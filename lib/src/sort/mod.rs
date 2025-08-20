@@ -1,2 +1,2 @@
 pub mod bubble;
-pub use bubble::bubble_sort;
+pub use bubble::bubble;

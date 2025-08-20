@@ -1,5 +1,5 @@
 /// Bubble sort.
-pub fn bubble_sort<T: Ord>(arr: &mut [T]) {
+pub fn bubble<T: Ord>(arr: &mut [T]) {
     // Early exit and reduced pass range via last-swap tracking.
     if arr.len() < 2 {
         return;
@@ -28,49 +28,49 @@ mod tests {
     #[test]
     fn sorts_empty_slice() {
         let mut v: Vec<i32> = vec![];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec![]);
     }
 
     #[test]
     fn sorts_single_element() {
         let mut v = vec![42];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec![42]);
     }
 
     #[test]
     fn sorts_two_elements() {
         let mut v = vec![2, 1];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec![1, 2]);
     }
 
     #[test]
     fn sorts_already_sorted() {
         let mut v = vec![1, 2, 3, 4, 5];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn sorts_reverse_sorted() {
         let mut v = vec![5, 4, 3, 2, 1];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn sorts_with_duplicates() {
         let mut v = vec![3, 1, 2, 3, 2, 1, 0];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec![0, 1, 1, 2, 2, 3, 3]);
     }
 
     #[test]
     fn sorts_strings() {
         let mut v = vec!["pear", "apple", "banana", "apple"];
-        bubble_sort(&mut v);
+        bubble(&mut v);
         assert_eq!(v, vec!["apple", "apple", "banana", "pear"]);
     }
 
@@ -102,7 +102,7 @@ mod tests {
             Pair { key: 2, idx: 4 },
         ];
 
-        bubble_sort(&mut v);
+        bubble(&mut v);
 
         // After sorting by key, pairs with the same key should keep their original relative order.
         let ones: Vec<usize> = v.iter().filter(|p| p.key == 1).map(|p| p.idx).collect();
