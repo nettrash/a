@@ -1,2 +1,2 @@
-pub mod bubble;
+mod bubble;
 pub use bubble::bubble;

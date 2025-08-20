@@ -30,9 +30,9 @@ Rust usage with integers:
 use a::sort::bubble;
 
 fn main() {
-    let mut v = vec![5, 1, 4, 2, 8];
-    bubble(&mut v);
-    assert_eq!(v, vec![1, 2, 4, 5, 8]);
+  let mut v = vec![5, 1, 4, 2, 8];
+  bubble(&mut v);
+  assert_eq!(v, vec![1, 2, 4, 5, 8]);
 }
 ```
 
@@ -42,9 +42,9 @@ Sorting strings:
 use a::sort::bubble;
 
 fn main() {
-    let mut fruits = vec!["pear", "apple", "banana", "apple"]; 
-    bubble(&mut fruits);
-    assert_eq!(fruits, vec!["apple", "apple", "banana", "pear"]);
+  let mut fruits = vec!["pear", "apple", "banana", "apple"]; 
+  bubble(&mut fruits);
+  assert_eq!(fruits, vec!["apple", "apple", "banana", "pear"]);
 }
 ```
 
