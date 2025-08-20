@@ -29,7 +29,7 @@ use a::sort::bubble;
 
 fn main() {
     let mut v = vec![5, 1, 4, 2, 8];
-  bubble(&mut v);
+    bubble(&mut v);
     assert_eq!(v, vec![1, 2, 4, 5, 8]);
 }
 ```
@@ -41,7 +41,7 @@ use a::sort::bubble;
 
 fn main() {
     let mut fruits = vec!["pear", "apple", "banana", "apple"]; 
-  bubble(&mut fruits);
+    bubble(&mut fruits);
     assert_eq!(fruits, vec!["apple", "apple", "banana", "pear"]);
 }
 ```
