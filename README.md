@@ -10,6 +10,9 @@ The A Library is a set of algorithms.
   - [Table of contents](#table-of-contents)
   - [Sorting](#sorting)
     - [Bubble](#bubble)
+      - [Examples](#examples)
+      - [Sorting strings:](#sorting-strings)
+      - [Efficiency](#efficiency)
 
 ## Sorting
 
@@ -20,7 +23,7 @@ Bubble sort is a simple, stable, in-place sorting algorithm. It repeatedly scans
 - Early exit: stop when a pass performs no swaps (already sorted).
 - Last-swap bound: the next pass only scans up to the last index that swapped (the tail is already sorted).
 
-Examples
+#### Examples
 
 Rust usage with integers:
 
@@ -34,7 +37,7 @@ fn main() {
 }
 ```
 
-Sorting strings:
+#### Sorting strings:
 
 ```rust
 use a::sort::bubble;
@@ -46,7 +49,7 @@ fn main() {
 }
 ```
 
-Efficiency
+#### Efficiency
 
 - Time complexity:
   - Worst: O(n^2)
