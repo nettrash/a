@@ -11,7 +11,6 @@ The A Library is a set of algorithms.
   - [Sorting](#sorting)
     - [Bubble](#bubble)
       - [Examples](#examples)
-      - [Sorting strings:](#sorting-strings)
       - [Efficiency](#efficiency)
 
 ## Sorting
@@ -37,7 +36,7 @@ fn main() {
 }
 ```
 
-#### Sorting strings:
+Sorting strings:
 
 ```rust
 use a::sort::bubble;
