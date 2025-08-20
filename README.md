@@ -25,7 +25,7 @@ Examples
 Rust usage with integers:
 
 ```rust
-use lib::sort::bubble_sort;
+use a::sort::bubble_sort;
 
 fn main() {
     let mut v = vec![5, 1, 4, 2, 8];
@@ -37,7 +37,7 @@ fn main() {
 Sorting strings:
 
 ```rust
-use lib::sort::bubble_sort;
+use a::sort::bubble_sort;
 
 fn main() {
     let mut fruits = vec!["pear", "apple", "banana", "apple"]; 
