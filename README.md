@@ -6,12 +6,10 @@ The A Library is a set of algorithms.
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-## Table of contents
+Table of contents
 
-- [A](#a)
-  - [Table of contents](#table-of-contents)
-  - [Sorting](#sorting)
-    - [Bubble](#bubble)
+- [Sorting](#sorting)
+  - [Bubble](#bubble)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
