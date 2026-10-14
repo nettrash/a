@@ -12,30 +12,34 @@ env:
 
 jobs:
   build:
+    name: build (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    # Nightly is an early warning for upcoming breakage; it must not block merges.
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
+
+    strategy:
+      fail-fast: false  # let both toolchains finish even if one fails
+      matrix:
+        toolchain: [ stable, nightly ]
+
+    defaults:
+      run:
+        working-directory: lib
 
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.88.0
+        toolchain: ${{ matrix.toolchain }}
         components: rustfmt, clippy
-    
+
     - name: Check format
-      run: 
-        cd ${{ github.workspace }}/lib ;
-          cargo fmt -- --check
+      run: cargo fmt -- --check
     - name: Check clippy
-      run: 
-        cd ${{ github.workspace }}/lib ;
-          cargo clippy --all-targets --all-features
+      run: cargo clippy --all-targets --all-features
     - name: Build
-      run: 
-        cd ${{ github.workspace }}/lib ;
-        cargo build --verbose
+      run: cargo build --verbose
     - name: Run tests
-      run: 
-        cd ${{ github.workspace }}/lib ;
-        cargo test --verbose
+      run: cargo test --verbose
