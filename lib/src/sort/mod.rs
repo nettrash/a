@@ -1,8 +1,10 @@
 mod bubble;
 mod cocktail_shaker;
+mod gnome;
 mod insertion;
 mod selection;
 pub use bubble::bubble;
 pub use cocktail_shaker::cocktail_shaker;
+pub use gnome::gnome;
 pub use insertion::insertion;
 pub use selection::selection;
