@@ -25,7 +25,7 @@ use core::ptr;
 /// the same comparisons and moves as insertion sort with a linear search; [`insertion`] in this
 /// crate searches by galloping instead and makes far fewer comparisons.
 ///
-/// [`insertion`]: crate::sort::insertion
+/// [`insertion`]: fn@crate::sort::insertion
 ///
 /// # Properties
 ///
