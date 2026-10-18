@@ -27,6 +27,9 @@ The A Library is a set of algorithms.
     - [Comb](#comb)
       - [Examples](#examples-5)
       - [Efficiency](#efficiency-5)
+    - [Merge](#merge)
+      - [Examples](#examples-6)
+      - [Efficiency](#efficiency-6)
 
 ## Sorting
 
@@ -338,3 +341,72 @@ fn main() {
 - Space complexity: O(1) extra (in-place)
 - Stability: unstable (a gapped swap can carry an element past an equal one)
 - Adaptivity: not adaptive (only the final bubble sort gets cheaper on nearly-sorted input); much faster than the other quadratic sorts here on random input, about 1.2 times slower than `slice::sort_unstable` on 10,000 random `u32` and 1.6 times on `u64`
+
+### Merge
+
+Merge sort is a stable, `O(n log n)` sorting algorithm that uses a buffer. It splits the slice into two halves, sorts each half recursively, and merges the two sorted halves into one. Every element takes part in one merge per level of recursion and there are about `log₂ n` levels, so the cost hardly depends on the input. This implementation uses a buffer of `n` elements, kept on the stack when it fits in 4 KiB and allocated once otherwise, and five optimizations:
+
+- Short runs sorted without branches: halves of at most 8 elements are not split further. A run is first scanned for order, which leaves a sorted run alone after len−1 comparisons and otherwise stops at the first descent, usually after one or two; then its two halves of at most 4 elements are sorted straight into the buffer by fixed sequences of comparisons that select where each element goes instead of branching on the outcome (1, 3 and 5 comparisons for 2, 3 and 4 elements, the last being the standard library's stable four-element sort), and merged back. Short runs took up to 60% of the time when they were insertion sorted; together with the stack buffer below, this makes the whole sort 1.2–2.8 times faster for integers (most for small slices) and 1.02–1.9 times for strings and large elements.
+- Ordered halves are not merged: if the first element of the right half is not smaller than the last element of the left half, one comparison replaces the merge, so already-sorted input costs exactly n−1 comparisons and is never moved.
+- Reversed halves are swapped: if the last element of the right half is smaller than the first element of the left half, the halves trade places as blocks with no further comparison, so reverse-sorted input costs about 2.6n comparisons instead of n·log₂ n.
+- Bidirectional, branchless merging: each merge proceeds from both ends at once, the front taking the smaller of the two first elements and the back the larger of the two last ones. The two independent chains of comparisons overlap in the processor, and every step copies from an address chosen by the comparison instead of branching on it. On random input this is 1.2–1.6 times faster than the classic merge that copies only the left half out and merges from the front.
+- No allocation for small slices: a buffer of up to 4 KiB lives on the stack, so a slice that fits in it (512 `u64`s, say) is sorted without touching the allocator.
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::merge;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8, 0, 3, 9, 7, 6];
+  merge(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+}
+```
+
+Equal keys keep their original order (cards are compared by rank only):
+
+```rust
+use a::sort::merge;
+use std::cmp::Ordering;
+
+#[derive(Debug, PartialEq, Eq)]
+struct Card(u8, char);
+
+impl Ord for Card {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.0.cmp(&other.0)
+  }
+}
+
+impl PartialOrd for Card {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+fn main() {
+  let ranks = [3, 1, 3, 0, 1, 3, 0, 2, 1, 0];
+  let mut cards: Vec<Card> = "abcdefghij".chars().zip(ranks).map(|(c, r)| Card(r, c)).collect();
+  merge(&mut cards);
+  let order: String = cards.iter().map(|c| c.1).collect();
+  assert_eq!(order, "dgjbeihacf");
+}
+```
+
+#### Efficiency
+
+- Time complexity:
+  - Worst: O(n log n)
+  - Average: O(n log n)
+  - Best: O(n), when the input is already sorted (or made of ordered or reversed halves at every level)
+- Comparisons and moves (a merge of m elements makes exactly 2⌊m/2⌋ comparisons after the two checks, and moves every element twice: out to the buffer and back):
+  - Best (already sorted): n−1 comparisons, 0 moves
+  - Reverse sorted: about 2.6n comparisons (2,590 for n = 1000, against 5,044 for the textbook merge sort)
+  - Random input: about n·log₂ n − 0.35n comparisons (≈ 9,620 for n = 1000; the textbook merge sort makes ≈ 8,700, since the checks cost a comparison or two per merge and a bidirectional merge does not stop when one half runs out) and about 2n·log₂(n/8) + 2n moves
+  - Worst: at most n·log₂ n + O(n) comparisons
+- Space complexity: O(n) extra (one buffer of n elements, on the stack up to 4 KiB, otherwise allocated once) plus O(log n) stack
+- Stability: stable (equal elements keep their relative order)
+- Adaptivity: adaptive at the scale of runs and halves (sorted and reverse-sorted input are nearly linear); faster than `slice::sort` on slices of up to about 20 random integers, but about 1.75 times slower on 100,000 and 1.1 times on large elements, since the standard library's stable sort also finds natural runs and merges them more cleverly
