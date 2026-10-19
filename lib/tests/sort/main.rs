@@ -2,6 +2,7 @@ mod bubble;
 mod cocktail_shaker;
 mod comb;
 mod gnome;
+mod heap;
 mod insertion;
 mod merge;
 mod quick;

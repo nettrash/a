@@ -1,6 +1,8 @@
 use core::mem::{self, ManuallyDrop};
 use core::ptr;
 
+use super::heap;
+
 /// Sorts a slice in place using quick sort.
 ///
 /// Quick sort picks a pivot element, partitions the slice into the elements smaller than the
@@ -43,8 +45,8 @@ use core::ptr;
 ///   parts of at most 16 elements are sorted by insertion sort.
 /// * **A guaranteed `O(n log n)`.** A part still being partitioned after `2·log₂ n` levels
 ///   means the pivots were consistently bad, which no sampling rules out (an adversary that
-///   answers comparisons adaptively can force it). Such a part is finished by heap sort, so
-///   no input makes the sort quadratic (the "introsort" idea).
+///   answers comparisons adaptively can force it). Such a part is finished by this crate's
+///   [`heap`](fn@heap) sort, so no input makes the sort quadratic (the "introsort" idea).
 ///
 /// # Properties
 ///
@@ -176,7 +178,7 @@ fn sort<'a, T: Ord>(mut v: &'a mut [T], mut ancestor: Option<&'a T>, mut limit: 
             return;
         }
         if limit == 0 {
-            heap_sort(v);
+            heap(v);
             return;
         }
         limit -= 1;
@@ -550,34 +552,6 @@ fn compare_exchange<T: Ord>(v: &mut [T], i: usize, j: usize) {
         let tmp = ManuallyDrop::new(ptr::read(to_b));
         ptr::copy(to_a, a, 1);
         ptr::copy_nonoverlapping(&*tmp, b, 1);
-    }
-}
-
-/// Sorts `v` by heap sort: `O(n log n)` comparisons on any input, in place.
-fn heap_sort<T: Ord>(v: &mut [T]) {
-    /// Moves `v[node]` down the max-heap `v` until neither child is larger.
-    fn sift_down<T: Ord>(v: &mut [T], mut node: usize) {
-        loop {
-            let mut child = 2 * node + 1;
-            if child >= v.len() {
-                return;
-            }
-            if child + 1 < v.len() && v[child] < v[child + 1] {
-                child += 1;
-            }
-            if v[child] <= v[node] {
-                return;
-            }
-            v.swap(node, child);
-            node = child;
-        }
-    }
-    for node in (0..v.len() / 2).rev() {
-        sift_down(v, node);
-    }
-    for end in (1..v.len()).rev() {
-        v.swap(0, end);
-        sift_down(&mut v[..end], 0);
     }
 }
 
