@@ -52,7 +52,9 @@ use core::{hint, ptr, slice};
 ///   everything else. For them, a short run that starts with fewer than four sorted elements
 ///   is instead sorted by this crate's merge sort, which sorts pieces of at most four elements
 ///   by fixed sequences of comparisons that select where each element goes, and merges them
-///   from both ends without branching: SMALLNUM
+///   from both ends without branching. This is 1.1–1.3 times faster for integers on random
+///   input and 1.1–1.2 times with few distinct keys, and up to 1.25 times slower on short
+///   slices that are nearly sorted in small steps, where insertion barely moves anything.
 /// * **No allocation for small slices or single runs.** The buffer lives on the stack while it
 ///   fits in 4 KiB (512 `u64`s, say), and is otherwise allocated when the first merge needs it:
 ///   sorted and strictly descending input never allocates.
@@ -85,11 +87,11 @@ use core::{hint, ptr, slice};
 /// Linear insertion into runs of 16 to 32 elements costs more comparisons than a binary search
 /// would, but less time.
 ///
-/// Against this crate's merge sort, this is 1.25–1.35 times slower on random integers and
+/// Against this crate's merge sort, this is 1.1–1.25 times slower on random integers and
 /// 1.03–1.13 times on random strings and 64-byte elements, but 2.7–4.3 times faster for
 /// integers and strings on nearly sorted input, sorted input with elements appended, or two
 /// interleaved runs (1.3–3.1 times for 64-byte elements), and 7–11 times on reverse-sorted
-/// input. Against [`slice::sort`], which also finds runs: 2.3–2.4 times slower on random
+/// input. Against [`slice::sort`], which also finds runs: 1.6–2.1 times slower on random
 /// integers from 1000 elements on and 1.5–1.85 times on random strings, but 1.6–4.2 times
 /// faster on nearly sorted input, 2.6–3.9 times on appended elements or two interleaved runs
 /// and 1.4–1.8 times on input made of many runs, for integers and strings.

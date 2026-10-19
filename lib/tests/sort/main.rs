@@ -5,6 +5,7 @@ mod comb;
 mod gnome;
 mod heap;
 mod insertion;
+mod intro;
 mod merge;
 mod quick;
 mod selection;
