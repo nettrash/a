@@ -141,7 +141,7 @@ struct StackBuffer<T> {
 }
 
 /// Sorts `v`, using `buf`, which has room for `v.len()` elements and does not overlap `v`.
-fn sort<T: Ord>(v: &mut [T], buf: *mut T) {
+pub(super) fn sort<T: Ord>(v: &mut [T], buf: *mut T) {
     let len = v.len();
     if len <= RUN {
         // SAFETY: `buf` has room for `len` elements and does not overlap `v`.

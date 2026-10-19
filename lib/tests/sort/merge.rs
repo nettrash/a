@@ -1,5 +1,4 @@
 use a::sort::merge;
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::cmp::Ordering;
 
@@ -505,33 +504,9 @@ fn non_decreasing_input_is_never_moved() {
     check(&(0..=255).collect::<Vec<u8>>());
 }
 
-/// Counts the allocations made on this thread, to check that merge sort allocates one buffer.
-struct CountingAllocator;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-// SAFETY: every call is forwarded to the system allocator unchanged.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // `try_with` fails only while the thread is being torn down.
-        let _ = ALLOCATIONS.try_with(|a| a.set(a.get() + 1));
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-
 /// Sorts `v` and returns how many allocations that made.
 fn allocations_of<T: Ord>(v: &mut [T]) -> usize {
-    let before = ALLOCATIONS.with(Cell::get);
-    merge(v);
-    ALLOCATIONS.with(Cell::get) - before
+    crate::allocations::count(|| merge(v))
 }
 
 #[test]

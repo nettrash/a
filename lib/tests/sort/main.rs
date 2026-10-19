@@ -1,3 +1,4 @@
+mod allocations;
 mod bubble;
 mod cocktail_shaker;
 mod comb;
@@ -7,3 +8,4 @@ mod insertion;
 mod merge;
 mod quick;
 mod selection;
+mod tim;
