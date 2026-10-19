@@ -1,3 +1,0 @@
-(eval):8: no such file or directory: ./target/release/tb
-(eval):8: no such file or directory: ./target/release/tb
-(eval):8: no such file or directory: ./target/release/tb

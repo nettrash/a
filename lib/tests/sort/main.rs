@@ -9,4 +9,5 @@ mod intro;
 mod merge;
 mod quick;
 mod selection;
+mod shell;
 mod tim;
