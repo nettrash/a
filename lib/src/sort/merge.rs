@@ -1,5 +1,5 @@
 use core::mem::{self, MaybeUninit};
-use core::ptr;
+use core::{ptr, slice};
 
 use super::insertion;
 
@@ -34,7 +34,15 @@ use super::insertion;
 ///   The two halves form two independent chains of comparisons that the processor overlaps,
 ///   and each step copies from an address chosen by the comparison instead of branching on it.
 ///   On random input this is 1.2–1.6 times faster than the classic merge, which copies only
-///   the left half out and merges from the front.
+///   the left half out and merges from the front. The merge takes a fixed number of steps, so
+///   once an end has used up its half it compares the last element the other end took from
+///   that half once more. A merge of up to 16 elements therefore decides the whole order
+///   before it copies anything; a longer one of elements of at most 8 bytes copies those at
+///   most four elements again after its last comparison, and one of larger elements stops as
+///   soon as a half has run out, so a comparison that mutates its arguments through interior
+///   mutability never leaves a stale copy behind. Against merges that compare stale copies,
+///   sound only for types without interior mutability, this costs integers 1.05–1.08 times on
+///   random input and 64-byte elements 1.07–1.09 times; strings are within 1.06 either way.
 /// * **No allocation for small slices.** A buffer of up to 4 KiB lives on the stack, so a
 ///   slice that fits in it (512 `u64`s, say) is sorted without touching the allocator.
 ///
@@ -50,8 +58,10 @@ use super::insertion;
 ///   comparison per element and are never moved, reversed halves are swapped without
 ///   comparisons.
 ///
-/// A merge of `m` elements makes exactly `2⌊m/2⌋` comparisons, after the two that rule out
-/// ordered and reversed halves, and moves every element twice: out to the buffer and back.
+/// A merge of `m` elements makes at most `2⌊m/2⌋` comparisons, after the two that rule out
+/// ordered and reversed halves: exactly that many for elements of at most 8 bytes, while a
+/// merge of larger elements stops once a half has run out (see above); it moves every element
+/// twice: out to the buffer and back.
 ///
 /// | Case                     | Comparisons                      | Moves                     |
 /// |--------------------------|----------------------------------|---------------------------|
@@ -145,7 +155,7 @@ pub(super) fn sort<T: Ord>(v: &mut [T], buf: *mut T) {
     let len = v.len();
     if len <= RUN {
         // SAFETY: `buf` has room for `len` elements and does not overlap `v`.
-        unsafe { sort_run(v, buf) };
+        unsafe { sort_run::<T, true>(v, buf) };
         return;
     }
     let mid = len / 2;
@@ -156,15 +166,145 @@ pub(super) fn sort<T: Ord>(v: &mut [T], buf: *mut T) {
     unsafe { merge_halves(v, buf) }
 }
 
+/// The longest slice [`sort_pingpong`] takes: its descents must fit in a `u64`.
+pub(super) const PINGPONG_MAX: usize = 64;
+
+/// Returns the descents of `v`, at most [`PINGPONG_MAX`] elements: bit `i` is set if
+/// `v[i] < v[i - 1]`, for `0 < i < v.len()`, and bit 0 is clear. Costs `v.len() − 1`
+/// comparisons, made in place, with no branch on their outcome.
+pub(super) fn descents<T: Ord>(v: &[T]) -> u64 {
+    debug_assert!(v.len() <= PINGPONG_MAX);
+    let mut mask = 0u64;
+    for i in 1..v.len() {
+        mask |= u64::from(v[i] < v[i - 1]) << i;
+    }
+    mask
+}
+
+/// Sorts `v`, at most [`PINGPONG_MAX`] elements with the `descents` that [`descents`] returns
+/// for it, as [`sort`] does, but with no level copied out before it is merged: every merge
+/// reads the halves where the level below left them, in `v` or in `buf`, and writes the
+/// other place, so from 9 elements on each level moves every element once instead of twice.
+/// The descents say which runs, and which longer stretches of the recursion, are sorted
+/// already: those are left alone. Halves that turn out in order after sorting are not merged
+/// either, which one comparison tells.
+///
+/// # Safety
+///
+/// `v.len() <= PINGPONG_MAX`, and `buf` is valid for writes and reads of `v.len()` elements
+/// and does not overlap `v`.
+pub(super) unsafe fn sort_pingpong<T: Ord>(v: &mut [T], buf: *mut T, descents: u64) {
+    debug_assert!(v.len() <= PINGPONG_MAX);
+    // SAFETY: as the caller guarantees.
+    unsafe { pingpong::<T, true>(v.as_mut_ptr(), v.len(), buf, descents) }
+}
+
+/// Sorts the `len` elements at `v`, leaving them in `v` if `IN_V` and otherwise in `buf`.
+/// Bit `i` of `descents` says whether `v[i] < v[i - 1]`, for `0 < i < len`; bit 0 is clear.
+///
+/// Wherever the sorted elements are left, they are the live copies: the ones every comparison
+/// since they were last moved has seen. When they are left in `buf`, the bits left behind in
+/// `v` are stale, and the caller takes care of `v` from then on, as the `IN_V` branch below
+/// does for each half it has sorted into `buf`.
+///
+/// # Safety
+///
+/// `v` holds `len <= PINGPONG_MAX` elements and `buf` is valid for writes and reads of `len`
+/// elements and does not overlap `v`.
+unsafe fn pingpong<T: Ord, const IN_V: bool>(v: *mut T, len: usize, buf: *mut T, descents: u64) {
+    // SAFETY: a stretch without a descent is sorted and stays where it is, copied to `buf`
+    // whole if that is where it is wanted. A run of at most `RUN` elements is sorted by
+    // `sort_run`, which compares `v` in place and merges through `buf`, or through `tmp` when
+    // its result is wanted in `buf`, with `restore` putting the live copies back into `v`
+    // if a comparison panics. Both halves of a longer slice are sorted into the other place
+    // than the slice is wanted and merged into it by `merge_from_buffer`, which leaves its
+    // destination holding every element exactly once whatever `Ord` does; while the halves
+    // are in `buf`, `restore` puts them back into `v` if a comparison panics, and the halves
+    // are checked for order under it. Two halves sorted already are left in `v`, where
+    // `merge_halves` keeps every element exactly once as well. So `v` holds every element
+    // exactly once whenever this returns or unwinds, and holds the live copies unless it
+    // returns with them in `buf`. The halves' descents are the bits below `mid`, and the bits
+    // from `mid + 1` on shifted down.
+    unsafe {
+        if descents == 0 {
+            if !IN_V {
+                ptr::copy_nonoverlapping(v, buf, len);
+            }
+            return;
+        }
+        if len <= RUN {
+            if IN_V {
+                sort_run::<T, false>(slice::from_raw_parts_mut(v, len), buf);
+                return;
+            }
+            let mid = len / 2;
+            if len <= 4 {
+                sort_at_most_4(v, len, buf);
+                return;
+            }
+            let mut tmp = MaybeUninit::<[T; RUN]>::uninit();
+            let tmp = tmp.as_mut_ptr().cast::<T>();
+            sort_at_most_4(v, mid, tmp);
+            sort_at_most_4(v.add(mid), len - mid, tmp.add(mid));
+            // `tmp` now holds the live copies, until the merge has written them into `buf`.
+            let restore = Restore {
+                src: tmp,
+                dst: v,
+                len,
+            };
+            merge_from_buffer(tmp, buf, len);
+            mem::forget(restore);
+            return;
+        }
+        let mid = len / 2;
+        let (left, right) = (descents & ((1u64 << mid) - 1), (descents >> mid) & !1);
+        if IN_V {
+            if left == 0 && right == 0 {
+                // Both halves are sorted and only their boundary is not: merge sort's checks
+                // for halves in order or reversed, and its merge out of `buf`, do the rest.
+                merge_halves(slice::from_raw_parts_mut(v, len), buf);
+                return;
+            }
+            pingpong::<T, false>(v, mid, buf, left);
+            let mut restore = Restore {
+                src: buf,
+                dst: v,
+                len: mid,
+            };
+            pingpong::<T, false>(v.add(mid), len - mid, buf.add(mid), right);
+            restore.len = len;
+            if *buf.add(mid) >= *buf.add(mid - 1) {
+                // In order already: dropping `restore` copies the halves back as they are.
+                drop(restore);
+                return;
+            }
+            mem::forget(restore);
+            merge_from_buffer(buf, v, len);
+        } else {
+            pingpong::<T, true>(v, mid, buf, left);
+            pingpong::<T, true>(v.add(mid), len - mid, buf.add(mid), right);
+            // Compares `v` in place.
+            if *v.add(mid) >= *v.add(mid - 1) {
+                ptr::copy_nonoverlapping(v, buf, len);
+                return;
+            }
+            merge_from_buffer(v, buf, len);
+        }
+    }
+}
+
 /// Sorts a run of at most [`RUN`] elements.
+///
+/// If `SCAN`, the run is first checked for order, up to the first descent: a sorted run is
+/// left alone after `len − 1` comparisons.
 ///
 /// # Safety
 ///
 /// `v.len() <= RUN`, and `buf` is valid for writes and reads of `v.len()` elements and does
 /// not overlap `v`.
-unsafe fn sort_run<T: Ord>(v: &mut [T], buf: *mut T) {
+pub(super) unsafe fn sort_run<T: Ord, const SCAN: bool>(v: &mut [T], buf: *mut T) {
     // Compares elements in place, so a panic leaves `v` untouched.
-    if v.windows(2).all(|w| w[1] >= w[0]) {
+    if SCAN && v.windows(2).all(|w| w[1] >= w[0]) {
         return;
     }
     let len = v.len();
@@ -192,7 +332,7 @@ unsafe fn sort_run<T: Ord>(v: &mut [T], buf: *mut T) {
 ///
 /// `v.len() >= 2`, and `buf` is valid for writes and reads of `v.len()` elements and does not
 /// overlap `v`.
-unsafe fn merge_halves<T: Ord>(v: &mut [T], buf: *mut T) {
+pub(super) unsafe fn merge_halves<T: Ord>(v: &mut [T], buf: *mut T) {
     let len = v.len();
     let mid = len / 2;
     // Both checks compare elements in place, so a panic leaves `v` untouched.
@@ -221,57 +361,210 @@ unsafe fn merge_halves<T: Ord>(v: &mut [T], buf: *mut T) {
     }
 }
 
-/// Merges the sorted halves `buf[..len / 2]` and `buf[len / 2..len]` into `dst[..len]`.
+/// Merges of at most this many elements are made by [`merge_gather`], longer ones by
+/// [`merge_tracked`] or [`merge_checked`]: measured for integers, the gather is the cheaper
+/// up to 16 elements and the dearer from 32 on.
+const GATHER_MAX: usize = 16;
+
+/// The largest element size, in bytes, merged by [`merge_tracked`] beyond [`GATHER_MAX`]
+/// elements; larger elements are merged by [`merge_checked`]. Measured on merge sort against
+/// the merge that compares stale copies: tracking costs integers 1.06–1.08 times on random
+/// input and the checked merge would cost them about as much once per merge, mispredicted;
+/// for strings and 64-byte elements, whose comparisons and copies dwarf that branch, the
+/// checked merge costs 1.02–1.05 times, while tracking made the compiler spill the loop
+/// around the comparison call (strings 1.15 times slower) or turn the selects into branches
+/// (64-byte elements 1.25 times slower).
+const TRACKED_MAX_SIZE: usize = 8;
+
+/// Merges the sorted halves `src[..len / 2]` and `src[len / 2..len]` into `dst[..len]`, from
+/// both ends at once with a fixed number of steps and no branch on a comparison.
+///
+/// `src` is only read. Whatever `Ord` does, `dst[..len]` afterwards holds every element of
+/// `src[..len]` exactly once, as the live copies: the merged elements, or if a comparison
+/// panicked or the merge turned out inconsistent (which only an `Ord` that is not a total
+/// order can cause), plain copies of `src`.
 ///
 /// # Safety
 ///
-/// `len >= 2`; `buf` holds `len` elements, every element of the slice `dst[..len]` exactly
-/// once, and does not overlap it.
-unsafe fn merge_from_buffer<T: Ord>(buf: *mut T, dst: *mut T, len: usize) {
+/// `len >= 2`; `src` holds `len` elements, `dst` is valid for writes of `len` elements, and
+/// the two do not overlap.
+unsafe fn merge_from_buffer<T: Ord>(src: *const T, dst: *mut T, len: usize) {
+    // SAFETY: as the caller guarantees; each shape documents its own argument.
+    unsafe {
+        if len <= GATHER_MAX {
+            merge_gather(src, dst, len);
+        } else if mem::size_of::<T>() <= TRACKED_MAX_SIZE {
+            merge_tracked(src, dst, len);
+        } else {
+            merge_checked(src, dst, len);
+        }
+    }
+}
+
+/// [`merge_from_buffer`] for elements larger than [`TRACKED_MAX_SIZE`] bytes: the merge
+/// stops as soon as a half has run out and copies what is left of the other, so it never
+/// compares an element whose copy is written already and needs no tracking. The first
+/// `mid / 2` steps need no check: after `k` steps both ends together have taken at most `2k`
+/// elements of a half that holds at least `mid`. A merge of `m` elements makes at most
+/// `2⌊m/2⌋` comparisons, fewer when a half runs out early.
+///
+/// # Safety
+///
+/// As [`merge_from_buffer`].
+unsafe fn merge_checked<T: Ord>(src: *const T, dst: *mut T, len: usize) {
     let mid = len / 2;
-    // SAFETY: `buf` holds every element exactly once while the merge writes bitwise copies of
-    // them into `dst`, and `restore` copies `buf` over `dst` if a comparison panics or if the
-    // merge turns out inconsistent. Comparisons read only `buf`, which is never written here.
+    // SAFETY: `src` holds every element exactly once and is only read, while the merge writes
+    // copies of them into `dst[out..out_end)`, the slots not yet written, as many as elements
+    // are left; `restore` copies `src` over `dst` if a comparison panics. Every step takes
+    // one element at the front and one at the back from halves that have elements left, so
+    // the reads stay within what is left of each half and every element is written exactly
+    // once, whatever `Ord` answers: after the first `mid / 2` steps (safe by the argument
+    // above) each step checks, and the loop ends as soon as a half has run out; what is left
+    // then fills exactly the slots left. Stability: the right element goes first only if it
+    // is strictly smaller, the left one last only if it is strictly greater.
+    unsafe {
+        let restore = Restore { src, dst, len };
+        let (mut left, mut right) = (0, mid);
+        let (mut left_end, mut right_end) = (mid, len);
+        let (mut out, mut out_end) = (0, len);
+        for _ in 0..mid / 2 {
+            let take_right = *src.add(right) < *src.add(left);
+            ptr::copy_nonoverlapping(
+                src.add(if take_right { right } else { left }),
+                dst.add(out),
+                1,
+            );
+            out += 1;
+            right += usize::from(take_right);
+            left += usize::from(!take_right);
+
+            let (last_left, last_right) = (left_end - 1, right_end - 1);
+            let take_left = *src.add(last_right) < *src.add(last_left);
+            out_end -= 1;
+            ptr::copy_nonoverlapping(
+                src.add(if take_left { last_left } else { last_right }),
+                dst.add(out_end),
+                1,
+            );
+            left_end -= usize::from(take_left);
+            right_end -= usize::from(!take_left);
+        }
+        while left < left_end && right < right_end {
+            let take_right = *src.add(right) < *src.add(left);
+            ptr::copy_nonoverlapping(
+                src.add(if take_right { right } else { left }),
+                dst.add(out),
+                1,
+            );
+            out += 1;
+            right += usize::from(take_right);
+            left += usize::from(!take_right);
+            if left == left_end || right == right_end {
+                break;
+            }
+            let (last_left, last_right) = (left_end - 1, right_end - 1);
+            let take_left = *src.add(last_right) < *src.add(last_left);
+            out_end -= 1;
+            ptr::copy_nonoverlapping(
+                src.add(if take_left { last_left } else { last_right }),
+                dst.add(out_end),
+                1,
+            );
+            left_end -= usize::from(take_left);
+            right_end -= usize::from(!take_left);
+        }
+        // What is left of a half (of both, if the loop ended on the back's turn with both
+        // run out) goes in order into the slots left, which it fills exactly.
+        let rest_left = left_end - left;
+        debug_assert_eq!(out + rest_left + (right_end - right), out_end);
+        ptr::copy_nonoverlapping(src.add(left), dst.add(out), rest_left);
+        ptr::copy_nonoverlapping(src.add(right), dst.add(out + rest_left), right_end - right);
+        mem::forget(restore);
+    }
+}
+
+/// [`merge_from_buffer`] for elements of at most [`TRACKED_MAX_SIZE`] bytes, with the slot of
+/// the last element each end took from each half tracked, and the four elements copied again
+/// once every comparison is made: a fixed number of steps with no branch on a comparison.
+///
+/// # Safety
+///
+/// As [`merge_from_buffer`].
+unsafe fn merge_tracked<T: Ord>(src: *const T, dst: *mut T, len: usize) {
+    let mid = len / 2;
+    // SAFETY: `src` holds every element exactly once and is only read, while the merge writes
+    // bitwise copies of them into `dst`; `restore` copies `src` over `dst` if a comparison
+    // panics or if the merge turns out inconsistent, so `dst` holds every element exactly
+    // once whenever this returns or unwinds.
     //
     // The front writes `dst[i]` for `i < mid` and the back `dst[len - 1 - i]`, the middle slot
     // of an odd length is written last, so every slot is written exactly once. Reads stay
-    // within `buf` whatever `Ord` answers: before step `i` the front has advanced `i` times in
+    // within `src` whatever `Ord` answers: before step `i` the front has advanced `i` times in
     // all, so `left <= i < mid` and `right <= mid + i < len`, and likewise the back keeps
     // `left_end >= mid - i >= 1` and `right_end >= len - i > mid`.
     //
     // With a total order the front takes the `mid` smallest elements, the back the `mid`
     // largest, and the two meet exactly: the merge is consistent. If not, some element was
-    // taken twice and another not at all, and `dst` gets back the contents of `buf`.
+    // taken twice and another not at all, and `dst` gets back the contents of `src`.
+    //
+    // An end compares an element whose copy is already written only once its half has run
+    // out (`left == left_end` at the front, say): the element is then the last one the other
+    // end took from that half, `src[left_end]`, and stays so, since either end taking from
+    // that half again would cross the other and make the merge inconsistent. A comparison may
+    // mutate its arguments, through interior mutability, which would leave such a copy stale:
+    // so the slot of the last element each end took from each half is tracked, and once every
+    // comparison is made the current state of each of those four elements is copied over its
+    // copy. The four copies are made whatever happened: the slot of an end that took nothing
+    // from a half is `spare`, a slot of its own, and the index of a half nothing was taken
+    // from is clamped into `src`. Nothing is read from `spare` and nothing is dropped from it.
     unsafe {
-        let restore = Restore { src: buf, dst, len };
+        let restore = Restore { src, dst, len };
         // The next element of each half at the front, and one past it at the back.
         let (mut left, mut right) = (0, mid);
         let (mut left_end, mut right_end) = (mid, len);
+        // The slot of the last element each end took from each half, as an index into `dst`,
+        // `usize::MAX` while an end has taken nothing from a half, kept up to date by masking
+        // with the comparison's answer, which the compiler lowers to conditional selects.
+        let (mut front_left_i, mut front_right_i) = (usize::MAX, usize::MAX);
+        let (mut back_left_i, mut back_right_i) = (usize::MAX, usize::MAX);
         for i in 0..mid {
             // Front: the right element goes first only if it is strictly smaller.
-            let take_right = *buf.add(right) < *buf.add(left);
-            let src = buf.add(if take_right { right } else { left });
-            ptr::copy_nonoverlapping(src, dst.add(i), 1);
+            let take_right = *src.add(right) < *src.add(left);
+            let from = src.add(if take_right { right } else { left });
+            ptr::copy_nonoverlapping(from, dst.add(i), 1);
+            let mask = usize::from(take_right).wrapping_neg();
+            front_right_i ^= (front_right_i ^ i) & mask;
+            front_left_i ^= (front_left_i ^ i) & !mask;
             right += usize::from(take_right);
             left += usize::from(!take_right);
 
-            // Back: the left element goes last only if it is strictly greater. Selecting
-            // between the indices of the two elements just compared, rather than between
-            // `left_end` and `right_end` before subtracting 1, keeps an addition off the path
-            // from the comparison to the load: 10% faster for integers.
+            // Back: the left element goes last only if it is strictly greater.
             let (last_left, last_right) = (left_end - 1, right_end - 1);
-            let take_left = *buf.add(last_right) < *buf.add(last_left);
-            let src = buf.add(if take_left { last_left } else { last_right });
-            ptr::copy_nonoverlapping(src, dst.add(len - 1 - i), 1);
+            let take_left = *src.add(last_right) < *src.add(last_left);
+            let from = src.add(if take_left { last_left } else { last_right });
+            ptr::copy_nonoverlapping(from, dst.add(len - 1 - i), 1);
+            let mask = usize::from(take_left).wrapping_neg();
+            back_left_i ^= (back_left_i ^ (len - 1 - i)) & mask;
+            back_right_i ^= (back_right_i ^ (len - 1 - i)) & !mask;
             left_end -= usize::from(take_left);
             right_end -= usize::from(!take_left);
         }
+        // The last element each end took from each half, as it is now, over its copy; an end
+        // that took nothing from a half writes `spare`, a slot of its own that is never read.
+        let mut spare = MaybeUninit::<T>::uninit();
+        let spare = spare.as_mut_ptr();
+        let slot = |k: usize| if k == usize::MAX { spare } else { dst.add(k) };
+        ptr::copy_nonoverlapping(src.add(left.max(1) - 1), slot(front_left_i), 1);
+        ptr::copy_nonoverlapping(src.add(right - 1), slot(front_right_i), 1);
+        ptr::copy_nonoverlapping(src.add(left_end), slot(back_left_i), 1);
+        ptr::copy_nonoverlapping(src.add(right_end.min(len - 1)), slot(back_right_i), 1);
         if len % 2 == 1 {
-            // One element is left, in one half: with a total order this needs no comparison.
+            // One element is left, in one half: with a total order this needs no comparison,
+            // and otherwise both elements compared are ones not yet copied.
             let take_left =
-                left < left_end && !(right < right_end && *buf.add(right) < *buf.add(left));
-            let src = buf.add(if take_left { left } else { right });
-            ptr::copy_nonoverlapping(src, dst.add(mid), 1);
+                left < left_end && !(right < right_end && *src.add(right) < *src.add(left));
+            let from = src.add(if take_left { left } else { right });
+            ptr::copy_nonoverlapping(from, dst.add(mid), 1);
             left += usize::from(take_left);
             right += usize::from(!take_left);
         }
@@ -281,11 +574,60 @@ unsafe fn merge_from_buffer<T: Ord>(buf: *mut T, dst: *mut T, len: usize) {
     }
 }
 
+/// [`merge_from_buffer`] for `len <= GATHER_MAX`, deciding the whole order first, as indices
+/// into `src`, and copying afterwards.
+///
+/// # Safety
+///
+/// As [`merge_from_buffer`].
+unsafe fn merge_gather<T: Ord>(src: *const T, dst: *mut T, len: usize) {
+    debug_assert!(len <= GATHER_MAX);
+    let mid = len / 2;
+    // SAFETY: the comparisons only decide `order`, the index in `src` of the element for each
+    // slot; nothing is copied until every comparison is made, so every comparison is of the
+    // only live copy of its arguments. The reads stay within `src` and the merge is
+    // consistent with a total order by the argument in `merge_tracked`; `order` is then a
+    // permutation and the elements are gathered into `dst`, and otherwise, or if a comparison
+    // panics, `restore` copies `src` over `dst`.
+    unsafe {
+        let restore = Restore { src, dst, len };
+        let mut order = MaybeUninit::<[u8; GATHER_MAX]>::uninit();
+        let order = order.as_mut_ptr().cast::<u8>();
+        let (mut left, mut right) = (0, mid);
+        let (mut left_end, mut right_end) = (mid, len);
+        for i in 0..mid {
+            let take_right = *src.add(right) < *src.add(left);
+            *order.add(i) = (if take_right { right } else { left }) as u8;
+            right += usize::from(take_right);
+            left += usize::from(!take_right);
+
+            let (last_left, last_right) = (left_end - 1, right_end - 1);
+            let take_left = *src.add(last_right) < *src.add(last_left);
+            *order.add(len - 1 - i) = (if take_left { last_left } else { last_right }) as u8;
+            left_end -= usize::from(take_left);
+            right_end -= usize::from(!take_left);
+        }
+        if len % 2 == 1 {
+            let take_left =
+                left < left_end && !(right < right_end && *src.add(right) < *src.add(left));
+            *order.add(mid) = (if take_left { left } else { right }) as u8;
+            left += usize::from(take_left);
+            right += usize::from(!take_left);
+        }
+        if left == left_end && right == right_end {
+            for k in 0..len {
+                ptr::copy_nonoverlapping(src.add(usize::from(*order.add(k))), dst.add(k), 1);
+            }
+            mem::forget(restore);
+        }
+    }
+}
+
 /// Sorts the `len <= 4` elements at `src` stably into `dst`, with 0, 1, 3 or 5 comparisons.
 ///
 /// Each comparison only chooses which element is copied where, and the choices are arranged so
 /// that `dst` receives every element of `src` exactly once whatever `Ord` answers. `src` is
-/// only read.
+/// only read, and nothing is copied before the last comparison.
 ///
 /// # Safety
 ///

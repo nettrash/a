@@ -1,6 +1,7 @@
 mod bubble;
 mod cocktail_shaker;
 mod comb;
+mod drift;
 mod gnome;
 mod heap;
 mod insertion;
@@ -13,6 +14,7 @@ mod tim;
 pub use bubble::bubble;
 pub use cocktail_shaker::cocktail_shaker;
 pub use comb::comb;
+pub use drift::drift;
 pub use gnome::gnome;
 pub use heap::heap;
 pub use insertion::insertion;

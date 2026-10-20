@@ -2,6 +2,7 @@ mod allocations;
 mod bubble;
 mod cocktail_shaker;
 mod comb;
+mod drift;
 mod gnome;
 mod heap;
 mod insertion;

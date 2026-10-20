@@ -369,10 +369,20 @@ fn model(keys: &[usize]) -> usize {
     go(&mut keys.to_vec())
 }
 
+/// The model counts a merge of `m` elements as `2⌊m/2⌋` comparisons, which holds exactly for
+/// elements of at most 8 bytes; `Counted` is 16 bytes, and a merge of larger elements stops
+/// comparing as soon as a half has run out, so the model is an upper bound for it.
 #[test]
 fn comparisons_match_the_model() {
     for_each_test_input(0xC0C7_A11E_5AAE_0001, &mut |v| {
-        assert_eq!(comparisons(v), model(v), "{v:?}");
+        let (counted, modelled) = (comparisons(v), model(v));
+        assert!(counted <= modelled, "{counted} > {modelled}: {v:?}");
+        // Halves that run out early save at most one comparison per element per merge level.
+        let levels = v.len().max(1).next_power_of_two().trailing_zeros() as usize + 1;
+        assert!(
+            counted + v.len() * levels >= modelled,
+            "{counted} vs {modelled}: {v:?}"
+        );
     });
 }
 
@@ -707,6 +717,174 @@ fn inconsistent_ord_keeps_every_element_exactly_once() {
                 names.sort_unstable();
                 assert_eq!(after, names);
             }
+        }
+    }
+}
+
+thread_local! {
+    /// Comparisons made by the elements below, which are too small to carry a counter.
+    static MUTATING_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Whether the elements below fail the test when the sort compares an element with itself.
+/// The pivot selection still does (the ninther's sample groups share elements, and the pivot
+/// may be the ancestor it is compared with), so until that is fixed such a comparison only
+/// counts as two mutations of the one element.
+const FORBID_SELF_COMPARISON: bool = true;
+
+/// An 8-byte element whose comparison mutates both of its arguments through interior
+/// mutability and moves heap ownership while doing so: it takes the boxes out of both cells,
+/// drops them, and puts fresh ones back with the comparison counted. A bitwise copy of an
+/// element made before a later comparison of its twin is stale, and dropping it frees memory
+/// twice (the standard library's `Freeze` rule). Small enough for the paths reserved for
+/// elements of at most 8 bytes.
+struct Swapping(Cell<Option<Box<(u32, u32, u32)>>>);
+
+impl Swapping {
+    fn new(key: u32, idx: u32) -> Self {
+        Self(Cell::new(Some(Box::new((key, idx, 0)))))
+    }
+    /// The key, the starting index and the number of comparisons taken part in.
+    fn get(&self) -> (u32, u32, u32) {
+        let b = self.0.take().expect("box present");
+        let t = *b;
+        self.0.set(Some(b));
+        t
+    }
+}
+impl PartialEq for Swapping {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Swapping {}
+impl PartialOrd for Swapping {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Swapping {
+    fn cmp(&self, other: &Self) -> Ordering {
+        assert!(
+            !FORBID_SELF_COMPARISON || !std::ptr::eq(self, other),
+            "an element compared with itself"
+        );
+        MUTATING_COMPARISONS.with(|c| c.set(c.get() + 1));
+        let a = self
+            .0
+            .take()
+            .expect("box present: a stale copy was compared");
+        if std::ptr::eq(self, other) {
+            self.0.set(Some(Box::new((a.0, a.1, a.2 + 2))));
+            return Ordering::Equal;
+        }
+        let b = other
+            .0
+            .take()
+            .expect("box present: a stale copy was compared");
+        let r = a.0.cmp(&b.0);
+        self.0.set(Some(Box::new((a.0, a.1, a.2 + 1))));
+        other.0.set(Some(Box::new((b.0, b.1, b.2 + 1))));
+        r
+    }
+}
+
+/// A 40-byte element: every comparison replaces the log of both arguments by a new, longer
+/// allocation, freeing the old one.
+struct Reallocating {
+    key: u32,
+    idx: u32,
+    log: std::cell::RefCell<Vec<u8>>,
+}
+
+impl Reallocating {
+    fn touch(&self) {
+        let mut log = self.log.borrow_mut();
+        let mut fresh = Vec::with_capacity(log.len() + 1);
+        fresh.extend_from_slice(&log);
+        fresh.push(1);
+        *log = fresh;
+    }
+}
+impl PartialEq for Reallocating {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Reallocating {}
+impl PartialOrd for Reallocating {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Reallocating {
+    fn cmp(&self, other: &Self) -> Ordering {
+        assert!(
+            !FORBID_SELF_COMPARISON || !std::ptr::eq(self, other),
+            "an element compared with itself"
+        );
+        MUTATING_COMPARISONS.with(|c| c.set(c.get() + 1));
+        self.touch();
+        other.touch();
+        self.key.cmp(&other.key)
+    }
+}
+
+#[test]
+fn mutating_comparison_keeps_every_mutation() {
+    // Every comparison mutates both arguments, so the sum of the elements' mutation counts
+    // must be twice the number of comparisons: a bitwise copy kept after its twin was compared
+    // again would carry fewer, and would free the twin's old allocation a second time (which
+    // Miri reports). Lengths cover the short-slice paths, the eager chunks and quick sort's
+    // leaves for both element sizes, and few keys put equal elements in every merge and
+    // partition.
+    let mut state = 0x5A7E_C0DE_5A7E_C0DE;
+    let comparisons = || MUTATING_COMPARISONS.with(|c| c.replace(0));
+    for len in (0..=size(70, 40)).chain([size(150, 60), size(1000, 100)]) {
+        for modulus in [2u64, 5, 1000] {
+            let keys: Vec<u32> = (0..len)
+                .map(|_| (xorshift(&mut state) % modulus) as u32)
+                .collect();
+
+            let mut v: Vec<Swapping> = keys
+                .iter()
+                .zip(0..)
+                .map(|(&k, i)| Swapping::new(k, i))
+                .collect();
+            comparisons();
+            merge(&mut v);
+            let c = comparisons();
+            let got: Vec<(u32, u32, u32)> = v.iter().map(Swapping::get).collect();
+            assert!(
+                got.windows(2).all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)),
+                "8-byte, len {len}: {keys:?}"
+            );
+            let mutations: usize = got.iter().map(|t| t.2 as usize).sum();
+            assert_eq!(mutations, 2 * c, "8-byte, len {len}: a stale copy was kept");
+
+            let mut v: Vec<Reallocating> = keys
+                .iter()
+                .zip(0..)
+                .map(|(&key, idx)| Reallocating {
+                    key,
+                    idx,
+                    log: std::cell::RefCell::new(Vec::new()),
+                })
+                .collect();
+            comparisons();
+            merge(&mut v);
+            let c = comparisons();
+            assert!(
+                v.windows(2)
+                    .all(|w| (w[0].key, w[0].idx) < (w[1].key, w[1].idx)),
+                "40-byte, len {len}: {keys:?}"
+            );
+            let mutations: usize = v.iter().map(|e| e.log.borrow().len()).sum();
+            assert_eq!(
+                mutations,
+                2 * c,
+                "40-byte, len {len}: a stale copy was kept"
+            );
         }
     }
 }

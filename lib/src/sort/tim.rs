@@ -39,7 +39,21 @@ use core::{hint, ptr, slice};
 ///   only the shorter run out and merges from one end; it is 1.15–1.45 times slower on random
 ///   input and 1.4–1.6 times on runs of varying lengths, but it moves less when one run is
 ///   much longer than the other, so merges of runs more than four times as long as each other
-///   still use it.
+///   still use it. For elements of at most 8 bytes, each end advances its pointer by
+///   selecting between it and the next one rather than adding the comparison's outcome, one
+///   instruction less on the chain from a comparison to the next load, and the merge checks
+///   for a run that ran out once per batch of steps that cannot run past one rather than at
+///   every step.
+/// * **Two merges at once when galloping does not pay.** The merge is bound by that chain
+///   from each comparison to the next load, not by instructions. Once galloping has failed
+///   to pay off in a sort, every merge long enough is split at the middle of its result by a
+///   binary search (co-ranking) into two independent merges, both from both ends, whose four
+///   chains the processor overlaps; an end that takes from the same run for a whole batch of
+///   steps hands what is left back to the galloping merge. With the select and the batches
+///   above, and new input for every sort: input made of runs of random content sorts 1.2–1.8
+///   times faster for integers and strings and 1.15 times for 64-byte elements, random input
+///   1.1–1.4 times (which merges the short runs it starts from), and input with `√n` distinct
+///   keys 1.05–1.2 times; input whose runs interleave in blocks keeps galloping.
 /// * **Pair insertion.** Short runs are extended by inserting elements two at a time, scanning
 ///   from the right: the larger of the two is carried left first, and the smaller one goes on
 ///   from where it stopped, so the elements both of them pass move once. Peters' binary
@@ -87,14 +101,15 @@ use core::{hint, ptr, slice};
 /// Linear insertion into runs of 16 to 32 elements costs more comparisons than a binary search
 /// would, but less time.
 ///
-/// Against this crate's merge sort, this is 1.1–1.25 times slower on random integers and
-/// 1.03–1.13 times on random strings and 64-byte elements, but 2.7–4.3 times faster for
-/// integers and strings on nearly sorted input, sorted input with elements appended, or two
-/// interleaved runs (1.3–3.1 times for 64-byte elements), and 7–11 times on reverse-sorted
-/// input. Against [`slice::sort`], which also finds runs: 1.6–2.1 times slower on random
-/// integers from 1000 elements on and 1.5–1.85 times on random strings, but 1.6–4.2 times
-/// faster on nearly sorted input, 2.6–3.9 times on appended elements or two interleaved runs
-/// and 1.4–1.8 times on input made of many runs, for integers and strings.
+/// Against this crate's merge sort, this is as fast or up to 1.3 times faster on random
+/// integers, 1.05–1.4 times faster on random strings and 1.03–1.1 times on 64-byte elements
+/// from 1000 elements on, 2.7–4.3 times faster for integers and strings on nearly sorted
+/// input, sorted input with elements appended, or two interleaved runs (1.3–3.1 times for
+/// 64-byte elements), and 7–11 times on reverse-sorted input. Against [`slice::sort`], which
+/// also finds runs: 1.35–1.7 times slower on random integers from 1000 elements on and
+/// 1.3–1.55 times on random strings, but 1.6–4.2 times faster on nearly sorted input,
+/// 2.6–3.9 times on appended elements or two interleaved runs and 1.4–1.8 times on input
+/// made of many runs, for integers and strings.
 ///
 /// Prefer [`slice::sort`], a far more refined stable sort that also finds runs, for real
 /// workloads.
@@ -198,7 +213,7 @@ pub fn tim<T: Ord>(arr: &mut [T]) {
 const MIN_MERGE: usize = 32;
 
 /// How many times in a row one run must win before a merge starts galloping.
-const MIN_GALLOP: usize = 7;
+pub(super) const MIN_GALLOP: usize = 7;
 
 /// A merge of runs one of which is more than this many times as long as the other copies only
 /// the shorter one out and merges from one end, as Tim sort originally does; other merges copy
@@ -264,7 +279,7 @@ struct StackBuffer<T> {
 
 /// Raw storage for `len` elements: on the stack if they fit in it, and otherwise allocated
 /// when the first merge asks for it, so that input made of one run allocates nothing.
-struct Buffer<T> {
+pub(super) struct Buffer<T> {
     stack: StackBuffer<T>,
     // Its length stays 0, so it never drops what passes through it.
     heap: Vec<T>,
@@ -272,7 +287,7 @@ struct Buffer<T> {
 }
 
 impl<T> Buffer<T> {
-    fn new(len: usize) -> Self {
+    pub(super) fn new(len: usize) -> Self {
         Self {
             stack: StackBuffer {
                 _align: [],
@@ -290,7 +305,7 @@ impl<T> Buffer<T> {
     }
 
     /// Returns storage for `len` elements, which does not overlap the slice being sorted.
-    fn get(&mut self) -> *mut T {
+    pub(super) fn get(&mut self) -> *mut T {
         if self.len <= STACK_BYTES / mem::size_of::<T>() {
             return self.on_stack();
         }
@@ -316,7 +331,7 @@ fn min_run_length(mut n: usize) -> usize {
 
 /// The factor that maps a sum of two positions in a slice of `len` elements onto a fraction
 /// of `2^63`, for [`node_power`].
-fn power_scale(len: usize) -> u64 {
+pub(super) fn power_scale(len: usize) -> u64 {
     (1u64 << 62).div_ceil(len as u64)
 }
 
@@ -324,7 +339,7 @@ fn power_scale(len: usize) -> u64 {
 /// how many leading bits the positions of the two runs' midpoints, as fractions of the slice,
 /// have in common. It is the depth of the boundary in a perfectly balanced merge tree over the
 /// whole slice; runs are merged bottom-up in that order (Munro and Wild's powersort).
-fn node_power(scale: u64, start: usize, mid: usize, end: usize) -> u32 {
+pub(super) fn node_power(scale: u64, start: usize, mid: usize, end: usize) -> u32 {
     // Twice the midpoints, below `2·len`, so the sums do not overflow and neither do the
     // products, which stay below `2^63 + 2·len`. They differ, since `start < end` and
     // `scale >= 1`.
@@ -375,7 +390,7 @@ fn find_run<T: Ord>(v: &mut [T]) -> usize {
 }
 
 /// Sorts `v`, at most `MIN_MERGE` elements whose first `sorted` are already sorted, into a run.
-fn build_run<T: Ord>(v: &mut [T], sorted: usize, buf: &mut Buffer<T>) {
+pub(super) fn build_run<T: Ord>(v: &mut [T], sorted: usize, buf: &mut Buffer<T>) {
     if mem::size_of::<T>() <= SMALL_SORT_MAX_SIZE && sorted < SMALL_SORT_RUN {
         // The stack buffer has room for `STACK_BYTES / 8 >= MIN_MERGE` such elements.
         super::merge::sort(v, buf.on_stack());
@@ -401,7 +416,7 @@ const SMALL_SORT_RUN: usize = 4;
 
 /// Sorts `v`, whose first `sorted` elements are already sorted, by inserting the others into
 /// that prefix two at a time.
-fn extend_run<T: Ord>(v: &mut [T], sorted: usize) {
+pub(super) fn extend_run<T: Ord>(v: &mut [T], sorted: usize) {
     let len = v.len();
     let mut i = sorted.max(1);
     while i + 1 < len {
@@ -574,8 +589,64 @@ fn binary_search<T>(v: &[T], before: impl Fn(&T) -> bool, mut lo: usize, mut hi:
     lo
 }
 
+/// The largest element size, in bytes, for which a merge advances its pointers by selecting
+/// between the pointer and the one after it (a conditional select) instead of adding the
+/// condition to it (a flag set and an add): one instruction less on the chain from each
+/// comparison to the next load, which is what bounds the merge. For larger elements the
+/// compiler made worse code of it: strings 1.07–1.1 times and 64-byte elements 1.04–1.4
+/// times slower on input made of runs.
+const SELECT_ADVANCE_MAX_SIZE: usize = 8;
+
+/// The largest element size, in bytes, for which a merge from both ends checks for a run that
+/// ran out once per batch of steps instead of at every step. Measured: 1–2% faster on input
+/// made of runs for integers (with the select above, the loop shrinks from 51 to 30
+/// instructions per step of two elements); strings and 16-byte boxed strings, whose
+/// comparisons are calls, 1.03–1.08 times slower: with the batch's end to keep as well, the
+/// compiler spilled the pointer on the chain from one comparison to the next load in a way
+/// the processor could not forward.
+const BATCH_MAX_SIZE: usize = 8;
+
+/// Returns `p.add(1)` if `cond` and `p` otherwise: see [`SELECT_ADVANCE_MAX_SIZE`].
+///
+/// # Safety
+///
+/// `p.add(1)` must be in bounds of the allocation `p` points into (one past the end is fine).
+#[inline(always)]
+unsafe fn advance<T>(p: *const T, cond: bool) -> *const T {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        if mem::size_of::<T>() <= SELECT_ADVANCE_MAX_SIZE {
+            hint::select_unpredictable(cond, p.add(1), p)
+        } else {
+            p.add(usize::from(cond))
+        }
+    }
+}
+
+/// Returns `p.sub(1)` if `cond` and `p` otherwise: see [`SELECT_ADVANCE_MAX_SIZE`].
+///
+/// # Safety
+///
+/// `p.sub(1)` must be in bounds of the allocation `p` points into.
+#[inline(always)]
+unsafe fn retreat<T>(p: *const T, cond: bool) -> *const T {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        if mem::size_of::<T>() <= SELECT_ADVANCE_MAX_SIZE {
+            hint::select_unpredictable(cond, p.sub(1), p)
+        } else {
+            p.sub(usize::from(cond))
+        }
+    }
+}
+
 /// Merges the sorted runs `v[..mid]` and `v[mid..]`, where `0 < mid < v.len()`.
-fn merge<T: Ord>(v: &mut [T], mid: usize, buf: &mut Buffer<T>, min_gallop: &mut usize) {
+///
+/// `min_gallop` is the streak that sets off galloping, adapted by every merge: it drops while
+/// galloping pays off and rises when it does not, and once above [`MIN_GALLOP`] merges of
+/// runs that are neither lopsided nor short run as two merges at once (see [`Merge::split`]
+/// and [`FOUR_CHAIN_MIN`]).
+pub(super) fn merge<T: Ord>(v: &mut [T], mid: usize, buf: &mut Buffer<T>, min_gallop: &mut usize) {
     // The elements of the left run that are not greater than the first of the right run are
     // already in place, and so are those of the right run not smaller than the last of the
     // left run. Both searches compare elements in place, so a panic leaves `v` untouched.
@@ -610,9 +681,10 @@ fn merge<T: Ord>(v: &mut [T], mid: usize, buf: &mut Buffer<T>, min_gallop: &mut 
 }
 
 /// Merges the sorted runs `v[..mid]` and `v[mid..]` through `buf`, from both ends at once,
-/// galloping when one run keeps winning. The first element of the right run should be
-/// smaller than the first of the left run, and the last of the left run greater than the last
-/// of the right run: they are placed first and last without comparisons.
+/// galloping when one run keeps winning, and as two merges at once while neither does (see
+/// [`Merge::split`]). The first element of the right run should be smaller than the first of
+/// the left run, and the last of the left run greater than the last of the right run: they
+/// are placed first and last without comparisons.
 ///
 /// # Safety
 ///
@@ -628,105 +700,323 @@ unsafe fn merge_through_buffer<T: Ord>(
     let dst = v.as_mut_ptr();
     // SAFETY: `v` is copied out whole into `buf`, which then holds every element exactly once
     // while the merge writes bitwise copies of them into `v`; `restore` copies `buf` back over
-    // `v` if a comparison panics. Comparisons read only `buf`, which is never written here.
-    //
-    // `a..a_end` and `b..b_end` are what is left of the two runs in `buf`, and `out..out_end`
-    // the slots of `v` not yet written, as many as are left in both runs. Each step takes an
-    // element from the start or the end of what is left of a run and writes it to the
-    // matching end of `out..out_end`, so every element is written exactly once, to a slot of
-    // its own, whatever `Ord` answers. A step reads only elements that are left: the
-    // single-element steps run while each run has at least two elements left, galloping
-    // starts only while both runs have elements left and is bounded by what is left, and every
-    // other step checks for an empty run first.
+    // `v` if a comparison panics, which loses nothing because comparisons read only `buf`,
+    // which is never written here, and only elements whose copy is not written yet (see
+    // [`Merge`]), so `buf` holds the latest state of every element. The two placements below
+    // take the first element of the right run and the last of the left one, which exist
+    // since `0 < mid < len`, and leave `m` with as many slots as elements.
     unsafe {
         ptr::copy_nonoverlapping(dst, buf, len);
         let restore = Restore { src: buf, dst, len };
-        let mut a = buf.cast_const();
-        let mut a_end = a.add(mid);
-        let mut b = a_end;
-        let mut b_end = a.add(len);
-        let mut out = dst;
-        let mut out_end = dst.add(len);
-
-        ptr::copy_nonoverlapping(b, out, 1);
-        b = b.add(1);
-        out = out.add(1);
-        a_end = a_end.sub(1);
-        out_end = out_end.sub(1);
-        ptr::copy_nonoverlapping(a_end, out_end, 1);
+        let a = buf.cast_const();
+        let mut m = Merge {
+            a,
+            a_end: a.add(mid),
+            b: a.add(mid),
+            b_end: a.add(len),
+            out: dst,
+            out_end: dst.add(len),
+        };
+        ptr::copy_nonoverlapping(m.b, m.out, 1);
+        m.b = m.b.add(1);
+        m.out = m.out.add(1);
+        m.a_end = m.a_end.sub(1);
+        m.out_end = m.out_end.sub(1);
+        ptr::copy_nonoverlapping(m.a_end, m.out_end, 1);
 
         let mut gallop = *min_gallop;
-        'merge: loop {
-            // Consecutive wins of each run at the front and at the back.
-            let (mut front_a, mut front_b, mut back_a, mut back_b) = (0usize, 0, 0, 0);
+        if gallop > MIN_GALLOP && m.rest_a() >= FOUR_CHAIN_MIN && m.rest_b() >= FOUR_CHAIN_MIN {
+            // Galloping has failed to pay off in this sort: merge as two merges at once
+            // until an end takes from the same run `gallop` times in a row, then gallop.
+            let (mut lower, mut upper) = m.split();
             loop {
-                if a_end.offset_from_unsigned(a) < 2 || b_end.offset_from_unsigned(b) < 2 {
-                    break 'merge;
-                }
-                // Front: the right element goes first only if it is strictly smaller.
-                let take_b = *b < *a;
-                ptr::copy_nonoverlapping(hint::select_unpredictable(take_b, b, a), out, 1);
-                out = out.add(1);
-                b = b.add(usize::from(take_b));
-                a = a.add(usize::from(!take_b));
-
-                // Back: the left element goes last only if it is strictly greater.
-                let (last_a, last_b) = (a_end.sub(1), b_end.sub(1));
-                let take_a = *last_b < *last_a;
-                out_end = out_end.sub(1);
-                let src = hint::select_unpredictable(take_a, last_a, last_b);
-                ptr::copy_nonoverlapping(src, out_end, 1);
-                a_end = a_end.sub(usize::from(take_a));
-                b_end = b_end.sub(usize::from(!take_a));
-
-                front_b = (front_b + 1) * usize::from(take_b);
-                front_a = (front_a + 1) * usize::from(!take_b);
-                back_a = (back_a + 1) * usize::from(take_a);
-                back_b = (back_b + 1) * usize::from(!take_a);
-
-                // A run may have run out in this step, if both ends took from it.
-                let galloping = (front_a | front_b | back_a | back_b) >= gallop;
-                if galloping && (a == a_end || b == b_end) {
-                    break 'merge;
-                }
-                if (front_a | front_b) >= gallop {
+                // Both halves take `n` steps, with no run running out: a batch. Whether one
+                // of their ends took from the same run throughout is checked at its end, so
+                // the batch is at most `gallop` steps, the streak that sets off galloping.
+                let n = lower.safe().min(upper.safe());
+                if n == 0 {
                     break;
                 }
-                if (back_a | back_b) >= gallop {
-                    // Gallop at the back: alternately move the elements of the left run that
+                let n = n.min(gallop);
+                let (mut lower_b, mut lower_a, mut upper_b, mut upper_a) = (0usize, 0, 0, 0);
+                for _ in 0..n {
+                    let (take_b, take_a) = lower.step();
+                    lower_b += usize::from(take_b);
+                    lower_a += usize::from(take_a);
+                    let (take_b, take_a) = upper.step();
+                    upper_b += usize::from(take_b);
+                    upper_a += usize::from(take_a);
+                }
+                if n == gallop
+                    && (streak(lower_b, n)
+                        || streak(lower_a, n)
+                        || streak(upper_b, n)
+                        || streak(upper_a, n))
+                {
+                    break;
+                }
+            }
+            // The galloping merge finishes both halves, the lower one first so that
+            // `gallop` adapts in order.
+            for half in [lower, upper] {
+                half.finish(&mut gallop);
+            }
+        } else {
+            m.finish(&mut gallop);
+        }
+        *min_gallop = gallop;
+        mem::forget(restore);
+    }
+}
+
+/// Whether an end that took `count` elements from one run in `n` steps took every element of
+/// the batch from the same run.
+#[inline(always)]
+fn streak(count: usize, n: usize) -> bool {
+    count == 0 || count == n
+}
+
+/// Merges whose runs both have at least this many elements left after the two known
+/// placements are merged as two merges at once (see [`Merge::split`]), once galloping has
+/// failed to pay off in an earlier merge of the same sort (`min_gallop` above [`MIN_GALLOP`]).
+/// Splitting every merge long enough instead costs a binary search per merge for nothing on
+/// input whose runs interleave in blocks, where the split is lopsided and galloping does the
+/// work: 1.03–1.08 times slower on such input and on nearly sorted input, and no faster on
+/// input made of runs, where galloping fails in the first merges anyway. 16 and 64 measured
+/// the same as 32.
+const FOUR_CHAIN_MIN: usize = 32;
+
+/// A merge of two runs copied out into a buffer, in progress: what is left of the runs,
+/// `a..a_end` and `b..b_end`, and the slots of the slice not yet written, `out..out_end`,
+/// exactly as many as elements are left.
+///
+/// Every step takes an element from the start or the end of what is left of a run and writes
+/// it to the matching end of the slots, so every element is written exactly once, to a slot of
+/// its own, whatever `Ord` answers; and it reads only elements that are left, so no element is
+/// compared after a copy of it was written. `a <= a_end` and `b <= b_end` always hold.
+struct Merge<T> {
+    a: *const T,
+    a_end: *const T,
+    b: *const T,
+    b_end: *const T,
+    out: *mut T,
+    out_end: *mut T,
+}
+
+impl<T: Ord> Merge<T> {
+    /// How many elements of the left run are left.
+    #[inline(always)]
+    unsafe fn rest_a(&self) -> usize {
+        // SAFETY: `a..a_end` is a range of the buffer.
+        unsafe { self.a_end.offset_from_unsigned(self.a) }
+    }
+
+    /// How many elements of the right run are left.
+    #[inline(always)]
+    unsafe fn rest_b(&self) -> usize {
+        // SAFETY: `b..b_end` is a range of the buffer.
+        unsafe { self.b_end.offset_from_unsigned(self.b) }
+    }
+
+    /// How many steps can be taken in a row without checking for a run that ran out: a step
+    /// reads two elements of each run and takes two, both possibly from the same run, so
+    /// `min(rest_a, rest_b) / 2` steps never read past a run.
+    #[inline(always)]
+    unsafe fn safe(&self) -> usize {
+        // SAFETY: as for `rest_a` and `rest_b`.
+        unsafe { self.rest_a().min(self.rest_b()) / 2 }
+    }
+
+    /// Takes one element at the front and one at the back, and returns whether the front took
+    /// from the right run and whether the back took from the left run.
+    ///
+    /// # Safety
+    ///
+    /// Both runs must have at least two elements left.
+    #[inline(always)]
+    unsafe fn step(&mut self) -> (bool, bool) {
+        // SAFETY: both runs have at least two elements left, so the four elements read are
+        // left, the front and the back take distinct ones, and the pointers they advance
+        // stay in bounds. Exactly one run advances at each end, whatever `Ord` answers, so as
+        // many elements as slots are left afterwards.
+        unsafe {
+            // Front: the right element goes first only if it is strictly smaller.
+            let take_b = *self.b < *self.a;
+            let src = hint::select_unpredictable(take_b, self.b, self.a);
+            ptr::copy_nonoverlapping(src, self.out, 1);
+            self.out = self.out.add(1);
+            self.b = advance(self.b, take_b);
+            self.a = advance(self.a, !take_b);
+
+            // Back: the left element goes last only if it is strictly greater.
+            let (last_a, last_b) = (self.a_end.sub(1), self.b_end.sub(1));
+            let take_a = *last_b < *last_a;
+            self.out_end = self.out_end.sub(1);
+            let src = hint::select_unpredictable(take_a, last_a, last_b);
+            ptr::copy_nonoverlapping(src, self.out_end, 1);
+            self.a_end = retreat(self.a_end, take_a);
+            self.b_end = retreat(self.b_end, !take_a);
+            (take_b, take_a)
+        }
+    }
+
+    /// Splits the merge in two at the middle of its result: a binary search finds how many
+    /// elements of each run belong to the lower half of the merged result (co-ranking), and
+    /// the two halves are independent merges, each from both ends, so that four chains of
+    /// comparisons overlap instead of two. The merge is bound by the chain from each
+    /// comparison to the next load, not by instructions: measured on input made of runs of
+    /// random content, two merges at once are 1.25–1.4 times faster for integers and strings
+    /// and 1.1 times for 64-byte elements.
+    ///
+    /// The `k = (rest_a + rest_b) / 2` smallest elements, in the stable order, are `a[..i]`
+    /// and `b[..k - i]`, where `a[m]` is among them exactly if at most `k - m - 1` elements of
+    /// the right run are smaller than it, that is if `b[k - m - 1] >= a[m]`. The search runs
+    /// over `k - rest_b..=min(k, rest_a)`, where both indices exist. The split keeps the merge
+    /// stable: `a[i - 1] <= b[k - i]` and `b[k - i - 1] < a[i]` where those exist, so nothing
+    /// in the lower half goes after anything in the upper one.
+    ///
+    /// # Safety
+    ///
+    /// The invariants of `Merge` must hold.
+    unsafe fn split(self) -> (Self, Self) {
+        // SAFETY: `m < hi <= min(k, rest_a)` and `m >= lo >= k - rest_b` keep `a[m]` and
+        // `b[k - m - 1]` within what is left of the runs, whatever `Ord` answers, and
+        // `i <= rest_a` and `k - i <= rest_b` keep both halves within them, each with as many
+        // slots as elements.
+        unsafe {
+            let (rest_a, rest_b) = (self.rest_a(), self.rest_b());
+            let k = (rest_a + rest_b) / 2;
+            let (mut lo, mut hi) = (k.saturating_sub(rest_b), k.min(rest_a));
+            while lo < hi {
+                let m = lo + (hi - lo) / 2;
+                if *self.b.add(k - m - 1) >= *self.a.add(m) {
+                    lo = m + 1;
+                } else {
+                    hi = m;
+                }
+            }
+            let (i, j) = (lo, k - lo);
+            let lower = Merge {
+                a: self.a,
+                a_end: self.a.add(i),
+                b: self.b,
+                b_end: self.b.add(j),
+                out: self.out,
+                out_end: self.out.add(k),
+            };
+            let upper = Merge {
+                a: self.a.add(i),
+                a_end: self.a_end,
+                b: self.b.add(j),
+                b_end: self.b_end,
+                out: self.out.add(k),
+                out_end: self.out_end,
+            };
+            (lower, upper)
+        }
+    }
+
+    /// Finishes the merge from both ends at once, galloping when one run keeps winning:
+    /// `min_gallop` is the streak that sets off galloping, adapted on the way.
+    ///
+    /// # Safety
+    ///
+    /// The invariants of `Merge` must hold.
+    #[inline(never)]
+    unsafe fn finish(self, min_gallop: &mut usize) {
+        let mut m = self;
+        // SAFETY: every step takes an element from the start or the end of what is left of a
+        // run and writes it to the matching end of `out..out_end`, so every element is
+        // written exactly once, to a slot of its own, whatever `Ord` answers. A step reads
+        // only elements that are left: the single-element steps run only while each run has
+        // at least two elements left (in batches of `safe()` for small elements, checked at
+        // every step otherwise), galloping starts only while both runs have elements left
+        // and is bounded by what is left, and every other step checks for an empty run
+        // first.
+        unsafe {
+            let mut gallop = *min_gallop;
+            'merge: loop {
+                // Consecutive wins of each run at the front and at the back.
+                let (mut front_a, mut front_b, mut back_a, mut back_b) = (0usize, 0, 0, 0);
+                loop {
+                    if mem::size_of::<T>() <= BATCH_MAX_SIZE {
+                        // `safe()` steps in a row never read past a run: they make a batch,
+                        // checked for a run that ran out only at its end, and for a streak at
+                        // every step.
+                        let safe = m.safe();
+                        if safe == 0 {
+                            break 'merge;
+                        }
+                        let batch_end = m.out.add(safe);
+                        loop {
+                            let (take_b, take_a) = m.step();
+                            front_b = (front_b + 1) * usize::from(take_b);
+                            front_a = (front_a + 1) * usize::from(!take_b);
+                            back_a = (back_a + 1) * usize::from(take_a);
+                            back_b = (back_b + 1) * usize::from(!take_a);
+                            if (front_a | front_b | back_a | back_b) >= gallop || m.out == batch_end
+                            {
+                                break;
+                            }
+                        }
+                    } else {
+                        // Larger elements check at every step: with a batch to keep track of
+                        // as well, the compiler made worse code of the loop (see
+                        // `BATCH_MAX_SIZE`).
+                        if m.rest_a() < 2 || m.rest_b() < 2 {
+                            break 'merge;
+                        }
+                        let (take_b, take_a) = m.step();
+                        front_b = (front_b + 1) * usize::from(take_b);
+                        front_a = (front_a + 1) * usize::from(!take_b);
+                        back_a = (back_a + 1) * usize::from(take_a);
+                        back_b = (back_b + 1) * usize::from(!take_a);
+                    }
+                    if (front_a | front_b | back_a | back_b) < gallop {
+                        // No streak yet.
+                        continue;
+                    }
+                    // A run may have run out in the last step, if both ends took from it.
+                    if m.a == m.a_end || m.b == m.b_end {
+                        break 'merge;
+                    }
+                    if (front_a | front_b) >= gallop {
+                        break;
+                    }
+                    // A streak at the back: alternately move the elements of the left run that
                     // are greater than the last of the right run, and those of the right run
                     // that are not smaller than the last of the left run, as blocks.
                     loop {
                         gallop -= usize::from(gallop > 1);
-                        let last_b = b_end.sub(1);
-                        let rest = slice::from_raw_parts(a, a_end.offset_from_unsigned(a));
+                        let last_b = m.b_end.sub(1);
+                        let rest = slice::from_raw_parts(m.a, m.a_end.offset_from_unsigned(m.a));
                         let count_a = rest.len() - gallop_from_end(rest, |x| x <= &*last_b);
-                        a_end = a_end.sub(count_a);
-                        out_end = out_end.sub(count_a);
-                        ptr::copy_nonoverlapping(a_end, out_end, count_a);
-                        if a == a_end {
+                        m.a_end = m.a_end.sub(count_a);
+                        m.out_end = m.out_end.sub(count_a);
+                        ptr::copy_nonoverlapping(m.a_end, m.out_end, count_a);
+                        if m.a == m.a_end {
                             break 'merge;
                         }
-                        b_end = b_end.sub(1);
-                        out_end = out_end.sub(1);
-                        ptr::copy_nonoverlapping(b_end, out_end, 1);
-                        if b == b_end {
+                        m.b_end = m.b_end.sub(1);
+                        m.out_end = m.out_end.sub(1);
+                        ptr::copy_nonoverlapping(m.b_end, m.out_end, 1);
+                        if m.b == m.b_end {
                             break 'merge;
                         }
 
-                        let last_a = a_end.sub(1);
-                        let rest = slice::from_raw_parts(b, b_end.offset_from_unsigned(b));
+                        let last_a = m.a_end.sub(1);
+                        let rest = slice::from_raw_parts(m.b, m.b_end.offset_from_unsigned(m.b));
                         let count_b = rest.len() - gallop_from_end(rest, |x| x < &*last_a);
-                        b_end = b_end.sub(count_b);
-                        out_end = out_end.sub(count_b);
-                        ptr::copy_nonoverlapping(b_end, out_end, count_b);
-                        if b == b_end {
+                        m.b_end = m.b_end.sub(count_b);
+                        m.out_end = m.out_end.sub(count_b);
+                        ptr::copy_nonoverlapping(m.b_end, m.out_end, count_b);
+                        if m.b == m.b_end {
                             break 'merge;
                         }
-                        a_end = a_end.sub(1);
-                        out_end = out_end.sub(1);
-                        ptr::copy_nonoverlapping(a_end, out_end, 1);
-                        if a == a_end {
+                        m.a_end = m.a_end.sub(1);
+                        m.out_end = m.out_end.sub(1);
+                        ptr::copy_nonoverlapping(m.a_end, m.out_end, 1);
+                        if m.a == m.a_end {
                             break 'merge;
                         }
                         if count_a < MIN_GALLOP && count_b < MIN_GALLOP {
@@ -736,72 +1026,71 @@ unsafe fn merge_through_buffer<T: Ord>(
                     gallop += 2;
                     continue 'merge;
                 }
-            }
-            // Gallop at the front: alternately move the elements of the left run that are not
-            // greater than the first of the right run, and those of the right run that are
-            // smaller than the first of the left run, as blocks.
-            loop {
-                gallop -= usize::from(gallop > 1);
-                let first_b = b;
-                let rest = slice::from_raw_parts(a, a_end.offset_from_unsigned(a));
-                let count_a = gallop_from_start(rest, |x| x <= &*first_b);
-                ptr::copy_nonoverlapping(a, out, count_a);
-                a = a.add(count_a);
-                out = out.add(count_a);
-                if a == a_end {
-                    break 'merge;
-                }
-                ptr::copy_nonoverlapping(b, out, 1);
-                b = b.add(1);
-                out = out.add(1);
-                if b == b_end {
-                    break 'merge;
-                }
+                // Gallop at the front: alternately move the elements of the left run that are not
+                // greater than the first of the right run, and those of the right run that are
+                // smaller than the first of the left run, as blocks.
+                loop {
+                    gallop -= usize::from(gallop > 1);
+                    let first_b = m.b;
+                    let rest = slice::from_raw_parts(m.a, m.a_end.offset_from_unsigned(m.a));
+                    let count_a = gallop_from_start(rest, |x| x <= &*first_b);
+                    ptr::copy_nonoverlapping(m.a, m.out, count_a);
+                    m.a = m.a.add(count_a);
+                    m.out = m.out.add(count_a);
+                    if m.a == m.a_end {
+                        break 'merge;
+                    }
+                    ptr::copy_nonoverlapping(m.b, m.out, 1);
+                    m.b = m.b.add(1);
+                    m.out = m.out.add(1);
+                    if m.b == m.b_end {
+                        break 'merge;
+                    }
 
-                let first_a = a;
-                let rest = slice::from_raw_parts(b, b_end.offset_from_unsigned(b));
-                let count_b = gallop_from_start(rest, |x| x < &*first_a);
-                ptr::copy_nonoverlapping(b, out, count_b);
-                b = b.add(count_b);
-                out = out.add(count_b);
-                if b == b_end {
-                    break 'merge;
+                    let first_a = m.a;
+                    let rest = slice::from_raw_parts(m.b, m.b_end.offset_from_unsigned(m.b));
+                    let count_b = gallop_from_start(rest, |x| x < &*first_a);
+                    ptr::copy_nonoverlapping(m.b, m.out, count_b);
+                    m.b = m.b.add(count_b);
+                    m.out = m.out.add(count_b);
+                    if m.b == m.b_end {
+                        break 'merge;
+                    }
+                    ptr::copy_nonoverlapping(m.a, m.out, 1);
+                    m.a = m.a.add(1);
+                    m.out = m.out.add(1);
+                    if m.a == m.a_end {
+                        break 'merge;
+                    }
+                    if count_a < MIN_GALLOP && count_b < MIN_GALLOP {
+                        break;
+                    }
                 }
-                ptr::copy_nonoverlapping(a, out, 1);
-                a = a.add(1);
-                out = out.add(1);
-                if a == a_end {
-                    break 'merge;
-                }
-                if count_a < MIN_GALLOP && count_b < MIN_GALLOP {
-                    break;
-                }
+                gallop += 2;
             }
-            gallop += 2;
-        }
-        *min_gallop = gallop;
+            *min_gallop = gallop;
 
-        // A run is empty, or has one element left, which a binary search places among what is
-        // left of the other one.
-        let rest_a = a_end.offset_from_unsigned(a);
-        let rest_b = b_end.offset_from_unsigned(b);
-        if rest_a == 1 && rest_b > 0 {
-            let rest = slice::from_raw_parts(b, rest_b);
-            let k = binary_search(rest, |x| x < &*a, 0, rest_b);
-            ptr::copy_nonoverlapping(b, out, k);
-            ptr::copy_nonoverlapping(a, out.add(k), 1);
-            ptr::copy_nonoverlapping(b.add(k), out.add(k + 1), rest_b - k);
-        } else if rest_b == 1 && rest_a > 0 {
-            let rest = slice::from_raw_parts(a, rest_a);
-            let k = binary_search(rest, |x| x <= &*b, 0, rest_a);
-            ptr::copy_nonoverlapping(a, out, k);
-            ptr::copy_nonoverlapping(b, out.add(k), 1);
-            ptr::copy_nonoverlapping(a.add(k), out.add(k + 1), rest_a - k);
-        } else {
-            ptr::copy_nonoverlapping(a, out, rest_a);
-            ptr::copy_nonoverlapping(b, out.add(rest_a), rest_b);
+            // A run is empty, or has one element left, which a binary search places among what is
+            // left of the other one.
+            let rest_a = m.a_end.offset_from_unsigned(m.a);
+            let rest_b = m.b_end.offset_from_unsigned(m.b);
+            if rest_a == 1 && rest_b > 0 {
+                let rest = slice::from_raw_parts(m.b, rest_b);
+                let k = binary_search(rest, |x| x < &*m.a, 0, rest_b);
+                ptr::copy_nonoverlapping(m.b, m.out, k);
+                ptr::copy_nonoverlapping(m.a, m.out.add(k), 1);
+                ptr::copy_nonoverlapping(m.b.add(k), m.out.add(k + 1), rest_b - k);
+            } else if rest_b == 1 && rest_a > 0 {
+                let rest = slice::from_raw_parts(m.a, rest_a);
+                let k = binary_search(rest, |x| x <= &*m.b, 0, rest_a);
+                ptr::copy_nonoverlapping(m.a, m.out, k);
+                ptr::copy_nonoverlapping(m.b, m.out.add(k), 1);
+                ptr::copy_nonoverlapping(m.a.add(k), m.out.add(k + 1), rest_a - k);
+            } else {
+                ptr::copy_nonoverlapping(m.a, m.out, rest_a);
+                ptr::copy_nonoverlapping(m.b, m.out.add(rest_a), rest_b);
+            }
         }
-        mem::forget(restore);
     }
 }
 
@@ -853,8 +1142,8 @@ unsafe fn merge_low<T: Ord>(v: &mut [T], mid: usize, buf: *mut T, min_gallop: &m
                 let src = hint::select_unpredictable(take_b, b, gap.src.cast_const());
                 ptr::copy_nonoverlapping(src, gap.dst, 1);
                 gap.dst = gap.dst.add(1);
-                b = b.add(usize::from(take_b));
-                gap.src = gap.src.add(usize::from(!take_b));
+                b = advance(b, take_b);
+                gap.src = advance(gap.src, !take_b).cast_mut();
                 wins_b = (wins_b + 1) * usize::from(take_b);
                 wins_a = (wins_a + 1) * usize::from(!take_b);
                 if gap.src == gap.end || b == b_end {
@@ -949,8 +1238,8 @@ unsafe fn merge_high<T: Ord>(v: &mut [T], mid: usize, buf: *mut T, min_gallop: &
                 let src = hint::select_unpredictable(take_a, last_a, last_b);
                 out = out.sub(1);
                 ptr::copy_nonoverlapping(src, out, 1);
-                gap.dst = gap.dst.sub(usize::from(take_a));
-                gap.end = gap.end.sub(usize::from(!take_a));
+                gap.dst = retreat(gap.dst, take_a).cast_mut();
+                gap.end = retreat(gap.end, !take_a).cast_mut();
                 wins_a = (wins_a + 1) * usize::from(take_a);
                 wins_b = (wins_b + 1) * usize::from(!take_a);
                 if gap.src == gap.end || gap.dst == base {
