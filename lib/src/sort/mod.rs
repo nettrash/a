@@ -1,6 +1,7 @@
 mod bubble;
 mod cocktail_shaker;
 mod comb;
+mod counting;
 mod drift;
 mod gnome;
 mod heap;
@@ -14,6 +15,7 @@ mod tim;
 pub use bubble::bubble;
 pub use cocktail_shaker::cocktail_shaker;
 pub use comb::comb;
+pub use counting::{CountingKey, counting, counting_by_key};
 pub use drift::drift;
 pub use gnome::gnome;
 pub use heap::heap;
