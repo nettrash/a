@@ -58,7 +58,8 @@ pub fn bucket<T: BucketKey>(arr: &mut [T]) {
             unsafe { ptr::from_mut(x).cast::<T::Bits>().write(bits) };
         }
     }
-    let keys = arr.as_mut_ptr().cast::<T::Bits>();
+    let p = arr.as_mut_ptr();
+    let keys = p.cast::<T::Bits>();
     let mut buf = Buffer::<T::Bits>::new(len);
     let none = NonNull::<()>::dangling().as_ptr();
     let v = Area { keys, elems: none };
@@ -80,7 +81,7 @@ pub fn bucket<T: BucketKey>(arr: &mut [T]) {
             // SAFETY: as above; the slot holds the bits of a key.
             unsafe {
                 let bits = keys.add(i).read();
-                arr.as_mut_ptr().add(i).write(T::from_ordered(bits));
+                p.add(i).write(T::from_ordered(bits));
             }
         }
     }
@@ -452,17 +453,18 @@ unsafe fn distribute<B: Bits, E, C: Count, I: Index<B>>(
     map: I,
     ends: &mut [C],
 ) {
+    let buckets = ends.len();
     let c = ends.as_mut_ptr();
-    // SAFETY: guaranteed by the caller: every bucket is below `ends.len()`, and the places of
-    // each bucket are handed out once each, all below `len`.
+    // SAFETY: guaranteed by the caller: every bucket is below `buckets`, and the places of
+    // each bucket are handed out once each, all below `len`. `ends` is only used through `c`.
     unsafe {
         for i in 0..len {
             bump(c.add(map.of(src.key(i))));
         }
         let mut sum = 0;
-        for e in ends.iter_mut() {
-            let count = e.get();
-            *e = C::ZERO.add(sum);
+        for b in 0..buckets {
+            let count = (*c.add(b)).get();
+            *c.add(b) = C::ZERO.add(sum);
             sum += count;
         }
         for i in 0..len {
