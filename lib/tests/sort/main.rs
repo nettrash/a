@@ -10,6 +10,7 @@ mod insertion;
 mod intro;
 mod merge;
 mod quick;
+mod radix;
 mod selection;
 mod shell;
 mod tim;

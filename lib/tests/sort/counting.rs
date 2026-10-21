@@ -17,7 +17,7 @@ fn xorshift(state: &mut u64) -> u64 {
 }
 
 /// Sorts `v` with [`counting`] and checks the result against [`slice::sort_unstable`].
-fn assert_counts<T: a::sort::CountingKey + std::fmt::Debug>(v: &[T]) {
+fn assert_counts<T: a::sort::IntegerKey + std::fmt::Debug>(v: &[T]) {
     let mut expected = v.to_vec();
     expected.sort_unstable();
     let mut actual = v.to_vec();
@@ -27,7 +27,7 @@ fn assert_counts<T: a::sort::CountingKey + std::fmt::Debug>(v: &[T]) {
 
 /// Sorts `keys`, each paired with its index, with [`counting_by_key`] and checks the result
 /// against the standard library's stable sort.
-fn assert_counts_by_key<K: a::sort::CountingKey + std::fmt::Debug>(keys: &[K]) {
+fn assert_counts_by_key<K: a::sort::IntegerKey + std::fmt::Debug>(keys: &[K]) {
     let mut expected: Vec<(K, usize)> = keys.iter().copied().zip(0..).collect();
     expected.sort_by_key(|&(k, _)| k);
     let mut actual: Vec<(K, usize)> = keys.iter().copied().zip(0..).collect();
@@ -310,7 +310,7 @@ fn allows_a_range_up_to_the_limit() {
 
 /// Sorts `v` with [`counting`] and returns the panic message, if any, after checking that a
 /// panicking sort left `v` untouched.
-fn panic_of<T: a::sort::CountingKey + std::fmt::Debug>(v: &mut [T]) -> Option<String> {
+fn panic_of<T: a::sort::IntegerKey + std::fmt::Debug>(v: &mut [T]) -> Option<String> {
     let before = v.to_vec();
     let result = catch_unwind(AssertUnwindSafe(|| counting(v)));
     let message = result.err().map(|e| *e.downcast::<String>().unwrap());
@@ -342,7 +342,7 @@ fn panics_on_a_range_over_the_limit_and_leaves_the_slice_alone() {
 }
 
 /// Sorts `v` with [`counting`] and returns how many allocations that made.
-fn allocations_of<T: a::sort::CountingKey>(v: &mut [T]) -> usize {
+fn allocations_of<T: a::sort::IntegerKey>(v: &mut [T]) -> usize {
     crate::allocations::count(|| counting(v))
 }
 

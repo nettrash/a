@@ -51,6 +51,9 @@ The A Library is a set of algorithms.
     - [Counting](#counting)
       - [Examples](#examples-13)
       - [Efficiency](#efficiency-13)
+    - [Radix](#radix)
+      - [Examples](#examples-14)
+      - [Efficiency](#efficiency-14)
 
 ## Sorting
 
@@ -794,7 +797,7 @@ fn main() {
 
 ### Counting
 
-Counting sort, described by Harold Seward in 1954, is the first sort of this library that does not compare elements with each other. It finds the smallest and the largest key, counts how many times each of the `k` keys in between occurs, and turns the counts into the sorted order, in `O(n + k)` time whatever the order of the input: faster than any comparison sort when `k` is not much larger than `n`, as with bytes, small integers or values in a known range. Keys are primitive integers, `char`s and `bool`s (the sealed `CountingKey` trait). It comes in two forms:
+Counting sort, described by Harold Seward in 1954, is the first sort of this library that does not compare elements with each other. It finds the smallest and the largest key, counts how many times each of the `k` keys in between occurs, and turns the counts into the sorted order, in `O(n + k)` time whatever the order of the input: faster than any comparison sort when `k` is not much larger than `n`, as with bytes, small integers or values in a known range. Keys are primitive integers, `char`s and `bool`s (the sealed `IntegerKey` trait). It comes in two forms:
 
 - `counting` sorts the keys themselves. Equal keys cannot be told apart, so the slice is simply rewritten from the counts: so many copies of the smallest key, then so many of the next.
 - `counting_by_key` sorts any type by such a key, stably: the counts become the place where each key's elements begin, and every element is moved, in order, to the next place of its key in a buffer, which is then copied back. This is counting sort as radix sort uses it. `key` is called exactly once per element.
@@ -844,3 +847,52 @@ fn main() {
 - Stability: `counting_by_key` is stable; `counting` cannot tell equal keys apart
 - Against the textbook counting sort: `counting` is 3–5.5 times faster on random integers with about as many distinct keys as elements, 1.7–3.1 times with four distinct keys and 9–80 times on sorted, reverse-sorted and all-equal input; `counting_by_key` is 1.05–1.6 times faster on random keys, 1.35–2.2 times with four distinct keys and 6–20 times on sorted and all-equal input, but 1.02–1.15 times slower on reverse-sorted input with repeated keys, nearly sorted input, random bytes from 10,000 elements on and 1000–10,000 random keys with sixteen times fewer keys than elements, where keeping the keys costs more than it saves
 - Against the standard library, from 100 elements on: `counting` is 3.6–9 times faster than `slice::sort_unstable` on random `u32` and `u64` with about as many distinct keys as elements, 1.7–3.8 times with four times as many, 2.5–4 times with four distinct keys and 9–15 times on random bytes from 1000 elements on; `counting_by_key` is 2.9–7 times faster than `slice::sort_by_key` on random `u32` keys with about as many distinct keys as elements and 1.6–2.3 times with four distinct keys, and as fast on sorted input. On 16 elements both are up to 2 times slower on sorted or nearly sorted input, where the standard library's insertion sort shines
+
+### Radix
+
+LSD radix sort, used on punched-card sorters since the 1920s, does not compare elements either. It reads every key as a number of a few digits and sorts the slice by each digit in turn, from the least significant to the most, with a stable counting pass; as each pass keeps the order the earlier ones made among equal digits, the slice ends up sorted by the whole key. For `w`-bit keys and `r`-bit digits that is `⌈w / r⌉` passes of `O(n + 2^r)` each, whatever the order of the input: unlike [Counting](#counting) sort, any range of keys can be sorted. Keys are the same as counting sort's (the sealed `IntegerKey` trait), signed integers read with their sign bit flipped. It comes in two forms: `radix` sorts the keys themselves, and `radix_by_key` sorts any type by such a key, stably, calling `key` exactly once per element. This implementation uses six optimizations:
+
+- Sorted and reverse-sorted input is recognised: `radix` scans for one ascending or one non-increasing run, 16 neighbours at a time with no exit inside a block, and `radix_by_key` checks for one ascending or one strictly descending run in the pass that reads the keys; a slice that is one run is left alone or reversed, and nothing is counted.
+- Only the bits in which keys differ are sorted, in digits sized by the slice: one pass ORs together every key's difference from the first, and the span from its lowest to its highest set bit is cut into the fewest digits of equal width of at most `log₂ n` bits (at least 8 from 64 elements on, at most 12), the digit size CLRS derives for radix sort. Against byte digits with shared bytes skipped: 1.1–1.25 times faster on random integers from 10,000 elements on and 1.75–3.4 times on integers below `n`.
+- One digit is a counting sort: when a single digit holds every bit in which the keys differ, its pass is this crate's [Counting](#counting) sort, with its count tables (`radix`, 2.4–5.4 times faster with four distinct values) or its segments (`radix_by_key`, 1.3–1.8 times faster with four distinct keys).
+- Every count in one pass, and no copy back: the counts of all digits are made in one pass, a digit all keys share is skipped, and the passes move the slice into the buffer and back alternately.
+- Large elements are moved once: when `radix_by_key`'s passes would move at least 96 bytes of every element and the slice takes at most 16 MiB, the keys are sorted with the indices of their elements, which are then gathered once (1.25 times faster for 32-byte elements, up to 1.6 times for 72-byte ones).
+- No allocation for small sorts: keys, elements and counts (`u32` up to `u32::MAX` elements) each live on the stack up to 4 KiB.
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::radix;
+
+fn main() {
+  let mut v = vec![i64::MAX, -1, i64::MIN, 0, 1 << 40];
+  radix(&mut v);
+  assert_eq!(v, vec![i64::MIN, -1, 0, 1 << 40, i64::MAX]);
+}
+```
+
+Sorting by a key, stably:
+
+```rust
+use a::sort::radix_by_key;
+
+fn main() {
+  let mut v = vec![(3, 'a'), (1, 'b'), (3, 'c'), (0, 'd'), (1, 'e')];
+  radix_by_key(&mut v, |&(k, _)| k);
+  assert_eq!(v, vec![(0, 'd'), (1, 'b'), (1, 'e'), (3, 'a'), (3, 'c')]);
+}
+```
+
+#### Efficiency
+
+- Time complexity:
+  - Worst, average and best: O(n·b/r) for keys that differ in `b` bits and digits of `r` bits (`r` ≈ log₂ n, between 8 and 12 from 64 elements on)
+  - Sorted and reverse-sorted input (strictly descending for `radix_by_key`): O(n), one scan
+- Comparisons: none between elements, except the scan for a sorted or reverse-sorted run
+- Calls to `key` (`radix_by_key`): exactly n
+- Space complexity: O(n) buffers (`radix`: n values; `radix_by_key`: n keys, n elements and, when gathering, 2n keys with indices) plus the counts; each on the stack up to 4 KiB, otherwise allocated once
+- Stability: `radix_by_key` is stable; `radix` cannot tell equal values apart
+- Against the textbook LSD radix sort (a pass per byte through a buffer copied back each time): `radix` is 1.15–1.8 times faster on random integers, 2.6–16 times on integers below `n`, 12–35 times with four distinct values and 58–190 times on sorted input; `radix_by_key` is as fast to 1.2 times faster on random `u32` keys of 16-byte elements, 1.45–2.4 times for 72-byte elements and 6–14 times with four distinct keys
+- Against the standard library, from 1000 elements on: `radix` is 2.3–4.8 times faster than `slice::sort_unstable` on random `u32`s, 1.2–2.5 times on random `u64`s and 3.5–6.7 times on integers below `n`; `radix_by_key` is 2.8–6.7 times faster than `slice::sort_by_key` on random `u32` keys (16- to 72-byte elements) and 1.3–2 times on random `u64` keys. Short slices of wide keys are its weakness: 100 random `u64`s sort 2.8 times slower than with `slice::sort_unstable`, and 16 elements up to 4 times slower. For keys in a range of about `n` values, [Counting](#counting) sort is 1.1–2.1 times faster

@@ -1,6 +1,7 @@
 use core::mem::{self, MaybeUninit};
 use core::{ptr, slice};
 
+use super::key::IntegerKey;
 use super::tim::Buffer;
 
 /// Sorts a slice of integers, `char`s or `bool`s in place using counting sort.
@@ -99,7 +100,7 @@ use super::tim::Buffer;
 /// let mut v = [0u32, 1_000_000];
 /// counting(&mut v);
 /// ```
-pub fn counting<T: CountingKey>(arr: &mut [T]) {
+pub fn counting<T: IntegerKey>(arr: &mut [T]) {
     let len = arr.len();
     if len < 2 {
         return;
@@ -206,7 +207,7 @@ pub fn counting<T: CountingKey>(arr: &mut [T]) {
 /// ```
 pub fn counting_by_key<T, K, F>(arr: &mut [T], mut key: F)
 where
-    K: CountingKey,
+    K: IntegerKey,
     F: FnMut(&T) -> K,
 {
     let len = arr.len();
@@ -247,82 +248,6 @@ where
     }
 }
 
-/// A type counting sort can count: a primitive integer, `char` or `bool`.
-///
-/// It is sealed: it cannot be implemented outside this crate.
-pub trait CountingKey: sealed::Key {}
-
-mod sealed {
-    /// What counting sort needs to know about a key type: its order as an offset from the
-    /// smallest key.
-    pub trait Key: Copy + Ord {
-        /// `self − min`, for `min <= self`.
-        fn distance(self, min: Self) -> u128;
-        /// `self − min`, for `min <= self` and a distance that fits in `usize`.
-        fn offset(self, min: Self) -> usize;
-        /// `min + offset`, or any value of the type if that is not one.
-        fn nth(min: Self, offset: usize) -> Self;
-    }
-}
-
-macro_rules! integer_key {
-    ($($t:ty => $u:ty),* $(,)?) => {$(
-        impl sealed::Key for $t {
-            #[inline(always)]
-            fn distance(self, min: Self) -> u128 {
-                (self as $u).wrapping_sub(min as $u) as u128
-            }
-            #[inline(always)]
-            fn offset(self, min: Self) -> usize {
-                (self as $u).wrapping_sub(min as $u) as usize
-            }
-            #[inline(always)]
-            fn nth(min: Self, offset: usize) -> Self {
-                (min as $u).wrapping_add(offset as $u) as $t
-            }
-        }
-        impl CountingKey for $t {}
-    )*};
-}
-
-integer_key! {
-    u8 => u8, u16 => u16, u32 => u32, u64 => u64, u128 => u128, usize => usize,
-    i8 => u8, i16 => u16, i32 => u32, i64 => u64, i128 => u128, isize => usize,
-}
-
-impl sealed::Key for char {
-    #[inline(always)]
-    fn distance(self, min: Self) -> u128 {
-        u128::from(self as u32 - min as u32)
-    }
-    #[inline(always)]
-    fn offset(self, min: Self) -> usize {
-        (self as u32).wrapping_sub(min as u32) as usize
-    }
-    #[inline(always)]
-    fn nth(min: Self, offset: usize) -> Self {
-        // An offset into the surrogates, which no element has, gives `min`.
-        char::from_u32((min as u32).wrapping_add(offset as u32)).unwrap_or(min)
-    }
-}
-impl CountingKey for char {}
-
-impl sealed::Key for bool {
-    #[inline(always)]
-    fn distance(self, min: Self) -> u128 {
-        u128::from(self as u8 - min as u8)
-    }
-    #[inline(always)]
-    fn offset(self, min: Self) -> usize {
-        usize::from(self).wrapping_sub(usize::from(min))
-    }
-    #[inline(always)]
-    fn nth(min: Self, offset: usize) -> Self {
-        usize::from(min) + offset != 0
-    }
-}
-impl CountingKey for bool {}
-
 /// Every range of at most this many values is allowed, whatever the length of the slice.
 const RANGE_MIN: usize = 1 << 16;
 
@@ -331,7 +256,7 @@ const RANGE_PER_ELEMENT: usize = 4;
 
 /// Returns the number of values from `min` to `max`, or panics if there are too many to count
 /// for `len` elements.
-fn range<K: CountingKey>(min: K, max: K, len: usize) -> usize {
+fn range<K: IntegerKey>(min: K, max: K, len: usize) -> usize {
     let limit = RANGE_MIN.max(len.saturating_mul(RANGE_PER_ELEMENT));
     let distance = max.distance(min);
     match usize::try_from(distance) {
@@ -347,7 +272,7 @@ fn range<K: CountingKey>(min: K, max: K, len: usize) -> usize {
 /// 16 with no exit inside a block, which the compiler vectorizes; random input leaves after the
 /// first block.
 #[inline(always)]
-fn in_order<T: CountingKey>(v: &[T], out: impl Fn(T, T) -> bool) -> bool {
+pub(super) fn in_order<T: IntegerKey>(v: &[T], out: impl Fn(T, T) -> bool) -> bool {
     const BLOCK: usize = 16;
     let mut i = 0;
     while i + BLOCK < v.len() {
@@ -366,7 +291,7 @@ fn in_order<T: CountingKey>(v: &[T], out: impl Fn(T, T) -> bool) -> bool {
 
 /// Returns the smallest and the largest value of a nonempty slice.
 #[inline(always)]
-fn min_max<T: CountingKey>(v: &[T]) -> (T, T) {
+pub(super) fn min_max<T: IntegerKey>(v: &[T]) -> (T, T) {
     let first = v[0];
     v.iter()
         .fold((first, first), |(min, max), &x| (min.min(x), max.max(x)))
@@ -378,7 +303,7 @@ fn min_max<T: CountingKey>(v: &[T]) -> (T, T) {
 /// # Safety
 ///
 /// All-zero bytes must be a valid zero.
-unsafe trait Count: Copy + Eq {
+pub(super) unsafe trait Count: Copy + Eq {
     const ZERO: Self;
     fn add(self, n: usize) -> Self;
     fn get(self) -> usize;
@@ -410,14 +335,18 @@ unsafe impl Count for usize {
 
 /// Room for counters on the stack: as much as the other sorts of this crate keep their buffers
 /// in.
-const STACK_BYTES: usize = 4096;
+pub(super) const STACK_BYTES: usize = 4096;
 
 #[repr(C, align(16))]
-struct Stack([MaybeUninit<u8>; STACK_BYTES]);
+pub(super) struct Stack(pub(super) [MaybeUninit<u8>; STACK_BYTES]);
 
 /// Returns `len` zeroed counters: in `stack` if they fit, and otherwise in `heap`, allocated.
 #[inline(always)]
-fn counters<'a, C: Count>(len: usize, stack: &'a mut Stack, heap: &'a mut Vec<C>) -> &'a mut [C] {
+pub(super) fn counters<'a, C: Count>(
+    len: usize,
+    stack: &'a mut Stack,
+    heap: &'a mut Vec<C>,
+) -> &'a mut [C] {
     if len <= STACK_BYTES / mem::size_of::<C>() {
         let p = stack.0.as_mut_ptr().cast::<C>();
         // SAFETY: the stack has room for `len` counters and is aligned for them (`C` is `u32`
@@ -434,14 +363,13 @@ fn counters<'a, C: Count>(len: usize, stack: &'a mut Stack, heap: &'a mut Vec<C>
 
 /// Returns room for `len` keys: in `stack` if they fit, and otherwise in `heap`, allocated.
 #[inline(always)]
-fn key_slots<'a, K: CountingKey>(
+pub(super) fn key_slots<'a, K: Copy>(
     len: usize,
     stack: &'a mut Stack,
     heap: &'a mut Vec<K>,
 ) -> &'a mut [MaybeUninit<K>] {
     const { assert!(mem::align_of::<K>() <= mem::align_of::<Stack>()) };
-    // Every key type has a nonzero size.
-    if len <= STACK_BYTES / mem::size_of::<K>() {
+    if len <= STACK_BYTES / mem::size_of::<K>().max(1) {
         // SAFETY: the stack has room for `len` keys and is aligned for them.
         unsafe { slice::from_raw_parts_mut(stack.0.as_mut_ptr().cast(), len) }
     } else {
@@ -468,7 +396,7 @@ const SPARSE_PER_ELEMENT: usize = 32;
 
 /// Counts the values of `arr`, all within the `k` values from `min`, and rewrites `arr` from
 /// the counts.
-fn rewrite<T: CountingKey, C: Count>(arr: &mut [T], min: T, k: usize) {
+pub(super) fn rewrite<T: IntegerKey, C: Count>(arr: &mut [T], min: T, k: usize) {
     let len = arr.len();
     let tables = if k <= TABLES_MAX_RANGE && len >= TABLES_MIN_PER_VALUE * k {
         TABLES
@@ -503,7 +431,7 @@ fn rewrite<T: CountingKey, C: Count>(arr: &mut [T], min: T, k: usize) {
 /// The slice is walked 8 elements at a time whatever `N` is: left to the compiler, the loop for
 /// one table was not unrolled, and counted 1.4 times slower.
 #[inline(always)]
-fn count<T: CountingKey, C: Count, const N: usize>(v: &[T], min: T, counts: &mut [C], k: usize) {
+fn count<T: IntegerKey, C: Count, const N: usize>(v: &[T], min: T, counts: &mut [C], k: usize) {
     const STEP: usize = 8;
     debug_assert!(STEP.is_multiple_of(N) && counts.len() == N * k);
     let c = counts.as_mut_ptr();
@@ -535,7 +463,7 @@ fn count<T: CountingKey, C: Count, const N: usize>(v: &[T], min: T, counts: &mut
 ///
 /// `c` must be valid for reads and writes.
 #[inline(always)]
-unsafe fn bump<C: Count>(c: *mut C) -> usize {
+pub(super) unsafe fn bump<C: Count>(c: *mut C) -> usize {
     // SAFETY: guaranteed by the caller.
     unsafe {
         let before = *c;
@@ -551,7 +479,7 @@ unsafe fn bump<C: Count>(c: *mut C) -> usize {
 /// values after it. Branching on every count instead mispredicts on a range of about as many
 /// values as elements, where counts of 0, 1 and 2 are all common.
 #[inline(always)]
-fn write_ahead<T: CountingKey, C: Count, const W: usize>(v: &mut [T], min: T, counts: &[C]) {
+fn write_ahead<T: IntegerKey, C: Count, const W: usize>(v: &mut [T], min: T, counts: &[C]) {
     let len = v.len();
     let base = v.as_mut_ptr();
     let mut pos = 0;
@@ -581,7 +509,7 @@ fn write_ahead<T: CountingKey, C: Count, const W: usize>(v: &mut [T], min: T, co
 /// Rewrites `v` from `counts` like [`write_ahead`], for a range with many more values than
 /// elements: blocks of 8 empty counts are skipped with one test.
 #[inline(always)]
-fn write_sparse<T: CountingKey, C: Count>(v: &mut [T], min: T, counts: &[C]) {
+fn write_sparse<T: IntegerKey, C: Count>(v: &mut [T], min: T, counts: &[C]) {
     const BLOCK: usize = 8;
     let mut pos = 0;
     let (blocks, rest) = counts.as_chunks::<BLOCK>();
@@ -615,7 +543,7 @@ const SEGMENTS_MIN_PER_KEY: usize = 16;
 
 /// Places every element of `arr` by its key in `keys`, all within the `k` keys from `min`, into
 /// a buffer at the place the counts give it, and copies the buffer back.
-fn scatter<T, K: CountingKey, C: Count>(arr: &mut [T], keys: &[K], min: K, k: usize) {
+pub(super) fn scatter<T, K: IntegerKey, C: Count>(arr: &mut [T], keys: &[K], min: K, k: usize) {
     let segments = if k <= SEGMENTS_MAX_RANGE && arr.len() >= SEGMENTS_MIN_PER_KEY * k {
         SEGMENTS
     } else {
@@ -641,7 +569,7 @@ fn scatter<T, K: CountingKey, C: Count>(arr: &mut [T], keys: &[K], min: K, k: us
 ///
 /// `next` holds `S·k` zeroed counters, which become the next place of each key in each segment.
 #[inline(always)]
-fn place<T, K: CountingKey, C: Count, const S: usize>(
+fn place<T, K: IntegerKey, C: Count, const S: usize>(
     arr: &mut [T],
     keys: &[K],
     min: K,
