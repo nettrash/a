@@ -1,7 +1,8 @@
 use a::sort::{BucketKey, bucket, bucket_by_key};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::fmt::Debug;
+use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
@@ -1516,4 +1517,562 @@ fn by_key_allocates_only_beyond_4_kib() {
         .collect();
     assert!(allocations_by_key_of(&mut v) > 0);
     assert!(v.is_sorted_by_key(|e| e.0));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Paths chosen by the size of a level and of its elements
+// ---------------------------------------------------------------------------------------------
+
+/// Random keys, keys over a range of a third of the length, and three distinct keys.
+fn spread_keys(len: usize, state: &mut u64) -> [Vec<u32>; 3] {
+    let third = (len as u64 / 3).max(1);
+    [
+        (0..len).map(|_| xorshift(state) as u32).collect(),
+        (0..len).map(|_| (xorshift(state) % third) as u32).collect(),
+        (0..len).map(|_| (xorshift(state) % 3) as u32).collect(),
+    ]
+}
+
+/// Keys in clusters of about ten, far apart, each cluster of eight values in random order: a
+/// level of up to 4096 elements gives each cluster a bucket of its own, whose keys the insertion
+/// sort then moves one or several places.
+fn clustered_keys(len: usize, state: &mut u64) -> Vec<u32> {
+    let clusters = (len as u64 / 10).max(1);
+    (0..len)
+        .map(|_| {
+            let r = xorshift(state);
+            ((r % clusters) * 10_000 + (r >> 32) % 8) as u32
+        })
+        .collect()
+}
+
+#[test]
+fn sorts_across_the_level_size_thresholds() {
+    // A level keeps the bucket of each key for up to 2048 keys, counts into four tables from
+    // four keys per bucket (16 384 keys for 4096 buckets) and into eight from 16 per bucket.
+    let mut state = 0x7B5E_7B5E_7B5E_7B5E;
+    let lens: Vec<usize> = if cfg!(miri) {
+        vec![2048, 2049]
+    } else {
+        vec![2047, 2048, 2049, 16_383, 16_384, 65_535, 65_536]
+    };
+    for len in lens {
+        for keys in spread_keys(len, &mut state) {
+            assert_bucket(&keys);
+            assert_bucket_by_key(&keys);
+            let floats: Vec<f32> = keys.iter().map(|&k| k as f32 * 0.25 - 100.0).collect();
+            assert_bucket_floats(&floats);
+            assert_bucket_by_float_key(&floats);
+        }
+        let v: Vec<f64> = (0..len).map(|_| unit_f64(&mut state)).collect();
+        assert_bucket_floats(&v);
+        // Few distinct keys in a range smaller than the buckets: one bucket per key, counted
+        // into several tables.
+        let keys: Vec<u16> = (0..len)
+            .map(|_| (xorshift(&mut state) % 40) as u16)
+            .collect();
+        assert_bucket(&keys);
+        assert_bucket_by_key(&keys);
+    }
+}
+
+#[test]
+fn sorts_floats_crowded_at_zero_with_the_rest_far_from_it() {
+    // Most keys zero and the others far from it on both sides: the buckets by value around zero
+    // hold the crowd, and the keys are counted again by bits, which leaves the zeros in one
+    // bucket all the same, so the cut by value stays and the keys move by it.
+    let mut state = 0xC20D_C20D_C20D_C20D;
+    for len in [17, 100, 1000, 2048, 2049, size(5000, 500)] {
+        for zeros in [[0.0, 0.0], [0.0, -0.0], [-0.0, -0.0]] {
+            let v: Vec<f64> = (0..len)
+                .map(|_| {
+                    let r = xorshift(&mut state);
+                    if r % 10 < 6 {
+                        zeros[(r >> 8) as usize % 2]
+                    } else {
+                        let x = 500.0 + unit_f64(&mut state) * 500.0;
+                        if r & (1 << 20) == 0 { x } else { -x }
+                    }
+                })
+                .collect();
+            assert_bucket_floats(&v);
+            assert_bucket_by_float_key(&v);
+            let w: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+            assert_bucket_floats(&w);
+            assert_bucket_by_float_key(&w);
+            // On one side of zero only, with the zeros at the end of the range.
+            let w: Vec<f64> = v.iter().map(|&x| x.abs()).collect();
+            assert_bucket_floats(&w);
+            assert_bucket_by_float_key(&w);
+        }
+        // A crowd of tiny values of either sign rather than zeros, which their bits spread.
+        let v: Vec<f64> = (0..len)
+            .map(|_| {
+                let r = xorshift(&mut state);
+                let x = if r % 10 < 6 {
+                    unit_f64(&mut state) * 1e-12
+                } else {
+                    500.0 + unit_f64(&mut state) * 500.0
+                };
+                if r & (1 << 20) == 0 { x } else { -x }
+            })
+            .collect();
+        assert_bucket_floats(&v);
+        assert_bucket_by_float_key(&v);
+    }
+}
+
+thread_local! {
+    /// How many times the [`Owned`] element with each id has been dropped on this thread.
+    static DROPS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The padding of an [`Owned`], filled from its id, so that an element pieced together from
+/// two others is noticed.
+trait Pad: PartialEq {
+    fn of(id: u32) -> Self;
+}
+
+impl<const N: usize> Pad for [u32; N] {
+    fn of(id: u32) -> Self {
+        std::array::from_fn(|i| id.wrapping_mul(0x9E37_79B9) ^ i as u32)
+    }
+}
+
+impl<const N: usize> Pad for [u64; N] {
+    fn of(id: u32) -> Self {
+        std::array::from_fn(|i| u64::from(id).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ i as u64)
+    }
+}
+
+/// Zero-sized markers that raise the alignment of an [`Owned`] above that of its fields.
+#[repr(align(32))]
+struct Align32;
+#[repr(align(64))]
+struct Align64;
+#[repr(align(128))]
+struct Align128;
+
+/// An element with a key, an id, padding `P` and the alignment of `A`, that counts its drops in
+/// [`DROPS`]. Its size and alignment choose how bucket sort moves it: without a branch up to 16
+/// bytes, by its position past that, along the cycles of the permutation from 64 bytes.
+struct Owned<P, A = ()> {
+    key: u32,
+    id: u32,
+    pad: P,
+    _align: [A; 0],
+}
+
+impl<P, A> Drop for Owned<P, A> {
+    fn drop(&mut self) {
+        DROPS.with(|d| d.borrow_mut()[self.id as usize] += 1);
+    }
+}
+
+/// Sorts elements of type `Owned<P, A>` with `keys`, from position `skip` on, with
+/// [`bucket_by_key`] by `key` of their key, and checks that they end up in the order of the
+/// standard library's stable sort by `order`, that the first `skip` stay where they are, that
+/// none is changed or dropped during the sort, and that each is dropped exactly once afterwards.
+fn assert_owned_by<P: Pad, A, K: BucketKey>(
+    keys: &[u32],
+    skip: usize,
+    key: impl Fn(u32) -> K,
+    order: impl Fn(&K, &K) -> Ordering,
+) {
+    let len = keys.len();
+    let skip = skip.min(len);
+    DROPS.with(|d| *d.borrow_mut() = vec![0; len]);
+    let mut v: Vec<Owned<P, A>> = keys
+        .iter()
+        .zip(0..)
+        .map(|(&key, id)| Owned {
+            key,
+            id,
+            pad: P::of(id),
+            _align: [],
+        })
+        .collect();
+    let calls = Cell::new(0);
+    bucket_by_key(&mut v[skip..], |e| {
+        calls.set(calls.get() + 1);
+        key(e.key)
+    });
+    let mut expected: Vec<u32> = (0..len as u32).collect();
+    expected[skip..].sort_by(|&a, &b| order(&key(keys[a as usize]), &key(keys[b as usize])));
+    let ids: Vec<u32> = v.iter().map(|e| e.id).collect();
+    assert!(
+        ids == expected,
+        "not stable or not a permutation: {} bytes, keys {}",
+        mem::size_of::<Owned<P, A>>(),
+        describe(keys),
+    );
+    assert!(
+        v.iter()
+            .all(|e| e.key == keys[e.id as usize] && e.pad == P::of(e.id)),
+        "element changed"
+    );
+    assert!(
+        len - skip < 2 || calls.get() == len - skip,
+        "not one call per element"
+    );
+    assert!(
+        DROPS.with(|d| d.borrow().iter().all(|&n| n == 0)),
+        "element dropped during sort"
+    );
+    drop(v);
+    assert!(
+        DROPS.with(|d| d.borrow().iter().all(|&n| n == 1)),
+        "element leaked or double-dropped"
+    );
+}
+
+/// [`assert_owned_by`] by the key itself.
+fn assert_owned<P: Pad, A>(keys: &[u32], skip: usize) {
+    assert_owned_by::<P, A, u32>(keys, skip, |k| k, Ord::cmp);
+}
+
+/// [`assert_owned_by`] by a float made from the key, in the same order: `-0.0` for 2, between
+/// the negative values below it and the positive ones above it.
+fn assert_owned_by_float<P: Pad, A>(keys: &[u32], skip: usize) {
+    let float = |k: u32| if k == 2 { -0.0 } else { f64::from(k) - 2.5 };
+    assert_owned_by::<P, A, f64>(keys, skip, float, f64::total_cmp);
+}
+
+/// Key layouts of `len` keys that end the order the keys are read in at different places:
+/// each is sorted, strictly descending or non-increasing, or turns out not to be at the first,
+/// the second or a later key.
+fn order_layouts(len: usize) -> Vec<Vec<u32>> {
+    let n = len as u32;
+    let mut layouts = vec![
+        // Non-increasing, the first three keys equal.
+        (0..n).map(|i| (3 * n + 2 - i) / 3).collect::<Vec<_>>(),
+        // Non-increasing, the first two keys different.
+        (0..n)
+            .map(|i| if i == 0 { 2 * n + 9 } else { (n - i) / 2 })
+            .collect(),
+        // Strictly descending.
+        (0..n).rev().collect(),
+        // Sorted with duplicates, and all equal.
+        (0..n).map(|i| i / 3).collect(),
+        vec![7; len],
+        // Sorted, but for the last key.
+        (1..=n).map(|i| if i == n { 0 } else { i }).collect(),
+    ];
+    if len >= 3 {
+        // Equal keys, then a descent, then larger keys.
+        let mut v: Vec<u32> = (0..n).map(|i| (3 * n + 2 - i) / 3).collect();
+        v[len - 1] = 3 * n;
+        layouts.push(v);
+        // A strict descent, then equal keys, then a larger one.
+        let mut v: Vec<u32> = (0..n)
+            .map(|i| if i == 0 { 2 * n + 9 } else { (n - i) / 2 })
+            .collect();
+        v[len - 1] = 3 * n;
+        layouts.push(v);
+        // A strict descent, then an ascent.
+        let mut v: Vec<u32> = (0..n).rev().collect();
+        v[2] = n + 1;
+        layouts.push(v);
+    }
+    layouts
+}
+
+#[test]
+fn by_key_recognises_the_order_of_elements_over_16_bytes() {
+    // Elements over 16 bytes have their keys read by loops that leave at the first key that
+    // ends an order; non-increasing keys are reversed and their runs of equal keys reversed
+    // back.
+    for len in [2, 3, 4, 5, 16, 17, 40, 300, size(3000, 300)] {
+        for keys in order_layouts(len) {
+            assert_owned::<[u64; 2], ()>(&keys, 0);
+            assert_owned_by_float::<[u64; 2], ()>(&keys, 0);
+            assert_owned::<[u64; 7], ()>(&keys, 0);
+            // The same layouts of 16-byte elements, read by the loop that tracks both orders.
+            assert_owned::<[u32; 2], ()>(&keys, 0);
+        }
+    }
+}
+
+#[test]
+fn by_key_gathers_elements_over_16_bytes_by_position() {
+    // Elements over 16 bytes out of order often enough are not moved by insertion but their
+    // positions are, and each element is then moved once: if the room they are moved to is
+    // aligned for positions. A slice of 20-byte elements from its second one is aligned for
+    // them only every other element.
+    let mut state = 0x6A7E_6A7E_6A7E_6A7E;
+    for len in [17, 100, 257, 300, size(3000, 300)] {
+        let mut layouts = vec![clustered_keys(len, &mut state)];
+        layouts.extend(spread_keys(len, &mut state));
+        for keys in &layouts {
+            for skip in [0, 1] {
+                assert_owned::<[u32; 3], ()>(keys, skip);
+                assert_owned::<[u64; 2], ()>(keys, skip);
+                assert_owned::<[u32; 2], Align32>(keys, skip);
+                assert_owned::<[u64; 5], ()>(keys, skip);
+                assert_owned_by_float::<[u64; 2], ()>(keys, skip);
+            }
+        }
+    }
+}
+
+#[test]
+fn by_key_moves_owning_elements_of_up_to_16_bytes_stably_in_every_insertion_mode() {
+    // Elements of up to 16 bytes are moved by insertion with a branch, or one or two places
+    // without one, as the keys before them called for: in order, clustered or spread.
+    let mut state = 0x1A5E_1A5E_1A5E_1A5E;
+    for len in [17, 33, 100, size(3000, 300)] {
+        let mut nearly: Vec<u32> = (0..len as u32).map(|i| i * 3).collect();
+        for _ in 0..len / 20 + 1 {
+            let i = (xorshift(&mut state) % len as u64) as usize;
+            nearly[i] = xorshift(&mut state) as u32 % (3 * len as u32);
+        }
+        // Blocks of clustered keys and of keys in order, one after the other.
+        let blocks: Vec<u32> = clustered_keys(len, &mut state)
+            .into_iter()
+            .enumerate()
+            .map(|(i, k)| if i / 64 % 2 == 0 { k } else { i as u32 * 1000 })
+            .collect();
+        let mut layouts = vec![clustered_keys(len, &mut state), nearly, blocks];
+        layouts.extend(spread_keys(len, &mut state));
+        for keys in &layouts {
+            assert_owned::<[u32; 0], ()>(keys, 0);
+            assert_owned::<[u32; 1], ()>(keys, 0);
+            assert_owned::<[u32; 2], ()>(keys, 0);
+            assert_owned_by_float::<[u32; 0], ()>(keys, 0);
+        }
+    }
+}
+
+#[test]
+fn by_key_walks_the_cycles_of_large_elements() {
+    // A slice of at least 64 KiB of elements of at least 64 bytes, of at most 8192 elements,
+    // is sorted by the indices of its elements, which are then moved along the cycles of that
+    // permutation.
+    let mut state = 0xC7C1_C7C1_C7C1_C7C1;
+    let (lens64, lens128): (Vec<usize>, Vec<usize>) = if cfg!(miri) {
+        (vec![1024], vec![512])
+    } else {
+        (vec![17, 1023, 1024, 3000, 8192, 8193], vec![511, 512, 4000])
+    };
+    for len in lens64 {
+        let mut layouts = vec![clustered_keys(len, &mut state)];
+        layouts.extend(spread_keys(len, &mut state));
+        for keys in &layouts {
+            assert_owned::<[u64; 7], ()>(keys, 0);
+            assert_owned::<[u32; 2], Align64>(keys, 0);
+            assert_owned_by_float::<[u64; 7], ()>(keys, 0);
+        }
+        // Float keys mostly `-0.0`, the others far from it on both sides, so that the indices
+        // are counted by value and by bits, and moved by value.
+        let keys: Vec<u32> = (0..len)
+            .map(|_| {
+                let r = xorshift(&mut state);
+                match r % 10 {
+                    0..6 => 2,
+                    6 => 0,
+                    _ => 1000 + (r >> 8) as u32 % 1000,
+                }
+            })
+            .collect();
+        assert_owned_by_float::<[u64; 7], ()>(&keys, 0);
+        let keys: Vec<u32> = keys.iter().map(|&k| k.min(1000)).collect();
+        assert_owned_by_float::<[u32; 2], Align64>(&keys, 0);
+    }
+    for len in lens128 {
+        for keys in &spread_keys(len, &mut state) {
+            assert_owned::<[u32; 2], Align128>(keys, 0);
+            assert_owned::<[u32; 2], Align128>(keys, 1);
+        }
+    }
+}
+
+#[test]
+fn by_key_walks_the_cycles_of_large_elements_in_a_deeper_level() {
+    // More than 8192 elements are moved with their keys at first, but a bucket two levels down
+    // of 64 KiB and at most 8192 elements is sorted along cycles again. Four clusters of 50
+    // keys lie in the first bucket of the first level, as one key is far above them, and each
+    // in a bucket of its own in the second.
+    let mut state = 0xDEE9_DEE9_DEE9_DEE9;
+    let len = 9000;
+    let mut keys: Vec<u32> = (0..len)
+        .map(|_| {
+            let r = xorshift(&mut state);
+            (r % 4) as u32 * 200_000 + (r >> 32) as u32 % 50
+        })
+        .collect();
+    keys[len / 3] = u32::MAX;
+    assert_owned::<[u64; 7], ()>(&keys, 0);
+    if !cfg!(miri) {
+        assert_owned::<[u32; 2], Align64>(&keys, 0);
+        assert_owned_by_float::<[u64; 7], ()>(&keys, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Elements of odd sizes and alignments
+// ---------------------------------------------------------------------------------------------
+
+/// An element of `N` bytes, at least 4, aligned as `A`: its id in the first four bytes and the
+/// rest filled from it, so that an element pieced together from two others is noticed. It
+/// counts its drops in [`DROPS`].
+struct Bytes<const N: usize, A> {
+    bytes: [u8; N],
+    _align: [A; 0],
+}
+
+impl<const N: usize, A> Bytes<N, A> {
+    fn new(id: u32) -> Self {
+        Self {
+            bytes: Self::of(id),
+            _align: [],
+        }
+    }
+
+    fn of(id: u32) -> [u8; N] {
+        let mut b = [0; N];
+        b[..4].copy_from_slice(&id.to_le_bytes());
+        for (j, x) in b.iter_mut().enumerate().skip(4) {
+            *x = (id.wrapping_mul(2_654_435_761) >> (j % 24)) as u8 ^ j as u8;
+        }
+        b
+    }
+
+    fn id(&self) -> u32 {
+        u32::from_le_bytes(self.bytes[..4].try_into().unwrap())
+    }
+}
+
+impl<const N: usize, A> Drop for Bytes<N, A> {
+    fn drop(&mut self) {
+        DROPS.with(|d| d.borrow_mut()[self.id() as usize] += 1);
+    }
+}
+
+/// Sorts elements of type `Bytes<N, A>` from position `skip` on with [`bucket_by_key`], the
+/// element with id `i` by `keys[i]`, and checks that they end up in the order of the standard
+/// library's stable sort by `order`, unchanged, and that each is dropped exactly once, after the
+/// sort.
+fn assert_bytes<const N: usize, A, K: BucketKey>(
+    keys: &[K],
+    skip: usize,
+    order: impl Fn(&K, &K) -> Ordering,
+) {
+    let len = keys.len();
+    DROPS.with(|d| *d.borrow_mut() = vec![0; len]);
+    let mut v: Vec<Bytes<N, A>> = (0..len as u32).map(Bytes::new).collect();
+    let mut expected: Vec<u32> = (0..len as u32).collect();
+    expected[skip..].sort_by(|&a, &b| order(&keys[a as usize], &keys[b as usize]));
+    bucket_by_key(&mut v[skip..], |e| keys[e.id() as usize]);
+    assert!(
+        DROPS.with(|d| d.borrow().iter().all(|&n| n == 0)),
+        "element dropped during sort"
+    );
+    let ids: Vec<u32> = v.iter().map(Bytes::id).collect();
+    assert_eq!(ids, expected, "{N}-byte elements, skip {skip}");
+    assert!(
+        v.iter().all(|e| e.bytes == Bytes::<N, A>::of(e.id())),
+        "element changed"
+    );
+    drop(v);
+    assert!(
+        DROPS.with(|d| d.borrow().iter().all(|&n| n == 1)),
+        "element leaked or double-dropped"
+    );
+}
+
+#[repr(align(8))]
+struct Align8;
+
+/// Mostly tiny values or `-0.0`, the others near `far`.
+fn crowded_near_zero(len: usize, state: &mut u64, far: f64) -> Vec<f64> {
+    (0..len)
+        .map(|_| {
+            let r = xorshift(state);
+            if r % 10 < 6 {
+                if r.is_multiple_of(3) {
+                    -0.0
+                } else {
+                    (r >> 20) as f64 * 1e-300
+                }
+            } else {
+                far * (unit_f64(state) + 0.5)
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn by_key_moves_owning_elements_of_keys_crowded_at_zero() {
+    // A level cut by value whose keys crowd at zero is counted again by bits, and moved by
+    // whichever cut is better, with its buckets kept (at most 2048 keys) or not.
+    let mut state = 0x1234_5678_9ABC_DEF1;
+    for len in [300, size(2100, 300)] {
+        for far in [1e6, -1e6, 1e300] {
+            let keys = crowded_near_zero(len, &mut state, far);
+            assert_bytes::<24, Align8, f64>(&keys, 0, f64::total_cmp);
+            assert_bytes::<20, u8, f64>(&keys, 1, f64::total_cmp);
+            let keys: Vec<f32> = keys.iter().map(|&x| x as f32).collect();
+            assert_bytes::<8, Align8, f32>(&keys, 0, f32::total_cmp);
+        }
+    }
+}
+
+#[test]
+fn by_key_moves_elements_of_odd_sizes_and_alignments() {
+    // Elements over 16 bytes whose room is not aligned for positions are moved by insertion,
+    // the others by position, whatever their size.
+    let mut state = 0xDEAD_BEEF_0BAD_F00D;
+    for len in [17, 40, 300] {
+        let keys: Vec<u32> = (0..len)
+            .map(|_| (xorshift(&mut state) % 7) as u32 * 1000 + (xorshift(&mut state) % 5) as u32)
+            .collect();
+        for skip in 0..3 {
+            assert_bytes::<20, u8, u32>(&keys, skip, Ord::cmp);
+            assert_bytes::<36, u16, u32>(&keys, skip, Ord::cmp);
+            assert_bytes::<40, Align8, u32>(&keys, skip, Ord::cmp);
+        }
+    }
+    // 65-byte elements aligned to one byte: 1009 of them take 64 KiB, and are sorted along the
+    // cycles of their permutation.
+    let keys: Vec<u64> = (0..1009)
+        .map(|_| xorshift(&mut state) >> (xorshift(&mut state) % 64))
+        .collect();
+    assert_bytes::<65, u8, u64>(&keys, 0, Ord::cmp);
+    assert_bytes::<65, u8, u64>(&keys, 1, Ord::cmp);
+}
+
+#[test]
+fn sorts_wide_and_extreme_keys_with_owning_elements() {
+    let mut state = 0x0F0F_F0F0_1234_4321;
+    let len = 600;
+    // `i128` keys of every magnitude and sign: deep levels whose differences need a shift.
+    let keys: Vec<i128> = (0..len)
+        .map(|_| {
+            let r = xorshift(&mut state) as i128 | ((xorshift(&mut state) as i128) << 64);
+            r >> (xorshift(&mut state) % 128)
+        })
+        .collect();
+    assert_bytes::<8, Align8, i128>(&keys, 0, Ord::cmp);
+    assert_bucket(&keys);
+    // Small buckets of several keys each: owning elements of 4 and 8 bytes moved two places.
+    let keys: Vec<u16> = (0..len)
+        .map(|_| (xorshift(&mut state) % 150) as u16)
+        .collect();
+    assert_bytes::<4, u8, u16>(&keys, 0, Ord::cmp);
+    assert_bytes::<8, Align8, u16>(&keys, 1, Ord::cmp);
+    // A range whose width overflows, around subnormals, and a range of subnormals only.
+    let keys: Vec<f64> = (0..len)
+        .map(|i| match i % 4 {
+            0 => f64::MAX,
+            1 => f64::MIN,
+            2 => f64::from_bits(xorshift(&mut state) % 1000),
+            _ => -f64::from_bits(xorshift(&mut state) % 1000),
+        })
+        .collect();
+    assert_bytes::<12, u32, f64>(&keys, 0, f64::total_cmp);
+    let keys: Vec<f32> = (0..len)
+        .map(|_| f32::from_bits((xorshift(&mut state) % 0x7F_FFFF) as u32))
+        .collect();
+    assert_bytes::<12, u32, f32>(&keys, 0, f32::total_cmp);
+    assert_bucket_floats(&keys);
 }

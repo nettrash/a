@@ -65,6 +65,8 @@ pub(super) mod sealed {
         fn from_ordered(bits: Self::Bits) -> Self;
         /// The value of the float whose [`Self::ordered`] bits are `bits`; `0.0` for other keys.
         fn value(bits: Self::Bits) -> f64;
+        /// [`Self::value`] as an `f32`, exact for an `f32` key.
+        fn value32(bits: Self::Bits) -> f32;
     }
 }
 
@@ -156,6 +158,10 @@ macro_rules! integer_key {
             fn value(_: $u) -> f64 {
                 0.0
             }
+            #[inline(always)]
+            fn value32(_: $u) -> f32 {
+                0.0
+            }
         }
         impl BucketKey for $t {}
     )*};
@@ -206,6 +212,10 @@ impl sealed::Bucket for char {
     fn value(_: u32) -> f64 {
         0.0
     }
+    #[inline(always)]
+    fn value32(_: u32) -> f32 {
+        0.0
+    }
 }
 impl BucketKey for char {}
 
@@ -246,6 +256,10 @@ impl sealed::Bucket for bool {
     fn value(_: u8) -> f64 {
         0.0
     }
+    #[inline(always)]
+    fn value32(_: u8) -> f32 {
+        0.0
+    }
 }
 impl BucketKey for bool {}
 
@@ -270,6 +284,10 @@ macro_rules! float_key {
             #[inline(always)]
             fn value(bits: $u) -> f64 {
                 f64::from(<Self as sealed::Bucket>::from_ordered(bits))
+            }
+            #[inline(always)]
+            fn value32(bits: $u) -> f32 {
+                <Self as sealed::Bucket>::from_ordered(bits) as f32
             }
         }
         impl BucketKey for $f {}
