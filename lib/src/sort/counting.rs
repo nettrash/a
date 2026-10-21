@@ -108,17 +108,17 @@ pub fn counting<T: IntegerKey>(arr: &mut [T]) {
     // Sorted input has nothing to count, but its range is checked all the same: the limit does
     // not depend on the order of the elements.
     if in_order(arr, |x, y| y < x) {
-        range(arr[0], arr[len - 1], len);
+        range(arr[0], arr[len - 1], len, SORT);
         return;
     }
     // Equal values cannot be told apart, so a non-increasing slice only needs reversing.
     if in_order(arr, |x, y| y > x) {
-        range(arr[len - 1], arr[0], len);
+        range(arr[len - 1], arr[0], len, SORT);
         arr.reverse();
         return;
     }
     let (min, max) = min_max(arr);
-    let k = range(min, max, len);
+    let k = range(min, max, len, SORT);
     if len <= u32::MAX as usize {
         rewrite::<T, u32>(arr, min, k);
     } else {
@@ -232,7 +232,7 @@ where
     }
     // SAFETY: all `len` slots have been written.
     let keys = unsafe { slice::from_raw_parts(slots.as_ptr().cast::<K>(), len) };
-    let k = range(min, max, len);
+    let k = range(min, max, len, SORT);
     if !descent {
         return;
     }
@@ -248,21 +248,24 @@ where
     }
 }
 
+/// The name a range too large panics with.
+const SORT: &str = "counting sort";
+
 /// Every range of at most this many values is allowed, whatever the length of the slice.
 const RANGE_MIN: usize = 1 << 16;
 
 /// Beyond [`RANGE_MIN`], a range is allowed if it has at most this many values per element.
 const RANGE_PER_ELEMENT: usize = 4;
 
-/// Returns the number of values from `min` to `max`, or panics if there are too many to count
-/// for `len` elements.
-fn range<K: IntegerKey>(min: K, max: K, len: usize) -> usize {
+/// Returns the number of values from `min` to `max`, or panics, naming `sort`, if there are too
+/// many to count for `len` elements.
+pub(super) fn range<K: IntegerKey>(min: K, max: K, len: usize, sort: &str) -> usize {
     let limit = RANGE_MIN.max(len.saturating_mul(RANGE_PER_ELEMENT));
     let distance = max.distance(min);
     match usize::try_from(distance) {
         Ok(d) if d < limit => d + 1,
         _ => panic!(
-            "counting sort: {} possible values are too many for {len} elements (at most {limit})",
+            "{sort}: {} possible values are too many for {len} elements (at most {limit})",
             distance.saturating_add(1)
         ),
     }
@@ -298,7 +301,8 @@ pub(super) fn min_max<T: IntegerKey>(v: &[T]) -> (T, T) {
 }
 
 /// A counter of elements: `u32` while the slice is short enough, which halves the memory the
-/// counts take, and `usize` otherwise.
+/// counts take, and `usize` otherwise; [`pigeonhole`](fn@super::pigeonhole) sort also uses
+/// `u16` up to `u16::MAX` elements.
 ///
 /// # Safety
 ///
@@ -314,6 +318,18 @@ unsafe impl Count for u32 {
     #[inline(always)]
     fn add(self, n: usize) -> Self {
         self + n as u32
+    }
+    #[inline(always)]
+    fn get(self) -> usize {
+        self as usize
+    }
+}
+
+unsafe impl Count for u16 {
+    const ZERO: Self = 0;
+    #[inline(always)]
+    fn add(self, n: usize) -> Self {
+        self + n as u16
     }
     #[inline(always)]
     fn get(self) -> usize {

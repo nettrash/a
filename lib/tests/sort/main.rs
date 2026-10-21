@@ -10,6 +10,7 @@ mod heap;
 mod insertion;
 mod intro;
 mod merge;
+mod pigeonhole;
 mod quick;
 mod radix;
 mod selection;
