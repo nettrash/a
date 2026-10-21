@@ -1,5 +1,6 @@
 mod allocations;
 mod bubble;
+mod bucket;
 mod cocktail_shaker;
 mod comb;
 mod counting;

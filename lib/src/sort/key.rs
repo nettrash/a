@@ -1,11 +1,19 @@
-//! The key types of the sorts that do not compare elements: [`counting`](super::counting) and
-//! [`radix`](super::radix) sort.
+//! The key types of the sorts that do not compare elements: [`counting`](super::counting),
+//! [`radix`](super::radix) and [`bucket`](super::bucket) sort.
 
 /// A key the sorts that do not compare elements can sort by: a primitive integer, `char` or
 /// `bool`.
 ///
 /// It is sealed: it cannot be implemented outside this crate.
 pub trait IntegerKey: sealed::Key {}
+
+/// A key bucket sort can sort by: a primitive integer, `char`, `bool`, `f32` or `f64`.
+///
+/// Floats are ordered as [`f64::total_cmp`] orders them: negative NaNs, −∞, the negative
+/// numbers, −0, +0, the positive numbers, +∞, positive NaNs.
+///
+/// It is sealed: it cannot be implemented outside this crate.
+pub trait BucketKey: sealed::Bucket {}
 
 pub(super) mod sealed {
     /// What the sorts need to know about a key type.
@@ -36,6 +44,27 @@ pub(super) mod sealed {
         fn digit(self, shift: u32, mask: usize) -> usize;
         /// `n`, which is less than `2^BITS`.
         fn of(n: usize) -> Self;
+        fn wrapping_sub(self, other: Self) -> Self;
+        fn shr(self, shift: u32) -> Self;
+        /// The low 64 bits.
+        fn low64(self) -> u64;
+    }
+
+    /// What bucket sort needs to know about a key type.
+    pub trait Bucket: Copy {
+        /// The key as an unsigned integer of the same size and alignment that orders as the key
+        /// does.
+        type Bits: Bits + super::IntegerKey;
+        /// Whether a key's bytes, read as [`Self::Bits`], already are [`Self::ordered`].
+        const IDENTITY: bool;
+        /// Whether the key is a float, whose buckets are cut by value.
+        const FLOAT: bool;
+        /// The key as [`Self::Bits`].
+        fn ordered(self) -> Self::Bits;
+        /// The key whose [`Self::ordered`] bits are `bits`.
+        fn from_ordered(bits: Self::Bits) -> Self;
+        /// The value of the float whose [`Self::ordered`] bits are `bits`; `0.0` for other keys.
+        fn value(bits: Self::Bits) -> f64;
     }
 }
 
@@ -68,6 +97,18 @@ macro_rules! bits {
             fn of(n: usize) -> Self {
                 n as $u
             }
+            #[inline(always)]
+            fn wrapping_sub(self, other: Self) -> Self {
+                <$u>::wrapping_sub(self, other)
+            }
+            #[inline(always)]
+            fn shr(self, shift: u32) -> Self {
+                self >> shift
+            }
+            #[inline(always)]
+            fn low64(self) -> u64 {
+                self as u64
+            }
         }
     )*};
 }
@@ -96,6 +137,27 @@ macro_rules! integer_key {
             }
         }
         impl IntegerKey for $t {}
+        impl sealed::Bucket for $t {
+            type Bits = $u;
+            const IDENTITY: bool = {
+                let sign: $u = $sign;
+                sign == 0
+            };
+            const FLOAT: bool = false;
+            #[inline(always)]
+            fn ordered(self) -> $u {
+                sealed::Key::bits(self)
+            }
+            #[inline(always)]
+            fn from_ordered(bits: $u) -> Self {
+                (bits ^ $sign) as $t
+            }
+            #[inline(always)]
+            fn value(_: $u) -> f64 {
+                0.0
+            }
+        }
+        impl BucketKey for $t {}
     )*};
 }
 
@@ -128,6 +190,25 @@ impl sealed::Key for char {
 }
 impl IntegerKey for char {}
 
+impl sealed::Bucket for char {
+    type Bits = u32;
+    const IDENTITY: bool = true;
+    const FLOAT: bool = false;
+    #[inline(always)]
+    fn ordered(self) -> u32 {
+        self as u32
+    }
+    #[inline(always)]
+    fn from_ordered(bits: u32) -> Self {
+        char::from_u32(bits).unwrap_or_default()
+    }
+    #[inline(always)]
+    fn value(_: u32) -> f64 {
+        0.0
+    }
+}
+impl BucketKey for char {}
+
 impl sealed::Key for bool {
     type Bits = u8;
     #[inline(always)]
@@ -148,3 +229,51 @@ impl sealed::Key for bool {
     }
 }
 impl IntegerKey for bool {}
+
+impl sealed::Bucket for bool {
+    type Bits = u8;
+    const IDENTITY: bool = true;
+    const FLOAT: bool = false;
+    #[inline(always)]
+    fn ordered(self) -> u8 {
+        self as u8
+    }
+    #[inline(always)]
+    fn from_ordered(bits: u8) -> Self {
+        bits != 0
+    }
+    #[inline(always)]
+    fn value(_: u8) -> f64 {
+        0.0
+    }
+}
+impl BucketKey for bool {}
+
+macro_rules! float_key {
+    ($($f:ty => $u:ty, $i:ty);* $(;)?) => {$(
+        impl sealed::Bucket for $f {
+            type Bits = $u;
+            const IDENTITY: bool = false;
+            const FLOAT: bool = true;
+            /// The bits with the sign bit flipped for a positive float and every bit flipped for
+            /// a negative one, which order as [`f64::total_cmp`] does.
+            #[inline(always)]
+            fn ordered(self) -> $u {
+                let u = self.to_bits();
+                u ^ ((((u as $i) >> (<$u>::BITS - 1)) as $u) | (1 << (<$u>::BITS - 1)))
+            }
+            #[inline(always)]
+            fn from_ordered(bits: $u) -> Self {
+                let flip = ((((!bits) as $i) >> (<$u>::BITS - 1)) as $u) | (1 << (<$u>::BITS - 1));
+                <$f>::from_bits(bits ^ flip)
+            }
+            #[inline(always)]
+            fn value(bits: $u) -> f64 {
+                f64::from(<Self as sealed::Bucket>::from_ordered(bits))
+            }
+        }
+        impl BucketKey for $f {}
+    )*};
+}
+
+float_key! { f32 => u32, i32; f64 => u64, i64 }

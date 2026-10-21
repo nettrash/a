@@ -272,7 +272,7 @@ fn range<K: IntegerKey>(min: K, max: K, len: usize) -> usize {
 /// 16 with no exit inside a block, which the compiler vectorizes; random input leaves after the
 /// first block.
 #[inline(always)]
-pub(super) fn in_order<T: IntegerKey>(v: &[T], out: impl Fn(T, T) -> bool) -> bool {
+pub(super) fn in_order<T: Copy>(v: &[T], out: impl Fn(T, T) -> bool) -> bool {
     const BLOCK: usize = 16;
     let mut i = 0;
     while i + BLOCK < v.len() {
