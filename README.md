@@ -60,6 +60,24 @@ The A Library is a set of algorithms.
     - [Pigeonhole](#pigeonhole)
       - [Examples](#examples-16)
       - [Efficiency](#efficiency-16)
+    - [Tree](#tree)
+      - [Examples](#examples-17)
+      - [Efficiency](#efficiency-17)
+    - [Cycle](#cycle)
+      - [Examples](#examples-18)
+      - [Efficiency](#efficiency-18)
+    - [Bitonic](#bitonic)
+      - [Examples](#examples-19)
+      - [Efficiency](#efficiency-19)
+    - [Odd-Even](#odd-even)
+      - [Examples](#examples-20)
+      - [Efficiency](#efficiency-20)
+    - [Stooge](#stooge)
+      - [Examples](#examples-21)
+      - [Efficiency](#efficiency-21)
+    - [Sleep](#sleep)
+      - [Examples](#examples-22)
+      - [Efficiency](#efficiency-22)
 
 ## Sorting
 
@@ -1010,3 +1028,384 @@ fn main() {
 - Stability: not stable (`pigeonhole` cannot tell equal keys apart anyway)
 - Against the textbook pigeonhole sort (a vector per hole, the elements pushed in and read out): 2–6 times faster on random keys and 160–340 times on sorted `u32` input
 - Against the standard library, from 100 elements on: `pigeonhole` is 1.6–3 times faster than `slice::sort_unstable` on random `u32` keys in a range of about `n` keys from 1000 elements on and 3–5 times on nearly sorted input, but up to 1.8 times slower on wider ranges from 10,000 elements on and 1.4–2.9 times slower with four distinct keys; `pigeonhole_by_key` is 1.6–2.4 times faster than `slice::sort_unstable_by_key` on random `u64` keys of 16-byte elements up to 10,000 elements (1.1–1.2 times beyond), 1.8–4.9 times for 72-byte elements and 1.7–14 times on nearly sorted input, but 1.2–2.1 times slower on sorted and reverse-sorted input and 1.5–2.5 times slower with four distinct keys of 16-byte elements. [Counting](#counting) sort's stable `counting_by_key`, which moves the elements through a buffer, is 1.2–3.4 times faster on random keys; `pigeonhole_by_key` is 1.3–2.2 times faster on nearly sorted input of 72- and 128-byte elements, and needs no buffer for them
+
+### Tree
+
+Tree sort is a stable, `O(n log n)` sorting algorithm that inserts the elements one by one into a binary search tree, in which the left subtree of every node holds the elements that go before it and the right subtree those that go after, and then reads the tree out in order (an in-order traversal) back into the slice. Binary search trees, and sorting by building one, go back to around 1960 (Windley; Booth and Colin; Hibbard). A plain binary search tree is only as good as the order the elements come in: sorted input builds a list and costs n²/2 comparisons. This implementation keeps the tree an AVL tree (Adelson-Velsky and Landis, 1962), the first self-balancing binary search tree: the two subtrees of every node differ in height by at most one, restored after each insertion by at most one single or double rotation, so the tree stays below 1.44·log₂ n levels and every insertion costs O(log n) whatever the input. An element equal to one already in the tree goes to its right, after it, which makes the sort stable. AVL trees were measured against red-black trees, whose looser balance makes them up to twice as high: within 10% of each other on random input, but red-black trees were 1.15–2.4 times slower on sorted, nearly sorted and sawtooth input and on input with few distinct keys. This implementation uses seven optimizations:
+
+- One array of nodes instead of an allocation per node: node `i` belongs to the element that started at index `i`, so the nodes form one array with 32-bit indices as links and the balance factors in a separate byte array that only rebalancing reads; searches and the in-order traversal are loops with an explicit stack. Elements are moved twice and only twice, whatever the input. Against the textbook AVL tree sort, which allocates a node per element and inserts recursively, this alone (the crate's first version of this sort) is 1.2–4 times faster on random input and up to 30 times on sorted strings.
+- Small elements live in the nodes: elements of 5 to 8 and of 17 to 24 bytes are copied into nodes of 16 and 32 bytes, so a search step loads a node and its key from one place; other elements stay in the slice, where they are compared, and are gathered into a buffer in order at the end (their nodes would waste a quarter or more on padding, and elements of up to 4 bytes or of 16 bytes are addressed by a shift in the slice too). This is 1.03–1.07 times faster on random input of 10,000 elements and more.
+- Branchless search steps: a step loads both links of a node with its key and the comparison selects one, instead of a branch that random input mispredicts half the time or a load that waits for the comparison: 1.02–1.11 times faster up to 10,000 elements.
+- Searches side by side: a search is a chain of dependent loads and comparisons that the processor cannot overlap with itself, so the places of the next 2 elements (4 from 1024 elements on, 8 from 262,144 on) are searched for at once in the same tree, and the elements are then inserted one after the other, in order. An insertion can only invalidate a later search through the slot it takes or a node it rotates; such a search goes on from the deepest node of its path still in place, usually a level or two above its slot, so the tree is exactly the one that one-by-one insertion builds, at up to 2% more comparisons with few distinct keys. On random input this is 1.1–3.7 times faster than one search at a time (most for strings and large slices), and 1.03–1.6 times with 16 distinct keys, except for 64-byte elements at 1,000,000 (1.08 times slower). Searching again from the root instead of going on is 1.05–1.2 times slower with few distinct keys.
+- Insertion beside the last insertion: if the last element inserted went right after or right before the one inserted before it, the next one is first tried right after or right before it in turn. Two comparisons, with the last element and its neighbour in order, say whether it belongs there; the path to that slot is the last element's, kept up to date through the rotations, so no search is needed. Sorted, reverse-sorted and all-equal input costs n−1 comparisons, and an ascending or descending run costs two per element after its first, wherever it lands. This is 1.9–8 times faster on sorted and reverse-sorted input and 1.6–3.6 times on nearly sorted input, at up to 5% on random input.
+- Short shifts of the kept path inline: a rotation removes a node from the path to the last insertion, usually a level or two above it; moving the one or two entries below it inline instead of calling `memmove` is 1.1–1.3 times faster on sorted and reverse-sorted input.
+- No allocation for small slices: up to 4 KiB of nodes (240 nodes of 8-byte elements) live on the stack, which is 2.1–3.4 times faster for 2 elements, 1.1–1.4 times for 10 and up to 1.27 times for 30; beyond, nodes, balance factors and the gather buffer take one allocation.
+
+Together, against the textbook tree sort, which builds an unbalanced binary search tree with a node allocated per element: 1.5–4.4 times faster on random input of 100 to 1,000,000 elements, and 1,600–2,500 times on 10,000 sorted elements, where the textbook sort makes n²/2 comparisons.
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::tree;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8, 0, 3, 9, 7, 6];
+  tree(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+}
+```
+
+Rust usage with strings:
+
+```rust
+use a::sort::tree;
+
+fn main() {
+  let mut words = vec!["pear", "apple", "fig"];
+  tree(&mut words);
+  assert_eq!(words, vec!["apple", "fig", "pear"]);
+}
+```
+
+Equal keys keep their original order (cards are compared by rank only):
+
+```rust
+use a::sort::tree;
+use std::cmp::Ordering;
+
+#[derive(Debug, PartialEq, Eq)]
+struct Card(u8, char);
+
+impl Ord for Card {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.0.cmp(&other.0)
+  }
+}
+
+impl PartialOrd for Card {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+fn main() {
+  let ranks = [3, 1, 3, 0, 1, 3, 0, 2, 1, 0];
+  let mut cards: Vec<Card> = "abcdefghij".chars().zip(ranks).map(|(c, r)| Card(r, c)).collect();
+  tree(&mut cards);
+  let order: String = cards.iter().map(|c| c.1).collect();
+  assert_eq!(order, "dgjbeihacf");
+}
+```
+
+#### Efficiency
+
+- Time complexity:
+  - Worst: O(n log n)
+  - Average: O(n log n)
+  - Best: O(n), when every element goes right after or right before the one before it (sorted, reverse-sorted or all-equal input)
+- Comparisons:
+  - Best (sorted, reverse sorted, all equal): n−1
+  - Runs: at most 2 per element, plus a search for the first element of each run
+  - Random input: about n·log₂ n − 1.2n (≈ 8,730 for n = 1000, against ≈ 10,000–11,000 for the textbook tree sort, which makes 499,500 on sorted input)
+  - Worst: O(n log n), since a search takes fewer than 1.44·log₂ n steps, the height of an AVL tree, on any input
+- Moves: exactly 2n, whatever the input (into the nodes and back, or gathered into a buffer and copied back)
+- Space complexity: O(n) extra: a node of 8 bytes per element (16 or 32 bytes with the element inside) and a balance factor, on the stack up to 4 KiB and allocated once beyond, plus a buffer of n elements for elements that stay in the slice; O(log n) stack
+- Stability: stable (equal elements keep their relative order)
+- Adaptivity: adaptive to runs, which cost at most two comparisons per element. A binary search tree is a poor way to sort what fits in an array, though: every search step in a large tree is a cache miss and every insertion pays for rebalancing. `slice::sort` is 1.5–5 times faster on random input, 2–17 times with few distinct keys and 6–30 times on sorted input; this crate's [Merge](#merge) and [Tim](#tim) sorts are 1.3–3.7 times faster on random integers and 64-byte elements (on random strings Merge sort is up to 1.1 times slower and Tim sort 1.1–1.4 times faster). Tree sort moves every element exactly twice, against n·log₂ n times for a merge sort, and is up to 1.9 times faster than `slice::sort` on nearly sorted strings and 1.4–1.5 times on nearly sorted 64-byte elements
+
+### Cycle
+
+Cycle sort, described by B. K. Haddon in 1990, is an unstable, in-place sorting algorithm that writes to the slice as few times as any sort can. The permutation that sorts the slice splits into cycles (the element in slot `a` belongs in slot `b`, the one in `b` in `c`, and so on back to `a`), and each cycle is rotated once: the element of the cycle's first slot is taken out, its final slot is found by counting the elements smaller than it, it is written there and the element it displaces is taken in turn, until the element in hand belongs in the first slot. Equal keys share a block of slots, and an element goes to the first slot of its key's block that does not already hold an equal element. Every element is written at most once, straight into its final slot, and an element whose slot already holds its key is not written at all, which is the point where writes are slow or wear the memory out (flash, EEPROM). The price is the counting: `Θ(n²)` comparisons on any input that is not in order already. This implementation writes the same elements to the same slots as the textbook version (in the same order, except on strictly decreasing input) and uses five optimizations:
+
+- Written cycle starts are passed over: after a cycle, the textbook takes the next slot as the next cycle start and counts for its element even if an earlier cycle wrote it, though such an element is final and the count finds nothing smaller. That is a third of all comparisons on random input (about 0.5n² of 1.5n²). A 4 KiB bitmap on the stack (a window of 32,768 slots) remembers the written slots: 1.23–1.25 times faster on 100 random `u64`s, 1.45–1.5 times from 1000 on and for strings and 64-byte elements, 1.15–1.25 times with four distinct keys from 1000 elements on. On nearly sorted input it gains nothing, and its bookkeeping (about 40 ns a sort) makes 100 `u64`s 1.08 times slower.
+- Runs of written starts are passed over at once: a written start is recognised by its bit with a branch, and the whole run of written slots after it is passed over a word at a time (1.03–1.04 times faster on 100 `u64`s than one bit per start; scanning the bits from every start with no branch made each count wait and was up to 1.3 times slower on nearly sorted input).
+- Sorted and reverse-sorted input is recognised: a non-decreasing slice is left alone and a strictly decreasing one is reversed, which writes the same elements to the same slots as the cycles would, at n−1 or n comparisons instead of `Θ(n²)` (18–460 times faster from 100 to 3000 elements; usually two comparisons on other input).
+- The element in hand: the textbook in safe generic Rust keeps the element being placed in the cycle's first slot and swaps, writing that slot again at every step; here the element is moved out once and the first slot stays vacant until the cycle closes, so each element placed costs exactly one write (a guard puts the element back if a comparison panics). The speed is the same, within 4%.
+- Long runs of equal small elements are skipped 16 at a time: for elements of up to 8 bytes, after 32 equal elements one at a time, they are compared 16 at a time in a few vector instructions (1.06 times faster on 1000 `u64`s with four distinct keys, 1.17 times on 3000; at most 1.06 times slower on 200–300 of them).
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::cycle;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8, 0, 3, 9, 7, 6];
+  cycle(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+}
+```
+
+Only the elements in the wrong slot are written (here the 0 and the 2):
+
+```rust
+use a::sort::cycle;
+
+fn main() {
+  let mut v = vec![2, 1, 0, 3];
+  cycle(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 3]);
+}
+```
+
+#### Efficiency
+
+- Time complexity:
+  - Worst: O(n^2)
+  - Average: O(n^2)
+  - Best: O(n), when the input is non-decreasing or strictly decreasing
+- Comparisons:
+  - Non-decreasing input: n−1; strictly decreasing: n
+  - Random distinct keys: about n² (the textbook cycle sort: about 1.5n²); with duplicates, placing an element also compares it with the equal elements already in its key's block
+  - Worst: Θ(n²)
+- Writes: exactly one per element whose slot does not already hold its key, and none for any other element: the fewest any sort can make (at most n; none for sorted input, 2⌊n/2⌋ for strictly decreasing input)
+- Space complexity: O(1): a 4 KiB bitmap on the stack, no allocation (in-place)
+- Stability: unstable (equal elements may be reordered)
+- Against the textbook cycle sort: 1.2–1.3 times faster on 100 random `u64`s, 1.45–1.5 times from 1000 on and on random strings and 64-byte elements, 1.15–1.45 times with four distinct keys from 1000 elements on, 11–7000 times on sorted and reverse-sorted input, and as fast on nearly sorted input from 1000 elements on; on up to 200 nearly sorted `u64`s the textbook is 1.08–1.2 times faster, and on 100 `u64`s with four distinct keys 1.04 times
+- Against [Selection](#selection) sort (at most n−1 swaps, so up to 2(n−1) writes): 3.2–4.3 times faster on random `u64`s and 5–10 times on nearly sorted ones, as fast to 1.55 times faster on random strings and 64-byte elements; selection sort, which gathers equal keys in each pass, is 2–250 times faster with four distinct keys and 1.2–1.9 times faster on sawtooth strings and 64-byte elements
+- Against the standard library: quadratic, so only worth it where a write costs far more than a comparison; `slice::sort_unstable` is 3–6 times faster on 100 random elements, 12–50 times on 1000 and 90–200 times on 10,000 (125 times on 3000 strings), and as fast on sorted and reverse-sorted input
+
+### Bitonic
+
+Bitonic sort, published by Kenneth Batcher in 1968, is a sorting network: a fixed sequence of compare-exchanges, each putting the elements at two given positions in order, chosen in advance and never depending on what the comparisons answer. A sequence that first rises and then falls is bitonic; one stage of compare-exchanges, of each element of the first half with the element half a slice further on, splits it into two bitonic halves with nothing in the first greater than anything in the second, and repeating this on the halves merges it. Bitonic sort sorts the two halves in opposite directions, which makes the whole slice bitonic, and merges it: `n·k·(k + 1) / 4` compare-exchanges for `n = 2^k`, in `k·(k + 1) / 2` stages whose compare-exchanges are independent of each other, which is why it suits hardware, vector units, GPUs and threads. Batcher's network is for powers of two; for other lengths this is H. W. Lang's formulation (the first `⌊n/2⌋` elements sorted descending, the rest ascending, and the merge of `n` elements comparing `i` with `i + m` for `m` the largest power of two below `n`), which is the network of the next power of two without the compare-exchanges that would involve missing elements, so nothing is padded and any `T` can be sorted. It is unstable and in place, and not adaptive: every input of a length gets the same compare-exchanges. It comes in two forms: `bitonic` on the calling thread, and `bitonic_parallel`, which makes exactly the same compare-exchanges on several threads. This implementation uses four optimizations, all of which change only how the network is carried out, never which compare-exchanges it makes:
+
+- Small networks in straight-line code: sorts of at most 16 elements and merges of at most 16 run their network with every compare-exchange written out at constant positions, so small elements stay in registers (2.2–4.2 times faster for integers than recursing down to single elements, 1.6–2 times for strings, 1.35–1.6 times for 64-byte elements; 1.9–2.4, 1.1–1.15 and 1.35–1.55 times faster than a loop over the same networks).
+- Two or three stages per pass: a merge of a power-of-two length runs its first two or three stages as one pass over groups of 4 or 8 elements, each read once, put through the 4 or 12 compare-exchanges of those stages and written once, then merges its parts depth first, so the later stages run in cache (three stages make integers 1.04–1.14 times faster, two make 64-byte elements 1.03–1.08 times faster; strings, whose comparisons cost more than the passes, take one).
+- Compare-exchanges without branches: elements of at most 8 bytes are exchanged by selecting the values to write back, which lets the compiler run a pass's independent compare-exchanges in vector registers (4.6–5 times faster than branching). Within a merge, whether a compare-exchange swaps comes in long runs, but in the small networks it is a coin toss on random input, so elements of 9 to 24 bytes, such as `String`, are exchanged there by selecting the addresses to copy from and by a branch in the passes (1.25–1.45 times faster for random strings, 1.05–1.1 times for nearly sorted ones; `u128` and pairs gain 1.4–1.9 times on random input but lose up to 1.8 times on nearly sorted input, and arrays, whose comparison is itself a chain of branches, lose up to 1.4 times). Larger elements branch.
+- The direction is a type: each part is sorted ascending or descending through a type parameter rather than a flag, so every compare-exchange is compiled for its direction.
+
+`bitonic_parallel` uses one thread per 16,384 elements of at most 8 bytes, or per 4,096 larger elements, up to `std::thread::available_parallelism`; shorter slices are sorted by `bitonic`, with no allocation. It cuts the slice into parts along the sort's own halving, two or four per thread, sorts them in a first round, and then takes two rounds per level of merges: the first runs the stages that compare elements of different parts, one range of positions at a time across all parts, the second merges each part on its own. The threads are spawned once and kept for all rounds (spawning them for each round instead was 1.15–1.6 times slower from 32,768 to 131,072 elements, and 1.2 times for a million integers), take the tasks of a round, which touch disjoint elements, one at a time until none is left, and meet at a barrier between rounds. A panic on any thread lets the others finish their current tasks, skips the rest and is propagated to the caller, with every element still in the slice exactly once.
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::bitonic;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8, 0, 3, 9, 7, 6];
+  bitonic(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+}
+```
+
+Rust usage with strings:
+
+```rust
+use a::sort::bitonic;
+
+fn main() {
+  let mut words = vec!["pear", "apple", "fig"];
+  bitonic(&mut words);
+  assert_eq!(words, vec!["apple", "fig", "pear"]);
+}
+```
+
+On all cores (the same compare-exchanges, so the same result, equal elements included):
+
+```rust
+use a::sort::bitonic_parallel;
+
+fn main() {
+  let mut v: Vec<u64> = (0..1_000_000).map(|i| i * 7919 % 1_000_003).collect();
+  bitonic_parallel(&mut v);
+  assert!(v.windows(2).all(|w| w[0] <= w[1]));
+}
+```
+
+#### Efficiency
+
+- Time complexity:
+  - Worst, average and best: O(n log² n), the same on every input
+  - Parallel: `k·(k + 1) / 2` stages of independent compare-exchanges for `2^(k−1) < n ≤ 2^k`, O(log² n) with enough processors
+- Comparisons: exactly the network's, on every input: `n·k·(k + 1) / 4` for `n = 2^k`, between `n·(k − 1)² / 4` and `n·k·(k + 1) / 4` for `2^(k−1) < n < 2^k` (26,984 for n = 1000 against about 10,500 for [Heap](#heap) sort; 102,931,040 for n = 1,000,000, about 5.2·n·log₂ n)
+- Space complexity: O(log n) stack, no allocation (in-place); `bitonic_parallel` allocates its list of tasks and its threads
+- Stability: unstable (equal elements may be reordered)
+- Adaptivity: none; sorted input costs as much as random input
+- Against the textbook bitonic sort (Lang's recursion, with the direction as a flag and a branch and a swap for each compare-exchange): 10.5–11.8 times faster on random integers and 4.8–9.8 times on other input, 1.75–2.1 times on random strings and 1.3–1.6 times on other strings, 1.4–1.8 times for random 64-byte elements and 1.05–1.5 times on other input
+- Against the standard library: as fast as `slice::sort_unstable` on random integers around 1000 elements (and 1.25 times faster than [Quick](#quick) sort), but its `log₂ n` factor shows from there on: `sort_unstable` is 1.35 times faster at 16,384 integers and 1.85 times at a million, 20–70 times faster on sorted input, 2.5–5 times faster on random strings and 2.3–4.1 times for random 64-byte elements. Against [Shell](#shell) sort: 3.3–4 times faster on random integers, as fast on random strings, 1.35–1.6 times slower for 64-byte elements
+- `bitonic_parallel` on the 16 threads of an Apple M4 Max (12 performance and 4 efficiency cores), against `bitonic`: integers 1.6 times faster at 32,768 elements, 2.5 times at 65,536, 2.9–3.2 times up to 262,144, 7.2 times at a million and 8.8 times at four million; strings 1.8 times faster at 8,192 elements, 3.3 times at 16,384, 4.4–5.7 times at 32,768 and 10–11 times from 262,144 on; 64-byte elements 1.7 times faster at 8,192 elements, 2.9 times at 16,384 and 8–9.7 times from 262,144 on (between 262,144 and a million integers, 8 to 12 threads would be up to 1.25 times faster than 16, as each round waits for its slowest thread). Against the single-threaded `slice::sort_unstable` it is faster from 32,768 elements on: for integers 1.2 times there and 3.9 times at a million, for strings 1.15 and 2.2 times, for 64-byte elements 1.05 and 2.4 times
+
+### Odd-Even
+
+Odd-even sort, also called brick sort or odd-even transposition sort, is a simple, stable, in-place sorting algorithm that compares neighbours in alternating phases: an odd phase compare-exchanges the pairs (1, 2), (3, 4), …, and an even phase the pairs (0, 1), (2, 3), …, swapping a pair if its second element is smaller. An odd and an even phase make a round, and the textbook version repeats rounds until one swaps nothing. No two pairs of a phase share an element, so all compare-exchanges of a phase are independent: the algorithm comes from parallel computing, where a row of processors that only talk to their neighbours sorts n elements in n phases (Habermann, 1972). On one processor it is bubble sort with each pass cut into independent pairs; `odd_even_parallel` runs it on several threads. This implementation uses six optimizations, none of which changes which compare-exchanges run in which phase (every swap is one the textbook version makes):
+
+- Bounds from the last swaps: a pair that is in order stays in order until one of its elements changes, so the odd phase of a round only compares the pairs from one before the first to one after the last pair the previous even phase swapped, and the even phase one pair more at each end; the textbook compares all n−1 pairs every round. This saves 7% of the comparisons on 1000 random elements, makes nearly sorted input 1.25–1.8 times faster and input with few distinct keys 1.2–1.4 times, and an element out of place at either end (a turtle or a rabbit) costs about 3.5n comparisons instead of about n²/2.
+- At most ⌈n/2⌉ rounds: n phases sort any input (the 0-1 principle), so the sort stops then even if the last round swapped. This saves the textbook's final round on input that needs every phase, such as reverse-sorted input, and guarantees that the sort ends with an inconsistent `Ord`, whose answers would otherwise almost never let a round pass without a swap.
+- One sweep per round: the even pair (k, k+1) depends only on the odd pairs on either side of it, so one sweep compares an odd pair and then the even pair just behind it — a wavefront making the same compare-exchanges on the same elements as two separate phases, while loading each element once per round instead of twice: 2–2.2 times faster for integers, up to 1.7 times for strings and 1.6 times for 64-byte elements.
+- Branchless compare-exchanges for elements of at most 8 bytes: both elements are read and the smaller and the larger written back, chosen by the comparison, so that a chunk of 32 odd and 32 even pairs compiles to vector code for integers and reports its swaps as a bit mask. 1.3–2 times faster than branching on random input or few distinct keys (2–10% slower on nearly sorted input, where branches are predictable); 16-byte elements are 2.4–3.9 times slower without branches, so larger elements keep them.
+- For larger elements, swaps by plain copies with the even phase two pairs behind the odd one: `mem::swap` compiled to copies the processor could not forward to the next comparison (1.2–1.9 times slower for 16- and 64-byte elements), and an even phase right behind the odd one was 1.07–1.45 times slower for 64-byte elements.
+- Parallel form: `odd_even_parallel` cuts the slice into blocks that threads (`std::thread::scope`, no dependencies) claim in turn; on its block a thread runs a super-step of K phases, each leaving out one more pair at each interior end (a trapezoid), and in the next super-step the slice is cut at the midpoints of the previous blocks, so that each thread first completes the triangle of pairs left out around one old boundary and then runs the next trapezoid. Every compare-exchange still runs exactly once, after the two it depends on, so this is still odd-even transposition sort (not block merge-split sort), with one barrier per super-step instead of one per phase. Short slices and input that is sorted within the first rounds never start a thread; a panic in any thread reaches the caller with its payload.
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::odd_even;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8];
+  odd_even(&mut v);
+  assert_eq!(v, vec![1, 2, 4, 5, 8]);
+}
+```
+
+A turtle (the 0 at the end moves two slots per round, and each round only compares around it):
+
+```rust
+use a::sort::odd_even;
+
+fn main() {
+  let mut v = vec![1, 2, 3, 4, 5, 0];
+  odd_even(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 3, 4, 5]);
+}
+```
+
+On several threads:
+
+```rust
+use a::sort::odd_even_parallel;
+
+fn main() {
+  let mut v: Vec<u32> = (0..10_000).rev().collect();
+  odd_even_parallel(&mut v);
+  assert!(v.windows(2).all(|w| w[0] <= w[1]));
+}
+```
+
+#### Efficiency
+
+- Time complexity:
+  - Worst: O(n^2)
+  - Average: O(n^2)
+  - Best: O(n), when the input is already sorted
+  - Parallel: O(n^2 / p) work per thread on p threads, with one barrier per super-step
+- Comparisons and swaps (`I` = number of inversions):
+  - Any input: exactly I swaps (each removes one inversion), as the textbook version; never more comparisons than the textbook version
+  - Best (sorted): n−1 comparisons, 0 swaps
+  - Reverse sorted: n(n−1)/2 comparisons for even n, (n²−1)/2 for odd n, every one a swap; the textbook version makes n−1 more
+  - Turtle `[1, 2, …, n−1, 0]`: (7n−16)/2 comparisons for even n, (7n−13)/2 for odd n, against (n−1)(⌊n/2⌋+1) for the textbook version (3,492 against 500,499 for n = 1000)
+  - Random input: about 453,400 comparisons for n = 1000 (textbook ≈ 486,800) and about n²/4 swaps
+- Space complexity: O(1) extra (in-place); the parallel form allocates only for its threads and a block plan
+- Stability: stable (only neighbours are swapped, and only when the second is strictly smaller)
+- Adaptivity: the bounds shrink to the part still changing; good for nearly sorted input whose displaced elements have not far to go, but a far-displaced element still costs a phase per slot
+- Against the textbook version (1000 and 5000 elements): 1.15–3.4 times faster for integers (2–2.6 on random), 1.03–1.75 times for strings, 1.0–2.1 times for 64-byte elements
+- Against [Bubble](#bubble): 2–2.3 times faster on random integers, but on strings and 64-byte elements from 1.1 times faster to 2 times slower (bubble sort shifts an element with one write per slot instead of swapping). Against [Cocktail Shaker](#cocktail-shaker): 1.25–1.7 times faster on random integers and 2.4 times on few distinct keys, but 1.2–1.4 times slower on random strings, 1.45–2.2 times on 64-byte elements and 17–60 times on nearly sorted input, which cocktail shaker sort fixes in a few passes
+- Against `slice::sort_unstable`: about 20 times slower on 1000 random integers and 85 times on 5000 — prefer `slice::sort` for real workloads
+- Parallel form against the sequential one (16-core machine, 12 performance cores, under other load): 4.3–6 times faster on 20,000 integers, 7–8 times on strings and 6.6–10.5 times on 64-byte elements; 1.9–3.8, 4.4–6.5 and 3.5–6.6 times on 8192; 1.3–2.1, 2.7–4 and 2–4.4 times on 4096. It uses threads from 4096 elements of at most 8 bytes and 2048 larger ones, after the first 64 rounds (or 2²⁰ / 2¹⁶ compared pairs) on the calling thread
+
+### Stooge
+
+Stooge sort is a deliberately slow, unstable, in-place sorting algorithm, mostly of educational value: an example of a short, correct algorithm with a surprising running time. It compares the first and the last element and swaps them if they are out of order; then, if the slice has at least three elements, it stooge-sorts the first two thirds (rounded up), the last two thirds, and the first two thirds again. The first call moves every element of the largest third that starts in the first two thirds into the middle, so after the second call all of them sit at the end, in order, and the third call sorts the rest. It is Problem 7-3 of Cormen, Leiserson, Rivest and Stein's *Introduction to Algorithms*, where Professors Howard, Fine and Howard (the Three Stooges) propose it as an "elegant" sorting algorithm, and the reader shows that it takes Θ(n^(log 3 / log 1.5)) ≈ Θ(n^2.71) time, worse than bubble sort. Which elements are compared depends only on the length of the slice, never on the answers: stooge sort is a sorting network, one fixed sequence of compare-exchanges for each length. This implementation makes exactly the textbook's comparisons, in the same order, with the same swaps, and uses three optimizations in executing them:
+
+- Unrolled bottom levels: all parts at one depth of the recursion have the same length, so the parts four levels above the bottom have 7, 8 or 9 elements throughout one sort; they run as straight-line code, the 121 compare-exchanges below them at constant indices, with no calls and no index checks. The textbook makes one call per compare-exchange, and the calls are its cost: recursing down to two elements without index checks is only 1.05–1.15 times faster than it, while unrolling four levels is 5–8 times faster for `u64`, 1.4–1.65 times for strings and 1.4–2.3 times for 64-byte elements than recursing down to two elements.
+- A branch, not a branchless select: only about 1% of the compare-exchanges swap anything (4.5% at 16 random elements, 0.2% with few distinct keys), so the branch is predicted almost always and the compare-exchanges do not wait for one another; a branchless select, which chains each to the one before, was 2 times slower than the textbook for `u64`, 4 times for strings and 1.8 times for 64-byte elements.
+- The swap is marked cold, so the compare-exchanges that do not swap are laid out as one straight line: 1.5–1.85 times faster for 64-byte elements, 1.05–1.25 times for strings and 1.1–1.25 times for `u64` from 100 elements on.
+
+The code is safe Rust, with no `unsafe` block.
+
+#### Examples
+
+Rust usage with integers:
+
+```rust
+use a::sort::stooge;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8, 0];
+  stooge(&mut v);
+  assert_eq!(v, vec![0, 1, 2, 4, 5, 8]);
+}
+```
+
+Sorting strings:
+
+```rust
+use a::sort::stooge;
+
+fn main() {
+  let mut words = vec!["pear", "apple", "fig"];
+  stooge(&mut words);
+  assert_eq!(words, vec!["apple", "fig", "pear"]);
+}
+```
+
+#### Efficiency
+
+- Time complexity: Θ(n^(log 3 / log 1.5)) ≈ Θ(n^2.71) on every input (worst, average and best alike)
+- Comparisons: exactly C(n) = (3^(D+1) − 1)/2 on every input of n ≥ 2 elements, where D is the number of times m ↦ m − ⌊m/3⌋ takes n to 2 (equivalently C(2) = 1, C(n) = 1 + 3·C(n − ⌊n/3⌋)): 13 for n = 4, 121 for n = 8, 1,093 for n = 16, 265,720 for n = 100 (and for 128: D grows in steps), 64,570,081 for n = 1000, against at most n(n−1)/2 = 499,500 for bubble sort
+- Swaps: at most C(n), depending on the input; about 1% of the comparisons on random input; none on already-sorted input
+- Space complexity: O(log n) stack, no allocation (in-place); the recursion nests D − 4 levels for n ≥ 10 (12 for n = 1000)
+- Stability: unstable (`[1a, 1b, 0]` becomes `[0, 1b, 1a]`)
+- Adaptivity: none; the same comparisons on every input of a given length
+- Against the textbook stooge sort (recursive, one call per compare-exchange): 9–11 times faster for `u64` from 64 elements on (3–10 times below), 1.7–2.2 times for strings, and 4.3–5 times for 64-byte elements from 32 on (2.5–4.5 times below; 1.4–2 times with few distinct keys, where every comparison reads all 64 bytes)
+- Against the standard library: `slice::sort_unstable` is 1.2–4 times faster on 8 elements, 50–130 times on 100 random elements, 900–2400 times on 1000 and about 4000 times on 2000 random `u64`; on sorted input, which std recognises in one pass, 10,000–70,000 times from 500 elements on
+
+### Sleep
+
+Sleep sort, posted anonymously to 4chan's programming board in 2011, is a joke: a shell script that started `sleep $n; echo $n` in the background for every argument `n`, so that the small numbers wake, and are printed, first. It sorts in "linear time", lets the operating system's timer queue do all the work, and is wrong as soon as the scheduler is late. `sleep` is that algorithm with real threads and real sleeping: one thread per element sleeps `(value − min) × unit` past a start all threads share, and the values are written back in the order their threads wake. Keys are the same as counting sort's (the sealed `IntegerKey` trait), so negative numbers, `char`s and `bool`s work too, and the smallest values wake right at the start.
+
+**It is nondeterministic and intended as a curiosity.** A thread scheduled late lets a larger value overtake a smaller one, so the slice may come out unsorted; `sleep` returns whether it did, `true` exactly when the slice ends up in order. Whatever happens, the slice ends up a permutation of what it was: every value is written back exactly once. It panics, leaving the slice as it was, if the clock cannot represent when the largest value would wake (about 292 billion years on Unix-like platforms: the whole range of `i128` at a nanosecond per unit, or of `u64` at a second; a zero unit never panics) or if the system cannot start a thread for every element (16,384 per process on macOS), after sending home the threads already started. A range the clock can represent is slept through, however long: the whole range of `i64` at a nanosecond per unit takes 584 years. This implementation uses four optimizations, for faithfulness and robustness rather than speed (the success rates are for random keys in `0..n` on a 16-core Mac loaded by other benchmarks):
+
+- One shared start: every thread sleeps until `start + (value − min) × unit`, not for a duration from whenever it happened to be started, so the order and the cost of starting the threads (15 µs each for 1000 of them) do not skew when they wake. Sleeping from each thread's own start, 100 elements at 100 µs per unit and 1000 elements at 1 ms never came out sorted; from the shared start, almost always.
+- The clock starts once every thread is running, and a little later: all threads are started first and wait at a gate, a `RwLock` the caller holds for writing, and the start is set 4 µs per thread after the gate opens, as waking the waiting threads takes the system 1.5–3 µs each. With the start at the gate, the smallest values, released last, woke after the next ones: 1000 elements at 100 µs never came out sorted (100 elements: 64%; 1000 at 1 ms: 30%).
+- Sleeping in halves: the system may let a sleep run longer than asked, to wake several threads together (here 1 ms took 1.5 ms, 5 ms took 7.5 ms, 50 ms up to 60 ms). Each thread sleeps for half the time left until its deadline, again and again, and for all of it once less than 50 µs is left, so a late sleep still ends before the deadline and the last, short one is late by a few dozen microseconds at most. At 1 ms per unit: from 39% to 100% sorted for 10 elements, from none to all for 100, and from none to 60–95% for 1000. Spinning through the last microseconds instead was no better.
+- Small stacks: each thread gets a 16 KiB stack instead of the default 2 MiB, which halves the time to start 5000 threads or more (0.27 s instead of 0.55 s for 5000).
+
+The values are written back lock-free, each waking thread taking the next place from an atomic counter, and `(value − min) × unit` is computed in 128 bits, saturating at `Duration::MAX`.
+
+#### Examples
+
+Rust usage with integers (a unit of a few milliseconds almost always sorts a few values):
+
+```rust
+use a::sort::sleep;
+use std::time::Duration;
+
+fn main() {
+  let mut v = vec![5, 1, 4, 2, 8, 0, 3, 9, 7, 6];
+  let sorted = sleep(&mut v, Duration::from_millis(2));
+  if sorted {
+    assert_eq!(v, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  } else {
+    println!("the scheduler was late: {v:?}");
+  }
+}
+```
+
+Negative numbers sleep from the smallest one, and the return value always tells the truth:
+
+```rust
+use a::sort::sleep;
+use std::time::Duration;
+
+fn main() {
+  let mut v = vec![3, -2, 0, -5, 1];
+  let sorted = sleep(&mut v, Duration::from_millis(1));
+  assert_eq!(sorted, v.is_sorted());
+}
+```
+
+#### Efficiency
+
+- Time complexity: `(max − min) × unit` of sleeping, plus starting n threads (about 15 µs each up to 1000 threads, more beyond: 0.27 s for 5000, 1 s for 10,000) and 4 µs per thread before the start, whatever the order of the input: "linear" in the range of the values, not in their number
+- Comparisons: none between elements (one pass for the smallest and largest value, one to report whether the result is sorted)
+- Threads: exactly n, one per element, all alive at once
+- Space complexity: O(n): a 16 KiB stack per thread; the values move through no buffer
+- Correctness probability (share of sorts that came out sorted, random keys in `0..n`, over three runs of 20–400 sorts on a loaded 16-core Mac):
+
+  | `unit` | 10 elements | 100 elements | 1000 elements |
+  |--------|-------------|--------------|---------------|
+  | 10 µs  | 12–18%      | 0%           | 0%            |
+  | 100 µs | 94–100%     | 94–100%      | 89–100%       |
+  | 1 ms   | 99–100%     | 89–100%      | 60–90%        |
+
+  A unit of 10 µs is below what the timers resolve (a thread wakes 10–15 µs after its deadline at best); a longer sort is longer exposed to the other work of the machine, so 1000 elements at 1 ms (a second) came out sorted less often than at 100 µs (a tenth of that)
+- Stability: equal values wake together, in any order, which cannot be seen
+- Against the standard library: hopeless, of course. `slice::sort_unstable` sorts 1000 random `u32`s in 3.5 µs and 100 in 0.2 µs; `sleep` takes about 115 ms and 11 ms at 100 µs per unit, 30,000–55,000 times as long, and is not always right
