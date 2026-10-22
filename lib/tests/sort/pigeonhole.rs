@@ -1323,3 +1323,96 @@ fn places_slices_of_32768_elements_and_more_by_swaps() {
     assert!(ids.into_iter().eq(0..len));
     assert!(v.iter().all(|e| keys[*e.1] == e.0));
 }
+
+#[test]
+fn places_few_distinct_keys_by_swaps_and_counts_them_in_eight_tables() {
+    // A range of at most 16 keys in random order is placed by swaps at any length, and one of
+    // at most 256 keys with at least 16 elements per key is counted into eight tables; keys
+    // mostly in order still go along the cycles.
+    let mut state = 0xF3A4_F3A4_F3A4_F3A4;
+    let lens: &[usize] = if cfg!(miri) {
+        &[16, 63, 64, 300]
+    } else {
+        &[16, 63, 64, 65, 100, 1000, 4095, 4096, 4097, 20_000]
+    };
+    for &len in lens {
+        for k in [2u64, 3, 4, 15, 16, 17, 255, 256, 257] {
+            let keys: Vec<u32> = (0..len)
+                .map(|_| (xorshift(&mut state) % k) as u32)
+                .collect();
+            assert_pigeonhole(&keys);
+            assert_by_key(&keys);
+            let mut sorted = keys.clone();
+            sorted.sort_unstable();
+            // Mostly in order: a few keys out of place.
+            for _ in 0..(len / 64).max(1) {
+                let i = (xorshift(&mut state) % len as u64) as usize;
+                sorted[i] = (xorshift(&mut state) % k) as u32;
+            }
+            assert_pigeonhole(&sorted);
+            assert_by_key(&sorted);
+            // Owning elements, with holes of one byte moving in place of the keys.
+            let bytes: Vec<u8> = keys.iter().map(|&x| x as u8).collect();
+            let mut v: Vec<(u8, Box<usize>)> = bytes
+                .iter()
+                .zip(0..)
+                .map(|(&b, i)| (b, Box::new(i)))
+                .collect();
+            sort_checked(&mut v, |e| e.0, |e| *e.1, |e| e.0 == bytes[*e.1]);
+        }
+    }
+}
+
+#[test]
+fn places_wide_ranges_by_swaps_and_ordered_input_by_places() {
+    // Two holes count as one more element towards the length from which elements are placed
+    // by swaps: 2100 elements over 65,536 holes, and 20,000 over 80,000, are swapped. Input
+    // mostly in order, and ranges of two holes or more per element, go along the cycles by
+    // their places rather than by their holes.
+    let mut state = 0x91DE_91DE_91DE_91DE;
+    let cases: &[(usize, u64)] = if cfg!(miri) {
+        &[(2100, 65_536), (300, 1200), (300, 300)]
+    } else {
+        &[
+            (2100, 65_536),
+            (20_000, 80_000),
+            (16_383, 65_532),
+            (5000, 20_000),
+            (5000, 5000),
+        ]
+    };
+    for &(len, span) in cases {
+        let mut keys: Vec<u32> = (0..len)
+            .map(|_| (xorshift(&mut state) % span) as u32)
+            .collect();
+        keys[0] = 0;
+        keys[1] = span as u32 - 1;
+        assert_pigeonhole(&keys);
+        assert_by_key(&keys);
+        let mut v: Vec<(u32, Box<usize>)> = keys
+            .iter()
+            .zip(0..)
+            .map(|(&k, i)| (k, Box::new(i)))
+            .collect();
+        sort_checked(&mut v, |e| e.0, |e| *e.1, |e| e.0 == keys[*e.1]);
+        // Mostly in order, with runs of equal keys.
+        let mut ordered = keys.clone();
+        ordered.sort_unstable();
+        for _ in 0..(len / 100).max(1) {
+            let i = (xorshift(&mut state) % len as u64) as usize;
+            let j = (xorshift(&mut state) % len as u64) as usize;
+            ordered.swap(i, j);
+        }
+        assert_pigeonhole(&ordered);
+        assert_by_key(&ordered);
+        let runs: Vec<u32> = ordered.iter().map(|&k| k / 16).collect();
+        assert_pigeonhole(&runs);
+        assert_by_key(&runs);
+        let mut v: Vec<(u32, Box<usize>)> = runs
+            .iter()
+            .zip(0..)
+            .map(|(&k, i)| (k, Box::new(i)))
+            .collect();
+        sort_checked(&mut v, |e| e.0, |e| *e.1, |e| e.0 == runs[*e.1]);
+    }
+}

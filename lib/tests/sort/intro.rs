@@ -138,7 +138,7 @@ fn sorts_zero_sized_elements() {
 const SHORT: usize = 24;
 
 /// Partitioning compares blocks of this many elements on each side.
-const BLOCK: usize = 64;
+const BLOCK: usize = 128;
 
 #[test]
 fn sorts_lengths_around_every_threshold() {
@@ -682,7 +682,7 @@ fn sort_with_comparison_budget<const PAD: usize>(keys: &[u32], budget: usize) ->
 fn panicking_comparison_keeps_every_element_exactly_once() {
     // Longer than two blocks, so partitioning runs a full block on each side before the last
     // blocks share what is left.
-    let len = size(150, 40);
+    let len = size(2 * BLOCK + 40, 40);
     let mut state = 0x0123_4567_89AB_CDEF;
     let random: Vec<u32> = (0..len).map(|_| xorshift(&mut state) as u32 % 7).collect();
     let distinct: Vec<u32> = {

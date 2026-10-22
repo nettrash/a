@@ -176,6 +176,52 @@ fn sorts_slices_longer_than_the_window() {
     let mut state = 0x0DDB_A110_DDBA_1100;
     let random: Vec<u32> = (0..n).map(|_| xorshift(&mut state) as u32 % 1000).collect();
     assert_sorts_like_std(&random);
+    // Elements of 2 and 4 bytes are counted in batches of 32,768 (see
+    // `counts_narrow_elements_in_batches`): a slice longer than that fills a whole one.
+    let random: Vec<u16> = (0..n).map(|_| xorshift(&mut state) as u16).collect();
+    assert_sorts_like_std(&random);
+    let reversed_but_one: Vec<i32> = [0].into_iter().chain((1..n as i32).rev()).collect();
+    assert_sorts_like_std(&reversed_but_one);
+}
+
+#[test]
+fn counts_narrow_elements_in_batches() {
+    // Elements of 1, 2 and 3–4 bytes are counted with counters as wide as they are, which are
+    // added up every 192 elements for 1-byte ones: lengths around those batches, with few
+    // and many distinct keys, for every narrow type.
+    let mut state = 0xBA7C_4E5B_A7C4_E5B0;
+    let lens = if cfg!(miri) {
+        vec![191, 193, 400]
+    } else {
+        vec![191, 192, 193, 194, 384, 385, 500, 1000, 3000]
+    };
+    for len in lens {
+        for modulus in [3, 200, u64::MAX] {
+            let v: Vec<u64> = (0..len).map(|_| xorshift(&mut state) % modulus).collect();
+            assert_sorts_like_std(&v.iter().map(|&k| k as u8).collect::<Vec<_>>());
+            assert_sorts_like_std(&v.iter().map(|&k| k as i8).collect::<Vec<_>>());
+            assert_sorts_like_std(&v.iter().map(|&k| k % 2 == 0).collect::<Vec<_>>());
+            assert_sorts_like_std(&v.iter().map(|&k| k as u16).collect::<Vec<_>>());
+            assert_sorts_like_std(&v.iter().map(|&k| k as i16).collect::<Vec<_>>());
+            assert_sorts_like_std(
+                &v.iter()
+                    .map(|&k| [k as u8, (k >> 8) as u8, 7])
+                    .collect::<Vec<_>>(),
+            );
+            assert_sorts_like_std(&v.iter().map(|&k| k as u32).collect::<Vec<_>>());
+            assert_sorts_like_std(&v.iter().map(|&k| k as i32).collect::<Vec<_>>());
+            let chars: Vec<char> = v
+                .iter()
+                .map(|&k| char::from_u32(k as u32 % 0xD800).unwrap())
+                .collect();
+            assert_sorts_like_std(&chars);
+        }
+        // One element smaller than all the others at the end: every count is 0 or `len - 1`.
+        let late_min: Vec<u8> = (0..len)
+            .map(|i| if i + 1 == len { 0 } else { 1 + (i % 250) as u8 })
+            .collect();
+        assert_sorts_like_std(&late_min);
+    }
 }
 
 /// Small deterministic xorshift generator, so the tests need no extra dependencies.

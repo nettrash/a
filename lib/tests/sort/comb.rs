@@ -9,17 +9,32 @@ fn size(normal: usize, miri: usize) -> usize {
 }
 
 /// Comb sort moves elements in one of three ways, chosen by their size: elements of at most
-/// 8 bytes are carried along each chain at gaps of 8 or less, elements of at most 32 bytes are
-/// swapped without branching, and larger ones with a branch. The test elements below carry
-/// `PAD` bytes of payload: `SMALL` makes them 9 to 32 bytes and `LARGE` more, and every test
-/// that depends on how elements are moved runs with both, and with [`Tiny`] elements of 4
-/// bytes, which keep their bookkeeping in thread-local state to stay that small.
+/// 16 bytes are carried in registers at the gaps of [`LANE_GAPS`], elements of at most 32
+/// bytes are swapped without branching at the other gaps, and larger ones with a branch. The
+/// test elements below carry `PAD` bytes of payload: `SMALL` makes them 9 to 32 bytes (16 for
+/// [`ByKey`] and [`Counted`], which are carried; 32 for [`Watched`], which is not), `MEDIUM`
+/// 17 to 32 bytes and `LARGE` more, and every test that depends on how elements are moved runs
+/// with them, and with [`Tiny`] elements of 4 bytes, which keep their bookkeeping in
+/// thread-local state to stay that small.
 const SMALL: usize = 0;
+const MEDIUM: usize = 16;
 const LARGE: usize = 40;
+
+/// The gaps at which elements of at most 16 bytes are carried in registers, when the slice
+/// is at least four times as long as the gap.
+const LANE_GAPS: [usize; 7] = [2, 3, 4, 6, 8, 11, 14];
 
 #[test]
 fn test_elements_cover_every_pass() {
     assert!(size_of::<Tiny>() <= 8);
+    assert!(size_of::<ByKey<u64, SMALL>>() <= 16);
+    assert!(size_of::<Counted<usize, SMALL>>() <= 16);
+    for medium in [
+        size_of::<ByKey<u64, MEDIUM>>(),
+        size_of::<Counted<usize, MEDIUM>>(),
+    ] {
+        assert!((17..=32).contains(&medium), "{medium} bytes");
+    }
     for small in [
         size_of::<ByKey<u64, SMALL>>(),
         size_of::<Counted<usize, SMALL>>(),
@@ -278,6 +293,7 @@ fn sorts_every_permutation_up_to_8() {
     for n in 0..=size(8, 5) {
         for_each_permutation(n, &mut |p| {
             assert_sorts::<_, SMALL>(p);
+            assert_sorts::<_, MEDIUM>(p);
             assert_sorts::<_, LARGE>(p);
         });
     }
@@ -288,6 +304,7 @@ fn sorts_every_sequence_over_three_keys_up_to_9() {
     for len in 0..=size(9, 6) as u32 {
         for_each_sequence(len, 3, &mut |s| {
             assert_sorts::<_, SMALL>(s);
+            assert_sorts::<_, MEDIUM>(s);
             assert_sorts::<_, LARGE>(s);
         });
     }
@@ -303,6 +320,7 @@ fn sorts_random_input() {
             for _ in 0..size(8, 1) {
                 let keys: Vec<u64> = (0..len).map(|_| xorshift(&mut state) % modulus).collect();
                 assert_sorts::<_, SMALL>(&keys);
+                assert_sorts::<_, MEDIUM>(&keys);
                 assert_sorts::<_, LARGE>(&keys);
             }
         }
@@ -377,9 +395,10 @@ struct Reference {
     /// per inversion left by the gapped passes and one per carry (a maximal run of swaps in
     /// one pass that move the same element, which a hole-shifting sort does as one carry).
     moves: usize,
-    /// The same, for elements carried along each chain at gaps of 8 or less: there, a swap
-    /// costs one move, plus one per carry along a chain (a maximal run of swaps in one pass
-    /// at positions `gap` apart, which move the same element).
+    /// The same, for elements carried in registers at the gaps of [`LANE_GAPS`] (for slices at
+    /// least four times as long as the gap): there, a
+    /// swap costs one move, plus one per carry along a chain (a maximal run of swaps in one
+    /// pass at positions `gap` apart, which move the same element).
     moves_carried: usize,
 }
 
@@ -398,7 +417,7 @@ fn reference<K: Ord + Clone>(keys: &[K]) -> Reference {
             if swap {
                 v.swap(i, i + gap);
                 moves += 2;
-                moves_carried += if gap <= 8 {
+                moves_carried += if LANE_GAPS.contains(&gap) && n >= 4 * gap {
                     1 + usize::from(!carrying[i % gap])
                 } else {
                     2
@@ -457,6 +476,7 @@ fn comparisons_match_classic_comb_sort() {
     for_each_test_input(0xC0C7_A11E_5AAE_0001, &mut |v| {
         let expected = reference(v).comparisons;
         assert_eq!(comparisons::<_, SMALL>(v), expected, "{v:?}");
+        assert_eq!(comparisons::<_, MEDIUM>(v), expected, "{v:?}");
         assert_eq!(comparisons::<_, LARGE>(v), expected, "{v:?}");
     });
 }
@@ -772,7 +792,7 @@ fn inconsistent_ord_keeps_every_element_exactly_once() {
     check::<LARGE>(&rng);
 }
 
-/// A 4-byte element, small enough to be carried along chains at small gaps. It is compared by
+/// A 4-byte element, small enough to be carried in registers at small gaps. It is compared by
 /// `key` only and carries the index it started at; everything else it needs — comparison
 /// count and budget, move and drop tracking, an optional random `Ord` — lives in [`TINY`].
 struct Tiny {

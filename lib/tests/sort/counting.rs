@@ -348,15 +348,19 @@ fn allocations_of<T: a::sort::IntegerKey>(v: &mut [T]) -> usize {
 
 #[test]
 fn allocates_only_for_counts_beyond_4_kib() {
-    // 1024 `u32` counters fill 4 KiB: a range of up to 1024 values, or of up to 128 when eight
-    // tables are used, is counted on the stack.
+    // 2048 `u16` counters fill 4 KiB, up to 65,535 elements: a range of up to 2048 values, or
+    // of up to 256 when eight tables are used, is counted on the stack. Longer slices count in
+    // `u32`, 1024 of which fill 4 KiB.
     let mut state = 0x0A11_0C47_E5B0_FFE5;
     for (len, span, allocations) in [
-        (100, 1024, 0),
-        (100, 1025, 1),
-        (16 * 128, 128, 0),
-        (16 * 129, 129, 1),
-        (size(20_000, 4_000), 2000, 1),
+        (100, 2048, 0),
+        (100, 2049, 1),
+        (16 * 256, 256, 0),
+        (16 * 257, 257, 1),
+        (size(20_000, 4_000), 2000, 0),
+        (size(20_000, 4_000), 3000, 1),
+        (70_000, 128, 0),
+        (70_000, 129, 1),
     ] {
         let mut v: Vec<u32> = (0..len)
             .map(|_| (xorshift(&mut state) % span) as u32)
@@ -491,6 +495,31 @@ fn by_key_places_eight_segments() {
                 .map(|_| (xorshift(&mut state) % span) as u32)
                 .collect();
             assert_counts_by_key(&keys);
+        }
+    }
+}
+
+#[test]
+fn by_key_places_runs_of_equal_keys_in_one_segment() {
+    // One segment is counted as four quarters side by side and placed four keys at a time:
+    // runs of equal keys, short and long, at every length modulo four, in `u16` and `u32`
+    // counts.
+    let mut state = 0x9E57_9E57_9E57_9E57;
+    let lens: Vec<usize> = if cfg!(miri) {
+        (1..12).chain([257, 1000]).collect()
+    } else {
+        (1..12).chain([257, 1000, 65_535, 65_536, 70_001]).collect()
+    };
+    for len in lens {
+        for run in [1, 3, 16, 300] {
+            // Runs over more than 256 keys, which take one segment.
+            let mut keys: Vec<u32> = (0..len).map(|i| (i / run) as u32 * 7 % 5000).collect();
+            for _ in 0..(len / 50).max(1) {
+                let i = (xorshift(&mut state) % len as u64) as usize;
+                keys[i] = (xorshift(&mut state) % 5000) as u32;
+            }
+            assert_counts_by_key(&keys);
+            assert_counts(&keys);
         }
     }
 }
@@ -685,16 +714,16 @@ fn allocations_by_key_of<const N: usize>(v: &mut [[u64; N]]) -> usize {
 
 #[test]
 fn by_key_allocates_only_beyond_4_kib() {
-    // 512 `u64` elements fill the 4 KiB stack buffer, 512 `u64` keys another 4 KiB, and 1024
-    // `u32` counters a third: a range of up to 1024 keys, or of up to 128 with eight segments,
+    // 512 `u64` elements fill the 4 KiB stack buffer, 512 `u64` keys another 4 KiB, and 2048
+    // `u16` counters a third: a range of up to 2048 keys, or of up to 256 with eight segments,
     // needs no allocation.
     let mut state = 0xA110_CA7E_A110_CA7E;
     for (len, span, allocations) in [
-        (100, 1024, 0),
-        (100, 1025, 1),
+        (100, 2048, 0),
+        (100, 2049, 1),
         (512, 32, 0),
         (513, 32, 2),
-        (513, 1100, 3),
+        (513, 2100, 3),
     ] {
         let mut v: Vec<[u64; 1]> = (0..len).map(|_| [xorshift(&mut state) % span]).collect();
         v[0] = [0];

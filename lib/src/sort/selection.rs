@@ -1,4 +1,6 @@
-use core::cmp::Ordering::{Equal, Greater, Less};
+use core::cmp::Ordering::{self, Equal, Greater, Less};
+use core::hint::select_unpredictable;
+use core::mem;
 
 /// Sorts a slice in place using double-ended selection sort.
 ///
@@ -25,6 +27,17 @@ use core::cmp::Ordering::{Equal, Greater, Less};
 ///   remembered by index; elements are moved once a pass is over, or when a second copy of
 ///   the current extreme turns up. Input with distinct keys costs at most `n - 1` swaps,
 ///   exactly like classic selection sort, and gathering duplicates never costs a comparison.
+///
+/// Which element of a pair is the smaller one is a coin flip on random input, and a branch on
+/// it would be mispredicted every other pair. The scan therefore picks the element to compare
+/// with the minimum, and the one to compare with the maximum, without branching, and only
+/// branches on the rare outcomes that change an extreme: on random input with distinct keys
+/// that is 1.1–1.5 times faster at 64 elements and 1.7–2.5 times from 1,000 up, for integers,
+/// strings and 64-byte arrays alike. Choosing without a branch makes the next two comparisons
+/// wait for the first, which costs more than a predicted branch when comparisons are slow to
+/// start, as for strings in order: so for elements of 9 to 32 bytes the first pass branches
+/// and counts how often a pair goes against the majority order, and later passes branch only
+/// if fewer than one in 16 did. The comparisons are the same either way.
 ///
 /// Distinct keys get no benefit from the refinements beyond the pairwise scan, so the worst
 /// case is any input with distinct keys, and on such input the number of comparisons
@@ -78,9 +91,23 @@ use core::cmp::Ordering::{Equal, Greater, Less};
 pub fn selection<T: Ord>(arr: &mut [T]) {
     // Everything before `lo` and from `hi` onwards is already in its final position.
     let (mut lo, mut hi) = (0, arr.len());
+    // Whether to branch on the order within a pair: decided by the first pass for elements of
+    // 9 to 32 bytes, never otherwise. Passes see the same middle of the slice, minus the
+    // extremes, so the first one tells how predictable the others will be.
+    let size = mem::size_of::<T>();
+    let mut first = size > 8 && size <= 32;
+    let mut branchy = false;
     while hi - lo > 1 {
         let mut pass = Pass::new(&mut arr[lo..hi]);
-        pass.scan();
+        if first {
+            let (pairs, flips) = pass.scan::<true, true>();
+            branchy = flips * FLIPS_MAX < pairs;
+            first = false;
+        } else if branchy {
+            pass.scan::<true, false>();
+        } else {
+            pass.scan::<false, false>();
+        }
         match pass.finish() {
             Some((front, back)) => {
                 lo += front;
@@ -90,6 +117,10 @@ pub fn selection<T: Ord>(arr: &mut [T]) {
         }
     }
 }
+
+/// The first pass decides to branch on the order within pairs if fewer than one pair in
+/// `FLIPS_MAX` goes against the majority order.
+const FLIPS_MAX: usize = 16;
 
 /// One pass of [`selection`] over the unsorted range `v`.
 ///
@@ -139,7 +170,12 @@ impl<'a, T: Ord> Pass<'a, T> {
     }
 
     /// Scans the whole range, gathering the min and max groups.
-    fn scan(&mut self) {
+    ///
+    /// With `BRANCHY`, branches on which element of a pair is the smaller one; otherwise
+    /// selects it without a branch. With `COUNT`, returns the number of pairs scanned after
+    /// the first and how many of them went against the majority order.
+    #[inline(always)]
+    fn scan<const BRANCHY: bool, const COUNT: bool>(&mut self) -> (usize, usize) {
         let len = self.v.len();
         // An odd length starts from a lone element, an even one from a compared pair, so
         // the rest of the range always splits into whole pairs.
@@ -159,77 +195,114 @@ impl<'a, T: Ord> Pass<'a, T> {
                 Equal => self.push_min(1),
             }
         }
+        let start = self.end;
+        let mut greater = 0;
         while self.end < len {
             let x = self.end;
             self.end += 2;
-            self.pair(x, x + 1);
+            let y = x + 1;
+            // SAFETY: the rest of the range splits into whole pairs, so `y < len`.
+            let order = unsafe { self.v.get_unchecked(x).cmp(self.v.get_unchecked(y)) };
+            if order == Equal {
+                self.pair_equal(x, y);
+                continue;
+            }
+            let less = order == Less;
+            let (s, l) = if BRANCHY {
+                if less {
+                    (x, y)
+                } else {
+                    if COUNT {
+                        greater += 1;
+                    }
+                    (y, x)
+                }
+            } else {
+                if COUNT {
+                    greater += usize::from(!less);
+                }
+                select_unpredictable(less, (x, y), (y, x))
+            };
+            // Before the first unequal pair, the minimum is also the maximum. Both
+            // comparisons are made against the extremes as they were before the pair.
+            let (min, max) = (self.mi, if self.same { self.mi } else { self.mx });
+            // SAFETY: `s` and `l` are `x` and `y`, and `mi` and `mx` always index scanned
+            // elements.
+            let (below, above) = unsafe {
+                (
+                    self.v.get_unchecked(s).cmp(self.v.get_unchecked(min)),
+                    self.v.get_unchecked(l).cmp(self.v.get_unchecked(max)),
+                )
+            };
+            if below == Greater && above == Less {
+                // Both lie strictly between the extremes: by far the most common case.
+                continue;
+            }
+            self.place(s, l, below, above);
+        }
+        let pairs = (len - start) / 2;
+        (pairs, greater.min(pairs - greater))
+    }
+
+    /// Places an equal pair at `x` and `y` with at most two more comparisons.
+    fn pair_equal(&mut self, x: usize, y: usize) {
+        // Before the first unequal pair, the minimum is also the maximum.
+        let (min, max) = (self.mi, if self.same { self.mi } else { self.mx });
+        // Both elements share one key, so one comparison against the minimum often
+        // settles both of them.
+        self.held[0] = y;
+        let joined_min = match self.v[x].cmp(&self.v[min]) {
+            Less => {
+                self.new_min(x);
+                true
+            }
+            Equal => {
+                self.push_min(x);
+                true
+            }
+            // Greater than the minimum while everything so far is equal, so it is
+            // also greater than the maximum.
+            Greater if self.same => {
+                self.new_max(x);
+                false
+            }
+            Greater => match self.v[x].cmp(&self.v[max]) {
+                Less => return, // both lie strictly between the extremes
+                Equal => {
+                    self.push_max(x);
+                    false
+                }
+                Greater => {
+                    self.new_max(x);
+                    false
+                }
+            },
+        };
+        let y = self.held[0];
+        if joined_min {
+            self.push_min(y);
+        } else {
+            self.push_max(y);
         }
     }
 
-    /// Classifies the pair at `x` and `y` with at most three comparisons and places it.
-    fn pair(&mut self, x: usize, y: usize) {
-        // Before the first unequal pair, the minimum is also the maximum.
-        let (min, max) = (self.mi, if self.same { self.mi } else { self.mx });
-        match self.v[x].cmp(&self.v[y]) {
-            Equal => {
-                // Both elements share one key, so one comparison against the minimum often
-                // settles both of them.
-                self.held[0] = y;
-                let joined_min = match self.v[x].cmp(&self.v[min]) {
-                    Less => {
-                        self.new_min(x);
-                        true
-                    }
-                    Equal => {
-                        self.push_min(x);
-                        true
-                    }
-                    // Greater than the minimum while everything so far is equal, so it is
-                    // also greater than the maximum.
-                    Greater if self.same => {
-                        self.new_max(x);
-                        false
-                    }
-                    Greater => match self.v[x].cmp(&self.v[max]) {
-                        Less => return, // both lie strictly between the extremes
-                        Equal => {
-                            self.push_max(x);
-                            false
-                        }
-                        Greater => {
-                            self.new_max(x);
-                            false
-                        }
-                    },
-                };
-                let y = self.held[0];
-                if joined_min {
-                    self.push_min(y);
-                } else {
-                    self.push_max(y);
-                }
-            }
-            order => {
-                let (s, l) = if order == Less { (x, y) } else { (y, x) };
-                // Both comparisons are made against the extremes as they were before the
-                // pair, then the smaller element is placed before the larger one.
-                let below = self.v[s].cmp(&self.v[min]);
-                let above = self.v[l].cmp(&self.v[max]);
-                self.held[0] = l;
-                match below {
-                    Less => self.new_min(s),
-                    Equal => self.push_min(s),
-                    Greater => {}
-                }
-                let l = self.held[0];
-                match above {
-                    Less => {}
-                    // `l` equals the old maximum. If that was also the old minimum, `s` has
-                    // just undercut it, which turned the old min group into the max group.
-                    Equal => self.push_max(l),
-                    Greater => self.new_max(l),
-                }
-            }
+    /// Places an unequal pair, its smaller element at `s` and its larger at `l`, given how
+    /// they compared with the old minimum (`below`) and the old maximum (`above`): the smaller
+    /// element is placed before the larger one.
+    fn place(&mut self, s: usize, l: usize, below: Ordering, above: Ordering) {
+        self.held[0] = l;
+        match below {
+            Less => self.new_min(s),
+            Equal => self.push_min(s),
+            Greater => {}
+        }
+        let l = self.held[0];
+        match above {
+            Less => {}
+            // `l` equals the old maximum. If that was also the old minimum, `s` has
+            // just undercut it, which turned the old min group into the max group.
+            Equal => self.push_max(l),
+            Greater => self.new_max(l),
         }
     }
 

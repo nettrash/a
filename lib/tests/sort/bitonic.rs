@@ -1066,3 +1066,160 @@ fn parallel_shuffled_permutations_sort() {
     bitonic_parallel(&mut v);
     assert!(v.iter().map(|e| e.key).eq(0..n as u32));
 }
+
+#[test]
+fn sorts_narrow_elements() {
+    // Elements of at most 4 bytes merge stage by stage up to merges of 2048: lengths whose
+    // power-of-two merges end below, at and above that, in every width and both directions.
+    fn check<T: Ord + Copy + Send + std::fmt::Debug>(v: &[T]) {
+        let mut expected = v.to_vec();
+        expected.sort_unstable();
+        let mut a = v.to_vec();
+        bitonic(&mut a);
+        assert_eq!(a, expected, "n = {}", v.len());
+        let mut b = v.to_vec();
+        bitonic_parallel(&mut b);
+        assert_eq!(b, expected, "n = {}", v.len());
+    }
+    let lens = if cfg!(miri) {
+        vec![17, 32, 33, 100, 128]
+    } else {
+        vec![
+            17, 31, 32, 33, 64, 100, 255, 256, 1000, 2047, 2048, 2049, 4096, 5000, 70_000,
+        ]
+    };
+    let mut state = 0xB170_0000_0000_0001;
+    for n in lens {
+        for modulus in [3, 1 << 16, u64::MAX] {
+            let r: Vec<u64> = (0..n).map(|_| xorshift(&mut state) % modulus).collect();
+            check(&r.iter().map(|&x| x as u8).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as i8).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as u16).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as i16).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as u32).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as i32).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x % 2 == 0).collect::<Vec<_>>());
+            check(
+                &r.iter()
+                    .map(|&x| [x as u8, (x >> 8) as u8, (x >> 16) as u8])
+                    .collect::<Vec<_>>(),
+            );
+            check(
+                &r.iter()
+                    .map(|&x| char::from_u32(x as u32 % 0xD800).unwrap())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        check(&(0..n as u32).rev().collect::<Vec<_>>());
+        check(&(0..n as u32).collect::<Vec<_>>());
+    }
+}
+
+/// A 4-byte element, merged stage by stage, that counts its drops and comparisons in
+/// [`TRACK`] and panics once the comparison budget is spent.
+struct Narrow {
+    key: u16,
+    id: u16,
+}
+
+impl Drop for Narrow {
+    fn drop(&mut self) {
+        TRACK.with(|s| s.drops.borrow_mut()[self.id as usize] += 1);
+    }
+}
+impl PartialEq for Narrow {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Narrow {}
+impl PartialOrd for Narrow {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Narrow {
+    fn cmp(&self, other: &Self) -> Ordering {
+        TRACK.with(|s| {
+            if let Some(left) = s.budget.get() {
+                if left == 0 {
+                    panic!("comparison budget exhausted");
+                }
+                s.budget.set(Some(left - 1));
+            }
+            s.comparisons.set(s.comparisons.get() + 1);
+            if let Some(mut state) = s.liar.get() {
+                let r = xorshift(&mut state);
+                s.liar.set(Some(state));
+                return [Ordering::Less, Ordering::Equal, Ordering::Greater][(r % 3) as usize];
+            }
+            self.key.cmp(&other.key)
+        })
+    }
+}
+
+/// [`sort_tracked`] for [`Narrow`] elements.
+fn sort_narrow(keys: &[u16], budget: Option<usize>, liar: Option<u64>) -> (bool, usize) {
+    let len = keys.len();
+    TRACK.with(|s| {
+        *s.drops.borrow_mut() = vec![0; len];
+        s.budget.set(budget);
+        s.comparisons.set(0);
+        s.liar.set(liar);
+    });
+    let mut v: Vec<Narrow> = keys
+        .iter()
+        .zip(0..)
+        .map(|(&key, id)| Narrow { key, id })
+        .collect();
+    let completed = catch_unwind(AssertUnwindSafe(|| bitonic(&mut v))).is_ok();
+    if completed && liar.is_none() {
+        assert!(v.windows(2).all(|w| w[0].key <= w[1].key));
+    }
+    let mut ids: Vec<u16> = v.iter().map(|t| t.id).collect();
+    ids.sort_unstable();
+    assert!(
+        ids.into_iter().eq(0..len as u16),
+        "element lost or duplicated"
+    );
+    assert!(
+        v.iter().all(|t| t.key == keys[t.id as usize]),
+        "element changed"
+    );
+    let comparisons = TRACK.with(|s| {
+        s.budget.set(None);
+        s.liar.set(None);
+        assert!(
+            s.drops.borrow().iter().all(|&d| d == 0),
+            "dropped during sort"
+        );
+        s.comparisons.get()
+    });
+    drop(v);
+    TRACK.with(|s| {
+        assert!(
+            s.drops.borrow().iter().all(|&d| d == 1),
+            "leaked or double-dropped"
+        )
+    });
+    (completed, comparisons)
+}
+
+#[test]
+fn narrow_panicking_or_inconsistent_ord_keeps_every_element_exactly_once() {
+    let mut state = 0xB170_0000_0000_0002;
+    for n in [32, 33, size(300, 64)] {
+        for keys in shapes(n, &mut state) {
+            let keys: Vec<u16> = keys.iter().map(|&k| k as u16).collect();
+            let (completed, total) = sort_narrow(&keys, None, None);
+            assert!(completed);
+            assert_eq!(total, lang_network(n).len());
+            for budget in (0..total).step_by(size(3, 61)) {
+                assert!(!sort_narrow(&keys, Some(budget), None).0, "budget {budget}");
+            }
+            assert!(sort_narrow(&keys, Some(total), None).0);
+            let liar = Some(xorshift(&mut state) | 1);
+            assert_eq!(sort_narrow(&keys, None, liar), (true, total));
+        }
+    }
+}

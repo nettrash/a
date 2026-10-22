@@ -19,7 +19,7 @@ use super::counting::STACK_BYTES;
 /// The price is the counting: each element is compared with the rest of the slice, `Θ(n²)`
 /// comparisons on any input that is not in order already.
 ///
-/// Five refinements keep the algorithm as cheap as cycle sort can be. It writes the same
+/// Six refinements keep the algorithm as cheap as cycle sort can be. It writes the same
 /// elements to the same slots as the textbook version, and in the same order except on
 /// strictly decreasing input:
 ///
@@ -55,9 +55,16 @@ use super::counting::STACK_BYTES;
 ///   faster on 1000 `u64`s with four distinct keys and 1.17 times on 3000, at most 1.06 times
 ///   slower on 200–300 of them, and the same with 32 distinct keys.
 ///
-/// The counts themselves compare every element with no branch on the answer, so integers
-/// are compared several at a time (eight `u64`s per step on Apple M4), as in the textbook's
-/// loop, which compiles the same.
+/// * **Narrow elements are counted in counters as narrow as they are.** A count compares every
+///   element with no branch on the answer, so integers are compared several at a time, as in
+///   the textbook's loop. Into one `usize`, the compiler widened the answer of every 1-, 2- and
+///   4-byte element to 64 bits and so compared two elements per vector instruction, as for
+///   `u64`. Here such elements are counted into counters of their own width, `u8`, `u16` or
+///   `u32`, added to the total every 192 elements for `u8` and every 32,768 for the others,
+///   before they can overflow: 16, 8 or 4 elements per instruction. On random input this is
+///   2.6–3.3 times faster for `u32` from 1000 elements on, 4.1–6.6 times for `u16` and
+///   3.9–5 times for `u8` (1.3–1.65 times on 100 elements), and 2.2–5.2 times with four
+///   distinct keys; elements of more than 4 bytes are counted as before.
 ///
 /// # Properties
 ///
@@ -86,14 +93,15 @@ use super::counting::STACK_BYTES;
 /// distinct keys 1.04 times.
 ///
 /// Against [`selection`](fn@super::selection) sort, which also moves few elements (at most
-/// `n − 1` swaps, up to `2(n − 1)` writes): 3.2–4.3 times faster on random `u64`s and 5–10
-/// times on nearly sorted ones, whose counts are vectorised, and as fast to 1.55 times faster
-/// on random strings and 64-byte elements; but selection sort, which gathers all equal keys
-/// in each pass, is 2–250 times faster with four distinct keys and 1.2–1.9 times faster on
-/// sawtooth strings and 64-byte elements. Cycle sort is quadratic, and only worth it where a
-/// write costs far more than a comparison: [`slice::sort_unstable`] is 3–6 times faster on
-/// 100 random elements, 12–50 times on 1000 and 90–200 times on 10,000 (125 times on 3000
-/// strings), and as fast on sorted and reverse-sorted input.
+/// `n − 1` swaps, up to `2(n − 1)` writes): 2–2.6 times faster on random `u64`s and 4–5.1
+/// times on nearly sorted ones, whose counts are vectorised; but selection sort is 1.1–2.3
+/// times faster on random strings and 64-byte elements, 1.05–1.2 times on nearly sorted ones
+/// and 1.6–2.5 times on sawtooth ones, and, as it gathers all equal keys in each pass,
+/// 2.25–700 times faster with four distinct keys. Cycle sort is quadratic, and only worth it
+/// where a write costs far more than a comparison: [`slice::sort_unstable`] is 3–6 times
+/// faster on 100 random elements, 12–50 times on 1000 and 90–200 times on 10,000 (125 times on
+/// 3000 strings, 17–30 times on 5000 random `u32`s, `u16`s or `u8`s), and as fast on sorted
+/// and reverse-sorted input.
 ///
 /// # Panics
 ///
@@ -242,10 +250,72 @@ impl Placed {
 /// Returns how many elements of `rest` are smaller than `item`.
 ///
 /// Every element is compared, with no branch on the answer, so integers are compared several
-/// at a time (eight `u64`s per step on Apple M4).
+/// at a time: eight `u64`s per step on Apple M4, and for elements of at most 4 bytes, counted
+/// in counters of their width ([`count_in`]), 16 `u32`s or 64 `u8`s.
 #[inline(always)]
 fn count_less<T: Ord>(rest: &[T], item: &T) -> usize {
-    rest.iter().filter(|x| **x < *item).count()
+    if mem::size_of::<T>() == 1 {
+        count_in::<T, u8>(rest, item)
+    } else if mem::size_of::<T>() == 2 {
+        count_in::<T, u16>(rest, item)
+    } else if mem::size_of::<T>() <= 4 {
+        count_in::<T, u32>(rest, item)
+    } else {
+        rest.iter().filter(|x| **x < *item).count()
+    }
+}
+
+/// A counter as wide as the elements counted with it.
+trait Lane: Copy {
+    const ZERO: Self;
+    /// The most elements one counter counts before it is added to the total: no more than it
+    /// can hold.
+    const CHUNK: usize;
+    /// The counter plus one if `b`, else the counter.
+    fn add(self, b: bool) -> Self;
+    fn get(self) -> usize;
+}
+
+macro_rules! lane {
+    ($t:ty, $chunk:expr) => {
+        impl Lane for $t {
+            const ZERO: Self = 0;
+            const CHUNK: usize = {
+                assert!($chunk <= <$t>::MAX as usize);
+                $chunk
+            };
+            #[inline(always)]
+            fn add(self, b: bool) -> Self {
+                self.wrapping_add(b as $t)
+            }
+            #[inline(always)]
+            fn get(self) -> usize {
+                self as usize
+            }
+        }
+    };
+}
+// Measured for `u8`: 192 elements (three times 64, what one step of the loop compares) were
+// 1.07–1.25 times faster than 255 or 240 and 1.25–1.3 times faster than counting into `u16`s;
+// 128 was as fast on 5000 elements and 1.18 times slower on 1000. For `u16` and `u32` the batch only
+// has to be long enough for the sum after it not to matter.
+lane!(u8, 192);
+lane!(u16, 1 << 15);
+lane!(u32, 1 << 15);
+
+/// [`count_less`] with counters `C` as wide as the elements: in batches of `C::CHUNK`, each
+/// counted into a `C` that cannot overflow and then added to the total.
+#[inline(always)]
+fn count_in<T: Ord, C: Lane>(rest: &[T], item: &T) -> usize {
+    let mut total = 0;
+    for chunk in rest.chunks(C::CHUNK) {
+        let mut c = C::ZERO;
+        for x in chunk {
+            c = c.add(*x < *item);
+        }
+        total += c.get();
+    }
+    total
 }
 
 /// Returns the first slot from `pos` on, below `len`, that does not hold an element equal to

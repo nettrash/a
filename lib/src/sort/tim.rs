@@ -7,7 +7,8 @@ use core::{hint, ptr, slice};
 /// makes use of the order already in the input. It splits the slice into runs, the longest
 /// stretches that are ascending or strictly descending, and reverses the descending ones. Runs
 /// shorter than a minimum length, between 16 and 32 elements and chosen so that the slice
-/// splits into a power of two runs or slightly fewer, are extended to it by insertion sort.
+/// splits into a power of two runs or slightly fewer, are extended to it by insertion sort
+/// (for elements of at most 8 bytes, to twice that length, see below).
 /// Runs are merged as they are found, in an order kept on a stack, until one is left. Random
 /// input has short runs and costs `O(n log n)` comparisons, like any merge sort, but input
 /// made of a few long runs costs little more than finding them: sorted and strictly
@@ -63,12 +64,20 @@ use core::{hint, ptr, slice};
 ///   1.03–1.1 times slower for integers and large elements, and no faster for strings.
 /// * **Branchless short runs for small elements.** Each insertion ends in a mispredicted
 ///   branch, which costs elements of at most 8 bytes, cheap to compare and move, more than
-///   everything else. For them, a short run that starts with fewer than four sorted elements
-///   is instead sorted by this crate's merge sort, which sorts pieces of at most four elements
-///   by fixed sequences of comparisons that select where each element goes, and merges them
-///   from both ends without branching. This is 1.1–1.3 times faster for integers on random
-///   input and 1.1–1.2 times with few distinct keys, and up to 1.25 times slower on short
-///   slices that are nearly sorted in small steps, where insertion barely moves anything.
+///   everything else. For them, a natural run shorter than the minimum length is extended to
+///   twice it, 32 to 64 elements as in CPython, and slices of fewer than 64 elements are
+///   sorted as one run; natural runs of the minimum length are kept as before. A short run
+///   that starts with fewer than four sorted elements, or whose next elements dip below its
+///   end (a comparison tells), is sorted by this crate's merge sort: one pass notes its
+///   descents, runs of up to 8 elements are sorted by fixed sequences of comparisons that
+///   select where each element goes, and merged from both ends without branching, leaving
+///   alone what is in order already. Other short runs are extended by insertion. Merge sort
+///   for the short runs is 1.1–1.3 times faster for integers on random input and 1.1–1.2
+///   times with few distinct keys, and up to 1.25 times slower on short slices that are
+///   nearly sorted in small steps, where insertion barely moves anything; runs of twice the
+///   length are another 1.08–1.3 times faster on random input and with few distinct keys and
+///   1.05–1.45 times on input made of runs of up to 1000 elements, but up to 1.07 times slower
+///   on runs of about 45 elements and 1.05–1.75 times on a sawtooth of 40 to 1000 elements.
 /// * **No allocation for small slices or single runs.** The buffer lives on the stack while it
 ///   fits in 4 KiB (512 `u64`s, say), and is otherwise allocated when the first merge needs it:
 ///   sorted and strictly descending input never allocates.
@@ -91,25 +100,26 @@ use core::{hint, ptr, slice};
 /// |-------------------------------------|------------------------------|--------------------|
 /// | Best (sorted, strictly descending)  | `n − 1`                      | `0` (`n` reversed) |
 /// | Runs of at least 32 elements        | `O(n + n·H)`                 | `O(n + n·H)`       |
-/// | Average (random)                    | `≈ (0.98–1.17)·n·log₂ n`     | `O(n log n)`       |
+/// | Average (random)                    | `≈ (1.04–1.17)·n·log₂ n`     | `O(n log n)`       |
 /// | Worst                               | `O(n log n)`                 | `O(n log n)`       |
 ///
 /// For `n = 1000`: 999 comparisons on sorted or strictly descending input, about 1,180 on
 /// sorted input with 10 random elements appended and about 1,800 with 10 random pairs
-/// swapped (this crate's merge sort makes about 3,020 and 6,100), and about 9,770 on random
-/// input for elements of at most 8 bytes and 11,700 for larger ones (merge sort: about 9,640).
-/// Linear insertion into runs of 16 to 32 elements costs more comparisons than a binary search
-/// would, but less time.
+/// swapped (2,060 for elements of at most 8 bytes; this crate's merge sort makes about 1,800
+/// and 3,900), and about 10,580 on random input for elements of at most 8 bytes and 11,700
+/// for larger ones (merge sort: about 10,290 and 9,570). Linear insertion into runs of 16 to
+/// 32 elements costs more comparisons than a binary search would, but less time.
 ///
-/// Against this crate's merge sort, this is as fast or up to 1.3 times faster on random
-/// integers, 1.05–1.4 times faster on random strings and 1.03–1.1 times on 64-byte elements
-/// from 1000 elements on, 2.7–4.3 times faster for integers and strings on nearly sorted
-/// input, sorted input with elements appended, or two interleaved runs (1.3–3.1 times for
-/// 64-byte elements), and 7–11 times on reverse-sorted input. Against [`slice::sort`], which
-/// also finds runs: 1.35–1.7 times slower on random integers from 1000 elements on and
-/// 1.3–1.55 times on random strings, but 1.6–4.2 times faster on nearly sorted input,
-/// 2.6–3.9 times on appended elements or two interleaved runs and 1.4–1.8 times on input
-/// made of many runs, for integers and strings.
+/// Against this crate's merge sort, which no longer copies a level out before merging it and
+/// splits long merges, and so is the faster of the two on input without long runs: 1.1–1.5
+/// times slower on random input from 1000 elements on and up to 1.35 times on short runs of
+/// random content, but 1.2–1.5 times faster on nearly sorted integers and strings, 1.45–2.2
+/// times on sorted input with elements appended, and 1.7–11 times on reverse-sorted input from
+/// 1000 elements on. Against [`slice::sort`], which also finds runs: 1.2–1.45 times slower on
+/// random integers from 1000 elements on and 1.35–1.45 times on random strings (1.5 times
+/// faster on a million), but 1.5–3.7 times faster on nearly sorted input, 1.9–3.4 times on
+/// appended elements and 1.6–3.6 times on input made of runs of `√n` elements from 10,000
+/// on, for integers and strings.
 ///
 /// Prefer [`slice::sort`], a far more refined stable sort that also finds runs, for real
 /// workloads.
@@ -163,13 +173,14 @@ pub fn tim<T: Ord>(arr: &mut [T]) {
         return;
     }
     let mut buf = Buffer::<T>::new(len);
-    if len < MIN_MERGE {
+    if len < MIN_MERGE * build_factor::<T>() {
         let run = find_run(arr);
         build_run(arr, run, &mut buf);
         return;
     }
 
     let min_run = min_run_length(len);
+    let build_len = min_run * build_factor::<T>();
     let scale = power_scale(len);
     let mut min_gallop = MIN_GALLOP;
     let mut runs = RunStack::new();
@@ -178,7 +189,7 @@ pub fn tim<T: Ord>(arr: &mut [T]) {
     while start < len {
         let mut run = find_run(&mut arr[start..]);
         if run < min_run {
-            let end = len.min(start + min_run);
+            let end = len.min(start + build_len);
             build_run(&mut arr[start..end], run, &mut buf);
             run = end - start;
         }
@@ -203,14 +214,35 @@ pub fn tim<T: Ord>(arr: &mut [T]) {
     }
 }
 
-/// Slices shorter than this are sorted by [`extend_run`] alone; longer ones are split into
-/// runs of at least half this length.
+/// Slices shorter than this (times [`build_factor`]) are sorted as one run; longer ones are
+/// split into runs of at least half this length.
 ///
-/// Measured against 64 (runs of 32 to 64 elements, as in CPython): 1.1–1.2 times faster on
-/// random input of 100 to 1000 elements and 1.02–1.07 times beyond, for integers, strings and
-/// large elements alike. Against 16: 1.1–1.3 times faster on slices of 20 to 100 elements and
-/// within 4% either way beyond.
+/// Measured against 64 (runs of 32 to 64 elements, as in CPython), when every short run was
+/// extended by insertion: 1.1–1.2 times faster on random input of 100 to 1000 elements and
+/// 1.02–1.07 times beyond, for integers, strings and large elements alike. Against 16:
+/// 1.1–1.3 times faster on slices of 20 to 100 elements and within 4% either way beyond.
+/// Elements of at most 8 bytes, whose short runs are now built by merge sort, extend them to
+/// twice the minimum length instead (see [`build_factor`]).
 const MIN_MERGE: usize = 32;
+
+/// How many times the minimum run length a natural run shorter than it is extended to, and
+/// how many times [`MIN_MERGE`] a slice must be to be split into runs: 2 for elements of at
+/// most [`SMALL_SORT_MAX_SIZE`] bytes, whose short runs are built by merge sort's branchless
+/// sort (runs of 32 to 64 elements, as in CPython), 1 for larger ones, whose runs are extended
+/// by insertion. Natural runs of the minimum length are kept either way.
+///
+/// Measured for integers against 1: 1.1–1.3 times faster on random input up to 100 elements and
+/// 1.05–1.1 times beyond, as much with few distinct keys, and 1.05–1.3 times on input made of
+/// runs up to 1000 elements; up to 1.07 times slower on runs of about 45 elements (2000
+/// elements made of runs of `√n`), and 1.35–1.75 times on a sawtooth of 40 to 100 elements,
+/// whose pattern the processor learns when the insertions handle it.
+const fn build_factor<T>() -> usize {
+    if mem::size_of::<T>() <= SMALL_SORT_MAX_SIZE {
+        2
+    } else {
+        1
+    }
+}
 
 /// How many times in a row one run must win before a merge starts galloping.
 pub(super) const MIN_GALLOP: usize = 7;
@@ -389,10 +421,16 @@ fn find_run<T: Ord>(v: &mut [T]) -> usize {
     end
 }
 
-/// Sorts `v`, at most `MIN_MERGE` elements whose first `sorted` are already sorted, into a run.
+/// Sorts `v`, at most `MIN_MERGE * build_factor::<T>()` elements whose first `sorted` are
+/// already sorted, into a run.
 pub(super) fn build_run<T: Ord>(v: &mut [T], sorted: usize, buf: &mut Buffer<T>) {
-    if mem::size_of::<T>() <= SMALL_SORT_MAX_SIZE && sorted < SMALL_SORT_RUN {
-        // The stack buffer has room for `STACK_BYTES / 8 >= MIN_MERGE` such elements.
+    // A prefix of at least `SMALL_SORT_RUN` elements is extended by insertion unless the
+    // elements after it dip below its end: then they belong deep inside it, which a merge
+    // costs less than inserting them one by one.
+    if mem::size_of::<T>() <= SMALL_SORT_MAX_SIZE
+        && (sorted < SMALL_SORT_RUN || (sorted + 2 < v.len() && v[sorted + 2] < v[sorted - 2]))
+    {
+        // The stack buffer has room for `STACK_BYTES / 8 >= 2 * MIN_MERGE` such elements.
         super::merge::sort(v, buf.on_stack());
     } else {
         extend_run(v, sorted);

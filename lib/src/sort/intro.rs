@@ -23,7 +23,7 @@ use super::heap;
 ///   on any other.
 /// * **Branchless block partitioning.** Hoare's scheme scans from both ends for elements on
 ///   the wrong side of the pivot and swaps them; each scan stops at an unpredictable element,
-///   a mispredicted branch. Here each end compares a block of 64 elements first, recording
+///   a mispredicted branch. Here each end compares a block of 128 elements first, recording
 ///   the misplaced ones by offset without branching, and then exchanges as many misplaced
 ///   pairs as both blocks have (Edelkamp and Weiss's BlockQuicksort). It makes the same
 ///   comparisons as Hoare's scheme and exchanges each pair in a cycle of two moves instead of
@@ -73,14 +73,15 @@ use super::heap;
 ///
 /// Against this crate's [`quick`](crate::sort::quick) sort, which also falls back to heap sort
 /// but partitions elements of up to 64 bytes by Lomuto's scheme without branching, sorts short
-/// parts by sorting networks and takes all copies of a pivot out at once: 1.4–1.5 times slower
-/// on random integers, 1.06–1.13 times on random strings and 1.5–3.8 times with few distinct
-/// keys; but 1.2–1.65 times faster on random 64-byte elements, which block partitioning moves
-/// only when misplaced instead of twice each, and 1.3–3.6 times faster on nearly sorted input.
-/// Against [`slice::sort_unstable`]: 1.6–1.8 times slower on random integers and within 1.07
+/// parts by sorting networks and takes all copies of a pivot out at once: 1.35–1.55 times
+/// slower on random integers from 1000 elements on, 1.06–1.13 times on random strings and
+/// 1.5–3.8 times with few distinct keys; but 1.2–1.65 times faster on random 64-byte elements,
+/// which block partitioning moves only when misplaced instead of twice each, and 1.3–3.6 times
+/// faster on nearly sorted input.
+/// Against [`slice::sort_unstable`]: 1.45–1.75 times slower on random integers and within 1.07
 /// times on random strings, but 1.08–1.55 times faster on random 64-byte elements and 1.5–3.7
 /// times on nearly sorted input of 100 elements or more. Against [`heap`](fn@heap) sort, which
-/// it falls back to, it is 1.75–2.4 times faster on random integers, 2.1–6.7 times on strings
+/// it falls back to, it is 1.3–2.4 times faster on random integers, 2.1–6.7 times on strings
 /// and 1.5–4.4 times on 64-byte elements.
 ///
 /// Prefer [`slice::sort_unstable`] for real workloads.
@@ -152,7 +153,11 @@ const NINTHER: usize = 128;
 
 /// How many elements each side of [`partition_blocks`] compares before moving any; at most 256,
 /// so that an offset into a block fits in a byte.
-const BLOCK: usize = 64;
+///
+/// Edelkamp and Weiss's choice. Measured against 64: 1.02–1.06 times faster on random input
+/// from 1000 elements on, and 1.02–1.07 times on nearly sorted input and few distinct keys;
+/// 256 is no faster.
+const BLOCK: usize = 128;
 
 /// How many comparisons [`scan_block`] makes per round of its loop.
 const SCAN_UNROLL: usize = 8;
@@ -292,9 +297,10 @@ fn partition_blocks<T: Ord>(v: &mut [T], pivot: &T) -> usize {
             }
             if start_r == end_r {
                 start_r = 0;
-                end_r = scan_block(&mut offsets_r, block_r, move |i| {
-                    *base.add(r - 1 - i) <= *pivot
-                });
+                // Addressed from the last element down, so that every element of an unrolled
+                // round is a constant offset from one pointer.
+                let last_r = base.add(r - 1);
+                end_r = scan_block(&mut offsets_r, block_r, move |i| *last_r.sub(i) <= *pivot);
             }
 
             let count = (end_l - start_l).min(end_r - start_r);

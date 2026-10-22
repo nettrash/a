@@ -31,7 +31,7 @@ use std::thread;
 /// the missing elements, as if they were padding greater than every element, which never
 /// moves; nothing is actually padded, so any `T` can be sorted.
 ///
-/// The network is fixed, so the four refinements change only how it is carried out: the
+/// The network is fixed, so the five refinements change only how it is carried out: the
 /// sort makes exactly the compare-exchanges of the textbook recursion, each once, in an
 /// order that respects which ones depend on which.
 ///
@@ -62,6 +62,14 @@ use std::thread;
 ///   input, whose branches are predictable.
 /// * **The direction is a type.** Each part is sorted ascending or descending through a type
 ///   parameter rather than a flag, so every compare-exchange is compiled for its direction.
+/// * **Narrow elements are merged stage by stage.** For elements of at most 4 bytes, a merge
+///   of a power-of-two length of at most 2048 runs its stages one after the other, each in one
+///   loop over the whole merge, which stays in the first-level cache: the compiler runs every
+///   stage, down to the one pairing neighbours, as vector minimums and maximums of 4 to 16
+///   elements at once, where the straight-line merges of 16 compare one pair at a time. This
+///   is 1.25 times faster for `u32`, `u16` and `u8` at 1000 elements, 1.45–1.6 times at
+///   16,384 and 1.3–1.55 times at a million, on every input; for `u64`, of which a vector holds
+///   two, it was 1.1–1.25 times slower.
 ///
 /// Together, against the textbook recursion (Lang's, with the direction as a flag and a
 /// branch and a swap for each compare-exchange): 10.5–11.8 times faster on random integers
@@ -80,18 +88,21 @@ use std::thread;
 /// | `2^k`                | `n·k·(k + 1) / 4`                       | `k·(k + 1) / 2`   |
 /// | `2^(k−1) < n < 2^k`  | between `n·(k − 1)² / 4` and `n·k·(k + 1) / 4` | `k·(k + 1) / 2` |
 ///
-/// For `n = 1000`: 26,984 comparisons on every input, against about 10,500 for heap sort;
-/// for `n = 1,000,000`: 102,931,040, about `5.2·n·log₂ n`.
+/// For `n = 1000`: 26,984 comparisons on every input, against about 10,500 for heap sort
+/// (14,600 for elements of at most 8 bytes); for `n = 1,000,000`: 102,931,040, about
+/// `5.2·n·log₂ n`.
 ///
 /// With integers, whose compare-exchanges run in vector registers, this sort is as fast as
 /// [`slice::sort_unstable`] around 1000 elements, and 1.25 times faster than this crate's
 /// [`quick`](fn@super::quick) sort; from there on its `log₂ n` factor shows: `sort_unstable`
 /// is 1.35 times faster at 16,384 elements and 1.85 times at a million, and 20–70 times
-/// faster on sorted input, which it recognises. Elements with costlier comparisons pay for
+/// faster on sorted input, which it recognises. Random `u32`s and `u16`s, merged stage by
+/// stage, are sorted 1.1–1.3 times faster than by `sort_unstable` from 1000 to 16,384
+/// elements, and 1.25–1.45 times slower at a million. Elements with costlier comparisons pay for
 /// every one of them: `sort_unstable` is 2.5–5 times faster on random strings and 2.3–4.1
 /// times for random 64-byte elements. Against this crate's [`shell`](fn@super::shell) sort:
-/// 3.3–4 times faster on random integers, as fast on random strings, 1.35–1.6 times slower
-/// for 64-byte elements.
+/// 2.25–3.6 times faster on random integers from 1000 elements to a million, as fast on
+/// random strings, 1.35–1.6 times slower for 64-byte elements.
 ///
 /// # Panics
 ///
@@ -152,7 +163,9 @@ pub fn bitonic<T: Ord>(arr: &mut [T]) {
 /// 1.25 times faster than 16: each round waits for its slowest thread, and on the efficiency
 /// cores a task takes longer. Against the single-threaded [`slice::sort_unstable`], this is
 /// faster from 32,768 elements on: for integers 1.2 times there and 3.9 times at a million,
-/// for strings 1.15 and 2.2 times, for 64-byte elements 1.05 and 2.4 times.
+/// for strings 1.15 and 2.2 times, for 64-byte elements 1.05 and 2.4 times. Elements of at
+/// most 4 bytes, merged stage by stage as in [`bitonic`], sort 1.05–1.25 (`u32`) and
+/// 1.15–1.35 (`u8`) times faster than without that, from 65,536 to a million elements.
 ///
 /// # Panics
 ///
@@ -671,6 +684,9 @@ fn merge<T: Ord, D: Direction>(v: &mut [T]) {
 /// in one pass, then merges each part depth first.
 fn merge_pow2<T: Ord, D: Direction>(v: &mut [T]) {
     let n = v.len();
+    if mem::size_of::<T>() <= STAGED_MAX_SIZE && n <= STAGED_LEN {
+        return staged::<T, D>(v);
+    }
     if n <= MERGE_LEAF {
         leaf::<T, D, true>(v);
         return;
@@ -706,6 +722,67 @@ fn merge_pow2<T: Ord, D: Direction>(v: &mut [T]) {
         clean2::<T, D>(a, b);
         merge_pow2::<T, D>(a);
         merge_pow2::<T, D>(b);
+    }
+}
+
+/// Elements of at most this many bytes are merged stage by stage ([`staged`]) once a merge of
+/// a power-of-two length is at most [`STAGED_LEN`] long.
+///
+/// Measured against the straight-line merges of 16 for `u32`, `u16` and `u8`: 1.25 times
+/// faster on 1000 random elements, 1.4–1.45 times on 16,384 and 1.3 times on a million for
+/// `u32`, 1.6–1.8 times for `u8`. For `u64` stage by stage is 1.1–1.25 times slower: two
+/// elements to a vector register do not pay for a pass over memory per stage, and the
+/// straight-line merges keep them in registers.
+const STAGED_MAX_SIZE: usize = 4;
+
+/// The longest merge [`staged`] runs, for elements of at most [`STAGED_MAX_SIZE`] bytes:
+/// 2048 elements, at most 8 KiB, stay in the first-level cache through all its stages.
+/// Measured: from 2048 to 32,768 within 2–3% of each other, and 64 to 256 up to 1.3 times
+/// slower.
+const STAGED_LEN: usize = 2048;
+
+/// Merges `v`, of a power-of-two length, into direction `D`, one stage at a time over all of
+/// `v`: the compare-exchanges `2^s` apart, for `s` from `log₂ n − 1` down to 0, each stage in
+/// one loop over the slice.
+///
+/// These are the compare-exchanges of [`merge_pow2`], in an order that still runs every one
+/// after the ones it depends on, but the loops of a stage are long and regular: the compiler
+/// runs a stage as vector minimums and maximums of 16 bytes, also the last three, which pair
+/// neighbours 4, 2 and 1 apart (with interleaving loads and stores for the last two). The
+/// straight-line merges of 16 elements, which [`merge_pow2`] recurses into otherwise, compare
+/// one pair at a time: for narrow elements, a vector compares 4 to 16.
+fn staged<T: Ord, D: Direction>(v: &mut [T]) {
+    let n = v.len();
+    let mut d = n / 2;
+    while d >= 8 {
+        for block in v.chunks_exact_mut(2 * d) {
+            let (a, b) = block.split_at_mut(d);
+            clean2::<T, D>(a, b);
+        }
+        d /= 2;
+    }
+    // Stages of 4, 2 and 1 positions apart in loops of their own: with the loop above, a
+    // stage 4 apart has too few pairs per block for the compiler to use vectors.
+    if d == 4 {
+        for [a, b, c, e, f, g, h, i] in v.as_chunks_mut::<8>().0 {
+            cx::<T, D>(a, f);
+            cx::<T, D>(b, g);
+            cx::<T, D>(c, h);
+            cx::<T, D>(e, i);
+        }
+        d = 2;
+    }
+    if d == 2 {
+        for [a, b, c, e] in v.as_chunks_mut::<4>().0 {
+            cx::<T, D>(a, c);
+            cx::<T, D>(b, e);
+        }
+        d = 1;
+    }
+    if d == 1 {
+        for [a, b] in v.as_chunks_mut::<2>().0 {
+            cx::<T, D>(a, b);
+        }
     }
 }
 

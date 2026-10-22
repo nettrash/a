@@ -337,6 +337,25 @@ fn sorts_small_elements_stably() {
             .collect();
         assert_sorts_small_like_std_stable(&keys);
     }
+    // Short natural runs, which start the runs that are built to twice the minimum length:
+    // shorter than the prefix that is extended by insertion, long enough for it, with what
+    // follows them dipping below their end or not.
+    for n in [40, 63, 64, 65, 100, 300, size(2000, 400)] {
+        for max_run in [3, 4, 5, 8, 16, 33, 63] {
+            for keys in [40, 1 << 20] {
+                let keys: Vec<u32> = runs_of_keys(n, max_run, keys, &mut state)
+                    .iter()
+                    .map(|&k| k as u32)
+                    .collect();
+                assert_sorts_small_like_std_stable(&keys);
+            }
+        }
+        let mut nearly: Vec<u32> = (0..n as u32).collect();
+        for i in (0..n).step_by(17) {
+            nearly.swap(i, (i * 7 + 3) % n);
+        }
+        assert_sorts_small_like_std_stable(&nearly);
+    }
 }
 
 #[test]

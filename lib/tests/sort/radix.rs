@@ -214,6 +214,134 @@ fn sorts_short_slices_of_wide_keys() {
         assert_radix(&v);
         let w: Vec<i8> = (0..len).map(|_| xorshift(&mut state) as i8).collect();
         assert_radix(&w);
+        // 16 digits of 4 bits, or 13 of 5, each a count of its own.
+        let u: Vec<u64> = (0..len).map(|_| xorshift(&mut state)).collect();
+        assert_radix(&u);
+        assert_radix_by_key(&u);
+    }
+}
+
+/// `len` random keys of `bits` bits from bit `low` on, with the byte from bit `shared` on the
+/// same in every key, if there is one.
+fn short_keys(len: usize, bits: u32, low: u32, shared: Option<u32>, state: &mut u64) -> Vec<u64> {
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1 << bits) - 1
+    };
+    let byte = xorshift(state) & 0xFF;
+    (0..len)
+        .map(|_| {
+            let x = (xorshift(state) & mask) << low;
+            match shared {
+                Some(at) => (x & !(0xFF << at)) | (byte << at),
+                None => x,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn sorts_short_slices_in_every_digit_plan() {
+    // From 16 to 639 elements, keys of up to eight 8-bit digits are counted in rows of eight
+    // lanes, one per digit, when those digits save enough passes against digits of 6 bits;
+    // from 24 elements on, digits of 6 bits are taken otherwise, below 48 elements per digit of
+    // `log₂ n` bits. In lanes, signed values are sorted as their bits, and a digit all keys share
+    // takes no pass.
+    let lens: &[usize] = if cfg!(miri) {
+        &[16, 24, 48, 100, 300]
+    } else {
+        &[
+            16, 17, 23, 24, 31, 32, 47, 48, 63, 64, 95, 96, 100, 127, 128, 143, 144, 200, 256, 319,
+            320, 400, 511, 639, 640, 641,
+        ]
+    };
+    let widths: &[u32] = if cfg!(miri) {
+        &[9, 24, 48, 64]
+    } else {
+        &[7, 9, 12, 16, 17, 24, 25, 32, 40, 48, 56, 63, 64]
+    };
+    let mut state = 0x1A4E_1A4E_1A4E_1A4E;
+    for &len in lens {
+        for &bits in widths {
+            for (low, shared) in [(0, None), (3, None), (0, Some(16))] {
+                if bits + low > 64 || (shared.is_some() && bits < 32) {
+                    continue;
+                }
+                let v = short_keys(len, bits, low, shared, &mut state);
+                assert_radix(&v);
+                assert_radix_by_key(&v);
+                // Negative values too: the keys moved down by half their range.
+                let half = 1u64 << (bits + low - 1);
+                let signed: Vec<i64> = v.iter().map(|&x| x.wrapping_sub(half) as i64).collect();
+                assert_radix(&signed);
+                assert_radix_by_key(&signed);
+                if bits + low <= 32 {
+                    let u: Vec<u32> = v.iter().map(|&x| x as u32).collect();
+                    assert_radix(&u);
+                    let i: Vec<i32> = signed.iter().map(|&x| x as i32).collect();
+                    assert_radix(&i);
+                    assert_radix_by_key(&i);
+                }
+            }
+        }
+        let i16s: Vec<i16> = (0..len).map(|_| xorshift(&mut state) as i16).collect();
+        assert_radix(&i16s);
+        let isizes: Vec<isize> = (0..len).map(|_| xorshift(&mut state) as isize).collect();
+        assert_radix(&isizes);
+        let chars: Vec<char> = (0..len)
+            .map(|_| char::from_u32((xorshift(&mut state) % 0x11_0000) as u32).unwrap_or('a'))
+            .collect();
+        assert_radix(&chars);
+        // Elements of 72 bytes with eight digits of keys are gathered once, from 64 elements on.
+        let mut e: Vec<[u64; 9]> = (0..len)
+            .map(|i| {
+                let mut e = [i as u64; 9];
+                e[0] = xorshift(&mut state);
+                e
+            })
+            .collect();
+        let mut expected = e.clone();
+        expected.sort_by_key(|e| e[0]);
+        radix_by_key(&mut e, |e| e[0]);
+        assert_eq!(e, expected);
+    }
+}
+
+#[test]
+fn sorts_across_the_counter_widths_and_runs_of_shared_digits() {
+    // Counts are `u16` up to 65,535 elements and `u32` beyond. Nearly sorted keys share their
+    // high digits with their neighbours, and four distinct wide keys share every digit with a
+    // quarter of the others: the counts and places are handed out four keys at a time.
+    let mut state = 0xC0DE_C0DE_C0DE_C0DE;
+    let lens: &[usize] = if cfg!(miri) {
+        &[300]
+    } else {
+        &[1000, 65_535, 65_536]
+    };
+    for &len in lens {
+        let four: [u64; 4] = std::array::from_fn(|_| xorshift(&mut state));
+        let mut nearly: Vec<u64> = (0..len).map(|_| xorshift(&mut state)).collect();
+        nearly.sort_unstable();
+        for _ in 0..(len / 100).max(1) {
+            let i = (xorshift(&mut state) % len as u64) as usize;
+            let j = (xorshift(&mut state) % len as u64) as usize;
+            nearly.swap(i, j);
+        }
+        let shapes: Vec<Vec<u64>> = vec![
+            (0..len).map(|_| xorshift(&mut state)).collect(),
+            (0..len)
+                .map(|_| four[(xorshift(&mut state) % 4) as usize])
+                .collect(),
+            nearly,
+        ];
+        for v in shapes {
+            assert_radix(&v);
+            assert_radix_by_key(&v);
+            let narrow: Vec<u32> = v.iter().map(|&x| (x >> 32) as u32).collect();
+            assert_radix(&narrow);
+            assert_radix_by_key(&narrow);
+        }
     }
 }
 

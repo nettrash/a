@@ -394,11 +394,30 @@ fn gaps(n: usize) -> Vec<usize> {
     gaps
 }
 
-/// The comparisons classic Shell sort makes on `keys`, after the scan for one ascending or
-/// strictly descending run that covers the whole slice: one h-insertion pass per gap, each
-/// element compared with the one `gap` before it and, while that one is greater, carried on
-/// past it.
+/// The gaps Shell sort uses for `n` elements of at most 8 bytes, largest first: Ciura's
+/// sequence, `1, 4, 10, 23, 57, 132, 301, 701`, then times 2.25 rounded down, below `n`.
+fn ciura_gaps(n: usize) -> Vec<usize> {
+    let mut gaps = vec![1, 4, 10, 23, 57, 132, 301, 701];
+    while gaps[gaps.len() - 1] < n {
+        let next = gaps[gaps.len() - 1] * 9 / 4;
+        gaps.push(next);
+    }
+    gaps.retain(|&g| g < n);
+    gaps.reverse();
+    gaps
+}
+
+/// The comparisons classic Shell sort makes on `keys` with Sedgewick's gaps, those of
+/// [`gaps`].
 fn reference(keys: &[usize]) -> usize {
+    classic_comparisons(keys, &gaps(keys.len()))
+}
+
+/// The comparisons classic Shell sort makes on `keys` with `gaps`, after the scan for one
+/// ascending or strictly descending run that covers the whole slice: one h-insertion pass per
+/// gap, each element compared with the one `gap` before it and, while that one is greater,
+/// carried on past it.
+fn classic_comparisons(keys: &[usize], gaps: &[usize]) -> usize {
     let mut v = keys.to_vec();
     let n = v.len();
     if n < 2 {
@@ -422,7 +441,7 @@ fn reference(keys: &[usize]) -> usize {
     if run == n {
         return comparisons;
     }
-    for gap in gaps(n) {
+    for &gap in gaps {
         for i in gap..n {
             let x = v[i];
             let mut j = i;
@@ -936,8 +955,9 @@ fn tiny_non_decreasing_input_is_never_moved() {
 #[test]
 fn tiny_panicking_comparison_keeps_every_element_exactly_once() {
     // Panics land in the window's comparisons, made before it writes anything, and in the
-    // insertion that goes on past it: at 64 elements the gaps of 10 and 4 take the window,
-    // and reversed input goes past it.
+    // insertion that goes on past it: at 64 elements the pass with gap 10 takes the window
+    // for its last 24 elements (the gap of 4 too, if those were hard to predict), and the
+    // last element of the rotated input goes past it.
     let len = size(64, 24);
     let mut state = 0x0123_4567_89AB_CDEF;
     let random: Vec<usize> = (0..len)
@@ -964,6 +984,87 @@ fn tiny_inconsistent_ord_keeps_every_element_exactly_once() {
     let mut seed = 0x5EED_5EED_5EED_5EED;
     for len in 0..size(64, 20) {
         for _ in 0..size(50, 3) {
+            let keys: Vec<usize> = (0..len).collect();
+            sort_tiny(&keys, None, Some(xorshift(&mut seed)));
+        }
+    }
+}
+
+/// Organ-pipe input, rising to the middle and falling after it.
+fn organ_pipe(n: usize) -> Vec<usize> {
+    (0..n).map(|i| if i < n / 2 { i } else { n - i }).collect()
+}
+
+#[test]
+fn tiny_patterned_input_is_inserted_plainly() {
+    // Organ-pipe input moves elements in long runs of one step each, which plain insertion
+    // predicts well: no block takes the window, so the comparisons are exactly those of
+    // classic Shell sort with Ciura's gaps, also in the blocks of the head of each pass and
+    // in the last elements of each block, which note their steps.
+    for n in [200, size(1000, 300), size(5000, 400)] {
+        let keys = organ_pipe(n);
+        let expected = classic_comparisons(&keys, &ciura_gaps(n));
+        assert_eq!(
+            sort_tiny(&keys, None, None).comparisons,
+            expected,
+            "n = {n}"
+        );
+    }
+    let n = size(2000, 1000);
+    let sawtooth: Vec<usize> = (0..n).map(|i| i % (n / 8)).collect();
+    let expected = classic_comparisons(&sawtooth, &ciura_gaps(n));
+    assert_eq!(sort_tiny(&sawtooth, None, None).comparisons, expected);
+}
+
+#[test]
+fn tiny_random_input_takes_the_window() {
+    // The window compares each element with the four before it on its chain at once: more
+    // comparisons than classic Shell sort, which stops at the first that is not greater.
+    let n = size(1000, 300);
+    let mut state = 0x7A6E_0F0E_11CE_5EED;
+    let keys: Vec<usize> = (0..n)
+        .map(|_| xorshift(&mut state) as usize % 60_000)
+        .collect();
+    let classic = classic_comparisons(&keys, &ciura_gaps(n));
+    let run = sort_tiny(&keys, None, None);
+    assert!(
+        run.comparisons > classic * 3 / 2,
+        "{} against {classic}",
+        run.comparisons
+    );
+}
+
+#[test]
+fn tiny_panicking_comparison_in_long_passes_keeps_every_element_exactly_once() {
+    // 200 elements make blocks of more than 64 elements, whose last 32 note their steps:
+    // random keys take the window there, organ-pipe keys plain insertion, and sawtooth keys
+    // both, with steps that repeat with the period of 3 or 4 in the last elements of a block
+    // inserted either way.
+    let len = 200;
+    let mut state = 0x0FED_CBA9_8765_4321;
+    let layouts: Vec<Vec<usize>> = vec![
+        (0..len)
+            .map(|_| xorshift(&mut state) as usize % 1000)
+            .collect(),
+        organ_pipe(len),
+        (0..len).map(|id| id % 3).collect(),
+        (0..len).map(|id| id % 4).collect(),
+    ];
+    for keys in layouts {
+        let total = sort_tiny(&keys, None, None).comparisons;
+        for budget in (0..=total).step_by(size(1, 61)) {
+            let run = sort_tiny(&keys, Some(budget), None);
+            assert_eq!(run.completed, budget == total, "budget {budget}: {keys:?}");
+        }
+    }
+}
+
+#[test]
+fn tiny_inconsistent_ord_in_long_passes_keeps_every_element_exactly_once() {
+    // Answers at random make the blocks choose either way and the steps look random.
+    let mut seed = 0x1DE5_1DE5_1DE5_1DE5;
+    for len in [100, 200, size(700, 150), size(3000, 200)] {
+        for _ in 0..size(5, 1) {
             let keys: Vec<usize> = (0..len).collect();
             sort_tiny(&keys, None, Some(xorshift(&mut seed)));
         }

@@ -883,9 +883,12 @@ struct TinyState {
     budget: Cell<Option<usize>>,
     /// The state of a random generator that answers comparisons instead of the keys, if set.
     liar: Cell<Option<u64>>,
-    /// Moves observed as in [`Watched`]: the address each element was last seen at.
+    /// Moves observed as in [`Watched`]: the slot each element was last seen in. Elements of
+    /// at most 4 bytes are also compared while the sort holds them outside the slice, in
+    /// registers or on its stack; only addresses within `slots`, the slice, count.
     moves: Cell<usize>,
     seen_at: RefCell<Vec<usize>>,
+    slots: Cell<(usize, usize)>,
     drops: RefCell<Vec<u32>>,
 }
 
@@ -896,6 +899,10 @@ thread_local! {
 impl TinyState {
     fn observe(&self, t: &Tiny) {
         let here = t as *const Tiny as usize;
+        let (lo, hi) = self.slots.get();
+        if !(lo..hi).contains(&here) {
+            return;
+        }
         let mut seen_at = self.seen_at.borrow_mut();
         if seen_at[t.id as usize] != here {
             seen_at[t.id as usize] = here;
@@ -969,6 +976,8 @@ fn sort_tiny(keys: &[usize], budget: Option<usize>, liar: Option<u64>) -> TinyRu
         s.liar.set(liar);
         s.moves.set(0);
         *s.seen_at.borrow_mut() = v.iter().map(|t| t as *const Tiny as usize).collect();
+        let lo = v.as_ptr() as usize;
+        s.slots.set((lo, lo + n * size_of::<Tiny>()));
         *s.drops.borrow_mut() = vec![0; n];
     });
 
@@ -1012,13 +1021,30 @@ fn sort_tiny(keys: &[usize], budget: Option<usize>, liar: Option<u64>) -> TinyRu
 
 #[test]
 fn tiny_elements_match_the_reference() {
-    // The branchless kernel makes the same comparisons, and rewriting a pair that is in
-    // order in place is not a move: still exactly two moves per swap.
+    // The branchless kernels make the same comparisons, and writing back a pair that is in
+    // order is not a move. An element moved twice while held outside the slice is seen in
+    // its slot only after both moves, so there are at most two moves per swap (exactly two
+    // for larger elements: see `moves_are_exactly_twice_the_inversions`).
     for_each_test_input(0x7111_0E1E_3E17_5EED, &mut |v| {
         let run = sort_tiny(v, None, None);
         assert_eq!(run.comparisons, reference(v).comparisons, "{v:?}");
-        assert_eq!(run.moves, 2 * inversions(v), "{v:?}");
+        assert!(run.moves <= 2 * inversions(v), "{v:?}");
     });
+    // Long enough for whole chunks of the branchless round, under Miri too.
+    let mut state = 0x7111_0E1E_3E17_5EED;
+    for n in [66, 67, 68, 69, 131, 140] {
+        let mut v: Vec<usize> = (0..n).collect();
+        shuffle(&mut v, &mut state);
+        for keys in [
+            v.clone(),
+            v.iter().map(|k| k % 3).collect(),
+            (0..n).rev().collect(),
+        ] {
+            let run = sort_tiny(&keys, None, None);
+            assert_eq!(run.comparisons, reference(&keys).comparisons, "{keys:?}");
+            assert!(run.moves <= 2 * inversions(&keys), "{keys:?}");
+        }
+    }
 }
 
 #[test]
@@ -1041,16 +1067,107 @@ fn tiny_panicking_comparison_keeps_every_element_exactly_once() {
             assert_eq!(run.completed, budget == total, "budget {budget}: {keys:?}");
         }
     }
+    // Long enough for a panic inside a chunk held outside the slice, and while an element is
+    // carried from one chunk to the next: every budget, or a sample of them under Miri.
+    for keys in panic_layouts(size(140, 70)) {
+        let keys: Vec<usize> = keys.into_iter().map(|k| k as usize).collect();
+        let total = sort_tiny(&keys, None, None).comparisons;
+        for budget in (0..=total).step_by(size(1, 97)).chain([total]) {
+            let run = sort_tiny(&keys, Some(budget), None);
+            assert_eq!(run.completed, budget == total, "budget {budget}: {keys:?}");
+        }
+    }
 }
 
 #[test]
 fn tiny_inconsistent_ord_keeps_every_element_exactly_once() {
     let mut seed = 0x5EED_5EED_5EED_5EED;
-    for len in 0..size(64, 12) {
+    for len in (0..size(64, 12)).chain([66, 67, 100, 141]) {
         for _ in 0..size(50, 2) {
             let keys: Vec<usize> = (0..len).collect();
             sort_tiny(&keys, None, Some(xorshift(&mut seed)));
         }
+    }
+}
+
+/// An element of 4 bytes, sorted by `key` only, carrying the index it started at.
+#[derive(Debug, Clone, Copy)]
+struct Narrow {
+    key: u16,
+    idx: u16,
+}
+impl PartialEq for Narrow {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl Eq for Narrow {}
+impl PartialOrd for Narrow {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Narrow {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+#[test]
+fn narrow_elements_match_std_stable_sort() {
+    // Elements of up to 4 bytes run whole chunks of the round outside the slice: lengths
+    // around one and two chunks, every width that does, and stability across chunks.
+    fn check<T: Ord + Copy + Send + std::fmt::Debug>(keys: &[T]) {
+        let mut expected = keys.to_vec();
+        expected.sort();
+        for parallel in [false, true] {
+            let mut v = keys.to_vec();
+            sort(&mut v, parallel);
+            assert_eq!(v, expected, "{keys:?}");
+        }
+    }
+    let mut state = 0xC0FF_EE00_D15C_0BA5;
+    let lens: Vec<usize> = if cfg!(miri) {
+        vec![65, 66, 67, 130, 133]
+    } else {
+        (0..300).chain([1000, 1001]).collect()
+    };
+    for &len in &lens {
+        for modulus in [2, 5, 1 << 16, u64::MAX] {
+            let r: Vec<u64> = (0..len).map(|_| xorshift(&mut state) % modulus).collect();
+            check(&r.iter().map(|&x| x as u8).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as i8).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as u16).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as i32).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x as u32).collect::<Vec<_>>());
+            check(&r.iter().map(|&x| x % 2 == 0).collect::<Vec<_>>());
+            check(
+                &r.iter()
+                    .map(|&x| [x as u8, (x >> 8) as u8, (x >> 16) as u8])
+                    .collect::<Vec<_>>(),
+            );
+            check(
+                &r.iter()
+                    .map(|&x| char::from_u32(x as u32 % 0xD800).unwrap())
+                    .collect::<Vec<_>>(),
+            );
+            let narrow: Vec<Narrow> = r
+                .iter()
+                .zip(0..)
+                .map(|(&x, idx)| Narrow { key: x as u16, idx })
+                .collect();
+            let mut expected = narrow.clone();
+            expected.sort();
+            for parallel in [false, true] {
+                let mut v = narrow.clone();
+                sort(&mut v, parallel);
+                // `Narrow` compares keys only: the indices show the order of equal keys.
+                let pairs = |v: &[Narrow]| v.iter().map(|n| (n.key, n.idx)).collect::<Vec<_>>();
+                assert_eq!(pairs(&v), pairs(&expected), "{r:?}");
+            }
+        }
+        let rev: Vec<u16> = (0..len as u16).rev().collect();
+        check(&rev);
     }
 }
 

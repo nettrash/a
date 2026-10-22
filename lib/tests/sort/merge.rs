@@ -888,3 +888,545 @@ fn mutating_comparison_keeps_every_mutation() {
         }
     }
 }
+
+/// An 8-byte element compared by `key` only, carrying the index it started at: small enough
+/// for the paths reserved for elements of at most 8 bytes.
+#[derive(Debug, Clone, Copy)]
+struct Small {
+    key: u32,
+    idx: u32,
+}
+impl PartialEq for Small {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl Eq for Small {}
+impl PartialOrd for Small {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Small {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+/// Like [`assert_sorts_like_std_stable`], with 8-byte elements.
+fn assert_sorts_small_like_std_stable(keys: &[u32]) {
+    assert_eq!(std::mem::size_of::<Small>(), 8);
+    let mut expected: Vec<(u32, u32)> = keys.iter().copied().zip(0..).collect();
+    expected.sort_by_key(|e| e.0);
+    let mut actual: Vec<Small> = keys
+        .iter()
+        .zip(0..)
+        .map(|(&key, idx)| Small { key, idx })
+        .collect();
+    merge(&mut actual);
+    let actual: Vec<(u32, u32)> = actual.into_iter().map(|e| (e.key, e.idx)).collect();
+    assert_eq!(actual, expected, "input: {keys:?}");
+}
+
+/// Inputs whose halves, at some level of the recursion, come out of their own sorts in
+/// different places (one sorted already and left where it is, the other merged into the
+/// buffer), or in order, or reversed: sorted and random stretches of various lengths side by
+/// side, strictly descending stretches, and sorted input with a few elements out of place.
+fn mixed_inputs(n: usize, state: &mut u64) -> Vec<Vec<u32>> {
+    let random = |state: &mut u64, len: usize| -> Vec<u32> {
+        (0..len).map(|_| (xorshift(state) % 1000) as u32).collect()
+    };
+    let mut inputs = Vec::new();
+    let mut sorted_then_random: Vec<u32> = (0..(n / 2) as u32).collect();
+    sorted_then_random.extend(random(state, n - n / 2));
+    inputs.push(sorted_then_random);
+    let mut random_then_sorted = random(state, n / 2);
+    random_then_sorted.extend((0..(n - n / 2) as u32).map(|k| k * 3));
+    inputs.push(random_then_sorted);
+    for block in [5, 8, 9, 63, 64, 65, 200] {
+        // Alternating sorted, random and strictly descending blocks.
+        let mut v = Vec::with_capacity(n);
+        let mut kind = 0;
+        while v.len() < n {
+            let len = block.min(n - v.len());
+            let mut b = random(state, len);
+            match kind % 3 {
+                0 => b.sort(),
+                1 => {}
+                _ => {
+                    b.sort();
+                    b.dedup();
+                    b.reverse();
+                }
+            }
+            v.extend(b);
+            kind += 1;
+        }
+        inputs.push(v);
+    }
+    let mut nearly: Vec<u32> = (0..n as u32).collect();
+    for _ in 0..3 {
+        let (i, j) = (
+            xorshift(state) as usize % n.max(1),
+            xorshift(state) as usize % n.max(1),
+        );
+        if n > 0 {
+            nearly.swap(i, j);
+        }
+    }
+    inputs.push(nearly);
+    inputs.push((0..n as u32).rev().collect());
+    inputs
+}
+
+#[test]
+fn sorts_small_elements_stably() {
+    for len in 0..=size(10, 7) as u32 {
+        for_each_sequence(len, 3, &mut |s| {
+            let keys: Vec<u32> = s.iter().map(|&k| k.into()).collect();
+            assert_sorts_small_like_std_stable(&keys);
+        });
+    }
+    // Lengths across the leaves of 64 elements, the merges split in two from 128 elements and
+    // in four from 4096.
+    let mut state = 0x5A11_E1E3_E275_0001;
+    let long: &[usize] = if cfg!(miri) {
+        &[300, 4096]
+    } else {
+        &[1000, 4095, 4096, 9000]
+    };
+    for len in (0..size(300, 140)).chain(long.iter().copied()) {
+        let moduli: &[u64] = if cfg!(miri) && len > 300 {
+            &[3, 1 << 32]
+        } else {
+            &[2, 3, 8, 64, 1 << 32]
+        };
+        for &modulus in moduli {
+            let keys: Vec<u32> = (0..len)
+                .map(|_| (xorshift(&mut state) % modulus) as u32)
+                .collect();
+            assert_sorts_small_like_std_stable(&keys);
+        }
+    }
+    for n in [100, 129, 200, size(1000, 300), size(9000, 300)] {
+        for keys in mixed_inputs(n, &mut state) {
+            assert_sorts_small_like_std_stable(&keys);
+        }
+    }
+}
+
+#[test]
+fn sorts_large_elements_stably_in_long_merges() {
+    // 16-byte elements are merged in four parts from 4096 elements, 40-byte ones in two.
+    let mut state = 0x1A26_E000_0000_0001;
+    for n in [128, 129, 200, size(1000, 300), size(5000, 4096)] {
+        if cfg!(miri) && n > 300 {
+            // One long random input, for the merges split in four.
+            let keys: Vec<u64> = (0..n).map(|_| xorshift(&mut state)).collect();
+            assert_sorts_like_std_stable(&keys);
+            continue;
+        }
+        for keys in mixed_inputs(n, &mut state) {
+            assert_sorts_like_std_stable(&keys);
+            let wide: Vec<[u32; 8]> = keys.iter().map(|&k| [k / 7, k, 0, 0, 0, 0, 0, 0]).collect();
+            assert_sorts_like_std_stable(&wide);
+        }
+        for modulus in [3, 1 << 32] {
+            let keys: Vec<u64> = (0..n).map(|_| xorshift(&mut state) % modulus).collect();
+            assert_sorts_like_std_stable(&keys);
+        }
+    }
+}
+
+thread_local! {
+    /// How many comparisons the elements below may still make before one panics.
+    static BUDGET: Cell<usize> = const { Cell::new(0) };
+    /// How many times each of the elements below has been dropped, by id.
+    static DROPS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// An 8-byte element whose comparisons panic once [`BUDGET`] is spent, and whose drops are
+/// counted in [`DROPS`].
+struct Fragile {
+    key: u32,
+    id: u32,
+}
+impl Drop for Fragile {
+    fn drop(&mut self) {
+        DROPS.with(|d| d.borrow_mut()[self.id as usize] += 1);
+    }
+}
+impl PartialEq for Fragile {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Fragile {}
+impl PartialOrd for Fragile {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Fragile {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let left = BUDGET.with(Cell::get);
+        if left == 0 {
+            panic!("comparison budget exhausted");
+        }
+        BUDGET.with(|b| b.set(left - 1));
+        self.key.cmp(&other.key)
+    }
+}
+
+/// [`sort_with_comparison_budget`] for 8-byte elements. Returns whether the sort completed
+/// and how many comparisons it made.
+fn sort_small_with_comparison_budget(keys: &[u32], budget: usize) -> (bool, usize) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    assert_eq!(std::mem::size_of::<Fragile>(), 8);
+    let len = keys.len();
+    DROPS.with(|d| *d.borrow_mut() = vec![0; len]);
+    BUDGET.with(|b| b.set(budget));
+    let mut v: Vec<Fragile> = keys
+        .iter()
+        .zip(0..)
+        .map(|(&key, id)| Fragile { key, id })
+        .collect();
+    let result = catch_unwind(AssertUnwindSafe(|| merge(&mut v)));
+    let made = budget - BUDGET.with(Cell::get);
+    if result.is_ok() {
+        assert!(
+            v.windows(2)
+                .all(|w| (w[0].key, w[0].id) < (w[1].key, w[1].id))
+        );
+    }
+    let mut ids: Vec<u32> = v.iter().map(|t| t.id).collect();
+    ids.sort_unstable();
+    assert!(
+        ids.iter().copied().eq(0..len as u32),
+        "element lost or duplicated"
+    );
+    assert!(
+        v.iter().all(|t| t.key == keys[t.id as usize]),
+        "element changed during sort"
+    );
+    assert!(
+        DROPS.with(|d| d.borrow().iter().all(|&c| c == 0)),
+        "element dropped during sort"
+    );
+    drop(v);
+    assert!(
+        DROPS.with(|d| d.borrow().iter().all(|&c| c == 1)),
+        "element leaked or double-dropped"
+    );
+    (result.is_ok(), made)
+}
+
+#[test]
+fn panicking_comparison_keeps_every_element_exactly_once_for_small_elements() {
+    // Panics land in the descents scan and the merges of a leaf sorted into either place,
+    // while a half waits in the buffer, in the checks of every merge, in the binary search of a
+    // split merge and in its parts. Long slices try a sample of budgets.
+    let mut state = 0x0123_4567_89AB_CDE0;
+    for n in [9, 70, 130, size(300, 140), size(5000, 4096)] {
+        let random: Vec<u32> = (0..n).map(|_| (xorshift(&mut state) % 7) as u32).collect();
+        let mut layouts = if cfg!(miri) && n > 300 {
+            Vec::new()
+        } else {
+            mixed_inputs(n, &mut state)
+        };
+        layouts.push(random);
+        for keys in layouts {
+            let (completed, total) = sort_small_with_comparison_budget(&keys, usize::MAX);
+            assert!(completed);
+            let tries = if n > 1000 { size(15, 2) } else { size(150, 15) };
+            for budget in (0..total).step_by((total / tries).max(1)) {
+                let (completed, _) = sort_small_with_comparison_budget(&keys, budget);
+                assert!(!completed, "budget {budget} of {total}: {keys:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn panicking_comparison_keeps_every_element_exactly_once_in_long_merges() {
+    let mut state = 0x0123_4567_89AB_CDE1;
+    for n in [130, size(300, 150)] {
+        for keys in mixed_inputs(n, &mut state) {
+            let total = comparisons(&keys);
+            let step = (total / size(300, 10)).max(1);
+            for budget in (0..total).step_by(step) {
+                assert!(
+                    !sort_with_comparison_budget(&keys, budget),
+                    "budget {budget}"
+                );
+            }
+            assert!(sort_with_comparison_budget(&keys, total));
+        }
+    }
+}
+
+thread_local! {
+    /// The state of the answers the elements below give.
+    static LIES: Cell<u64> = const { Cell::new(0x5EED_5EED_5EED_5EED) };
+}
+
+/// An 8-byte element whose comparisons answer at random, or always the same.
+struct SmallLiar {
+    id: u32,
+    mode: u32,
+}
+impl PartialEq for SmallLiar {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for SmallLiar {}
+impl PartialOrd for SmallLiar {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SmallLiar {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let answers = [Ordering::Less, Ordering::Equal, Ordering::Greater];
+        let random = || {
+            LIES.with(|s| {
+                let mut state = s.get();
+                let r = xorshift(&mut state);
+                s.set(state);
+                r
+            })
+        };
+        match self.mode {
+            0..=2 => answers[self.mode as usize],
+            3 => answers[(random() % 3) as usize],
+            _ => {
+                // Mostly the order of scrambled ids, so that halves need merging, with one
+                // answer in eight reversed.
+                let key = |id: u32| id.wrapping_mul(0x9E37_79B9).rotate_left(7);
+                let truth = key(self.id).cmp(&key(other.id));
+                if random() % 8 == 0 {
+                    truth.reverse()
+                } else {
+                    truth
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn inconsistent_ord_keeps_every_element_exactly_once_for_small_elements_and_long_merges() {
+    for mode in 0..5 {
+        let long = if cfg!(miri) && mode < 4 { 300 } else { 5000 };
+        let lens = (0..size(80, 30) as u32).chain([128, 129, 300, long]);
+        for len in lens {
+            for _ in 0..if mode < 3 { 1 } else { size(4, 2) } {
+                let mut v: Vec<SmallLiar> = (0..len).map(|id| SmallLiar { id, mode }).collect();
+                merge(&mut v);
+                let mut ids: Vec<u32> = v.iter().map(|l| l.id).collect();
+                ids.sort_unstable();
+                assert!(ids.into_iter().eq(0..len), "mode {mode}, len {len}");
+            }
+        }
+    }
+    // Large elements in long merges, split in two and, up to 32 bytes, in four.
+    for mode in 0..5u32 {
+        let long = if cfg!(miri) && mode < 4 { 300 } else { 5000 };
+        for len in [128usize, 300, long] {
+            let mut v: Vec<(SmallLiar, u64)> = (0..len as u32)
+                .map(|id| (SmallLiar { id, mode }, 0))
+                .collect();
+            merge(&mut v);
+            let mut ids: Vec<u32> = v.iter().map(|l| l.0.id).collect();
+            ids.sort_unstable();
+            assert!(ids.into_iter().eq(0..len as u32), "mode {mode}, len {len}");
+            let mut v: Vec<(SmallLiar, [u64; 4])> = (0..len as u32)
+                .map(|id| (SmallLiar { id, mode }, [0; 4]))
+                .collect();
+            merge(&mut v);
+            let mut ids: Vec<u32> = v.iter().map(|l| l.0.id).collect();
+            ids.sort_unstable();
+            assert!(ids.into_iter().eq(0..len as u32), "mode {mode}, len {len}");
+        }
+    }
+}
+
+#[test]
+fn mutating_comparison_keeps_every_mutation_in_long_merges() {
+    // As `mutating_comparison_keeps_every_mutation`, at lengths whose top merges are split in
+    // four (8-byte elements) and in two (40-byte elements).
+    let mut state = 0x5A7E_C0DE_5A7E_C0DF;
+    let comparisons = || MUTATING_COMPARISONS.with(|c| c.replace(0));
+    for len in [4096, 5000].into_iter().take(size(2, 1)) {
+        for modulus in [3u64, 1 << 32].into_iter().take(size(2, 1)) {
+            let keys: Vec<u32> = (0..len)
+                .map(|_| (xorshift(&mut state) % modulus) as u32)
+                .collect();
+            let mut v: Vec<Swapping> = keys
+                .iter()
+                .zip(0..)
+                .map(|(&k, i)| Swapping::new(k, i))
+                .collect();
+            comparisons();
+            merge(&mut v);
+            let c = comparisons();
+            let got: Vec<(u32, u32, u32)> = v.iter().map(Swapping::get).collect();
+            assert!(got.windows(2).all(|w| (w[0].0, w[0].1) < (w[1].0, w[1].1)));
+            let mutations: usize = got.iter().map(|t| t.2 as usize).sum();
+            assert_eq!(mutations, 2 * c, "8-byte, len {len}: a stale copy was kept");
+
+            if cfg!(miri) {
+                // 40-byte elements are split in two only, as at the lengths of the test above.
+                continue;
+            }
+            let mut v: Vec<Reallocating> = keys
+                .iter()
+                .zip(0..)
+                .map(|(&key, idx)| Reallocating {
+                    key,
+                    idx,
+                    log: std::cell::RefCell::new(Vec::new()),
+                })
+                .collect();
+            comparisons();
+            merge(&mut v);
+            let c = comparisons();
+            assert!(
+                v.windows(2)
+                    .all(|w| (w[0].key, w[0].idx) < (w[1].key, w[1].idx))
+            );
+            let mutations: usize = v.iter().map(|e| e.log.borrow().len()).sum();
+            assert_eq!(
+                mutations,
+                2 * c,
+                "40-byte, len {len}: a stale copy was kept"
+            );
+        }
+    }
+}
+
+/// Like [`Swapping`], 8 bytes, but its comparisons panic once [`BUDGET`] is spent.
+struct FragileSwapping(Swapping);
+impl PartialEq for FragileSwapping {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for FragileSwapping {}
+impl PartialOrd for FragileSwapping {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for FragileSwapping {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let left = BUDGET.with(Cell::get);
+        if left == 0 {
+            panic!("comparison budget exhausted");
+        }
+        BUDGET.with(|b| b.set(left - 1));
+        self.0.cmp(&other.0)
+    }
+}
+
+/// Like [`Reallocating`], 40 bytes, but its comparisons panic once [`BUDGET`] is spent.
+struct FragileReallocating(Reallocating);
+impl PartialEq for FragileReallocating {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for FragileReallocating {}
+impl PartialOrd for FragileReallocating {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for FragileReallocating {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let left = BUDGET.with(Cell::get);
+        if left == 0 {
+            panic!("comparison budget exhausted");
+        }
+        BUDGET.with(|b| b.set(left - 1));
+        self.0.cmp(&other.0)
+    }
+}
+
+#[test]
+fn panicking_mutating_comparison_keeps_every_mutation() {
+    // A comparison that panics while some sorted elements wait in the buffer must leave the
+    // slice with their latest copies: a stale one would carry fewer mutations, and would free
+    // a box a second time (which Miri reports and the allocator may catch).
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let mut state = 0x5A7E_C0DE_5A7E_C0E0;
+    let comparisons = || MUTATING_COMPARISONS.with(|c| c.replace(0));
+    let lens: &[usize] = if cfg!(miri) {
+        &[9, 70, 130]
+    } else {
+        &[9, 70, 130, 300, 5000]
+    };
+    for &n in lens {
+        for keys in mixed_inputs(n, &mut state) {
+            let tries = if n > 1000 { 3 } else { size(30, 6) };
+            // The comparisons a complete sort makes, then a sample of budgets below that.
+            BUDGET.with(|b| b.set(usize::MAX));
+            let mut v: Vec<FragileSwapping> = keys
+                .iter()
+                .zip(0..)
+                .map(|(&k, i)| FragileSwapping(Swapping::new(k, i)))
+                .collect();
+            comparisons();
+            merge(&mut v);
+            let total = comparisons();
+            drop(v);
+            for budget in (0..total).step_by((total / tries).max(1)) {
+                BUDGET.with(|b| b.set(budget));
+                let mut v: Vec<FragileSwapping> = keys
+                    .iter()
+                    .zip(0..)
+                    .map(|(&k, i)| FragileSwapping(Swapping::new(k, i)))
+                    .collect();
+                comparisons();
+                assert!(catch_unwind(AssertUnwindSafe(|| merge(&mut v))).is_err());
+                let c = comparisons();
+                let got: Vec<(u32, u32, u32)> = v.iter().map(|e| e.0.get()).collect();
+                let mut ids: Vec<u32> = got.iter().map(|t| t.1).collect();
+                ids.sort_unstable();
+                assert!(ids.into_iter().eq(0..n as u32), "8-byte, len {n}");
+                let mutations: usize = got.iter().map(|t| t.2 as usize).sum();
+                assert_eq!(
+                    mutations,
+                    2 * c,
+                    "8-byte, len {n}, budget {budget}: stale copy"
+                );
+
+                BUDGET.with(|b| b.set(budget));
+                let mut v: Vec<FragileReallocating> = keys
+                    .iter()
+                    .zip(0..)
+                    .map(|(&key, idx)| {
+                        FragileReallocating(Reallocating {
+                            key,
+                            idx,
+                            log: std::cell::RefCell::new(Vec::new()),
+                        })
+                    })
+                    .collect();
+                comparisons();
+                let completed = catch_unwind(AssertUnwindSafe(|| merge(&mut v))).is_ok();
+                let c = comparisons();
+                let mut ids: Vec<u32> = v.iter().map(|e| e.0.idx).collect();
+                ids.sort_unstable();
+                assert!(ids.into_iter().eq(0..n as u32), "40-byte, len {n}");
+                let mutations: usize = v.iter().map(|e| e.0.log.borrow().len()).sum();
+                assert_eq!(
+                    mutations,
+                    2 * c,
+                    "40-byte, len {n}, budget {budget} (completed: {completed}): stale copy"
+                );
+            }
+        }
+    }
+}

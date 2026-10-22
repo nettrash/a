@@ -842,3 +842,29 @@ fn inconsistent_ord_keeps_every_element_exactly_once() {
         }
     }
 }
+
+#[test]
+fn sorts_elements_of_every_size_whether_moved_inline_or_not() {
+    // Short moves of elements up to 32 bytes are made inline, longer moves and larger elements
+    // by `memmove`: lengths around 32 moves and sizes of 4, 8, 32 and 40 bytes.
+    fn check<T: Ord + Clone + std::fmt::Debug>(v: Vec<T>) {
+        let mut expected = v.clone();
+        expected.sort();
+        let mut actual = v;
+        insertion(&mut actual);
+        assert_eq!(actual, expected);
+    }
+    let mut state = 0x51F7_0000_0000_0001;
+    for len in (0..size(80, 40)).chain([size(300, 70)]) {
+        for modulus in [3, u64::MAX] {
+            let keys: Vec<u64> = (0..len).map(|_| xorshift(&mut state) % modulus).collect();
+            check(keys.iter().map(|&k| k as u32).collect::<Vec<_>>());
+            check(keys.clone());
+            check(keys.iter().map(|&k| [k, 1, 2, 3]).collect::<Vec<_>>());
+            check(keys.iter().map(|&k| [k, 1, 2, 3, 4]).collect::<Vec<_>>());
+            let mut descending = keys;
+            descending.sort_unstable_by(|a, b| b.cmp(a));
+            check(descending.iter().map(|&k| [k, 1, 2, 3]).collect::<Vec<_>>());
+        }
+    }
+}

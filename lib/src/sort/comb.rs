@@ -1,3 +1,4 @@
+use core::hint::select_unpredictable;
 use core::mem::{self, ManuallyDrop};
 use core::ptr;
 
@@ -19,7 +20,9 @@ use super::bubble;
 ///   their spread.
 /// * **An adaptive finish.** The final phase is this crate's [`bubble`](fn@bubble), which
 ///   scans only up to the last element it moved and moves elements by hole shifting, instead
-///   of the repeated full passes of classic comb sort.
+///   of the repeated full passes of classic comb sort. For integers, its branchless passes
+///   make the whole comb sort 1.1–1.2 times faster than a finish that branches on every
+///   comparison.
 /// * **Branchless swaps for small elements.** Whether a gapped pass swaps a pair is close to a
 ///   coin flip, which defeats the branch predictor. For elements of at most 32 bytes the swap
 ///   is made unconditional: both slots are rewritten from addresses chosen by the comparison,
@@ -30,20 +33,24 @@ use super::bubble;
 ///   quarter slower, a price worth paying for a sort that is not adaptive anyway. Larger
 ///   elements cost more to rewrite than a misprediction does, so they are swapped only when
 ///   needed.
-/// * **Carrying along each chain at small gaps, for elements of at most 8 bytes.** At a gap
-///   of 8 or less, each pair overlaps the one `gap` slots before it, so a swap has to reach
+/// * **Carrying in registers at small gaps, for elements of at most 16 bytes.** At a gap of
+///   14 or less, each pair overlaps the one `gap` slots before it, so a swap has to reach
 ///   memory before the next comparison can read it back, and a pass at gap 2 runs at a third
-///   of the speed of one at a large gap. Instead, each chain `c, c + gap, c + 2·gap, ...` is
-///   walked holding the largest element seen so far in a register, and only the smaller of it
-///   and the next element is written back: the same comparisons with the same outcomes, the
-///   same result, and one move per swap plus one per carried element instead of two per swap.
-///   This makes the whole sort 10–50% faster for integers and pointers. It only pays when a
-///   comparison is cheap: each one waits for the previous one, so larger elements, whose
-///   comparisons usually read memory (strings, for one), are much faster with the
-///   independent pairs of a plain pass.
+///   of the speed of one at a large gap. But the pairs form `gap` chains
+///   `c, c + gap, c + 2·gap, ...`, and along a chain a pass carries the largest element seen
+///   so far. So the pass holds the carried element of every chain in a register, one per
+///   chain, and at each position writes back only the smaller of the carried element and the
+///   next one: the comparisons of a plain pass in its order, with the same outcomes and the
+///   same result, and no round trip through memory. The `gap` chains are independent, so
+///   their comparisons overlap. Against walking one chain at a time this makes the whole sort
+///   1.1–1.3 times faster for 4- and 8-byte integers, and against a plain pass 1.1–1.4 times
+///   for pairs of integers and boxed strings; it is slower for `String`, whose comparisons
+///   take long to start, which keeps the independent pairs of a plain pass. Chains shorter
+///   than four elements, which only short slices have, are not worth picking up.
 ///
-/// The comparisons made are exactly those of comb sort with the rule of 11, followed by bubble
-/// sort with early exit and last-swap bound, though not always in the same order.
+/// The comparisons made are exactly those of comb sort with the rule of 11, in the order of a
+/// plain pass, followed by those of bubble sort with early exit and last-swap bound (which
+/// interleaves two of its passes for small elements).
 ///
 /// # Properties
 ///
@@ -105,8 +112,19 @@ pub fn comb<T: Ord>(arr: &mut [T]) {
         // The sizes are compile-time constants: for each `T`, the passes it cannot use are
         // compiled away.
         let size = mem::size_of::<T>();
-        if size <= CARRY_MAX_SIZE && gap <= CARRY_MAX_GAP {
-            pass_carry(arr, gap);
+        if size <= LANES_MAX_SIZE && gap <= LANES_MAX_GAP && arr.len() >= LANES_MIN_CHAIN * gap {
+            // Every gap of 14 or less that occurs for 15 elements or more: the others, 5, 7,
+            // 12 and 13, only start the sort of a shorter slice.
+            match gap {
+                2 => pass_lanes::<T, 2>(arr),
+                3 => pass_lanes::<T, 3>(arr),
+                4 => pass_lanes::<T, 4>(arr),
+                6 => pass_lanes::<T, 6>(arr),
+                8 => pass_lanes::<T, 8>(arr),
+                11 => pass_lanes::<T, 11>(arr),
+                14 => pass_lanes::<T, 14>(arr),
+                _ => pass_branchless(arr, gap),
+            }
         } else if size <= BRANCHLESS_MAX_SIZE {
             pass_branchless(arr, gap);
         } else {
@@ -122,16 +140,20 @@ pub fn comb<T: Ord>(arr: &mut [T]) {
 /// sort 1.6–4.5 times faster branchless; elements of 64 bytes or more about 1.2–2 times slower.
 const BRANCHLESS_MAX_SIZE: usize = 32;
 
-/// The largest element size, in bytes, for which small gaps are passed by [`pass_carry`].
+/// The largest element size, in bytes, for which small gaps are passed by [`pass_lanes`].
 ///
-/// Measured per pass at gaps 2 to 8: 2–3 times faster than [`pass_branchless`] for 8-byte
-/// integers and pointers, but slower for every 16-byte type tried (up to 1.6 times for pairs of
-/// integers) and up to 4 times slower for `String`.
-const CARRY_MAX_SIZE: usize = 8;
+/// Measured on the whole sort against [`pass_branchless`] at those gaps: 1.05–1.6 times faster
+/// for `u32`, `u64`, `Box<u64>`, `(u64, u64)` and `Box<str>`, 1.05–1.2 times slower for
+/// `String`.
+const LANES_MAX_SIZE: usize = 16;
 
-/// The largest gap passed by [`pass_carry`]. From 11 up (9 and 10 never occur), the
-/// independent pairs of [`pass_branchless`], which the compiler vectorizes for integers, win.
-const CARRY_MAX_GAP: usize = 8;
+/// The largest gap passed by [`pass_lanes`]. From 18 up, the independent pairs of
+/// [`pass_branchless`], which the compiler vectorizes for integers, are as fast or faster.
+const LANES_MAX_GAP: usize = 14;
+
+/// The shortest chains, in elements, worth holding in registers: shorter ones cost more to
+/// pick up and put back than they save.
+const LANES_MIN_CHAIN: usize = 4;
 
 /// The gap after `gap`: `gap / 1.3` rounded down, with 9 and 10 replaced by 11.
 fn shrink(gap: usize) -> usize {
@@ -159,7 +181,7 @@ fn pass_branchless<T: Ord>(arr: &mut [T], gap: usize) {
             // original elements each.
             unsafe {
                 let swap = *b < *a;
-                let (to_a, to_b) = if swap { (b, a) } else { (a, b) };
+                let (to_a, to_b) = select_unpredictable(swap, (b, a), (a, b));
                 let tmp = ManuallyDrop::new(ptr::read(to_b));
                 ptr::copy(to_a, a, 1);
                 ptr::copy_nonoverlapping(&*tmp, b, 1);
@@ -179,73 +201,117 @@ fn pass_branchy<T: Ord>(arr: &mut [T], gap: usize) {
     }
 }
 
-/// Does what [`pass_branchless`] does, one chain `c, c + gap, c + 2·gap, ...` at a time.
+/// Does what [`pass_branchless`] does at gap `G`, with the carried element of each chain held
+/// outside the slice.
 ///
-/// Along a chain, a pass carries the largest element seen so far: each pair is that element
-/// and the next one, and the smaller of the two stays behind. So the carried element is held
-/// outside the slice, and at each step the smaller of it and the next element is written into
-/// the vacant slot behind, chosen by value so that the carried element can stay in a register.
-/// Chains share no element, so taking them one after the other gives the same result as the
-/// interleaved order of a plain pass.
-fn pass_carry<T: Ord>(arr: &mut [T], gap: usize) {
+/// Position `j` belongs to chain `j % G`. Along a chain, a pass carries the largest element
+/// seen so far: each pair is that element and the next one, and the smaller of the two stays
+/// behind. So the carried element of chain `c` is held in `lanes.held[c]`, the slot it came
+/// from is vacant, and at each position the smaller of the held element and the next one is
+/// written into the vacant slot, chosen by value so that the held elements can stay in
+/// registers. Positions are taken in increasing order, as in a plain pass, and the head of a
+/// chain is compared in its slot before it is picked up.
+///
+/// `G` must be less than `arr.len()`.
+#[inline(always)]
+fn pass_lanes<T: Ord, const G: usize>(arr: &mut [T]) {
     let len = arr.len();
     let base = arr.as_mut_ptr();
-    // Chain `c` has a pair only if `c + gap < len`; `gap < len` always holds here.
-    for c in 0..gap.min(len - gap) {
-        // SAFETY: every index is `< len`, so all pointers stay inside `arr`. The first
-        // comparison is made with both elements in place, so a panic there leaves the slice
-        // untouched. Then the head of the chain is read out into `held`, which leaves exactly
-        // one slot logically uninitialised: `hole.dst`. Each step reads the next element and
-        // the held one bitwise, writes the smaller into `hole.dst` and the larger back into
-        // `held`, and moves `hole.dst` onto the slot of the element just read, which is now the
-        // vacant one; nothing in it can panic. Every later comparison is made with the next
-        // element in its slot and the held one in `held`. When `hole` is dropped — normally, or
-        // while unwinding from a panicking comparison — it writes the held element into
-        // `hole.dst`, so `arr` again holds every element exactly once. `held` is accessed only
-        // through `held_ptr` once that exists, so `hole.src` stays valid.
-        unsafe {
-            let mut j = c + gap;
-            let mut smaller = *base.add(j) < *base.add(c);
-            let mut held = ManuallyDrop::new(ptr::read(base.add(c)));
-            let held_ptr: *mut ManuallyDrop<T> = &mut held;
-            let mut hole = Hole {
-                src: held_ptr.cast::<T>(),
-                dst: base.add(c),
-            };
-            loop {
-                let next = ManuallyDrop::new(ptr::read(base.add(j)));
-                let carried = ptr::read(held_ptr);
-                let (stays, goes_on) = if smaller {
-                    (next, carried)
-                } else {
-                    (carried, next)
-                };
-                ptr::write(hole.dst, ManuallyDrop::into_inner(stays));
-                ptr::write(held_ptr, goes_on);
-                hole.dst = base.add(j);
-                j += gap;
-                if j >= len {
-                    break;
-                }
-                smaller = *base.add(j) < **held_ptr;
+    // SAFETY: `G < len`, and every index is `< len`. Picking up the head of a chain leaves its
+    // slot logically uninitialised, and `Lanes` keeps track of that slot: each step reads the
+    // next element of a chain and its held element bitwise, writes the smaller into the
+    // chain's vacant slot and the larger into `held`, and moves the vacant slot onto the slot
+    // of the element just read; nothing between the comparison and the end of a step can
+    // panic. When `lanes` is dropped — normally, or while unwinding from a panicking
+    // comparison — it writes every held element into its chain's vacant slot, so `arr` again
+    // holds every element exactly once.
+    unsafe {
+        // The first row compares each chain's head with the next element while both are in
+        // their slots; its pairs share no element, so all of them can be compared before any
+        // is moved, and a panic there leaves the slice untouched.
+        let first = G.min(len - G);
+        let mut smaller = [false; G];
+        for (c, s) in smaller.iter_mut().enumerate().take(first) {
+            *s = *base.add(G + c) < *base.add(c);
+        }
+        let mut lanes = Lanes::<T, G> {
+            held: core::array::from_fn(|c| ManuallyDrop::new(ptr::read(base.add(c)))),
+            base,
+            row: G,
+            done: 0,
+        };
+        for (c, &s) in smaller.iter().enumerate().take(first) {
+            lanes.step(c, s);
+        }
+        if len < 2 * G {
+            return;
+        }
+        lanes.row += G;
+        lanes.done = 0;
+        while lanes.row + G <= len {
+            for c in 0..G {
+                let s = *base.add(lanes.row + c) < *lanes.held[c];
+                lanes.step(c, s);
             }
+            lanes.row += G;
+            lanes.done = 0;
+        }
+        for c in 0..len - lanes.row {
+            let s = *base.add(lanes.row + c) < *lanes.held[c];
+            lanes.step(c, s);
         }
     }
 }
 
-/// A vacant slot of a slice, plus the element held outside the slice that belongs there.
+/// The carried elements of the `G` chains of a pass at gap `G`, walked a row of `G`
+/// positions at a time.
 ///
-/// Writing the held element back on drop is what keeps [`pass_carry`] panic-safe: the slice is
-/// whole again even if a comparison unwinds while the element is out.
-struct Hole<T> {
-    src: *const T,
-    dst: *mut T,
+/// Writing the held elements back on drop is what keeps [`pass_lanes`] panic-safe: the slice
+/// is whole again even if a comparison unwinds while the elements are out.
+struct Lanes<T, const G: usize> {
+    held: [ManuallyDrop<T>; G],
+    base: *mut T,
+    /// The first position of the row being walked, a multiple of `G` and at least `G`.
+    row: usize,
+    /// How many chains have taken their step in this row. Chain `c`'s vacant slot is
+    /// `row + c` if it has, and `row - G + c` if it has not.
+    done: usize,
 }
 
-impl<T> Drop for Hole<T> {
+impl<T: Ord, const G: usize> Lanes<T, G> {
+    /// Takes chain `c`'s step at position `row + c`, which must be inside the slice, given
+    /// whether the element there is `smaller` than the held one, with `c == done`.
+    #[inline(always)]
+    unsafe fn step(&mut self, c: usize, smaller: bool) {
+        // SAFETY: see `pass_lanes`; the vacant slot of chain `c` is `row - G + c` until now.
+        unsafe {
+            let x = self.base.add(self.row + c);
+            let held: *mut ManuallyDrop<T> = &mut self.held[c];
+            let stays =
+                select_unpredictable(smaller, ManuallyDrop::new(ptr::read(x)), ptr::read(held));
+            let goes_on =
+                select_unpredictable(smaller, ptr::read(held), ManuallyDrop::new(ptr::read(x)));
+            ptr::write(
+                self.base.add(self.row - G + c),
+                ManuallyDrop::into_inner(stays),
+            );
+            ptr::write(held, goes_on);
+            self.done = c + 1;
+        }
+    }
+}
+
+impl<T, const G: usize> Drop for Lanes<T, G> {
     fn drop(&mut self) {
-        // SAFETY: `dst` points to the single uninitialised slot of the slice being sorted, and
-        // `src` to the held element, which is never used again after this write.
-        unsafe { ptr::copy_nonoverlapping(self.src, self.dst, 1) }
+        for (c, held) in self.held.iter().enumerate() {
+            let slot = if c < self.done {
+                self.row + c
+            } else {
+                self.row - G + c
+            };
+            // SAFETY: `slot` is chain `c`'s vacant slot, and its held element is never used
+            // again after this write.
+            unsafe { ptr::copy_nonoverlapping(&**held, self.base.add(slot), 1) }
+        }
     }
 }

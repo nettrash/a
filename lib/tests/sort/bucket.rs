@@ -1549,7 +1549,9 @@ fn clustered_keys(len: usize, state: &mut u64) -> Vec<u32> {
 #[test]
 fn sorts_across_the_level_size_thresholds() {
     // A level keeps the bucket of each key for up to 2048 keys, counts into four tables from
-    // four keys per bucket (16 384 keys for 4096 buckets) and into eight from 16 per bucket.
+    // four keys per bucket and into eight from 16 per bucket: spread keys take one bucket per
+    // key up to 131,071 keys, the few distinct keys below up to 4096 buckets, so that 16,384 of
+    // them count into four tables and 65,536 into eight.
     let mut state = 0x7B5E_7B5E_7B5E_7B5E;
     let lens: Vec<usize> = if cfg!(miri) {
         vec![2048, 2049]
@@ -2075,4 +2077,174 @@ fn sorts_wide_and_extreme_keys_with_owning_elements() {
         .collect();
     assert_bytes::<12, u32, f32>(&keys, 0, f32::total_cmp);
     assert_bucket_floats(&keys);
+}
+
+#[test]
+fn sorts_wide_levels_of_keys_that_spread() {
+    // A level of more than 4096 and fewer than 131,072 keys, whose sampled keys spread over
+    // its range, cuts it into one bucket per key; keys that do not spread, as a few distinct
+    // ones, or most of them in a cluster, and fewer than 65,536 keys mostly in order, into 4096
+    // buckets. Floats are sampled by value for a
+    // cut by value, and by bits for a cut by bits, as when they crowd at zero.
+    let mut state = 0x31DE_31DE_31DE_31DE;
+    let lens: Vec<usize> = if cfg!(miri) {
+        vec![4097]
+    } else {
+        vec![4096, 4097, 8192, 8193, 20_000, 131_071, 131_072]
+    };
+    for len in lens {
+        for keys in spread_keys(len, &mut state) {
+            assert_bucket(&keys);
+            assert_bucket_by_key(&keys);
+        }
+        let wide: Vec<u64> = (0..len).map(|_| xorshift(&mut state)).collect();
+        assert_bucket(&wide);
+        assert_bucket_by_key(&wide);
+        // Mostly in order, which keeps up to 4096 buckets below 65,536 keys.
+        let mut nearly = wide.clone();
+        nearly.sort_unstable();
+        for _ in 0..(len / 100).max(1) {
+            let i = (xorshift(&mut state) % len as u64) as usize;
+            let j = (xorshift(&mut state) % len as u64) as usize;
+            nearly.swap(i, j);
+        }
+        assert_bucket(&nearly);
+        assert_bucket_by_key(&nearly);
+        let signed: Vec<i64> = wide.iter().map(|&x| x as i64 >> 20).collect();
+        assert_bucket(&signed);
+        // 64 distinct keys, and a cluster with a few keys far from it.
+        let few: Vec<u64> = (0..len).map(|_| 1 << (xorshift(&mut state) % 64)).collect();
+        assert_bucket(&few);
+        assert_bucket_by_key(&few);
+        let clustered: Vec<u32> = (0..len)
+            .map(|_| {
+                let r = xorshift(&mut state);
+                if r.is_multiple_of(100) {
+                    u32::MAX - (r >> 40) as u32
+                } else {
+                    (r >> 40) as u32 % 1000
+                }
+            })
+            .collect();
+        assert_bucket(&clustered);
+        assert_bucket_by_key(&clustered);
+        // Floats spread by value, by bits (any exponent), and crowded at zero by value while
+        // their bits spread.
+        let unit: Vec<f64> = (0..len).map(|_| unit_f64(&mut state)).collect();
+        assert_bucket_floats(&unit);
+        assert_bucket_by_float_key(&unit);
+        let any: Vec<f64> = (0..len).map(|_| finite_f64(&mut state)).collect();
+        assert_bucket_floats(&any);
+        assert_bucket_by_float_key(&any);
+        let narrow: Vec<f32> = any.iter().map(|&x| x as f32).collect();
+        assert_bucket_floats(&narrow);
+        let crowded: Vec<f64> = (0..len)
+            .map(|_| {
+                let r = xorshift(&mut state);
+                let x = if r % 10 < 6 {
+                    unit_f64(&mut state) * 1e-12
+                } else {
+                    500.0 + unit_f64(&mut state) * 500.0
+                };
+                if r & (1 << 20) == 0 { x } else { -x }
+            })
+            .collect();
+        assert_bucket_floats(&crowded);
+        assert_bucket_by_float_key(&crowded);
+        // Large elements sorted by their indices up to 8192 elements, owning their contents.
+        if len <= 8193 {
+            let keys: Vec<u32> = (0..len).map(|_| xorshift(&mut state) as u32).collect();
+            assert_owned::<[u64; 7], ()>(&keys, 0);
+        }
+    }
+}
+
+/// Keys that crowd a few buckets, as eight of them at even distances tell, are counted into
+/// tables of their own for groups of keys side by side, and moved by those groups: inputs whose
+/// sampled keys share a bucket, at lengths around the thresholds (512 keys, 2048 with their
+/// buckets kept), at 1 key per bucket (not in groups), 2 and more (two groups), and 8 and 16
+/// (four), and at lengths that do not split evenly into groups or into blocks of four or eight
+/// keys.
+#[test]
+fn sorts_keys_crowding_a_few_buckets_in_groups() {
+    let mut state = 0x5eed_c0de_u64;
+    let lens: &[usize] = if cfg!(miri) {
+        &[512, 1001, 2049, 3001]
+    } else {
+        &[512, 513, 1001, 2048, 2049, 3001, 40_003, 70_001, 300_007]
+    };
+    for &len in lens {
+        let crowd = |v: &mut [u64], key: u64| {
+            for i in 0..8 {
+                v[i * len / 8] = key;
+            }
+        };
+        // Powers of two: most keys in the first bucket of every level.
+        let mut pow2: Vec<u64> = (0..len).map(|_| 1 << (xorshift(&mut state) % 64)).collect();
+        crowd(&mut pow2, 1);
+        assert_bucket(&pow2);
+        let signed: Vec<i64> = pow2
+            .iter()
+            .map(|&x| (x >> 1) as i64 * if x & 0xAAAA_AAAA != 0 { -1 } else { 1 })
+            .collect();
+        assert_bucket(&signed);
+        let narrow: Vec<u32> = pow2.iter().map(|&x| (x >> 32 | x) as u32).collect();
+        assert_bucket(&narrow);
+        // Four wide keys.
+        let four = [0, 1, 2, 3].map(|_| xorshift(&mut state));
+        let mut few: Vec<u64> = (0..len)
+            .map(|_| four[(xorshift(&mut state) % 4) as usize])
+            .collect();
+        crowd(&mut few, four[0]);
+        assert_bucket(&few);
+        assert_bucket_by_key(&few);
+        let few32: Vec<u32> = few.iter().map(|&x| x as u32).collect();
+        assert_bucket(&few32);
+        // A range of one key per bucket at 1, 3, 10 and 17 keys per bucket, nine in ten keys
+        // one.
+        for span in [len - 1, len / 3, len / 10, len / 17] {
+            let mut range: Vec<u64> = (0..len)
+                .map(|_| {
+                    let r = xorshift(&mut state);
+                    if r % 10 < 9 { 5 } else { r % span as u64 }
+                })
+                .collect();
+            crowd(&mut range, 5);
+            range[1] = 0;
+            range[2] = span as u64 - 1;
+            assert_bucket(&range);
+        }
+        // Floats of four values, cut by value.
+        let values = [0.25, 0.75, 3.5, 1000.0];
+        let mut floats: Vec<f64> = (0..len)
+            .map(|_| values[(xorshift(&mut state) % 4) as usize])
+            .collect();
+        for i in 0..8 {
+            floats[i * len / 8] = 3.5;
+        }
+        assert_bucket_floats(&floats);
+        let narrow: Vec<f32> = floats.iter().map(|&x| x as f32).collect();
+        assert_bucket_floats(&narrow);
+    }
+}
+
+/// A level cut by value whose sampled keys share a bucket far from zero, while more than half
+/// its keys crowd at zero, counts them (in groups, from two keys per bucket), gives up, and is
+/// cut by bits instead; or, if the cut by bits leaves as large a bucket, moves them by the cut
+/// by value after all.
+#[test]
+fn sorts_floats_crowded_at_zero_whose_sample_is_not() {
+    // At 9001 keys, two per bucket, the cut by value is counted in groups.
+    for len in [1000, 3001, 9001] {
+        for near in [[1e-4, 1e-4], [1e-4, 2e-4]] {
+            let mut v: Vec<f64> = (0..len).map(|i| near[i % 2]).collect();
+            for i in 0..8 {
+                v[i * len / 8] = 1e6;
+            }
+            v[len / 16] = -1e6;
+            assert_bucket_floats(&v);
+            let narrow: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+            assert_bucket_floats(&narrow);
+        }
+    }
 }

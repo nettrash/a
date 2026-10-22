@@ -28,16 +28,22 @@ use super::tim::Buffer;
 ///   chain of dependent increments. With at most 2048 values and at least 16 elements per value,
 ///   the slice is counted into eight tables, one element after the other into the next, and the
 ///   tables are added up: eight chains at once, 3–5 times faster with a few distinct values and
-///   on sorted runs of bytes.
+///   on sorted runs of bytes. One table is counted as four quarters of the slice side by side,
+///   which breaks such chains too, when its counts are `u16` or the slice's first values are
+///   mostly in order: 2.2 times faster on nearly sorted input with sixteen of each value. With
+///   that walk for `u16` counts, and a plain loop for wider ones that it stays out of the way of,
+///   random `u8` and `u32` values from 100 elements on sort 1.05–1.3 times faster than with one
+///   plain loop for every count type; wider values as fast.
 /// * **Values written ahead of their counts.** Each value is written 4 times (8 for one- and
 ///   two-byte types, in one store) whatever its count, and only a count above that takes a
 ///   branch; the copies beyond the count are overwritten by the next value. Branching on every
 ///   count mispredicts when the range has about as many values as the slice has elements, where
 ///   counts of 0, 1 and 2 are all common: this is 2.5–5 times faster there. A range with 32 or more
 ///   values per element is rewritten instead by skipping blocks of 8 empty counts at once.
-/// * **Counts on the stack.** Up to 4 KiB of counts (1024 values, or 128 values in eight tables)
-///   need no allocation; counts are `u32` up to `u32::MAX` elements, halving the memory larger
-///   ranges take.
+/// * **Counts on the stack.** Up to 4 KiB of counts (2048 values, or 256 values in eight tables,
+///   up to 65,535 elements) need no allocation; counts are `u16` up to 65,535 elements and `u32`
+///   up to `u32::MAX`, a quarter and a half of the memory larger ranges take (1.1–1.25 times
+///   faster at 10,000–50,000 elements than `u32` counts).
 ///
 /// Together, against the textbook counting sort (scan for the range, count, branch on every
 /// count to rewrite): 3–5.5 times faster on random integers with about as many distinct values
@@ -58,10 +64,10 @@ use super::tim::Buffer;
 /// | Sorted, reverse-sorted, equal | one scan (`n − 1` comparisons), reversing        | `O(n)`     |
 /// | Any other input               | a block or two of the scan, range, count, write | `O(n + k)` |
 ///
-/// Against [`slice::sort_unstable`], for `u32` and `u64` from 100 elements on: 3.6–9 times faster
-/// on random integers with about as many distinct values as elements, 2.6–9.5 times with
-/// sixteen times fewer, 1.7–3.8 times with four times as many, 2.5–4 times with four distinct
-/// values; 2–10 times faster on nearly sorted input, 1.6–4.8 times on sorted and all-equal input,
+/// Against [`slice::sort_unstable`], for `u32` and `u64` from 100 elements on: 3.2–10 times faster
+/// on random integers with about as many distinct values as elements, 2.8–14 times with
+/// sixteen times fewer, 1.9–4 times with four times as many, 2.8–4 times with four distinct
+/// values; 2.2–12 times faster on nearly sorted input, 1.6–4.8 times on sorted and all-equal input,
 /// and 12–99 times on reverse-sorted input; random bytes sort 9–15 times faster from 1000
 /// elements on. On 16 elements it is up to 2 times slower on sorted, nearly sorted and all-equal
 /// input, and this crate's [`drift`](fn@super::drift) sort, which insertion sorts short slices,
@@ -119,7 +125,9 @@ pub fn counting<T: IntegerKey>(arr: &mut [T]) {
     }
     let (min, max) = min_max(arr);
     let k = range(min, max, len, SORT);
-    if len <= u32::MAX as usize {
+    if len <= u16::MAX as usize {
+        rewrite::<T, u16>(arr, min, k);
+    } else if len <= u32::MAX as usize {
         rewrite::<T, u32>(arr, min, k);
     } else {
         rewrite::<T, usize>(arr, min, k);
@@ -150,19 +158,26 @@ pub fn counting<T: IntegerKey>(arr: &mut [T]) {
 ///   segments, each with its own places for every key after those of the segments before it,
 ///   and the segments are counted and placed side by side: eight chains at once, 1.6–2.3 times
 ///   faster with four distinct keys and 2.4–2.9 times on runs of bytes. More keys than 256 gain
-///   nothing and lose up to 1.25 times to the extra places.
+///   nothing and lose up to 1.25 times to the extra places. One segment is counted as four
+///   quarters side by side instead, as counts do not depend on the order of the keys, and placed
+///   four keys at a time, all four places read before any is written back: 1.4–2.6 times faster
+///   on nearly sorted input, 1.1–1.25 times on random keys over four times as many keys as
+///   elements.
 /// * **Keys read once.** Counting and placing read the keys from their buffer instead of from
 ///   the elements: 1.05–1.25 times faster than calling `key` again on random keys with about as
 ///   many distinct keys as elements, or four times as many.
-/// * **Buffers on the stack.** Up to 4 KiB each of elements, keys and places (counts are `u32`
-///   up to `u32::MAX` elements) need no allocation.
+/// * **Buffers on the stack.** Up to 4 KiB each of elements, keys and places (places are `u16`
+///   up to 65,535 elements in one segment, which halves the memory they take, and `u32` up to
+///   `u32::MAX` elements otherwise) need no allocation.
 ///
 /// Together, against the textbook counting sort (scan for the range, count, place, copy back,
 /// calling `key` in each pass): 1.05–1.6 times faster on random keys, 1.35–2.2 times with four
 /// distinct keys, 2.6–3.1 times on runs of bytes and 6–20 times on sorted and all-equal input;
-/// but 1.02–1.15 times slower on reverse-sorted input with repeated keys, on nearly sorted
-/// input, on random bytes from 10,000 elements on and on 1000–10,000 random keys with sixteen
-/// times fewer keys than elements, where keeping the keys costs more than it saves.
+/// but 1.02–1.15 times slower on reverse-sorted input with repeated keys, on random bytes from
+/// 10,000 elements on and on 1000–10,000 random keys with sixteen times fewer keys than
+/// elements, where keeping the keys costs more than it saves. Nearly sorted input, 1.02–1.15
+/// times slower than the textbook sort before keys were placed four at a time, now takes
+/// 0.6–0.85 times as long as it did then.
 ///
 /// # Properties
 ///
@@ -180,7 +195,7 @@ pub fn counting<T: IntegerKey>(arr: &mut [T]) {
 /// Against [`slice::sort_by_key`], with 16-byte elements from 100 elements on: 3–7.6 times faster
 /// on random `u32` keys with sixteen times fewer distinct keys than elements, 2.9–7 times with
 /// about as many, 1.85–4.2 times with four times as many; 1.6–2.3 times faster with four
-/// distinct keys, 1.9–5.7 times on reverse-sorted input and 1–9 times on nearly sorted input;
+/// distinct keys, 1.9–5.7 times on reverse-sorted input and 1.6–9 times on nearly sorted input;
 /// as fast on sorted and all-equal input with `u32` keys, and 1.3–1.7 times faster with `u8`
 /// keys from 1000 elements on, where random bytes sort 4.4–8 times faster. On 16 elements it is
 /// between 1.9 times faster and 2 times slower.
@@ -241,11 +256,7 @@ where
         arr.reverse();
         return;
     }
-    if len <= u32::MAX as usize {
-        scatter::<T, K, u32>(arr, keys, min, k);
-    } else {
-        scatter::<T, K, usize>(arr, keys, min, k);
-    }
+    scatter(arr, keys, min, k);
 }
 
 /// The name a range too large panics with.
@@ -290,6 +301,22 @@ pub(super) fn in_order<T: Copy>(v: &[T], out: impl Fn(T, T) -> bool) -> bool {
         i += BLOCK;
     }
     v[i..].windows(2).all(|w| !out(w[0], w[1]))
+}
+
+/// The first this many elements tell [`in_order_at_first`]...
+const HEAD: usize = 64;
+
+/// ...whether at most one in this many of them is less than the one before it.
+const HEAD_DESCENTS_PART: usize = 16;
+
+/// Whether the first [`HEAD`] elements of `v` are mostly in order, as those of nearly sorted
+/// input are: few of them less than the one before it. A cheap guess at the order of the
+/// whole slice, for choosing how to count it.
+#[inline(always)]
+pub(super) fn in_order_at_first<T: Copy + Ord>(v: &[T]) -> bool {
+    let head = &v[..v.len().min(HEAD)];
+    let descents: usize = head.windows(2).map(|w| usize::from(w[1] < w[0])).sum();
+    descents * HEAD_DESCENTS_PART <= head.len()
 }
 
 /// Returns the smallest and the largest value of a nonempty slice.
@@ -412,6 +439,10 @@ const SPARSE_PER_ELEMENT: usize = 32;
 
 /// Counts the values of `arr`, all within the `k` values from `min`, and rewrites `arr` from
 /// the counts.
+///
+/// Never inlined: with its counts on the stack, it made the frame of [`counting`] large enough
+/// to be probed on every call, which cost sorted input of 100 elements 1.5 times as long.
+#[inline(never)]
 pub(super) fn rewrite<T: IntegerKey, C: Count>(arr: &mut [T], min: T, k: usize) {
     let len = arr.len();
     let tables = if k <= TABLES_MAX_RANGE && len >= TABLES_MIN_PER_VALUE * k {
@@ -451,6 +482,13 @@ fn count<T: IntegerKey, C: Count, const N: usize>(v: &[T], min: T, counts: &mut 
     const STEP: usize = 8;
     debug_assert!(STEP.is_multiple_of(N) && counts.len() == N * k);
     let c = counts.as_mut_ptr();
+    if N == 1 && mem::size_of::<C>() == 2 {
+        // SAFETY: as below.
+        return unsafe { by_quarters(v, min, c) };
+    }
+    if N == 1 && v.len() >= QUARTERS_MIN_LEN && in_order_at_first(v) {
+        return count_by_quarters(v, min, counts);
+    }
     let (chunks, rest) = v.as_chunks::<STEP>();
     for chunk in chunks {
         for (j, x) in chunk.iter().enumerate() {
@@ -470,6 +508,86 @@ fn count<T: IntegerKey, C: Count, const N: usize>(v: &[T], min: T, counts: &mut 
                 *sum = sum.add(c.get());
             }
         }
+    }
+}
+
+/// Turns `counts` into the sums of the counts before each: the place where the elements of
+/// each counter begin.
+///
+/// The counts are read four at a time and summed among themselves before the sum of those
+/// before them is added: one addition per four counts waits for the one before it, where a
+/// running sum waits for every count.
+#[inline(always)]
+pub(super) fn exclusive_scan<C: Count>(counts: &mut [C]) {
+    let mut sum = 0;
+    let (chunks, rest) = counts.as_chunks_mut::<4>();
+    for chunk in chunks {
+        let [a, b, c, d] = chunk.map(|c| c.get());
+        let (ab, abc) = (a + b, a + b + c);
+        *chunk = [sum, sum + a, sum + ab, sum + abc].map(|s| C::ZERO.add(s));
+        sum += abc + d;
+    }
+    for c in rest {
+        let count = c.get();
+        *c = C::ZERO.add(sum);
+        sum += count;
+    }
+}
+
+/// The places four keys in a row take, from their counters `b` and the next free place `next`
+/// of each counter before them: a key takes the place after those taken by the keys before it
+/// with the same counter.
+///
+/// The four next places are all read before any is written back, so a run of keys with one
+/// counter waits for memory once per four keys, not once per key.
+#[inline(always)]
+pub(super) fn places4(b: [usize; 4], next: [usize; 4]) -> [usize; 4] {
+    [
+        next[0],
+        next[1] + usize::from(b[1] == b[0]),
+        next[2] + usize::from(b[2] == b[0]) + usize::from(b[2] == b[1]),
+        next[3] + usize::from(b[3] == b[0]) + usize::from(b[3] == b[1]) + usize::from(b[3] == b[2]),
+    ]
+}
+
+/// One table of `u32` or `usize` counts is walked as four quarters side by side, for slices of
+/// at least this many elements whose first values are mostly in order, by [`count_by_quarters`];
+/// one of `u16` counts always, by [`by_quarters`].
+const QUARTERS_MIN_LEN: usize = 1024;
+
+/// [`by_quarters`] out of line: inlined into [`rewrite`] next to the plain loop, it made that
+/// loop count `char`s 1.2 times slower from 100,000 elements on.
+#[inline(never)]
+fn count_by_quarters<T: IntegerKey, C: Count>(v: &[T], min: T, counts: &mut [C]) {
+    // SAFETY: `counts` holds a counter for every value of `v`.
+    unsafe { by_quarters(v, min, counts.as_mut_ptr()) }
+}
+
+/// Counts the values of `v` from `min` into the counters at `c`, walking `v` as four quarters
+/// side by side: counts do not depend on the order of the values, and a run of equal values
+/// then does not wait on each increment (2.2 times faster on nearly sorted input with sixteen
+/// of each value). On random values with `u32` counts, the four streams cost 1.02–1.07 times as
+/// long as one; with `u16` counts, the plain loop cost 1.1–1.2 times as long as four streams.
+///
+/// # Safety
+///
+/// `c` must hold a counter for every value of `v`, `x.offset(min)` for each.
+#[inline(always)]
+unsafe fn by_quarters<T: IntegerKey, C: Count>(v: &[T], min: T, c: *mut C) {
+    let quarter = v.len() / 4;
+    let (a, rest) = v.split_at(quarter);
+    let (b, rest) = rest.split_at(quarter);
+    let (d, rest) = rest.split_at(quarter);
+    let (e, rest) = rest.split_at(quarter);
+    for (((a, b), d), e) in a.iter().zip(b).zip(d).zip(e) {
+        for x in [a, b, d, e] {
+            // SAFETY: guaranteed by the caller.
+            unsafe { bump(c.add(x.offset(min))) };
+        }
+    }
+    for x in rest {
+        // SAFETY: as above.
+        unsafe { bump(c.add(x.offset(min))) };
     }
 }
 
@@ -559,12 +677,30 @@ const SEGMENTS_MIN_PER_KEY: usize = 16;
 
 /// Places every element of `arr` by its key in `keys`, all within the `k` keys from `min`, into
 /// a buffer at the place the counts give it, and copies the buffer back.
-pub(super) fn scatter<T, K: IntegerKey, C: Count>(arr: &mut [T], keys: &[K], min: K, k: usize) {
-    let segments = if k <= SEGMENTS_MAX_RANGE && arr.len() >= SEGMENTS_MIN_PER_KEY * k {
-        SEGMENTS
+///
+/// The places are `u16` up to 65,535 elements in one segment, which halves the memory they
+/// take (1.05–1.25 times faster from 1000 keys on), and `u32` with eight segments, whose loops
+/// took 1.05 times as long with `u16`; `usize` beyond `u32::MAX` elements.
+pub(super) fn scatter<T, K: IntegerKey>(arr: &mut [T], keys: &[K], min: K, k: usize) {
+    let len = arr.len();
+    let segments = k <= SEGMENTS_MAX_RANGE && len >= SEGMENTS_MIN_PER_KEY * k;
+    if !segments && len <= u16::MAX as usize {
+        scatter_in::<T, K, u16>(arr, keys, min, k, 1);
+    } else if len <= u32::MAX as usize {
+        scatter_in::<T, K, u32>(arr, keys, min, k, if segments { SEGMENTS } else { 1 });
     } else {
-        1
-    };
+        scatter_in::<T, K, usize>(arr, keys, min, k, if segments { SEGMENTS } else { 1 });
+    }
+}
+
+/// [`scatter`] with places of type `C`, in `segments` segments: 1 or [`SEGMENTS`].
+fn scatter_in<T, K: IntegerKey, C: Count>(
+    arr: &mut [T],
+    keys: &[K],
+    min: K,
+    k: usize,
+    segments: usize,
+) {
     let mut stack = Stack([MaybeUninit::uninit(); STACK_BYTES]);
     let mut heap = Vec::new();
     let next = counters::<C>(segments * k, &mut stack, &mut heap);
@@ -598,32 +734,72 @@ fn place<T, K: IntegerKey, C: Count, const S: usize>(
     let next = next.as_mut_ptr();
     let keys = keys.as_ptr();
     // Segment `s` is `arr[s·seg..(s + 1)·seg]`, and the last one also takes `arr[S·seg..]`.
-    for i in 0..seg {
-        for s in 0..S {
-            // SAFETY: `s·seg + i < S·seg <= len`. Every key lies between `min` and the largest
-            // key, so its offset is less than `k` and the counter is in `next`.
-            unsafe { bump(next.add(s * k + (*keys.add(s * seg + i)).offset(min))) };
+    // One segment is counted as four quarters side by side, as counts do not depend on the
+    // order of the keys: a run of equal keys then does not wait on each increment.
+    let (quarters, quarter) = if S == 1 { (4, len / 4) } else { (S, seg) };
+    for i in 0..quarter {
+        for q in 0..quarters {
+            // SAFETY: `q·quarter + i < quarters·quarter <= len`. Every key lies between `min`
+            // and the largest key, so its offset is less than `k`, and the counter is in
+            // `next`: in table `q` of `S`, or in the one table.
+            unsafe {
+                let t = if S == 1 { 0 } else { q };
+                bump(next.add(t * k + (*keys.add(q * quarter + i)).offset(min)));
+            }
         }
     }
-    for i in tail..len {
+    for i in quarters * quarter..len {
         // SAFETY: as above, in the last segment.
         unsafe { bump(next.add((S - 1) * k + (*keys.add(i)).offset(min))) };
     }
-    let mut sum = 0;
-    for o in 0..k {
-        for s in 0..S {
-            // SAFETY: `s·k + o < S·k`.
-            unsafe {
-                let c = next.add(s * k + o);
-                let count = (*c).get();
-                *c = C::ZERO.add(sum);
-                sum += count;
+    if S == 1 {
+        // SAFETY: `next` holds `S·k` counters.
+        exclusive_scan(unsafe { slice::from_raw_parts_mut(next, k) });
+    } else {
+        let mut sum = 0;
+        for o in 0..k {
+            for s in 0..S {
+                // SAFETY: `s·k + o < S·k`.
+                unsafe {
+                    let c = next.add(s * k + o);
+                    let count = (*c).get();
+                    *c = C::ZERO.add(sum);
+                    sum += count;
+                }
             }
         }
     }
     let mut buf = Buffer::<T>::new(len);
     let dst = buf.get();
     let base = arr.as_ptr();
+    if S == 1 {
+        // Four keys at a time: a run of equal keys waits for memory once per four keys.
+        let mut i = 0;
+        while i + 4 <= len {
+            // SAFETY: as below, the places handed out as one key at a time would.
+            unsafe {
+                let b = [0, 1, 2, 3].map(|j| (*keys.add(i + j)).offset(min));
+                let p = places4(b, b.map(|b| (*next.add(b)).get()));
+                for j in 0..4 {
+                    *next.add(b[j]) = C::ZERO.add(p[j] + 1);
+                }
+                for (j, &p) in p.iter().enumerate() {
+                    ptr::copy_nonoverlapping(base.add(i + j), dst.add(p), 1);
+                }
+            }
+            i += 4;
+        }
+        for i in i..len {
+            // SAFETY: as below.
+            unsafe {
+                let pos = bump(next.add((*keys.add(i)).offset(min)));
+                ptr::copy_nonoverlapping(base.add(i), dst.add(pos), 1);
+            }
+        }
+        // SAFETY: as below.
+        unsafe { ptr::copy_nonoverlapping(dst, arr.as_mut_ptr(), len) };
+        return;
+    }
     for i in 0..seg {
         for s in 0..S {
             // SAFETY: as in the count above. The keys are the ones counted, so the places of

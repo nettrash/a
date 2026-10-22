@@ -8,11 +8,15 @@ fn size(normal: usize, miri: usize) -> usize {
     if cfg!(miri) { miri } else { normal }
 }
 
-/// Heap sort uses a heap with two children per node below 64 KiB of elements and four from
-/// there on. The test elements carry `PAD` bytes of payload: `SMALL` keeps them at 16 bytes,
-/// so the slices of most tests use two children, and `LARGE` makes them 128 bytes, so that
-/// [`FOUR_CHILDREN`] of them already use four, cheaply enough for Miri.
+/// Heap sort uses a heap with two children per node below 64 KiB of elements larger than 8
+/// bytes, and four from there on and for elements of at most 8 bytes at any length. Between 9
+/// and 16 bytes, two children are chosen by selects, and above by arithmetic. The test
+/// elements carry `PAD` bytes of payload: `SMALL` keeps them at 16 bytes, `MEDIUM` makes them
+/// 32, so the slices of most tests use two children, and `LARGE` makes them 128 bytes, so that
+/// [`FOUR_CHILDREN`] of them already use four, cheaply enough for Miri. Elements of 8 bytes
+/// ([`Small`] and friends) use four children from two elements on.
 const SMALL: usize = 0;
+const MEDIUM: usize = 16;
 const LARGE: usize = 112;
 
 /// The shortest slice of `LARGE` elements sorted on a heap with four children per node.
@@ -22,6 +26,11 @@ const FOUR_CHILDREN: usize = 512;
 fn test_elements_cover_both_heap_shapes() {
     const QUATERNARY_MIN_BYTES: usize = 64 * 1024;
     assert_eq!(size_of::<ByKey<u64, SMALL>>(), 16);
+    assert_eq!(size_of::<ByKey<u64, MEDIUM>>(), 32);
+    assert_eq!(size_of::<Small>(), 8);
+    assert_eq!(size_of::<CountedSmall>(), 8);
+    assert_eq!(size_of::<TrackedSmall>(), 8);
+    assert_eq!(size_of::<LiarSmall>(), 4);
     assert_eq!(
         size_of::<ByKey<u64, LARGE>>() * FOUR_CHILDREN,
         QUATERNARY_MIN_BYTES
@@ -146,7 +155,7 @@ fn sorts_zero_sized_elements() {
 
 #[test]
 fn sorts_long_inputs() {
-    // 400 KB of `u32`s outside Miri, so four children per node, and 18 KB under it, so two.
+    // 400 KB of `u32`s outside Miri and 18 KB under it, both on four children per node.
     let n = size(100_000, 4_500);
     let mut state = 0x7E57_7E57_7E57_7E57;
     let shapes: Vec<Vec<u32>> = vec![
@@ -295,7 +304,60 @@ fn assert_sorts_with<K: Ord + Copy + std::fmt::Debug, const PAD: usize>(keys: &[
 
 fn assert_sorts<K: Ord + Copy + std::fmt::Debug>(keys: &[K]) {
     assert_sorts_with::<K, SMALL>(keys);
+    assert_sorts_with::<K, MEDIUM>(keys);
     assert_sorts_with::<K, LARGE>(keys);
+    assert_sorts_small(keys);
+}
+
+/// An 8-byte element compared by `key` only, carrying the index it started at.
+#[derive(Debug, Clone, Copy)]
+struct Small {
+    key: u32,
+    idx: u32,
+}
+impl PartialEq for Small {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl Eq for Small {}
+impl PartialOrd for Small {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Small {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+/// Like [`assert_sorts_with`], for 8-byte elements, whose keys are the ranks of `keys`.
+fn assert_sorts_small<K: Ord + Copy + std::fmt::Debug>(keys: &[K]) {
+    let mut distinct = keys.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let rank = |k: &K| distinct.binary_search(k).expect("`k` is in `distinct`") as u32;
+    let mut v: Vec<Small> = keys
+        .iter()
+        .enumerate()
+        .map(|(idx, k)| Small {
+            key: rank(k),
+            idx: idx as u32,
+        })
+        .collect();
+    heap(&mut v);
+    assert!(
+        v.windows(2).all(|w| w[0].key <= w[1].key),
+        "input: {keys:?}"
+    );
+    let mut idx: Vec<usize> = v.iter().map(|e| e.idx as usize).collect();
+    idx.sort_unstable();
+    assert!(idx.into_iter().eq(0..keys.len()), "input: {keys:?}");
+    assert!(
+        v.iter().all(|e| e.key == rank(&keys[e.idx as usize])),
+        "element changed: {keys:?}"
+    );
 }
 
 #[test]
@@ -411,6 +473,59 @@ fn random_input_costs_about_n_log2_n_comparisons() {
     }
 }
 
+thread_local! {
+    static SMALL_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// An 8-byte key that counts every comparison made between two of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CountedSmall(u64);
+impl PartialOrd for CountedSmall {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for CountedSmall {
+    fn cmp(&self, other: &Self) -> Ordering {
+        SMALL_COMPARISONS.with(|c| c.set(c.get() + 1));
+        self.0.cmp(&other.0)
+    }
+}
+
+/// Sorts 8-byte copies of `keys`, checks the result, and returns the number of comparisons.
+fn comparisons_small(keys: &[u64]) -> usize {
+    let mut v: Vec<CountedSmall> = keys.iter().map(|&k| CountedSmall(k)).collect();
+    SMALL_COMPARISONS.with(|c| c.set(0));
+    heap(&mut v);
+    let count = SMALL_COMPARISONS.with(Cell::get);
+    let mut expected = keys.to_vec();
+    expected.sort_unstable();
+    assert!(v.into_iter().map(|c| c.0).eq(expected));
+    count
+}
+
+#[test]
+fn small_elements_cost_about_1_5_n_log2_n_comparisons() {
+    // Elements of at most 8 bytes take four children per node at every length: three
+    // comparisons per level of half as many as with two children.
+    for n in 0..size(300, 60) {
+        let sorted: Vec<u64> = (0..n as u64).collect();
+        let reverse: Vec<u64> = (0..n as u64).rev().collect();
+        assert_eq!(comparisons_small(&sorted), n.saturating_sub(1), "n = {n}");
+        assert_eq!(comparisons_small(&reverse), n.saturating_sub(1), "n = {n}");
+    }
+    let mut state = 0x5A11_5A11_5A11_5A11;
+    for n in [16, 64, size(1000, 200)] {
+        for _ in 0..size(10, 2) {
+            let mut v: Vec<u64> = (0..n as u64).collect();
+            shuffle(&mut v, &mut state);
+            let lg = n as f64 * (n as f64).log2();
+            let c = comparisons_small(&v) as f64;
+            assert!(c < 1.6 * lg, "{c} comparisons for n = {n}");
+        }
+    }
+}
+
 #[test]
 fn every_input_costs_o_n_log_n_comparisons() {
     // Heap sort is not adaptive: no input makes it much cheaper, but none makes it costlier
@@ -429,6 +544,12 @@ fn every_input_costs_o_n_log_n_comparisons() {
     ];
     let bound = 2.0 * n as f64 * (n as f64).log2();
     for keys in &shapes {
+        let wide: Vec<u64> = keys.iter().map(|&k| u64::from(k)).collect();
+        let small = comparisons_small(&wide) as f64;
+        assert!(
+            small < bound,
+            "{small} comparisons of small elements, bound {bound}"
+        );
         let two = comparisons_with::<_, SMALL>(keys) as f64;
         let four = comparisons_with::<_, LARGE>(keys) as f64;
         assert!(
@@ -629,6 +750,7 @@ fn panicking_comparison_keeps_every_element_exactly_once() {
     let mut state = 0x0123_4567_89AB_CDEF;
     for keys in layouts(size(60, 24), &mut state) {
         check::<SMALL>(&keys, 1);
+        check::<MEDIUM>(&keys, 1);
         check::<LARGE>(&keys, 1);
     }
     for keys in layouts(FOUR_CHILDREN + 3, &mut state) {
@@ -703,6 +825,174 @@ fn inconsistent_ord_keeps_every_element_exactly_once() {
     // `Liar` is 40 bytes plus `PAD`: `LARGE` ones take four children per node from 432.
     for answer in answers {
         check::<SMALL>(answer, 0..size(100, 30));
+        check::<MEDIUM>(answer, 0..size(100, 30));
         check::<LARGE>(answer, (0..size(100, 30)).chain(480..480 + size(8, 2)));
+    }
+}
+
+thread_local! {
+    static SMALL_DROPS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SMALL_BUDGET: Cell<usize> = const { Cell::new(0) };
+}
+
+/// An 8-byte element whose comparisons start panicking once [`SMALL_BUDGET`] runs out, and
+/// whose drops are counted in [`SMALL_DROPS`].
+struct TrackedSmall {
+    key: u32,
+    id: u32,
+}
+impl Drop for TrackedSmall {
+    fn drop(&mut self) {
+        SMALL_DROPS.with(|d| d.borrow_mut()[self.id as usize] += 1);
+    }
+}
+impl PartialEq for TrackedSmall {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for TrackedSmall {}
+impl PartialOrd for TrackedSmall {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for TrackedSmall {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let left = SMALL_BUDGET.with(Cell::get);
+        if left == 0 {
+            panic!("comparison budget exhausted");
+        }
+        SMALL_BUDGET.with(|b| b.set(left - 1));
+        self.key.cmp(&other.key)
+    }
+}
+
+/// Like [`sort_with_comparison_budget`], for 8-byte elements.
+fn sort_small_with_comparison_budget(keys: &[u32], budget: usize) -> bool {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let len = keys.len();
+    SMALL_DROPS.with(|d| *d.borrow_mut() = vec![0; len]);
+    SMALL_BUDGET.with(|b| b.set(budget));
+    let mut v: Vec<TrackedSmall> = keys
+        .iter()
+        .zip(0..)
+        .map(|(&key, id)| TrackedSmall { key, id })
+        .collect();
+
+    let result = catch_unwind(AssertUnwindSafe(|| heap(&mut v)));
+
+    if result.is_ok() {
+        assert!(v.windows(2).all(|w| w[0].key <= w[1].key));
+    }
+    let mut ids: Vec<usize> = v.iter().map(|t| t.id as usize).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        (0..len).collect::<Vec<_>>(),
+        "element lost or duplicated"
+    );
+    assert!(
+        v.iter().all(|t| t.key == keys[t.id as usize]),
+        "element changed during sort"
+    );
+    assert!(
+        SMALL_DROPS.with(|d| d.borrow().iter().all(|&n| n == 0)),
+        "element dropped during sort"
+    );
+    drop(v);
+    assert!(
+        SMALL_DROPS.with(|d| d.borrow().iter().all(|&n| n == 1)),
+        "element leaked or double-dropped"
+    );
+    result.is_ok()
+}
+
+#[test]
+fn panicking_comparison_keeps_small_elements_exactly_once() {
+    // Elements of 8 bytes take four children per node at every length: panics land in the run
+    // scan, building the heap and both halves of a removal, on short and long heaps.
+    let mut state = 0x0FED_CBA9_8765_4321;
+    for len in [size(60, 24), size(300, 40)] {
+        let distinct: Vec<u32> = {
+            let mut v: Vec<u32> = (0..len as u32).collect();
+            shuffle(&mut v, &mut state);
+            v
+        };
+        let layouts = [
+            distinct,
+            (0..len).map(|_| xorshift(&mut state) as u32 % 7).collect(),
+            (0..len as u32).map(|id| id ^ 1).collect(),
+            (0..len as u32).map(|i| i.min(len as u32 - 1 - i)).collect(),
+            (1..len as u32).chain([0]).collect(),
+        ];
+        for keys in layouts {
+            let total = {
+                let wide: Vec<u64> = keys.iter().map(|&k| u64::from(k)).collect();
+                comparisons_small(&wide)
+            };
+            for budget in (0..=total).step_by(size(1, 7)).chain([total]) {
+                let completed = sort_small_with_comparison_budget(&keys, budget);
+                assert_eq!(completed, budget == total, "budget {budget}: {keys:?}");
+            }
+        }
+    }
+}
+
+thread_local! {
+    static LIAR_ANSWER: Cell<u8> = const { Cell::new(0) };
+    static LIAR_STATE: Cell<u64> = const { Cell::new(0x5EED_5EED_5EED_5EED) };
+}
+
+/// A 4-byte element whose `Ord` answers [`LIAR_ANSWER`]: always less, always greater, always
+/// equal, or at random.
+struct LiarSmall {
+    id: u32,
+}
+impl PartialEq for LiarSmall {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for LiarSmall {}
+impl PartialOrd for LiarSmall {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for LiarSmall {
+    fn cmp(&self, _: &Self) -> Ordering {
+        match LIAR_ANSWER.with(Cell::get) {
+            0 => Ordering::Less,
+            1 => Ordering::Greater,
+            2 => Ordering::Equal,
+            _ => LIAR_STATE.with(|s| {
+                let mut state = s.get();
+                let r = xorshift(&mut state);
+                s.set(state);
+                [Ordering::Less, Ordering::Equal, Ordering::Greater][(r % 3) as usize]
+            }),
+        }
+    }
+}
+
+#[test]
+fn inconsistent_ord_keeps_small_elements_exactly_once() {
+    // Four children per node at every length, with an `Ord` that is not a total order.
+    for answer in 0..4 {
+        LIAR_ANSWER.with(|a| a.set(answer));
+        for len in (0..size(100, 30)).chain([size(1000, 200)]) {
+            for _ in 0..size(5, 1) {
+                let mut v: Vec<LiarSmall> = (0..len as u32).map(|id| LiarSmall { id }).collect();
+                heap(&mut v);
+                let mut ids: Vec<u32> = v.iter().map(|l| l.id).collect();
+                ids.sort_unstable();
+                assert!(
+                    ids.into_iter().eq(0..len as u32),
+                    "answer {answer}, len {len}"
+                );
+            }
+        }
     }
 }

@@ -2,6 +2,11 @@ use a::sort::selection;
 use std::cell::Cell;
 use std::cmp::Ordering;
 
+/// Scales an exhaustive or randomised test down when it runs under Miri.
+fn size(normal: usize, miri: usize) -> usize {
+    if cfg!(miri) { miri } else { normal }
+}
+
 #[test]
 fn sorts_empty_slice() {
     let mut v: Vec<i32> = vec![];
@@ -648,6 +653,216 @@ fn inconsistent_ord_keeps_every_element_exactly_once() {
             let mut names = names;
             names.sort_unstable();
             assert_eq!(after, names);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pairwise scan picks the element to compare with each extreme without a branch for
+// elements of at most 8 bytes and of more than 32, and decides from the first pass for those in
+// between. `Small` (8 bytes, bookkeeping in thread-local state) and `Big` (more than 32 bytes)
+// exercise the first two; [`Counted`] (16 bytes) the third.
+
+#[derive(Debug, Clone, Copy)]
+struct Small {
+    key: u32,
+    idx: u32,
+}
+
+#[derive(Default)]
+struct SmallState {
+    comparisons: Cell<usize>,
+    budget: Cell<Option<usize>>,
+    liar: Cell<Option<u64>>,
+}
+
+thread_local! {
+    static SMALL: SmallState = SmallState::default();
+}
+
+impl PartialEq for Small {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Small {}
+impl PartialOrd for Small {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Small {
+    fn cmp(&self, other: &Self) -> Ordering {
+        SMALL.with(|s| {
+            if let Some(left) = s.budget.get() {
+                if left == 0 {
+                    panic!("comparison budget exhausted");
+                }
+                s.budget.set(Some(left - 1));
+            }
+            s.comparisons.set(s.comparisons.get() + 1);
+            if let Some(mut state) = s.liar.get() {
+                let r = xorshift(&mut state);
+                s.liar.set(Some(state));
+                return [Ordering::Less, Ordering::Equal, Ordering::Greater][(r % 3) as usize];
+            }
+            self.key.cmp(&other.key)
+        })
+    }
+}
+
+/// Sorts `keys` as [`Small`] elements, with comparisons panicking after `budget` of them and
+/// answered at random from `liar` if those are set. Checks that every element is still there
+/// exactly once, and sorted if the sort completed with honest comparisons. Returns whether it
+/// completed and the number of comparisons.
+fn sort_small(keys: &[u32], budget: Option<usize>, liar: Option<u64>) -> (bool, usize) {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let mut v: Vec<Small> = keys
+        .iter()
+        .enumerate()
+        .map(|(idx, &key)| Small {
+            key,
+            idx: idx as u32,
+        })
+        .collect();
+    SMALL.with(|s| {
+        s.comparisons.set(0);
+        s.budget.set(budget);
+        s.liar.set(liar);
+    });
+    let completed = catch_unwind(AssertUnwindSafe(|| selection(&mut v))).is_ok();
+    let comparisons = SMALL.with(|s| {
+        s.budget.set(None);
+        s.liar.set(None);
+        s.comparisons.get()
+    });
+    if completed && liar.is_none() {
+        assert!(v.windows(2).all(|w| w[0].key <= w[1].key), "{keys:?}");
+    }
+    let mut idx: Vec<u32> = v.iter().map(|e| e.idx).collect();
+    idx.sort_unstable();
+    assert!(
+        idx.into_iter().eq(0..keys.len() as u32),
+        "element lost or duplicated: {keys:?}"
+    );
+    assert!(
+        v.iter().all(|e| keys[e.idx as usize] == e.key),
+        "element changed: {keys:?}"
+    );
+    (completed, comparisons)
+}
+
+/// A key of more than 32 bytes that counts every comparison made between two of them.
+#[derive(Debug, Clone)]
+struct Big<'a> {
+    key: u32,
+    comparisons: &'a Cell<usize>,
+    _pad: [u8; 40],
+}
+impl PartialEq for Big<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for Big<'_> {}
+impl PartialOrd for Big<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Big<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.comparisons.set(self.comparisons.get() + 1);
+        self.key.cmp(&other.key)
+    }
+}
+
+/// Sorts `keys` as [`Big`] elements, checks the result, and returns the number of comparisons.
+fn big_comparisons(keys: &[u32]) -> usize {
+    let count = Cell::new(0);
+    let mut v: Vec<Big> = keys
+        .iter()
+        .map(|&key| Big {
+            key,
+            comparisons: &count,
+            _pad: [0; 40],
+        })
+        .collect();
+    selection(&mut v);
+    assert!(v.windows(2).all(|w| w[0].key <= w[1].key), "{keys:?}");
+    count.get()
+}
+
+#[test]
+fn test_elements_cover_every_scan() {
+    assert!(std::mem::size_of::<Small>() <= 8);
+    assert!((9..=32).contains(&std::mem::size_of::<Counted<u32>>()));
+    assert!(std::mem::size_of::<Big>() > 32);
+}
+
+#[test]
+fn every_scan_makes_the_same_comparisons() {
+    // The scans differ only in how they pick elements, so on any input elements of every size
+    // cost the same comparisons, duplicates or not, predictable or not.
+    let check = |keys: &[u32]| {
+        let counted = comparisons(keys);
+        assert_eq!(sort_small(keys, None, None).1, counted, "{keys:?}");
+        assert_eq!(big_comparisons(keys), counted, "{keys:?}");
+    };
+    for n in 0..=size(7, 5) {
+        for_each_permutation(n, &mut |p| {
+            check(&p.iter().map(|&k| k as u32).collect::<Vec<_>>())
+        });
+    }
+    for len in 0..=size(8, 5) as u32 {
+        for_each_sequence(len, 3, &mut |s| {
+            check(&s.iter().map(|&k| u32::from(k)).collect::<Vec<_>>())
+        });
+    }
+    let mut state = 0x5E1E_C710_0000_0001;
+    for n in [9, 10, 31, 64, 100, 255, 256] {
+        let n = size(n, n.min(40));
+        for modulus in [2, 5, 64, u64::MAX] {
+            let keys: Vec<u32> = (0..n)
+                .map(|_| (xorshift(&mut state) % modulus) as u32)
+                .collect();
+            check(&keys);
+        }
+        check(&(0..n as u32).collect::<Vec<_>>());
+        check(&(0..n as u32).rev().collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn small_panicking_comparison_keeps_every_element_exactly_once() {
+    let mut state = 0x5E1E_C710_0000_0002;
+    let n = size(60, 24);
+    let distinct: Vec<u32> = (0..n).map(|_| xorshift(&mut state) as u32).collect();
+    let few: Vec<u32> = (0..n).map(|_| (xorshift(&mut state) % 3) as u32).collect();
+    let sorted: Vec<u32> = (0..n as u32).collect();
+    for keys in [distinct, few, sorted] {
+        let total = sort_small(&keys, None, None).1;
+        for budget in (0..=total).step_by(size(1, 5)) {
+            let (completed, _) = sort_small(&keys, Some(budget), None);
+            assert_eq!(completed, budget == total, "budget {budget}: {keys:?}");
+        }
+    }
+}
+
+#[test]
+fn small_inconsistent_ord_keeps_every_element_exactly_once() {
+    // An `Ord` that answers at random makes the order of the result unspecified, but no
+    // element may be lost or duplicated, no index may go out of bounds, and the sort must
+    // still terminate.
+    let mut state = 0x5E1E_C710_0000_0003;
+    for len in 0..size(64, 20) {
+        for _ in 0..size(20, 2) {
+            let keys: Vec<u32> = (0..len)
+                .map(|_| (xorshift(&mut state) % 8) as u32)
+                .collect();
+            let (completed, _) = sort_small(&keys, None, Some(xorshift(&mut state) | 1));
+            assert!(completed);
         }
     }
 }

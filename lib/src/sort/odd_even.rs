@@ -1,5 +1,5 @@
 use core::hint::select_unpredictable;
-use core::mem::{ManuallyDrop, size_of};
+use core::mem::{ManuallyDrop, MaybeUninit, size_of};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::panic::resume_unwind;
@@ -19,7 +19,7 @@ use std::thread;
 /// sorting network of such a row. On one processor it is bubble sort with each pass cut into
 /// independent pairs; [`odd_even_parallel`] runs it on several threads.
 ///
-/// Five refinements keep the realisation as cheap as odd-even sort can be. None of them
+/// Six refinements keep the realisation as cheap as odd-even sort can be. None of them
 /// changes which compare-exchanges run in which phase, so every swap is one the textbook
 /// version makes, and the slice after every round is the same.
 ///
@@ -56,6 +56,18 @@ use std::thread;
 ///   where the branches are predictable. Sweeps of 64 pairs are 1.2–1.25 times slower (more
 ///   than the processor can keep in flight), and 16-byte elements 2.4–3.9 times slower without
 ///   branches than with them.
+/// * **Elements of at most 4 bytes split into even and odd positions.** For these, a chunk of
+///   32 steps is moved out of the slice into two small arrays, one for the elements at even
+///   positions and one for those at odd ones, and back after both phases; the element where
+///   the next chunk starts is carried over in a register. Every pair of a phase then sits at
+///   the same place of the two arrays (one place apart for the odd phase), and the compiler
+///   runs each phase as a few vector minimums and maximums, where in the slice it picked
+///   lanes apart and widened every swap bit of a narrow element to 64 bits for the mask. The
+///   same pairs are compared and the same swaps made, in the same rounds, but the elements are
+///   compared where the chunk holds them, outside the slice: 1.3–1.5 times faster for 4-byte
+///   elements from 1000 elements on, 1.7–2.35 times for 2-byte and 3.3–4.3 times for 1-byte
+///   ones, on every input that takes more than one round (1.05–1.5 times on 100); for `u64`
+///   it made no difference.
 /// * **For larger elements, swaps by plain copies, with the even phase two pairs behind.** A
 ///   swap reads both elements and writes them back crossed; [`core::mem::swap`] compiled to
 ///   copies that the processor could not forward to the next comparison, 1.2–1.9 times slower
@@ -85,13 +97,13 @@ use std::thread;
 /// Against the textbook version, measured on 1000 and 5000 elements: 1.15–3.4 times faster for
 /// integers (1.15 on reverse-sorted input, 2–2.6 on random), 1.03–1.75 times for strings and
 /// 1.0–2.1 times for 64-byte elements. Against this crate's [`bubble`](fn@super::bubble) sort,
-/// 2–2.3 times faster on random integers, but on strings and 64-byte elements from 1.1 times
+/// 1.6–1.7 times faster on random integers, but on strings and 64-byte elements from 1.1 times
 /// faster to 2 times slower (reverse-sorted 64-byte elements): bubble sort shifts an element
 /// one write per slot instead of swapping. [`cocktail_shaker`](fn@super::cocktail_shaker)
 /// sort makes a third fewer comparisons on random input and carries a turtle home in one pass:
-/// odd-even sort is 1.25–1.7 times faster on random integers and 2.4 times on few distinct
-/// keys, but 1.2–1.4 times slower on random strings, 1.45–2.2 times on 64-byte elements and
-/// 17–60 times on nearly sorted input. Odd-even sort is quadratic: on 1000 random integers it
+/// odd-even sort is 1.45 times faster on random integers and 2.1 times on few distinct keys,
+/// but 1.2–1.4 times slower on random strings, 1.5–2.2 times on 64-byte elements and 20–50
+/// times on nearly sorted input. Odd-even sort is quadratic: on 1000 random integers it
 /// is about 20 times slower than [`slice::sort_unstable`], on 5000 about 85 times; prefer
 /// [`slice::sort`] for real workloads.
 ///
@@ -168,7 +180,9 @@ pub fn odd_even<T: Ord>(arr: &mut [T]) {
 /// 64 rounds have run. Measured on a 16-core machine (12 performance cores) under other load,
 /// against [`odd_even`]: 4.3–6 times faster on 20,000 integers, 7–8 times on strings and
 /// 6.6–10.5 times on 64-byte elements; on 8192 elements 1.9–3.8, 4.4–6.5 and 3.5–6.6 times; on
-/// 4096, 1.3–2.1, 2.7–4 and 2–4.4 times. On 2048 strings it is 1.5–2.5 times faster.
+/// 4096, 1.3–2.1, 2.7–4 and 2–4.4 times. On 2048 strings it is 1.5–2.5 times faster. Elements
+/// of at most 4 bytes, split into even and odd positions as in [`odd_even`], sort 1.2–1.25
+/// (`u32`) and 2.1–2.2 (`u8`) times faster than without that on 8192 and 20,000 elements.
 ///
 /// # Panics
 ///
@@ -482,6 +496,142 @@ unsafe fn steps_branchless<T: Ord>(p: *mut T, c: usize) -> u64 {
     mask
 }
 
+/// The largest element size, in bytes, for which the branchless round moves each chunk out of
+/// the slice into a [`Chunk`] of local arrays, one of the elements at even and one of those at
+/// odd positions ([`chunk_steps`]).
+///
+/// Measured against [`steps_branchless`], on 1000 and 5000 elements: 1.3–1.5 times faster for
+/// 4-byte elements on every input, 1.7–2.35 times for 2-byte and 3.3–4.3 times for 1-byte
+/// elements, and 1.05–1.5 times on 100. For `u64` it made no difference (within 1.5%), and
+/// chunks of 16 steps made `u64` 1.15–1.2 times slower: two elements to a vector register
+/// leave little to gain. Chunks of 16 or 64 steps made narrow elements 1.5–2.9 times slower
+/// than [`CHUNK`]: the compiler no longer keeps the arrays in vector registers.
+const SPLIT_MAX_SIZE: usize = 4;
+
+/// An element held outside the slice, and the slot it goes back to when dropped.
+struct Carry<T> {
+    val: MaybeUninit<T>,
+    dst: *mut T,
+}
+
+impl<T> Drop for Carry<T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // SAFETY: `dst` is the vacant slot of the slice that `val` belongs in (see `Chunk`).
+        unsafe { ptr::copy_nonoverlapping(self.val.as_ptr(), self.dst, 1) }
+    }
+}
+
+/// The `2·CHUNK + 1` elements from `p` on, moved out of the slice: `even[i]` is the element of
+/// `p + 2i`, `odd[i]` that of `p + 2i + 1` and `last` that of `p + 2·CHUNK`. The element of `p`
+/// comes from `carry`, which holds it outside the slice, and dropping the chunk writes every
+/// element back but `last`, which goes into `carry` instead, for `p + 2·CHUNK`: the next chunk
+/// starts there and reads it from a register, not from a slot the processor has only just
+/// been told to write.
+struct Chunk<'a, T> {
+    even: [MaybeUninit<T>; CHUNK],
+    odd: [MaybeUninit<T>; CHUNK],
+    last: MaybeUninit<T>,
+    p: *mut T,
+    carry: &'a mut Carry<T>,
+}
+
+impl<T> Drop for Chunk<'_, T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // SAFETY: the slots `p .. p + 2·CHUNK` are vacant, their elements in `even` and `odd`,
+        // and `carry.val` is vacant, its element in `even[0]` (see `chunk_steps`). Each goes
+        // back to its slot, and `last` into `carry`, whose slot `p + 2·CHUNK` is now vacant.
+        unsafe {
+            for i in 0..CHUNK {
+                ptr::copy_nonoverlapping(self.even[i].as_ptr(), self.p.add(2 * i), 1);
+                ptr::copy_nonoverlapping(self.odd[i].as_ptr(), self.p.add(2 * i + 1), 1);
+            }
+            ptr::copy_nonoverlapping(self.last.as_ptr(), self.carry.val.as_mut_ptr(), 1);
+            self.carry.dst = self.p.add(2 * CHUNK);
+        }
+    }
+}
+
+/// [`cx_branchless`] on elements held in a [`Chunk`].
+///
+/// # Safety
+///
+/// `a` and `b` must be valid, distinct and initialised.
+#[inline(always)]
+unsafe fn cx_held<T: Ord>(a: *mut MaybeUninit<T>, b: *mut MaybeUninit<T>) -> bool {
+    // SAFETY: as in `cx_branchless`: the comparison runs with both elements where they are,
+    // then each of the two places gets one of them, and nothing in between can panic.
+    unsafe {
+        let swap = (*b).assume_init_ref() < (*a).assume_init_ref();
+        let (x, y) = (ptr::read(a), ptr::read(b));
+        let (lo, hi) = select_unpredictable(swap, (ptr::read(&y), ptr::read(&x)), (x, y));
+        ptr::write(a, lo);
+        ptr::write(b, hi);
+        swap
+    }
+}
+
+/// [`steps_branchless`] for [`CHUNK`] steps from `p`, on elements of at most
+/// [`SPLIT_MAX_SIZE`] bytes, with the element of `p` held in `carry`; afterwards `carry` holds
+/// that of `p + 2·CHUNK` (see [`Chunk`]).
+///
+/// The elements are moved into two arrays, one for even positions and one for odd ones, so
+/// that every compare-exchange of a phase pairs equal lanes of the two (shifted by one for the
+/// first phase), and the compiler runs the phase as a few vector minimums and maximums:
+/// [`steps_branchless`] makes it pick lanes apart, and widens the comparison results of
+/// narrow elements to 64 bits to build the mask. Every comparison and every swap is still the
+/// one of the phase, on the same two elements.
+///
+/// # Safety
+///
+/// As for [`steps_branchless`], with `c` = [`CHUNK`]; the slot `p` is vacant, its element in
+/// `carry`, and no other element is held out of the slice.
+#[inline(always)]
+unsafe fn chunk_steps<T: Ord>(p: *mut T, carry: &mut Carry<T>) -> u64 {
+    // SAFETY: the chunk takes the elements of `p + 1 ..= p + 2·CHUNK` from the slice and that
+    // of `p` from `carry`, by bit copies that leave their old places vacant; it compares and
+    // exchanges them among its own places only, and on drop (also if a comparison panics)
+    // puts each back, as described for `Chunk`.
+    unsafe {
+        let mut chunk = Chunk::<T> {
+            even: [const { MaybeUninit::uninit() }; CHUNK],
+            odd: [const { MaybeUninit::uninit() }; CHUNK],
+            last: ptr::read(p.add(2 * CHUNK).cast()),
+            p,
+            carry,
+        };
+        ptr::copy_nonoverlapping(chunk.carry.val.as_ptr(), chunk.even[0].as_mut_ptr(), 1);
+        for i in 1..CHUNK {
+            chunk.even[i] = ptr::read(p.add(2 * i).cast());
+        }
+        for i in 0..CHUNK {
+            chunk.odd[i] = ptr::read(p.add(2 * i + 1).cast());
+        }
+        let even = chunk.even.as_mut_ptr();
+        let odd = chunk.odd.as_mut_ptr();
+        // The first phase: the pairs `(p + 2i + 1, p + 2i + 2)`.
+        for i in 0..CHUNK - 1 {
+            cx_held(odd.add(i), even.add(i + 1));
+        }
+        cx_held(odd.add(CHUNK - 1), &raw mut chunk.last);
+        // The second phase: the pairs `(p + 2i, p + 2i + 1)`, which swapped as bytes, turned
+        // into bits below: a 64-bit mask built lane by lane is what made narrow elements slow.
+        let mut swapped = [0u8; CHUNK];
+        for (i, s) in swapped.iter_mut().enumerate() {
+            *s = cx_held(even.add(i), odd.add(i)) as u8;
+        }
+        drop(chunk);
+        let mut mask = 0;
+        for (k, bytes) in swapped.as_chunks::<8>().0.iter().enumerate() {
+            // Byte `j` of `x` is 0 or 1; the product gathers them into its top byte, bit `j`.
+            let x = u64::from_le_bytes(*bytes);
+            mask |= (x.wrapping_mul(0x0102_0408_1020_4080) >> 56) << (8 * k);
+        }
+        mask
+    }
+}
+
 /// Runs two consecutive phases: the first compares the `na` pairs starting at `a0`, `a0 + 2`,
 /// ..., the second the `nb` pairs starting at `b0`, `b0 + 2`, .... Returns the pairs the second
 /// phase swapped.
@@ -514,6 +664,23 @@ unsafe fn round<T: Ord>(base: *mut T, a0: usize, na: usize, b0: usize, nb: usize
         let steps = (na - head).min(nb);
         if size_of::<T>() <= BRANCHLESS_MAX_SIZE {
             let mut done = 0;
+            if size_of::<T>() <= SPLIT_MAX_SIZE && steps >= CHUNK {
+                // The element of the slot each chunk starts at comes from the chunk before.
+                let mut carry = Carry {
+                    val: MaybeUninit::new(ptr::read(base.add(b0))),
+                    dst: base.add(b0),
+                };
+                while steps - done >= CHUNK {
+                    let p = b0 + 2 * done;
+                    let mask = chunk_steps(base.add(p), &mut carry);
+                    if mask != 0 {
+                        swaps.first = swaps.first.min(p + 2 * mask.trailing_zeros() as usize);
+                        swaps.last = p + 2 * (63 - mask.leading_zeros() as usize);
+                    }
+                    done += CHUNK;
+                }
+                // Dropping `carry` puts the element of the next slot back.
+            }
             while done < steps {
                 let p = b0 + 2 * done;
                 let c = if steps - done >= CHUNK {

@@ -3,7 +3,9 @@ use core::mem::{self, MaybeUninit};
 use core::ptr::{self, NonNull};
 use core::slice;
 
-use super::counting::{Count, STACK_BYTES, Stack, bump, counters, in_order, key_slots, min_max};
+use super::counting::{
+    Count, STACK_BYTES, Stack, bump, counters, in_order, in_order_at_first, key_slots, min_max,
+};
 use super::key::BucketKey;
 use super::key::sealed::{Bits, Bucket};
 use super::tim::Buffer;
@@ -15,14 +17,15 @@ use super::tim::Buffer;
 /// falls in, sorts each bucket, and reads the buckets out in order. CLRS's version sorts `n`
 /// reals spread uniformly over `[0, 1)` into `n` buckets of about one element each, sorted by
 /// insertion, in `O(n)` expected time. Here a level cuts its range into one bucket per element,
-/// but at most 4096, so that the counts stay in the fastest caches, and moves the elements into
-/// their buckets with a stable counting pass; runs of buckets of at most 16 elements are sorted
+/// but at most 4096, so that the counts stay in the fastest caches (65,536 for a level of fewer
+/// than 131,072 keys that spread over its range), and moves the elements into their buckets
+/// with a stable counting pass; runs of buckets of at most 16 elements are sorted
 /// by one insertion sort, and larger buckets are cut again over their own range. Floats are
 /// sorted as [`f64::total_cmp`] orders them, and cut by value at the first level; integers, and
 /// floats below it, by their bits, which bounds the depth by the width of the key: skewed input
 /// cannot make it quadratic, as it makes the textbook version.
 ///
-/// Eight refinements keep the algorithm as cheap as bucket sort can be:
+/// Ten refinements keep the algorithm as cheap as bucket sort can be:
 ///
 /// * **Sorted and reverse-sorted input is recognised.** The slice is first scanned for one
 ///   ascending or one non-increasing run, 16 neighbours at a time with no exit inside a block;
@@ -43,6 +46,26 @@ use super::tim::Buffer;
 ///   a time, all four counters read before any is written back, and a level with at least four
 ///   keys per bucket counts into four interleaved tables, from 16 into eight: 1.8–3 times faster
 ///   on powers of two, 1.3–2 times with four distinct keys, 1.7 times on nearly sorted input.
+/// * **Keys that crowd a few buckets are counted and moved in groups.** The tables split the
+///   chains of a count, but not those of the moves, which follow one place of each bucket. A
+///   level of at least 512 keys, two or more per bucket, whose eight keys at even distances
+///   share buckets in at least four pairs, as among few distinct keys or keys crowding one
+///   bucket, is cut into groups of keys side by side, each counted into tables of its own and
+///   moved by places of its own: two groups, or four of two tables each from eight keys per
+///   bucket on (not for floats cut by value, whose buckets cost more to find): 1.02–1.15 times
+///   faster on powers of two at 10,000 elements, 1.05–1.3 times at 100,000 and 1.3–1.45 times
+///   at 1,000,000; 1.12–1.35 times with 4 to 16 distinct keys from 100,000 elements on, and
+///   1.12–1.3 times on `f32`s of random exponents from 10,000 on.
+/// * **One bucket per key up to 65,536 for keys that spread.** Cut into 4096 buckets, a level of
+///   5000 to 130,000 keys holds 1 to 32 per bucket, which the insertion sorts of runs of small
+///   buckets pay for, or a second level. A level of more than 4096 and fewer than 131,072 keys
+///   cuts its range into one bucket per key, up to 65,536, when 32 of its keys at even
+///   distances fall in at least 30 different buckets of 4096 (few distinct keys, or keys
+///   crowding a few buckets, gain nothing from more buckets, and pay for counting and walking
+///   them), unless it has fewer than 65,536 keys whose first ones are mostly in order, which
+///   insertion sorts cheaply: 1.2–2.9 times faster on random and uniform keys and keys below
+///   `n` from 10,000 to 130,000 elements on fresh input, 1.05–2.2 times on the same input over
+///   and over.
 /// * **Buckets are found once.** A level of at most 2048 keys keeps the bucket of each key as
 ///   it counts it, on the stack, for the pass that moves it.
 /// * **A level of one bucket per key is sorted as it is moved.** When there are fewer keys in
@@ -54,7 +77,10 @@ use super::tim::Buffer;
 ///   writing the larger and the smaller of a key and its neighbour without one, two places for
 ///   keys of up to 8 bytes that often move further: 1.2–1.8 times faster on uniform keys.
 /// * **No allocation for small sorts.** Up to 16 elements are sorted by insertion at once, and
-///   a buffer and counts of up to 4 KiB each live on the stack.
+///   a buffer and counts of up to 4 KiB each live on the stack; counts are `u16` up to 65,535
+///   elements. The counts of a level are turned into the starts of its buckets four at a time,
+///   one addition per four buckets waiting for the one before it (1.03–1.07 times faster at 100
+///   to 1000 elements).
 ///
 /// Together, against the first version of this sort (the same levels with one count per bucket
 /// and a branching insertion sort): 1.2–1.8 times faster on random and uniform integers, 1.3–1.8
@@ -81,19 +107,22 @@ use super::tim::Buffer;
 /// | Any keys of `w` bits              | at most `⌈w / 4⌉`, plus one (floats) | `O(n·w)` |
 ///
 /// A level divides the range of its keys by its number of buckets, at least 17 as it has more
-/// than 16 keys, and up to 4096: while an element's bucket holds more than 4096 keys, a level
-/// takes 12 bits off its range, so 64-bit keys need at most six levels of that size.
+/// than 16 keys, and up to 4096 (65,536 below 131,072 keys): while an element's bucket holds
+/// more than 4096 keys, a level takes at least 12 bits off its range, so 64-bit keys need at
+/// most six levels of that size.
 ///
 /// Against [`slice::sort_unstable`] (`sort_unstable_by(f64::total_cmp)` for floats), from 100
-/// elements on: 1.5–3 times faster on random and uniform integers, 2–3.3 times on uniform
-/// floats, 1.4–3 times on `f64`s of random exponents, 2.2–5 times on keys below `n`, 1.3–4.5
-/// times on nearly sorted input, 1.7–5 times on sorted input and 1.3–2.9 times on
+/// elements on: 1.3–3 times faster on random and uniform integers, 1.7–3.7 times on uniform
+/// floats, 1.2–4.8 times on `f64`s of random exponents, 2–5.9 times on keys below `n`, 1.25–4.8
+/// times on nearly sorted input, 2.1–2.6 times on sorted input and 1.3–1.7 times on
 /// reverse-sorted input. Its weaknesses are keys the equal-width buckets do not spread, where
-/// the standard library gains from few distinct values: powers of two take 1.4–3.4 times as
-/// long, four distinct keys 1.2–1.6 times as long from 1000 elements on, and `f32`s of random
-/// exponents, which are mostly zeros and infinities, up to 1.8 times as long; 16 elements take
-/// about as long. For integers, [`radix`](fn@super::radix) sort,
-/// which does not depend on how the keys are spread, is faster on large slices of random keys.
+/// the standard library gains from few distinct values: powers of two take 1.2–4.3 times as
+/// long up to 100,000 elements (about as long at 1,000,000), four distinct keys up to 1.5 times
+/// as long from 1000 to 10,000 elements (`f64`s 1.8–2.2 times from 1000 on), and `f32`s of
+/// random exponents, which are mostly zeros and infinities, up to 1.8 times as long; 16
+/// elements take about as long. For 32-bit integers, [`radix`](fn@super::radix) sort, which
+/// does not depend on how the keys are spread, is faster on large slices of random keys
+/// (1.4–1.6 times from 100,000 elements on), but on random `u64`s it is 1.2–1.35 times slower.
 ///
 /// # Examples
 ///
@@ -175,7 +204,9 @@ pub fn bucket<T: BucketKey>(arr: &mut [T]) {
         // SAFETY: `v` holds `len` keys, and `scratch` has room for `len` keys, apart from them;
         // the elements are zero-sized.
         unsafe {
-            if len <= u32::MAX as usize {
+            if len <= u16::MAX as usize {
+                sort::<T, (), u16, false>(v, scratch, len, 0, &mut Mode::One, bounds);
+            } else if len <= u32::MAX as usize {
                 sort::<T, (), u32, false>(v, scratch, len, 0, &mut Mode::One, bounds);
             } else {
                 sort::<T, (), usize, false>(v, scratch, len, 0, &mut Mode::One, bounds);
@@ -196,11 +227,13 @@ pub fn bucket<T: BucketKey>(arr: &mut [T]) {
 /// Sorts a slice in place by an integer, `char`, `bool` or float key using bucket sort. The sort
 /// is stable: elements with equal keys keep their order.
 ///
-/// The keys are bucketed as [`bucket`] buckets values, with the same refinements, and the
-/// elements move with them. `key` is called exactly once per element of a slice of two or more
-/// elements that are not zero-sized (a shorter slice, or one of zero-sized elements, is left as
-/// it is without calling it): the keys are kept in a buffer of their own as they are read, and
-/// once the last key is read no code of the caller runs.
+/// The keys are bucketed as [`bucket`] buckets values, with the same refinements but for the
+/// groups of keys that crowd a few buckets, which cost elements moved with their keys more than
+/// they saved (1.05–1.1 times as long), and the elements move with them. `key` is called
+/// exactly once per element of a slice of two or more elements that are not zero-sized (a
+/// shorter slice, or one of zero-sized elements, is left as it is without calling it): the keys
+/// are kept in a buffer of their own as they are read, and once the last key is read no code of
+/// the caller runs.
 ///
 /// Four refinements are its own:
 ///
@@ -234,12 +267,12 @@ pub fn bucket<T: BucketKey>(arr: &mut [T]) {
 ///   counts of a level; each on the stack up to 4 KiB and otherwise allocated.
 /// * **Not adaptive**, as [`bucket`].
 ///
-/// Against [`slice::sort_by_key`], from 100 elements on: 2.1–3 times faster on random `u64`
-/// keys of 16-byte elements and 2.4–4.5 times of 72-byte elements, 1.8–3.2 times on random
+/// Against [`slice::sort_by_key`], from 100 elements on: 1.3–3.1 times faster on random `u64`
+/// keys of 16-byte elements and 2.3–4.8 times of 72-byte elements, 1.5–3.4 times on random
 /// `f64` keys, 2.6–5.5 times on keys below `n`, and about as fast on sorted and reverse-sorted
 /// input. It is weaker where the standard library's merges of runs and its few distinct values
-/// gain: powers of two take up to 2.1 times as long, four distinct keys up to 1.35 times, and
-/// 16 elements about 1.1 times as long.
+/// gain: powers of two take up to 2.1 times as long on fresh input (3.5 times on the same input
+/// over and over), four distinct keys up to 1.4 times, and 16 elements about 1.1 times as long.
 ///
 /// # Panics
 ///
@@ -346,7 +379,9 @@ where
     // SAFETY: `v` holds the `len` keys, all written, and their elements; `scratch` has room for
     // `len` of each, apart from them.
     unsafe {
-        if len <= u32::MAX as usize {
+        if len <= u16::MAX as usize {
+            sort::<K, T, u16, false>(v, scratch, len, 0, &mut Mode::One, None);
+        } else if len <= u32::MAX as usize {
             sort::<K, T, u32, false>(v, scratch, len, 0, &mut Mode::One, None);
         } else {
             sort::<K, T, usize, false>(v, scratch, len, 0, &mut Mode::One, None);
@@ -673,9 +708,78 @@ impl<B, E> Place<B, E> for Cached {
     }
 }
 
-/// How many buckets a level of `len` elements cuts its range into.
-fn buckets(len: usize) -> usize {
-    (len / LOAD).clamp(2, MAX_BUCKETS)
+/// A level of fewer than `WIDE_LOAD` elements per bucket of this many, whose keys [`spread`]
+/// over the range, cuts it into up to this many buckets instead of [`MAX_BUCKETS`]: one per
+/// element, as in CLRS, while the slice is at most this long. Cut into 4096 buckets, such a level
+/// holds from 2 to 32 keys per bucket, many of them sorted by insertion together, which cost
+/// random keys up to twice as long; beyond, the second level its larger buckets take is cheaper
+/// than the counts of more buckets. Keys that do not spread, such as a few distinct ones, do not
+/// gain from more buckets, and pay for counting and walking them.
+const WIDE_BUCKETS: usize = 1 << 16;
+
+/// See [`WIDE_BUCKETS`].
+const WIDE_LOAD: usize = 2;
+
+/// How many of the keys [`spread`] samples...
+const SAMPLE: usize = 32;
+
+/// ...of which at most this many may fall in a bucket another one fell in.
+const SAMPLE_REPEATS: usize = 2;
+
+/// How many buckets a level of `len` elements cuts its range into: up to [`WIDE_BUCKETS`] if
+/// `wide`, and otherwise up to [`MAX_BUCKETS`].
+fn buckets(len: usize, wide: bool) -> usize {
+    let max = if wide { WIDE_BUCKETS } else { MAX_BUCKETS };
+    (len / LOAD).clamp(2, max)
+}
+
+/// Whether a level of the `len` keys at `keys` that `map` cuts into [`MAX_BUCKETS`] buckets
+/// cuts its range into up to [`WIDE_BUCKETS`] instead: if it has more than [`MAX_BUCKETS`]
+/// elements, fewer than `WIDE_LOAD` per wide bucket, and keys that spread, as told by
+/// [`SAMPLE`] keys at even distances, at most [`SAMPLE_REPEATS`] of which fall in a bucket of
+/// `map` that one before them fell in. Few distinct keys, or keys crowded in a few buckets, fail
+/// it: 64 distinct keys take about 25 buckets of the 32 keys.
+///
+/// # Safety
+///
+/// `keys` must hold `len` initialized keys, each of which `map` maps.
+#[inline(always)]
+unsafe fn spread<B: Copy + Ord>(keys: *const B, len: usize, map: impl Fn(B) -> usize) -> bool {
+    if len <= MAX_BUCKETS || len >= WIDE_LOAD * WIDE_BUCKETS {
+        return false;
+    }
+    // Keys mostly in order are sorted cheaply by insertion in runs of many small buckets: more
+    // buckets only cost them, until the narrow cut leaves buckets to cut again.
+    // SAFETY: guaranteed by the caller.
+    if len < LEAF * MAX_BUCKETS && in_order_at_first(unsafe { slice::from_raw_parts(keys, len) }) {
+        return false;
+    }
+    // SAFETY: guaranteed by the caller; `i · len / SAMPLE < len`.
+    let sample: [usize; SAMPLE] =
+        core::array::from_fn(|i| map(unsafe { *keys.add(i * len / SAMPLE) }));
+    let mut repeats = 0;
+    for i in 1..SAMPLE {
+        repeats += usize::from(sample[..i].contains(&sample[i]));
+    }
+    repeats <= SAMPLE_REPEATS
+}
+
+/// [`spread`] for a cut of the range from `min` to `max` by the keys' bits, into the buckets of
+/// the top 12 bits of their difference from `min` below the span's highest bit.
+///
+/// # Safety
+///
+/// As for [`spread`], with every key from `min` to `max`.
+#[inline(always)]
+unsafe fn spread_by_bits<B: Bits>(keys: *const B, len: usize, min: B, max: B) -> bool {
+    let span = max.wrapping_sub(min);
+    let shift = (B::BITS - span.leading_zeros()).saturating_sub(MAX_BUCKETS.ilog2());
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        spread(keys, len, |key: B| {
+            key.wrapping_sub(min).shr(shift).low64() as usize
+        })
+    }
 }
 
 /// Where the keys and their elements of a part of the slice, or of the scratch space, are.
@@ -762,6 +866,8 @@ trait Index<B>: Copy {
     /// Whether every bucket holds a single key, so that a level is sorted once its keys are in
     /// their buckets.
     const ONE_KEY: bool = false;
+    /// Whether the map cuts float keys by value, which costs more than a cut by bits.
+    const BY_VALUE: bool = false;
     /// The bucket `key` falls in: a pure function of `key`, which gives the same bucket every
     /// time, as [`count`] and [`distribute`] may each evaluate it, and must agree. The float map
     /// does on every target whose float arithmetic is exact IEEE 754 (not x87 with its excess
@@ -900,6 +1006,7 @@ impl<K: Bucket> Float<K> {
 }
 
 impl<K: Bucket> Index<K::Bits> for Float<K> {
+    const BY_VALUE: bool = true;
     #[inline(always)]
     fn of(self, key: K::Bits) -> usize {
         // Every key is finite and at least `lo`, so the product is not negative; as in `at`.
@@ -967,8 +1074,13 @@ unsafe fn sort<K: Bucket, E, C: Count, const INTO: bool>(
         }
         if K::FLOAT
             && depth < FLOAT_LEVELS
-            && let Some(map) = Float::<K>::new(min, max, buckets(len))
+            && let Some(map) = Float::<K>::new(min, max, buckets(len, false))
         {
+            let map = if spread(src.keys, len, |key| map.of(key)) {
+                Float::<K>::new(min, max, buckets(len, true)).unwrap_or(map)
+            } else {
+                map
+            };
             level::<K, E, C, _, INTO>(src, dst, len, map, depth, mode, usize::MAX);
             return;
         }
@@ -994,7 +1106,8 @@ unsafe fn by_bits<K: Bucket, E, C: Count, const INTO: bool>(
     mode: &mut Mode,
     most: usize,
 ) -> bool {
-    let buckets = buckets(len);
+    // SAFETY: guaranteed by the caller.
+    let buckets = buckets(len, unsafe { spread_by_bits(src.keys, len, min, max) });
     let span = max.wrapping_sub(min);
     let width = <K::Bits as Bits>::BITS - span.leading_zeros();
     // SAFETY: guaranteed by the caller; each map sends `min` to its first bucket and `max` to
@@ -1063,18 +1176,19 @@ unsafe fn level<K: Bucket, E, C: Count, I: Index<K::Bits>, const INTO: bool>(
     most: usize,
 ) -> bool {
     let buckets = map.buckets();
-    let tables = if len >= MANY_LOAD * buckets {
-        MANY_TABLES
-    } else if len >= FEW_LOAD * buckets {
-        FEW_TABLES
-    } else {
-        1
-    };
+    let tables = tables(len, buckets);
     let mut stack = Stack([MaybeUninit::uninit(); STACK_BYTES]);
     let mut heap = Vec::new();
     // An allocation while elements lie in both `src` and `dst` cannot unwind: allocation
     // failure aborts on stable Rust (as in `by_index`).
-    let counts = counters::<C>(tables * buckets, &mut stack, &mut heap);
+    // Elements that move with their keys are not moved in groups, nor small levels (see
+    // `partition`).
+    let room = if mem::size_of::<E>() == 0 && len >= CHAIN_MIN_LEN {
+        room::<K::Bits, I>(len, buckets)
+    } else {
+        tables
+    };
+    let counts = counters::<C>(room * buckets, &mut stack, &mut heap);
     // SAFETY: guaranteed by the caller.
     unsafe {
         if let Some(most) = partition(src, dst, len, map, counts, tables, most) {
@@ -1125,17 +1239,19 @@ unsafe fn level<K: Bucket, E, C: Count, I: Index<K::Bits>, const INTO: bool>(
 }
 
 /// Moves the keys and elements of `src` into their buckets in `dst`, stably, counting them into
-/// `tables` tables first, and leaves in the first `counts.len() / tables` counters the end of
-/// each bucket. Gives up before moving any, with the starts of the buckets left in those
-/// counters, if [`gives_up`] says so, and returns what it says.
+/// `tables` tables first, or in groups side by side if [`layout`] says so, and leaves in the
+/// first counter of each bucket its end. Gives up before moving any, with the starts of the
+/// buckets left in those counters, if [`gives_up`] says so, and returns what it says.
 ///
 /// Never inlined, so that the buckets it keeps on the stack are not part of the frames of the
-/// levels below.
+/// levels below; and the choice of groups is made here, as in [`level`] it made the insertion
+/// sorts of some inputs 3–7% slower. The counters of the groups are those of [`level`]: in a
+/// frame of their own, their allocation made nearly sorted floats 1.1 times as slow.
 ///
 /// # Safety
 ///
-/// As for [`level`], with `counts` zeroed and `tables` counters per bucket, `tables` being 1,
-/// `FEW_TABLES` or `MANY_TABLES`.
+/// As for [`level`], with `counts` zeroed and [`room`] counters per bucket, and `tables` as
+/// [`tables`] chose.
 #[inline(never)]
 unsafe fn partition<B: Bits, E, C: Count, I: Index<B>>(
     src: Area<B, E>,
@@ -1146,52 +1262,333 @@ unsafe fn partition<B: Bits, E, C: Count, I: Index<B>>(
     tables: usize,
     most: usize,
 ) -> Option<usize> {
-    let buckets = counts.len() / tables;
+    // Elements that move with their keys are moved in one group: in groups side by side, keys of
+    // 16-byte elements took up to 1.05 times as long, of 72-byte ones 1.1 times.
+    if mem::size_of::<E>() == 0 && len >= CHAIN_MIN_LEN {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            match layout(src.keys, len, map) {
+                MANY_GROUPS => {
+                    return partition_in_groups::<_, _, _, _, MANY_GROUPS>(
+                        src, dst, len, map, counts, most,
+                    );
+                }
+                GROUPS => {
+                    return partition_in_groups::<_, _, _, _, GROUPS>(
+                        src, dst, len, map, counts, most,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    let buckets = map.buckets();
+    let counts = &mut counts[..tables * buckets];
     // SAFETY: guaranteed by the caller; `idx` has room for the bucket of every key.
     unsafe {
         if len <= CACHE_MAX {
             let mut idx = [MaybeUninit::<u16>::uninit(); CACHE_MAX];
             let idx = idx.as_mut_ptr().cast::<u16>();
             match tables {
-                MANY_TABLES => count::<_, _, _, _, MANY_TABLES>(src, len, map, counts, idx),
-                FEW_TABLES => count::<_, _, _, _, FEW_TABLES>(src, len, map, counts, idx),
-                _ => count::<_, _, _, _, 1>(src, len, map, counts, idx),
+                MANY_TABLES => count::<_, _, _, _, MANY_TABLES, 1>(src, len, map, counts, idx),
+                FEW_TABLES => count::<_, _, _, _, FEW_TABLES, 1>(src, len, map, counts, idx),
+                _ => count::<_, _, _, _, 1, 1>(src, len, map, counts, idx),
             }
             let starts = &mut counts[..buckets];
-            if let Some(most) = gives_up(map, starts, len, most) {
+            if let Some(most) = gives_up(map, starts, buckets, 1, len, most) {
                 return Some(most);
             }
-            distribute(src, dst, len, Cached(idx), starts);
+            distribute::<_, _, _, _, 1>(src, dst, len, Cached(idx), starts, len);
         } else {
             let idx = ptr::null_mut();
             match tables {
-                MANY_TABLES => count::<_, _, _, _, MANY_TABLES>(src, len, map, counts, idx),
-                FEW_TABLES => count::<_, _, _, _, FEW_TABLES>(src, len, map, counts, idx),
-                _ => count::<_, _, _, _, 1>(src, len, map, counts, idx),
+                MANY_TABLES => count::<_, _, _, _, MANY_TABLES, 1>(src, len, map, counts, idx),
+                FEW_TABLES => count::<_, _, _, _, FEW_TABLES, 1>(src, len, map, counts, idx),
+                _ => count::<_, _, _, _, 1, 1>(src, len, map, counts, idx),
             }
             let starts = &mut counts[..buckets];
-            if let Some(most) = gives_up(map, starts, len, most) {
+            if let Some(most) = gives_up(map, starts, buckets, 1, len, most) {
                 return Some(most);
             }
-            distribute(src, dst, len, Mapped(map), starts);
+            distribute::<_, _, _, _, 1>(src, dst, len, Mapped(map), starts, len);
         }
     }
     None
 }
 
-/// Whether a level whose `len` keys `map` counted, with `starts` where each bucket starts,
-/// gives up before moving any: if `map` cuts by value and its keys crowd near zero (see
-/// [`CROWD`]), with the most keys any of the buckets there holds; and if its largest bucket
-/// holds `most` keys or more, with nothing to tell.
+/// [`partition`] for a level that counts and moves its keys in `G` groups side by side, at
+/// least two: [`MANY_GROUPS`] of a level counted into [`MANY_TABLES`] tables, and otherwise
+/// [`GROUPS`] of one counted into as many tables. Each number of groups has a function of its
+/// own: in one, the moves in two groups took up to 1.2 times as long.
+///
+/// # Safety
+///
+/// As for [`partition`], with `counts` zeroed and holding as many tables as the groups need
+/// ([`room`]).
+#[inline(never)]
+unsafe fn partition_in_groups<B: Bits, E, C: Count, I: Index<B>, const G: usize>(
+    src: Area<B, E>,
+    dst: Area<B, E>,
+    len: usize,
+    map: I,
+    counts: &mut [C],
+    most: usize,
+) -> Option<usize> {
+    let tables = if G == MANY_GROUPS { MANY_TABLES } else { G };
+    let buckets = map.buckets();
+    let counts = &mut counts[..tables * buckets];
+    // SAFETY: guaranteed by the caller; `idx` has room for the bucket of every key.
+    let gave_up = unsafe {
+        if len <= CACHE_MAX {
+            let mut idx = [MaybeUninit::<u16>::uninit(); CACHE_MAX];
+            let idx = idx.as_mut_ptr().cast::<u16>();
+            count_in_groups::<_, _, _, _, G>(src, len, map, counts, idx);
+            let gave_up = gives_up(map, counts, buckets, G, len, most);
+            if gave_up.is_none() {
+                distribute_in_groups::<_, _, _, _, G>(src, dst, len, Cached(idx), counts, buckets);
+            }
+            gave_up
+        } else {
+            count_in_groups::<_, _, _, _, G>(src, len, map, counts, ptr::null_mut());
+            let gave_up = gives_up(map, counts, buckets, G, len, most);
+            if gave_up.is_none() {
+                distribute_in_groups::<_, _, _, _, G>(src, dst, len, Mapped(map), counts, buckets);
+            }
+            gave_up
+        }
+    };
+    if gave_up.is_some() {
+        regroup(counts, buckets, G, 1);
+    }
+    gave_up
+}
+
+/// [`count`] into the tables of [`partition_in_groups`] in `G` groups, leaving where each group
+/// starts in each bucket, `G` counters per bucket from the first (see [`regroup`]).
+///
+/// # Safety
+///
+/// As for [`count`], with as many tables as [`partition_in_groups`] counts into.
+#[inline(always)]
+unsafe fn count_in_groups<B: Bits, E, C: Count, I: Index<B>, const G: usize>(
+    src: Area<B, E>,
+    len: usize,
+    map: I,
+    counts: &mut [C],
+    idx: *mut u16,
+) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        if G == MANY_GROUPS {
+            count::<_, _, _, _, MANY_TABLES, G>(src, len, map, counts, idx);
+            regroup(counts, counts.len() / MANY_TABLES, MANY_TABLES, G);
+        } else {
+            count::<_, _, _, _, G, G>(src, len, map, counts, idx);
+        }
+    }
+}
+
+/// [`distribute`] in `G` groups of `len / G` keys (the last also taking the rest), from the
+/// starts [`count_in_groups`] left, and leaves the end of each bucket in the first `buckets`
+/// counters.
+///
+/// # Safety
+///
+/// As for [`distribute`], with `counts` as [`count_in_groups`] left them.
+#[inline(always)]
+unsafe fn distribute_in_groups<B: Bits, E, C: Count, P: Place<B, E>, const G: usize>(
+    src: Area<B, E>,
+    dst: Area<B, E>,
+    len: usize,
+    place: P,
+    counts: &mut [C],
+    buckets: usize,
+) {
+    let starts = &mut counts[..buckets * G];
+    // SAFETY: guaranteed by the caller.
+    unsafe { distribute::<_, _, _, _, G>(src, dst, len, place, starts, len / G) };
+    regroup_ends(counts, buckets, G);
+}
+
+/// Keeps, of the starts [`count`] left for `tables` tables per bucket, those of `groups` groups
+/// of `tables / groups` tables each, `groups` counters per bucket from the first.
+fn regroup<C: Count>(counts: &mut [C], buckets: usize, tables: usize, groups: usize) {
+    if tables == groups {
+        return;
+    }
+    let step = tables / groups;
+    // Each counter is written at or before where it is read from, and after every counter
+    // before it was read.
+    for b in 0..buckets {
+        for g in 0..groups {
+            counts[b * groups + g] = counts[b * tables + g * step];
+        }
+    }
+}
+
+/// Moves the end of each bucket, that of the last of its `groups` groups after [`distribute`],
+/// to the first `buckets` counters.
+fn regroup_ends<C: Count>(counts: &mut [C], buckets: usize, groups: usize) {
+    for b in 0..buckets {
+        counts[b] = counts[b * groups + groups - 1];
+    }
+}
+
+/// How many counters per bucket a level of at least [`CHAIN_MIN_LEN`] keys without elements in
+/// `buckets` buckets cut by a map `I` needs: for [`tables`] tables, or for the groups [`layout`]
+/// may choose, under the same conditions.
+///
+/// Out of line: inlined into [`level`], it made the insertion sorts of some inputs 5–9% slower
+/// (random `u32`s from 300,000 keys on).
+#[inline(never)]
+fn room<B: Bits, I: Index<B>>(len: usize, buckets: usize) -> usize {
+    let tables = tables(len, buckets);
+    if len < GROUPS_LOAD * buckets {
+        tables
+    } else if tables == 1 {
+        GROUPS
+    } else if len >= MANY_GROUPS_LOAD * buckets && !I::BY_VALUE {
+        MANY_TABLES
+    } else {
+        tables
+    }
+}
+
+/// How many tables a level of `len` keys in `buckets` buckets counts its keys into, as
+/// [`count`] does: one per bucket, or [`FEW_TABLES`] or [`MANY_TABLES`] as there are more keys
+/// per bucket.
+#[inline(always)]
+fn tables(len: usize, buckets: usize) -> usize {
+    if len >= MANY_LOAD * buckets {
+        MANY_TABLES
+    } else if len >= FEW_LOAD * buckets {
+        FEW_TABLES
+    } else {
+        1
+    }
+}
+
+/// In how many groups side by side a level of the `len` keys at `keys` that `map` cuts counts
+/// and moves them. Keys that crowd a few buckets ([`chained`]) wait on each other as they are
+/// counted and moved, each count of a bucket depending on the one before it; [`count`] splits
+/// such chains among tables, but [`distribute`] cannot. Such a level is cut into groups of keys
+/// side by side, each counted into tables of its own and moved by places of its own
+/// ([`partition_in_groups`]): one of one table per bucket and at least [`GROUPS_LOAD`] keys per
+/// bucket into [`GROUPS`] groups, of one table each, and one of more tables and at least
+/// [`MANY_GROUPS_LOAD`] keys per bucket into [`MANY_GROUPS`] groups, of [`MANY_TABLES`] tables in
+/// all. Other levels are counted into [`tables`] tables, and moved in one group.
+///
+/// Out of line, as it is needed only from [`CHAIN_MIN_LEN`] keys on.
+///
+/// # Safety
+///
+/// `keys` must hold `len` initialized keys, each of which `map` maps.
+#[inline(never)]
+unsafe fn layout<B: Bits, I: Index<B>>(keys: *const B, len: usize, map: I) -> usize {
+    let buckets = map.buckets();
+    let tables = tables(len, buckets);
+    // The buckets of keys cut by value cost more to find than the chains save, once the keys
+    // are counted into several tables: by groups, they took up to 1.05 times as long; and so
+    // did four distinct keys at fewer than `MANY_GROUPS_LOAD` keys per bucket, up to 1.2 times.
+    if tables > 1 && (I::BY_VALUE || len < MANY_GROUPS_LOAD * buckets) {
+        return 1;
+    }
+    // At fewer keys per bucket, the counters of the groups cost about as much as they save:
+    // four distinct keys and powers of two from 1000 to 6000 keys took up to 1.15 times as
+    // long in groups.
+    if len < GROUPS_LOAD * buckets {
+        return 1;
+    }
+    // SAFETY: guaranteed by the caller.
+    if !unsafe { chained(keys, len, map) } {
+        1
+    } else if tables > 1 {
+        MANY_GROUPS
+    } else {
+        GROUPS
+    }
+}
+
+/// Whether the keys of a level crowd a few buckets, so that they wait on each other as they are
+/// counted and moved: whether at least [`CHAIN_PAIRS`] of the pairs of [`CHAIN_SAMPLE`] keys at
+/// even distances fall in the same bucket, as among few distinct keys, or keys crowding a bucket.
+/// Keys in order are not told apart from others: their runs in one bucket wait on each other
+/// too, but in a pattern the processor foresees.
+///
+/// # Safety
+///
+/// `keys` must hold `len` initialized keys, each of which `map` maps.
+#[inline(always)]
+unsafe fn chained<B: Bits, I: Index<B>>(keys: *const B, len: usize, map: I) -> bool {
+    // SAFETY: guaranteed by the caller; `i · len / CHAIN_SAMPLE < len`.
+    let b: [usize; CHAIN_SAMPLE] =
+        core::array::from_fn(|i| map.of(unsafe { *keys.add(i * len / CHAIN_SAMPLE) }));
+    // Keys that seem to crowd near zero are most likely counted again, by bits (see [`CROWD`]):
+    // then more tables would only cost.
+    if let Some((zero, _, _)) = map.crowd() {
+        let near = b
+            .iter()
+            .filter(|&&b| b + 1 >= zero && b <= zero + 1)
+            .count();
+        if near * CROWD > CHAIN_SAMPLE {
+            return false;
+        }
+    }
+    let mut pairs = 0;
+    for i in 1..CHAIN_SAMPLE {
+        for j in 0..i {
+            pairs += usize::from(b[j] == b[i]);
+        }
+    }
+    pairs >= CHAIN_PAIRS
+}
+
+/// A level of at least this many keys checks whether they crowd a few buckets ([`layout`]);
+/// below, the check cost more than the groups saved.
+const CHAIN_MIN_LEN: usize = 512;
+
+/// See [`chained`].
+const CHAIN_SAMPLE: usize = 8;
+
+/// See [`chained`].
+const CHAIN_PAIRS: usize = 4;
+
+/// See [`layout`]: the groups of a level of one table per bucket...
+const GROUPS: usize = 2;
+
+/// ...from this many keys per bucket on.
+const GROUPS_LOAD: usize = 2;
+
+/// See [`layout`]: the groups of a level of more tables, which beat two (the powers of two of
+/// 200,000 keys took 1.05 times as long in two groups)...
+const MANY_GROUPS: usize = 4;
+
+/// ...from this many keys per bucket on: at fewer, eight tables cost four distinct keys more than
+/// the groups saved (up to 1.2 times as long at 20,000 keys).
+const MANY_GROUPS_LOAD: usize = 8;
+
+const _: () = assert!(MANY_TABLES.is_multiple_of(MANY_GROUPS) && FEW_LOAD <= MANY_GROUPS_LOAD);
+
+/// Whether a level whose `len` keys `map` counted into `buckets` buckets, with `starts` where
+/// each bucket starts, every `stride` counters, gives up before moving any: if `map` cuts by
+/// value and its keys crowd near zero (see [`CROWD`]), with the most keys any of the buckets
+/// there holds; and if its largest bucket holds `most` keys or more, with nothing to tell.
 #[inline(always)]
 fn gives_up<B, C: Count, I: Index<B>>(
     map: I,
     starts: &[C],
+    buckets: usize,
+    stride: usize,
     len: usize,
     most: usize,
 ) -> Option<usize> {
-    let buckets = starts.len();
-    let start = |b: usize| if b < buckets { starts[b].get() } else { len };
+    let start = |b: usize| {
+        if b < buckets {
+            starts[b * stride].get()
+        } else {
+            len
+        }
+    };
     if let Some((zero, _, _)) = map.crowd() {
         let (lo, hi) = (zero.saturating_sub(1), (zero + 2).min(buckets));
         if start(hi) - start(lo) > len / CROWD {
@@ -1222,7 +1619,7 @@ unsafe fn scatter<B: Bits, E, C: Count, I: Index<B>>(
     starts: &mut [C],
 ) {
     // SAFETY: guaranteed by the caller.
-    unsafe { distribute(src, dst, len, Mapped(map), starts) }
+    unsafe { distribute::<_, _, _, _, 1>(src, dst, len, Mapped(map), starts, len) }
 }
 
 /// The places four keys in a row take, from their buckets `b` and the next free place `next`
@@ -1242,19 +1639,23 @@ fn places(b: [usize; 4], next: [usize; 4]) -> [usize; 4] {
     ]
 }
 
-/// Counts the keys of `src` that fall in each bucket into `N` tables, interleaved, the key at
-/// `i` into table `i mod N`, and leaves in the first `counts.len() / N` counters where each
-/// bucket starts. If `idx` is not null, the bucket of the key at `i` is also written to it at
-/// `i`.
+/// Counts the keys of `src` that fall in each bucket into `N` tables, interleaved, `N / G` for
+/// each of `G` groups of `len / G` keys (the last also taking the rest): the key at `i` of group
+/// `g` into table `g·N/G + i mod N/G`. With one group, it then leaves in the first
+/// `counts.len() / N` counters where each bucket starts; with more, in counter `b·N + g·N/G`
+/// where the keys of group `g` in bucket `b` start. If `idx` is not null, the bucket of the key
+/// at `i` is also written to it at `i`.
 ///
-/// With one table, the keys are counted four at a time, as [`places`] hands out places.
+/// The groups are counted side by side, so that a run of keys in one bucket makes `N` chains
+/// that do not wait on each other; a single table per group is counted four keys at a time, as
+/// [`places`] hands out places.
 ///
 /// # Safety
 ///
-/// As for [`level`], with `counts` zeroed and `N` counters per bucket, and `idx` null or valid
-/// for `len` writes.
+/// As for [`level`], with `counts` zeroed and `N` counters per bucket, `G` dividing `N`, and
+/// `idx` null or valid for `len` writes.
 #[inline(always)]
-unsafe fn count<B: Bits, E, C: Count, I: Index<B>, const N: usize>(
+unsafe fn count<B: Bits, E, C: Count, I: Index<B>, const N: usize, const G: usize>(
     src: Area<B, E>,
     len: usize,
     map: I,
@@ -1264,25 +1665,23 @@ unsafe fn count<B: Bits, E, C: Count, I: Index<B>, const N: usize>(
     let buckets = counts.len() / N;
     let c = counts.as_mut_ptr();
     let cache = !idx.is_null();
+    // Tables per group.
+    let r = N / G;
     // SAFETY: guaranteed by the caller: every bucket is below `buckets`, so its counters are
     // below `N * buckets`; a bucket fits in a `u16`, as `MAX_BUCKETS <= 2^16`.
     unsafe {
-        let mut i = 0;
-        if N == 1 {
-            while i + 4 <= len {
-                let b = [0, 1, 2, 3].map(|j| map.of(src.key(i + j)));
-                if cache {
-                    for (j, &b) in b.iter().enumerate() {
-                        idx.add(i + j).write(b as u16);
-                    }
-                }
-                let counted = places(b, b.map(|b| (*c.add(b)).get()));
-                for j in 0..4 {
-                    *c.add(b[j]) = C::ZERO.add(counted[j] + 1);
-                }
-                i += 4;
+        let one = |i: usize, t: usize| {
+            let b = map.of(src.key(i));
+            debug_assert!(b < buckets);
+            if cache {
+                idx.add(i).write(b as u16);
             }
-        } else {
+            bump(c.add(b * N + t));
+        };
+        let group = len / G;
+        let mut i = 0;
+        if G == 1 && N > 1 {
+            // As below, in a shape the compiler vectorizes the buckets of.
             while i + 8 <= len {
                 for j in 0..8 {
                     let b = map.of(src.key(i + j));
@@ -1293,65 +1692,150 @@ unsafe fn count<B: Bits, E, C: Count, I: Index<B>, const N: usize>(
                 }
                 i += 8;
             }
-        }
-        for i in i..len {
-            let b = map.of(src.key(i));
-            debug_assert!(b < buckets);
-            if cache {
-                idx.add(i).write(b as u16);
+        } else if r == 1 {
+            while i + 4 <= group {
+                for g in 0..G {
+                    let at = g * group + i;
+                    let b = [0, 1, 2, 3].map(|j| map.of(src.key(at + j)));
+                    if cache {
+                        for (j, &b) in b.iter().enumerate() {
+                            idx.add(at + j).write(b as u16);
+                        }
+                    }
+                    let b = b.map(|b| b * N + g);
+                    let counted = places(b, b.map(|b| (*c.add(b)).get()));
+                    for j in 0..4 {
+                        *c.add(b[j]) = C::ZERO.add(counted[j] + 1);
+                    }
+                }
+                i += 4;
             }
-            bump(c.add(b * N));
+        } else {
+            // Eight keys of each group at a time, the groups taking turns key by key, so that
+            // the keys counted one after the other go to different tables.
+            while i + 8 <= group {
+                for j in 0..8 {
+                    for g in 0..G {
+                        one(g * group + i + j, g * r + j % r);
+                    }
+                }
+                i += 8;
+            }
         }
+        for g in 0..G {
+            for i in g * group + i..(g + 1) * group {
+                one(i, g * r);
+            }
+        }
+        for i in G * group..len {
+            one(i, (G - 1) * r);
+        }
+        if G == 1 {
+            // Four buckets at a time, their counts summed among themselves before the sum of
+            // those before them is added: one addition per four buckets waits for the one
+            // before it, where a running sum waits for every bucket.
+            let total = |b: usize| (0..N).map(|t| (*c.add(b * N + t)).get()).sum::<usize>();
+            let mut sum = 0;
+            let mut b = 0;
+            while b + 4 <= buckets {
+                let n = [0, 1, 2, 3].map(|j| total(b + j));
+                let (ab, abc) = (n[0] + n[1], n[0] + n[1] + n[2]);
+                // All four buckets are read before any is written: `b + j <= (b + j)·N`, and
+                // the counters written belong to these buckets or to buckets before them.
+                for (j, start) in [sum, sum + n[0], sum + ab, sum + abc]
+                    .into_iter()
+                    .enumerate()
+                {
+                    *c.add(b + j) = C::ZERO.add(start);
+                }
+                sum += abc + n[3];
+                b += 4;
+            }
+            for b in b..buckets {
+                let count = total(b);
+                // `b <= b * N`: the counters of the buckets after `b` are still to be read.
+                *c.add(b) = C::ZERO.add(sum);
+                sum += count;
+            }
+            return;
+        }
+        // In the order of the counters, four at a time, summed among themselves before the sum
+        // of those before them is added: one addition per four counters waits for the one
+        // before it, where a running sum waits for every counter.
+        let total = N * buckets;
         let mut sum = 0;
-        for b in 0..buckets {
-            let mut count = 0;
-            for t in 0..N {
-                count += (*c.add(b * N + t)).get();
+        let mut b = 0;
+        while b + 4 <= total {
+            let n = [0, 1, 2, 3].map(|j| (*c.add(b + j)).get());
+            let (ab, abc) = (n[0] + n[1], n[0] + n[1] + n[2]);
+            for (j, start) in [sum, sum + n[0], sum + ab, sum + abc]
+                .into_iter()
+                .enumerate()
+            {
+                *c.add(b + j) = C::ZERO.add(start);
             }
-            // `b <= b * N`: the counters of the buckets after `b` are still to be read.
+            sum += abc + n[3];
+            b += 4;
+        }
+        for b in b..total {
+            let count = (*c.add(b)).get();
             *c.add(b) = C::ZERO.add(sum);
             sum += count;
         }
     }
 }
 
-/// Moves the keys and elements of `src` into their buckets in `dst`, stably, four at a time as
-/// [`places`] hands out places, and turns the start of each bucket in `starts` into its end.
+/// Moves the keys and elements of `src` into their buckets in `dst`, stably, in `G` groups of
+/// `group` keys (the last also taking the rest) side by side, the keys of each four at a time as
+/// [`places`] hands out places, and turns the start of each group in each bucket, at `b·G + g`
+/// of `starts`, into its end.
 ///
 /// # Safety
 ///
-/// As for [`level`], with `starts` the starts [`count`] leaves, and `place` finding the
-/// buckets it counted.
+/// As for [`level`], with `starts` the starts [`count`] leaves for those groups, and `place`
+/// finding the buckets it counted; `G · group` must be at most `len`.
 #[inline(always)]
-unsafe fn distribute<B: Bits, E, C: Count, P: Place<B, E>>(
+unsafe fn distribute<B: Bits, E, C: Count, P: Place<B, E>, const G: usize>(
     src: Area<B, E>,
     dst: Area<B, E>,
     len: usize,
     place: P,
     starts: &mut [C],
+    group: usize,
 ) {
     let c = starts.as_mut_ptr();
-    // SAFETY: guaranteed by the caller: every bucket is below `starts.len()`, and the places
-    // of each bucket are handed out once each, in order, all below `len`, as by one key at a
-    // time.
+    // SAFETY: guaranteed by the caller: every bucket is below `starts.len() / G`, and the places
+    // of each group in each bucket are handed out once each, in order, all below `len`, as by
+    // one key at a time.
     unsafe {
+        let one = |i: usize, g: usize| {
+            let pos = bump(c.add(place.bucket(src, i) * G + g));
+            debug_assert!(pos < len);
+            src.move_to(i, dst, pos);
+        };
         let mut i = 0;
-        while i + 4 <= len {
-            let b = [0, 1, 2, 3].map(|j| place.bucket(src, i + j));
-            let p = places(b, b.map(|b| (*c.add(b)).get()));
-            debug_assert!(p.iter().all(|&p| p < len));
-            for j in 0..4 {
-                *c.add(b[j]) = C::ZERO.add(p[j] + 1);
-            }
-            for (j, &p) in p.iter().enumerate() {
-                src.move_to(i + j, dst, p);
+        while i + 4 <= group {
+            for g in 0..G {
+                let at = g * group + i;
+                let b = [0, 1, 2, 3].map(|j| place.bucket(src, at + j) * G + g);
+                let p = places(b, b.map(|b| (*c.add(b)).get()));
+                debug_assert!(p.iter().all(|&p| p < len));
+                for j in 0..4 {
+                    *c.add(b[j]) = C::ZERO.add(p[j] + 1);
+                }
+                for (j, &p) in p.iter().enumerate() {
+                    src.move_to(at + j, dst, p);
+                }
             }
             i += 4;
         }
-        for i in i..len {
-            let pos = bump(c.add(place.bucket(src, i)));
-            debug_assert!(pos < len);
-            src.move_to(i, dst, pos);
+        for g in 0..G {
+            for i in g * group + i..(g + 1) * group {
+                one(i, g);
+            }
+        }
+        for i in G * group..len {
+            one(i, G - 1);
         }
     }
 }

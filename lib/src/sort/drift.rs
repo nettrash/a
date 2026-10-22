@@ -161,8 +161,9 @@ use super::tim::{Buffer, MIN_GALLOP, build_run, extend_run, merge, node_power, p
 /// | Worst                               | `O(n log n)`                 | `O(n log n)`       |
 ///
 /// For `n = 1000`: 999 comparisons on sorted or strictly descending input, about 11,200 on
-/// random input, 5,700 with 16 distinct keys and 2,800 with 2 (Tim sort: 9,870, 8,780 and
-/// 5,610), about 2,050 with 10 random pairs swapped and 7,100 on a sawtooth (the standard
+/// random input, 5,700 with 16 distinct keys and 2,800 with 2 (Tim sort: 10,560, 9,390 and
+/// 7,050 for elements of at most 8 bytes, 11,800, 10,380 and 5,290 for larger ones), about
+/// 2,050 with 10 random pairs swapped and 7,100 on a sawtooth (the standard
 /// library: 10,600, 5,660, 3,100, 6,600 and 8,900). Elements of at most 8 bytes trade about
 /// 4% more comparisons on random input, and 6–13% on slices of up to 64 elements, for fewer
 /// mispredicted branches.
@@ -178,11 +179,12 @@ use super::tim::{Buffer, MIN_GALLOP, build_run, extend_run, merge, node_power, p
 /// integers or strings); and 1.1–8 times faster on input with structure from 24 elements on:
 /// nearly sorted, sorted with elements appended, made of runs of `√n` elements (from 10,000;
 /// as fast below) or of interleaved blocks. Up to 20 nearly sorted elements its insertion
-/// sort is 1.2–1.5 times faster. Against this crate's Tim sort: 1.2–1.85 times faster on
-/// random integers and strings (1.3 times on 64-byte elements), 1.6–11 times with few
-/// distinct keys and 1.3–2.4 times on sawtooth input up to 100,000 elements, but 1.1–1.35
-/// times slower on nearly sorted integers (up to 2 times for strings at 100,000) and 1.05–1.4
-/// times slower on input made of runs of `√n` elements, which Tim sort keeps whole.
+/// sort is 1.2–1.5 times faster. Against this crate's Tim sort: 1.05–1.3 times faster on
+/// random integers from 1000 elements on and 1.4–1.65 times on random strings (1.2–1.3 times
+/// on 64-byte elements), 1.6–9.3 times with few distinct keys (3.4–9.3 times for integers)
+/// and 1.25–2.55 times on sawtooth input up to 100,000 elements, but 1.1–1.4 times slower on
+/// nearly sorted integers (1.15–2 times for strings) and 1.05–1.4 times slower on input made
+/// of runs of `√n` elements, which Tim sort keeps whole.
 ///
 /// Prefer [`slice::sort`] for real workloads.
 ///

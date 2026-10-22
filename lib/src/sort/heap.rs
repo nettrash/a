@@ -1,3 +1,4 @@
+use core::hint::select_unpredictable;
 use core::mem::{self, ManuallyDrop};
 use core::ptr;
 
@@ -10,7 +11,7 @@ use core::ptr;
 /// removals `O(log n)`, so the sort makes `O(n log n)` comparisons whatever the input, needs no
 /// buffer and does not recurse.
 ///
-/// Four refinements keep the algorithm as cheap as heap sort can be:
+/// Five refinements keep the algorithm as cheap as heap sort can be:
 ///
 /// * **Sorted and reverse-sorted input is recognised.** The slice is first scanned for one
 ///   ascending or strictly descending run; if it covers the whole slice, the slice is left
@@ -27,21 +28,30 @@ use core::ptr;
 /// * **Holes instead of swaps.** The element being placed is held outside the slice, and each
 ///   level moves one element into the vacant slot instead of swapping two: one move instead of
 ///   three.
-/// * **Four children per node for large heaps.** From 64 KiB of elements on, the heap no
-///   longer fits in the processor's fastest cache, and every level of it costs a cache miss.
-///   A heap with four children per node has half as many levels, whose children are adjacent
-///   in memory, at the cost of three comparisons per level instead of one, about
-///   `1.5·n·log₂ n` in all. On random input this is 1.15–1.35 times faster than two children
+/// * **Four children per node for large heaps and small elements.** A heap with four children
+///   per node has half as many levels, whose children are adjacent in memory, at the cost of
+///   three comparisons per level instead of one, about `1.5·n·log₂ n` in all. That pays from
+///   64 KiB of elements on, where the heap no longer fits in the processor's fastest cache and
+///   every level costs a cache miss: on random input 1.15–1.35 times faster than two children
 ///   for integers from 100,000 elements on, 1.1–1.4 times for strings and 1.25–2 times for
-///   64-byte elements; on nearly sorted strings, whose comparisons cost the most, it is
-///   1.05–1.15 times slower.
+///   64-byte elements; on nearly sorted strings, whose comparisons cost the most, 1.05–1.15
+///   times slower. It also pays for elements of at most 8 bytes at any length: their
+///   comparisons are so cheap that a level costs about the time to load the children, compare
+///   them and find the next ones, so half as many levels make integers sort 1.15–1.25 times
+///   faster in cache.
+/// * **Short chains from one level to the next.** Each level of a removal waits for the
+///   comparison before it, which says where the next children are. Every child is loaded from
+///   the first child's index with no address to compute first, and for elements of up to 16
+///   bytes the larger child and its own first child are chosen by selects between values
+///   computed beforehand; with four children the winners of the first round are selected as
+///   pointers, so that the values already loaded are compared instead of being loaded again.
+///   This alone makes integers sort 1.25–1.3 times faster on four children per node.
 ///
-/// Together, against the textbook heap sort: 1.25–1.35 times faster for integers from 100,000
-/// elements on, 1.05–1.4 times for strings from 1000 elements on, and 1.3–2.2 times for
-/// 256-byte elements. On slices of up to 10,000 integers, where comparisons are nearly free and
-/// everything is in cache, the textbook heap sort is 1.03–1.15 times faster: the comparisons
-/// that bottom-up removal saves cost almost nothing there, and it takes two loops, down and
-/// back up, where the textbook sift-down takes one.
+/// Together, against the textbook heap sort: 1.1–1.25 times faster for integers up to 1000
+/// elements and 1.4–1.85 times from 10,000 on, 1.05–1.4 times for strings from 1000 elements
+/// on, and 1.3–2.2 times for 256-byte elements. Only sawtooth input of 1000–2000 integers, in
+/// whose short periods three comparisons per level cost more than the levels saved, would sort
+/// 1.02–1.05 times faster on two children per node.
 ///
 /// # Properties
 ///
@@ -53,17 +63,19 @@ use core::ptr;
 /// |--------------------------|---------------------------------|--------------------|
 /// | Best (sorted, reverse)   | `n − 1`                         | `0` (`n` reversed) |
 /// | Average (random)         | `≈ n·log₂ n + 0.6n`             | `≈ n·log₂ n`       |
-/// | Large heaps (4 children) | `≈ 1.5·n·log₂ n`                | `≈ 0.5·n·log₂ n`   |
+/// | Four children per node   | `≈ 1.5·n·log₂ n`                | `≈ 0.5·n·log₂ n`   |
 /// | Worst                    | `O(n log n)`                    | `O(n log n)`       |
 ///
+/// Four children per node: from 64 KiB of elements on, and for elements of at most 8 bytes.
 /// For `n = 1000`: 999 comparisons on sorted or reverse-sorted input and about 10,500 on
-/// random input, against about 16,800 for the textbook heap sort.
+/// random input (about 14,600 for elements of at most 8 bytes), against about 16,800 for the
+/// textbook heap sort.
 ///
 /// Heap sort's strength is its guarantee: `O(n log n)` on every input, in place, with constant
 /// stack. It jumps around the slice, though, so [`slice::sort_unstable`] and this crate's
 /// [`quick`](fn@super::quick) sort, which falls back to it only when its pivots keep failing,
-/// are faster: 3–4 times for random integers, 1.6–6 times for strings and 1.1–3.5 times for
-/// 256-byte elements.
+/// are faster: 2–3.4 times for random integers from 64 elements on, 1.6–6 times for strings
+/// and 1.1–3.5 times for 256-byte elements.
 ///
 /// # Panics
 ///
@@ -104,19 +116,40 @@ pub fn heap<T: Ord>(arr: &mut [T]) {
         }
         return;
     }
-    if len.saturating_mul(mem::size_of::<T>()) < QUATERNARY_MIN_BYTES {
+    if mem::size_of::<T>() > QUATERNARY_MAX_SIZE
+        && len.saturating_mul(mem::size_of::<T>()) < QUATERNARY_MIN_BYTES
+    {
         heap_sort::<T, 2>(arr);
     } else {
         heap_sort::<T, 4>(arr);
     }
 }
 
-/// From this many bytes of elements on, the heap has four children per node instead of two.
+/// From this many bytes of elements on, the heap has four children per node instead of two,
+/// whatever the element size.
 ///
-/// Measured: below it, two children are 1.02–1.15 times faster for integers and strings; from
-/// about this size on, four are, for integers from 100,000 elements and for 64-byte elements
-/// from 1000, where the heap leaves the 128 KiB first-level cache of the Apple M4 measured on.
+/// Measured: below it, two children are 1.02–1.15 times faster for strings; from about this
+/// size on, four are, for 64-byte elements from 1000 and for `u64`s (before they took four at
+/// every length) from 100,000, where the heap leaves the 128 KiB first-level cache of the
+/// Apple M4 measured on.
 const QUATERNARY_MIN_BYTES: usize = 64 * 1024;
+
+/// Elements of at most this many bytes use a heap with four children per node at any length.
+///
+/// Their comparisons are so cheap that a level costs about the latency of loading the
+/// children, comparing them and working out where the next children are, and half as many
+/// levels outweigh three comparisons per level instead of one: measured below 64 KiB,
+/// integers sort 1.15–1.25 times faster with four children, `u128`s 1.15–1.4 times, but
+/// `&str`s, as small as a `u128` and slower to compare, 1.05–1.15 times slower.
+const QUATERNARY_MAX_SIZE: usize = 8;
+
+/// The largest element size, in bytes, for which [`largest_child`] chooses its results by
+/// selects instead of arithmetic.
+///
+/// Larger elements compare by chains of branches (64-byte arrays element by element), after
+/// which the compiler turns the selects into a branch on the answer: 1.35–1.5 times slower
+/// for 64-byte elements from 10,000 on. With arithmetic, they sort as before.
+const SELECT_MAX_SIZE: usize = 16;
 
 /// Sorts `v`, of at least two elements, by heap sort on a heap with `D` children per node, `D`
 /// being 2 or 4. The children of `v[i]` are `v[D·i + 1..=D·i + D]`.
@@ -137,32 +170,73 @@ fn heap_sort<T: Ord, const D: usize>(v: &mut [T]) {
     }
 }
 
-/// Returns the index of the largest of the `D` children `c..=last`, with one comparison for
-/// two children and three, in two rounds, for four.
+/// Returns the index of the largest of the `D` children starting at `c`, with one comparison
+/// for two children and three, in two rounds, for four, and the index of that child's first
+/// child.
 ///
-/// The last child is addressed by `last`, which the caller has computed for its bounds check
-/// anyway, rather than by `c + D - 1`. From `c` alone the compiler loads the first two
-/// children as a pair, from an address it must compute first, which puts an addition on the
-/// critical path of every level: that made the sort 1.1–1.15 times slower for integers.
+/// Each level of a removal waits for the one before: the children's addresses depend on the
+/// last comparison. `bases[k]` is `base.add(k)`, so that every child is loaded from `c`
+/// directly, with no address to compute first. For elements of at most [`SELECT_MAX_SIZE`]
+/// bytes, both results are chosen by selects between values computed before the comparison,
+/// so that a single select lies between a comparison and the next level's loads; with four
+/// children, the winners of the first round are selected as pointers, so that the compiler
+/// compares the values it has already loaded instead of loading the winners again. Together,
+/// this makes a removal from a heap with four children 1.25–1.3 times faster for integers,
+/// and one from a heap with two 1.02–1.05 times.
 ///
 /// # Safety
 ///
-/// `last == c + D - 1` and `base` must be valid for `last + 1` elements.
+/// `base` must be valid for `c + D` elements.
 #[inline(always)]
-unsafe fn largest_child<T: Ord, const D: usize>(base: *const T, c: usize, last: usize) -> usize {
-    // SAFETY: `c..=last` is in bounds, as the caller guarantees.
+unsafe fn largest_child<T: Ord, const D: usize>(bases: &[*const T; D], c: usize) -> (usize, usize) {
+    // SAFETY: `c..c + D` is in bounds, as the caller guarantees.
     unsafe {
+        if mem::size_of::<T>() > SELECT_MAX_SIZE {
+            let (base, last) = (bases[0], c + (D - 1));
+            let child = if D == 2 {
+                c + usize::from(*base.add(c) < *base.add(last))
+            } else {
+                let left = c + usize::from(*base.add(c) < *base.add(c + 1));
+                let right = c + 2 + usize::from(*base.add(c + 2) < *base.add(last));
+                if *base.add(left) < *base.add(right) {
+                    right
+                } else {
+                    left
+                }
+            };
+            return (child, D * child + 1);
+        }
         if D == 2 {
-            return c + usize::from(*base.add(c) < *base.add(last));
+            let right = *bases[0].add(c) < *bases[1].add(c);
+            return (
+                select_unpredictable(right, c + 1, c),
+                select_unpredictable(right, 2 * c + 3, 2 * c + 1),
+            );
         }
-        let left = c + usize::from(*base.add(c) < *base.add(c + 1));
-        let right = c + 2 + usize::from(*base.add(c + 2) < *base.add(last));
-        if *base.add(left) < *base.add(right) {
-            right
-        } else {
-            left
-        }
+        let (p0, p1) = (bases[0].add(c), bases[1].add(c));
+        let (p2, p3) = (bases[2].add(c), bases[3].add(c));
+        let (b0, b1) = (*p0 < *p1, *p2 < *p3);
+        // The winners are selected as pointers, so the compiler compares the values it has
+        // already loaded instead of loading the winners again.
+        let left = select_unpredictable(b0, p1, p0);
+        let right = select_unpredictable(b1, p3, p2);
+        let (li, ri) = (
+            select_unpredictable(b0, c + 1, c),
+            select_unpredictable(b1, c + 3, c + 2),
+        );
+        let b2 = *left < *right;
+        (
+            select_unpredictable(b2, ri, li),
+            select_unpredictable(b2, D * ri + 1, D * li + 1),
+        )
     }
+}
+
+/// Returns `[base, base + 1, …, base + D − 1]`, the pointers [`largest_child`] addresses the
+/// children from.
+#[inline(always)]
+fn child_bases<T, const D: usize>(base: *const T) -> [*const T; D] {
+    core::array::from_fn(|k| base.wrapping_add(k))
 }
 
 /// Returns the index of the largest of the `k` children starting at `c`, `1 <= k < D`: the
@@ -204,11 +278,11 @@ unsafe fn sift_down<T: Ord, const D: usize>(base: *mut T, mut node: usize, len: 
             src: &*held,
             dst: base.add(node),
         };
+        let bases = child_bases::<T, D>(base);
         loop {
             let c = D * node + 1;
-            let last = c + (D - 1);
-            let child = if last < len {
-                largest_child::<T, D>(base, c, last)
+            let child = if c + (D - 1) < len {
+                largest_child::<T, D>(&bases, c).0
             } else if c < len {
                 largest_of_few::<T, D>(base, c, len - c)
             } else {
@@ -248,22 +322,19 @@ unsafe fn pop<T: Ord, const D: usize>(base: *mut T, end: usize) {
             src: &*held,
             dst: base,
         };
-        let mut node = 0;
-        loop {
-            let c = D * node + 1;
-            let last = c + (D - 1);
-            if last >= end {
-                // Only the last node with children can have fewer than `D`, and their
-                // children are leaves.
-                if c < end {
-                    let child = largest_of_few::<T, D>(base, c, end - c);
-                    ptr::copy_nonoverlapping(base.add(child), base.add(node), 1);
-                    node = child;
-                    hole.dst = base.add(node);
-                }
-                break;
-            }
-            let child = largest_child::<T, D>(base, c, last);
+        let bases = child_bases::<T, D>(base);
+        let (mut node, mut c) = (0, 1);
+        while c + (D - 1) < end {
+            let (child, next) = largest_child::<T, D>(&bases, c);
+            ptr::copy_nonoverlapping(base.add(child), base.add(node), 1);
+            node = child;
+            c = next;
+            hole.dst = base.add(node);
+        }
+        // Only the last node with children can have fewer than `D`, and their children are
+        // leaves.
+        if c < end {
+            let child = largest_of_few::<T, D>(base, c, end - c);
             ptr::copy_nonoverlapping(base.add(child), base.add(node), 1);
             node = child;
             hole.dst = base.add(node);

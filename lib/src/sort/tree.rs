@@ -107,8 +107,8 @@ use core::ptr;
 /// large tree is a cache miss, and every insertion pays for rebalancing. [`slice::sort`] is
 /// 1.5–5 times faster on random input, 2–17 times with few distinct keys and 6–30 times on
 /// sorted input; this crate's [`merge`](fn@super::merge) and [`tim`](fn@super::tim) sorts are
-/// 1.3–3.7 times faster on random integers and 64-byte elements (on random strings merge sort
-/// is up to 1.1 times slower and Tim sort 1.1–1.4 times faster). Tree sort moves every element
+/// 1.25–4.5 times faster on random integers and 64-byte elements, and on random strings merge
+/// sort is 1.3–1.8 times faster and Tim sort 1.05–1.4 times. Tree sort moves every element
 /// exactly twice, though, against `n·log₂ n` times for a merge sort, and it is up to 1.9 times
 /// faster than [`slice::sort`] on nearly sorted strings and 1.4–1.5 times on nearly sorted
 /// 64-byte elements.

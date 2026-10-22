@@ -1,3 +1,4 @@
+use core::mem::{self, MaybeUninit};
 use core::ptr;
 
 /// Sorts a slice in place using pair insertion sort with galloping search.
@@ -24,7 +25,9 @@ use core::ptr;
 ///   at once and those between them by one, and each new element is written once into its
 ///   final slot. A prefix element that both new elements pass therefore moves once instead of
 ///   twice. Both insertion points are found before anything moves, so no comparison ever
-///   runs while an element is out of the slice.
+///   runs while an element is out of the slice. Short moves of elements of up to 32 bytes are
+///   made in place, four elements at a time, rather than by a call to `memmove`, which costs
+///   them more than the copying.
 ///
 /// Against inserting the same elements one at a time with the same galloping search, a pair
 /// spends one comparison on ordering itself, and in exchange the smaller element's search
@@ -132,7 +135,7 @@ fn insert_pair<T: Ord>(v: &mut [T]) {
     // Order the pair. Only a second element strictly smaller than the first counts as out of
     // order, so equal elements keep their order.
     let swapped = v[i + 1] < v[i];
-    let (s, l) = if swapped { (i + 1, i) } else { (i, i + 1) };
+    let s = if swapped { i + 1 } else { i };
 
     // Fast path: the smaller element does not go before the last element of the prefix, so
     // the larger one does not either.
@@ -142,7 +145,28 @@ fn insert_pair<T: Ord>(v: &mut [T]) {
         }
         return;
     }
+    if mem::size_of::<T>() <= SHIFT_INLINE_SIZE {
+        insert_pair_far_out_of_line(v, swapped);
+    } else {
+        insert_pair_far(v, swapped);
+    }
+}
 
+/// [`insert_pair_far`] kept out of line, for elements whose short moves [`shift_up`] makes
+/// itself: inlined, those moves made the compiler keep their addresses up to date in the loop
+/// of [`insertion`], which cost sorted integers 1.3–1.45 times. Larger elements, whose moves
+/// all go to `memmove`, lose 1.05–1.1 times on short random slices to the call instead.
+#[inline(never)]
+fn insert_pair_far_out_of_line<T: Ord>(v: &mut [T], swapped: bool) {
+    insert_pair_far(v, swapped);
+}
+
+/// [`insert_pair`] past the fast path: the smaller element goes before the last element of the
+/// prefix.
+#[inline(always)]
+fn insert_pair_far<T: Ord>(v: &mut [T], swapped: bool) {
+    let i = v.len() - 2;
+    let (s, l) = if swapped { (i + 1, i) } else { (i, i + 1) };
     let (prefix, pair) = v.split_at(i);
     let (small, large) = (&pair[s - i], &pair[l - i]);
     // Each element goes after every prefix element that is not greater than it, so it ends
@@ -173,8 +197,8 @@ fn insert_pair<T: Ord>(v: &mut [T]) {
     unsafe {
         let small = ptr::read(base.add(s));
         let large = ptr::read(base.add(l));
-        ptr::copy(base.add(pl), base.add(pl + 2), i - pl);
-        ptr::copy(base.add(ps), base.add(ps + 1), pl - ps);
+        shift_up(base.add(pl), 2, i - pl);
+        shift_up(base.add(ps), 1, pl - ps);
         ptr::write(base.add(ps), small);
         ptr::write(base.add(pl + 1), large);
     }
@@ -251,7 +275,49 @@ fn move_last_to_front<T>(v: &mut [T]) {
     // once again when the block ends.
     unsafe {
         let x = ptr::read(base.add(last));
-        ptr::copy(base, base.add(1), last);
+        shift_up(base, 1, last);
         ptr::write(base, x);
+    }
+}
+
+/// The largest element size, in bytes, for which [`shift_up`] moves short stretches itself.
+const SHIFT_INLINE_SIZE: usize = 32;
+
+/// The longest stretch [`shift_up`] moves itself; longer ones go to `memmove`.
+const SHIFT_INLINE_MAX: usize = 32;
+
+/// Moves the `count` elements at `src` up by `by` slots, as `ptr::copy(src, src.add(by),
+/// count)` does, but for short stretches of small elements by itself, four elements at a time
+/// from the top: a call to `memmove` costs such moves more than the copying. Measured for
+/// integers: 1.05–1.3 times faster on short or nearly sorted slices and up to 1.5 times on
+/// 16 reverse-sorted elements, within 1.03 times either way on long random input, whose moves
+/// are mostly long; strings (24 bytes) gain up to 1.08 times on short slices.
+///
+/// # Safety
+///
+/// As for `ptr::copy(src, src.add(by), count)`.
+#[inline(always)]
+unsafe fn shift_up<T>(src: *mut T, by: usize, count: usize) {
+    // SAFETY: as the caller guarantees, `src[..count + by]` is valid for reads and writes.
+    // Every block (or element) is read whole before it is written `by` slots higher, and they
+    // go from the top down: what has been written lies at or above the top of the block read,
+    // so every block is read before any of its slots is overwritten, as `ptr::copy` would.
+    // The elements are moved as `MaybeUninit` bits, which nothing drops.
+    unsafe {
+        if mem::size_of::<T>() <= SHIFT_INLINE_SIZE && count <= SHIFT_INLINE_MAX {
+            let mut j = count;
+            while j >= 4 {
+                j -= 4;
+                let block = ptr::read_unaligned(src.add(j).cast::<[MaybeUninit<T>; 4]>());
+                ptr::write_unaligned(src.add(j + by).cast::<[MaybeUninit<T>; 4]>(), block);
+            }
+            while j > 0 {
+                j -= 1;
+                let x = ptr::read(src.add(j).cast::<MaybeUninit<T>>());
+                ptr::write(src.add(j + by).cast::<MaybeUninit<T>>(), x);
+            }
+        } else {
+            ptr::copy(src, src.add(by), count);
+        }
     }
 }
