@@ -1,6 +1,21 @@
 [package]
-name = "a"
-version = "0.0.1"
+name = "nettrash-a"
+version = "0.0.17"
 edition = "2024"
+description = "A library of algorithms in Rust"
+license = "MIT"
+repository = "https://github.com/nettrash/a"
+readme = "../README.md"
+keywords = ["algorithms"]
+categories = ["algorithms"]
+rust-version = "1.88"
+
+[lib]
+name = "a"
 
 [dependencies]
+
+# Full debug info for the tests, with their many instantiations of the sorts, took the build
+# past the memory of the CI runner; line tables still locate panics and backtraces.
+[profile.test]
+debug = "line-tables-only"
