@@ -991,7 +991,10 @@ fn network<T: Ord, D: Direction, const N: usize, const MERGE: bool>(v: &mut [T])
     macro_rules! compare_exchanges {
         ($($k:literal)*) => {
             $(
-                if $k < net.len {
+                // Decided at compile time, so the compare-exchanges past the network's length
+                // are not generated at all, also without optimizations: checking `net.len`
+                // when sorting instead let the build of the tests run out of memory in CI.
+                if const { $k < if MERGE { MERGE_NETWORKS[N].len } else { SORT_NETWORKS[N].len } } {
                     let [lo, hi] = net.pairs[$k];
                     // SAFETY: the networks for `N` elements only name positions below `N`,
                     // and the two of a pair differ, so both are distinct elements of `v`.

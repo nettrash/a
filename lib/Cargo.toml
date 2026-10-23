@@ -14,3 +14,8 @@ rust-version = "1.88"
 name = "a"
 
 [dependencies]
+
+# Full debug info for the tests, with their many instantiations of the sorts, took the build
+# past the memory of the CI runner; line tables still locate panics and backtraces.
+[profile.test]
+debug = "line-tables-only"
