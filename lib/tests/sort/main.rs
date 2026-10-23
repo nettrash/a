@@ -6,6 +6,7 @@ mod cocktail_shaker;
 mod comb;
 mod counting;
 mod cycle;
+mod default;
 mod drift;
 mod gnome;
 mod heap;
