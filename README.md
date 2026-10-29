@@ -73,3 +73,5 @@ Sleep sort is a joke: a thread per element sleeps in proportion to its value, th
 | Page | Contents |
 | --- | --- |
 | [Numbers](https://github.com/nettrash/a/blob/main/lib/docs/math/numbers.md) | `a::math::numbers::Number`: an integer of any size, stored as its sign and the bytes of its absolute value in either byte order |
+| [Addition](https://github.com/nettrash/a/blob/main/lib/docs/math/add.md) | `+` and `+=` for `Number`, with owned or borrowed operands: the exact sum, in the byte order of the left operand, built in an operand's vector when that has room |
+| [Subtraction](https://github.com/nettrash/a/blob/main/lib/docs/math/sub.md) | `-` and `-=` for `Number`, with owned or borrowed operands: the exact difference, computed as the sum with the right operand's sign turned over, with the same promises and kernels |

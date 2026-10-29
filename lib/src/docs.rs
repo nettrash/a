@@ -79,3 +79,9 @@ struct SortingSleep;
 
 #[doc = include_str!("../docs/math/numbers.md")]
 struct MathNumbers;
+
+#[doc = include_str!("../docs/math/add.md")]
+struct MathAdd;
+
+#[doc = include_str!("../docs/math/sub.md")]
+struct MathSub;
