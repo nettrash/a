@@ -1,0 +1,919 @@
+use a::math::numbers::{ByteOrder, Number};
+
+use super::common::*;
+use crate::allocations::count;
+
+// Expected products
+
+/// The 32-bit limbs of a magnitude given least significant byte first.
+fn limbs32(magnitude: &[u8]) -> Vec<u32> {
+    magnitude
+        .chunks(4)
+        .map(|c| {
+            let mut b = [0; 4];
+            b[..c.len()].copy_from_slice(c);
+            u32::from_le_bytes(b)
+        })
+        .collect()
+}
+
+/// The product of the integers `a` and `b` hold, worked out independently of the implementation:
+/// the schoolbook method on 32-bit limbs of the magnitudes, and the sign of the product of the
+/// signs. The tests on small values check it against `i128` arithmetic.
+fn product(a: &Number, b: &Number) -> Expected {
+    let (x, y) = (limbs32(&le_bytes(a)), limbs32(&le_bytes(b)));
+    let mut r = vec![0u32; x.len() + y.len() + 1];
+    for (i, &xi) in x.iter().enumerate() {
+        let mut carry = 0u64;
+        for (j, &yj) in y.iter().enumerate() {
+            let t = u64::from(xi) * u64::from(yj) + u64::from(r[i + j]) + carry;
+            r[i + j] = t as u32;
+            carry = t >> 32;
+        }
+        let mut k = i + y.len();
+        while carry != 0 {
+            let t = u64::from(r[k]) + carry;
+            r[k] = t as u32;
+            carry = t >> 32;
+            k += 1;
+        }
+    }
+    let magnitude: Vec<u8> = r.iter().flat_map(|l| l.to_le_bytes()).collect();
+    // A zero product is not negative: `expected` sees to it.
+    expected(&magnitude, a.negative != b.negative)
+}
+
+/// Primes below 2^62 for [`residues`].
+const PRIMES: [u64; 3] = [(1 << 61) - 1, 0x3FFF_FFFF_FFFF_FFC3, 0x1FFF_FFFF_FFFF_FFE7];
+
+/// The magnitude given least significant byte first, modulo each of [`PRIMES`].
+fn residues(magnitude: &[u8]) -> [u64; 3] {
+    PRIMES.map(|p| {
+        magnitude.iter().rev().fold(0u64, |r, &byte| {
+            ((u128::from(r) * 256 + u128::from(byte)) % u128::from(p)) as u64
+        })
+    })
+}
+
+/// Checks a product too long for the schoolbook reference: in the shortest form and the byte
+/// order of `a`, with the sign of the product of the signs, the length the operands allow, and
+/// the product of their residues modulo three primes.
+fn assert_product_residues(result: &Number, a: &Number, b: &Number, inputs: &dyn Fn() -> String) {
+    assert_shortest(result, inputs);
+    assert!(
+        result.byte_order == a.byte_order,
+        "{}: byte order",
+        inputs()
+    );
+    let (x, y, z) = (le_bytes(a), le_bytes(b), le_bytes(result));
+    let (rx, ry, rz) = (residues(&x), residues(&y), residues(&z));
+    for i in 0..3 {
+        let p = u128::from(PRIMES[i]);
+        let want = (u128::from(rx[i]) * u128::from(ry[i]) % p) as u64;
+        assert_eq!(rz[i], want, "{}: the product modulo {p}", inputs());
+    }
+    let significant = |m: &[u8]| m.iter().rposition(|&v| v != 0).map_or(0, |t| t + 1);
+    let (la, lb) = (significant(&x), significant(&y));
+    let zero = la == 0 || lb == 0;
+    let len = significant(&z);
+    if zero {
+        assert_eq!(len, 0, "{}: a product with zero is zero", inputs());
+    } else {
+        assert!(
+            len == la + lb || len + 1 == la + lb,
+            "{}: length {len}",
+            inputs()
+        );
+    }
+    let negative = !zero && a.negative != b.negative;
+    assert_eq!(result.negative, negative, "{}: sign", inputs());
+}
+
+// The forms of multiplication
+
+/// The six ways to write a multiplication. Every form must give the same product, so the tests
+/// run them all.
+#[derive(Clone, Copy)]
+enum Form {
+    ValueValue,
+    ValueRef,
+    RefValue,
+    RefRef,
+    AssignValue,
+    AssignRef,
+}
+
+const FORMS: [Form; 6] = [
+    Form::ValueValue,
+    Form::ValueRef,
+    Form::RefValue,
+    Form::RefRef,
+    Form::AssignValue,
+    Form::AssignRef,
+];
+
+impl Form {
+    /// The form as it is written.
+    fn name(self) -> &'static str {
+        match self {
+            Form::ValueValue => "a * b",
+            Form::ValueRef => "a * &b",
+            Form::RefValue => "&a * b",
+            Form::RefRef => "&a * &b",
+            Form::AssignValue => "a *= b",
+            Form::AssignRef => "a *= &b",
+        }
+    }
+
+    /// Multiplies `a` by `b` in this form; an operand the form only borrows is dropped
+    /// afterwards.
+    fn apply(self, a: Number, b: Number) -> Number {
+        match self {
+            Form::ValueValue => a * b,
+            Form::ValueRef => a * &b,
+            Form::RefValue => &a * b,
+            Form::RefRef => &a * &b,
+            Form::AssignValue => {
+                let mut a = a;
+                a *= b;
+                a
+            }
+            Form::AssignRef => {
+                let mut a = a;
+                a *= &b;
+                a
+            }
+        }
+    }
+}
+
+/// Every form, or under Miri one picked at random: for the tests that check many products.
+fn forms_to_run() -> &'static [Form] {
+    if cfg!(miri) {
+        let k = pick(FORMS.len());
+        &FORMS[k..=k]
+    } else {
+        &FORMS
+    }
+}
+
+/// Checks `a * b` against `expected` in every form, as [`assert_multiplies_in`] does.
+fn assert_multiplies(a: &Number, b: &Number, expected: &Expected) {
+    assert_multiplies_in(&FORMS, a, b, expected);
+}
+
+/// Checks `a * b` against `expected` in each of `forms`: with the vectors of the operands the
+/// form takes by value as tight as their values, with one byte to spare, and with room for any
+/// product, and for `a * b` and `a *= b` also with room in `b` only, so that each form meets each
+/// way it can place the product. Under Miri each form runs with one of these setups, picked at
+/// random.
+fn assert_multiplies_in(forms: &[Form], a: &Number, b: &Number, expected: &Expected) {
+    for &form in forms {
+        let spares = spares(form, a, b);
+        let spares = if cfg!(miri) {
+            let k = pick(spares.len());
+            &spares[k..=k]
+        } else {
+            &spares[..]
+        };
+        for &(spare_a, spare_b) in spares {
+            assert_multiplies_with(form, spare_a, spare_b, a, b, expected);
+        }
+    }
+}
+
+/// The capacity setups [`assert_multiplies_in`] runs `form` with, as the bytes to spare in the
+/// vectors of `a` and `b`.
+fn spares(form: Form, a: &Number, b: &Number) -> Vec<(usize, usize)> {
+    // A product is at most as long as both operands together.
+    let room = a.value.len() + b.value.len();
+    match form {
+        Form::RefRef => vec![(0, 0)],
+        Form::ValueValue | Form::AssignValue => vec![(0, 0), (1, 1), (room, room), (0, room)],
+        Form::ValueRef | Form::RefValue | Form::AssignRef => vec![(0, 0), (1, 1), (room, room)],
+    }
+}
+
+/// Checks `a * b` against `expected` in `form`, with `spare_a` and `spare_b` bytes to spare in
+/// the vectors of the operands the form takes by value.
+fn assert_multiplies_with(
+    form: Form,
+    spare_a: usize,
+    spare_b: usize,
+    a: &Number,
+    b: &Number,
+    expected: &Expected,
+) {
+    let result = form.apply(copy(a, spare_a), copy(b, spare_b));
+    let inputs = || {
+        format!(
+            "{} with a = {}, b = {}, {spare_a} and {spare_b} bytes to spare",
+            form.name(),
+            describe(a),
+            describe(b)
+        )
+    };
+    assert_result(&result, expected, a.byte_order, &inputs);
+}
+
+/// `a * b` in `form`, checked to be in the shortest form and in the byte order of `a`.
+fn multiply(form: Form, a: &Number, b: &Number) -> Number {
+    let result = form.apply(copy(a, 0), copy(b, 0));
+    let inputs = || {
+        format!(
+            "{} with a = {}, b = {}",
+            form.name(),
+            describe(a),
+            describe(b)
+        )
+    };
+    assert_shortest(&result, &inputs);
+    assert!(
+        result.byte_order == a.byte_order,
+        "{}: not in the byte order of a",
+        inputs()
+    );
+    result
+}
+
+/// A random `i128` of at most 63 bits of magnitude, so that every product of two fits.
+fn random_i64(state: &mut u64) -> i128 {
+    random_i128(state) >> 63
+}
+
+// Small values against `i128` arithmetic
+
+#[test]
+fn multiplies_small_values_as_i128() {
+    let mut state = 0x8F1B_BCDC_CA62_C1D6;
+    for _ in 0..size(1000, 40) {
+        let x = random_i64(&mut state);
+        let y = random_i64(&mut state);
+        let expected = expected_i128(x * y);
+        for (left, right) in ORDER_PAIRS {
+            let a = Number::new_from_i128(x, left);
+            let b = Number::new_from_i128(y, right);
+            // The reference of the tests on big numbers agrees with `i128` arithmetic.
+            assert_eq!(product(&a, &b), expected, "reference for {x} * {y}");
+            assert_multiplies_in(forms_to_run(), &a, &b, &expected);
+        }
+    }
+}
+
+#[test]
+fn multiplies_every_pair_of_small_integers() {
+    // From -300 to 300: every carry out of the first byte of a product and into its third, in
+    // every combination of signs. Each pair runs in one form, pair of byte orders and spare
+    // capacity, taken in turn.
+    let mut turn = 0;
+    for x in (-300..=300).step_by(size(1, 23)) {
+        for y in (-300..=300).step_by(size(1, 23)) {
+            let (left, right) = ORDER_PAIRS[turn % 4];
+            let form = FORMS[turn / 4 % 6];
+            let spare = turn / 24 % 3;
+            turn += 1;
+            let a = Number::new_from_i32(x, left);
+            let b = Number::new_from_i32(y, right);
+            let result = form.apply(copy(&a, spare), copy(&b, spare));
+            let inputs = || format!("{x} * {y} as {} with {spare} bytes to spare", form.name());
+            assert_result(&result, &expected_i128((x * y).into()), left, &inputs);
+        }
+    }
+}
+
+#[test]
+fn multiplies_at_the_limits_of_the_short_path() {
+    // Operands of up to 16 bytes, the longest the short path takes, with every bit set, as powers
+    // of two, and random: products of up to 32 bytes, in every pair of lengths.
+    let mut state = 0xB8E1_AFED_6A26_7E96;
+    for len_a in 0..=17 {
+        for len_b in 0..=17 {
+            let mut magnitudes = vec![vec![0xFF; len_a], random_magnitude(&mut state, len_a)];
+            if len_a > 0 {
+                let mut power = vec![0; len_a - 1];
+                power.push(0x80);
+                magnitudes.push(power);
+            }
+            for x in &magnitudes {
+                let y = random_magnitude(&mut state, len_b);
+                let k = below(&mut state, 16);
+                let (left, right) = ORDER_PAIRS[k % 4];
+                let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+                let a = number(x, negative_a, left);
+                let b = number(&y, negative_b, right);
+                assert_multiplies_in(forms_to_run(), &a, &b, &product(&a, &b));
+                let b = number(&vec![0xFF; len_b], negative_b, right);
+                assert_multiplies_in(forms_to_run(), &a, &b, &product(&a, &b));
+            }
+        }
+    }
+}
+
+// Big values against the reference
+
+#[test]
+fn multiplies_random_big_numbers_as_the_reference() {
+    let mut state = 0xA4D0_B5C2_1F3E_9D87;
+    for _ in 0..size(300, 12) {
+        let a = random_operand(&mut state, 600);
+        let b = random_operand(&mut state, 600);
+        assert_multiplies_in(forms_to_run(), &a, &b, &product(&a, &b));
+    }
+}
+
+#[test]
+fn multiplies_every_pair_of_lengths_up_to_40_bytes() {
+    // Up to five 8-byte limbs, with every remainder after whole limbs. Every pair of lengths runs
+    // in every combination of byte orders and signs, or under Miri in one picked at random.
+    let mut state = 0x5851_F42D_4C95_7F2D;
+    for len_a in 0..=40 {
+        for len_b in 0..=40 {
+            for k in 0..size(16, 1) {
+                let k = if cfg!(miri) { below(&mut state, 16) } else { k };
+                let (left, right) = ORDER_PAIRS[k % 4];
+                let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+                let a = number(&random_magnitude(&mut state, len_a), negative_a, left);
+                let b = number(&random_magnitude(&mut state, len_b), negative_b, right);
+                assert_multiplies_in(forms_to_run(), &a, &b, &product(&a, &b));
+            }
+        }
+    }
+}
+
+/// Numbers of limbs around the sizes at which a product changes method: the schoolbook method,
+/// Karatsuba's from a few dozen limbs in the shorter operand, a shorter operand of at most half
+/// the longer one, which multiplies it in pieces, and the levels of Karatsuba's recursion. Under
+/// Miri, fewer.
+fn product_limbs() -> Vec<usize> {
+    let all = [
+        1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 63, 64, 65, 95, 96,
+        97, 127, 128, 129, 191, 192, 193, 255, 256, 257,
+    ];
+    let miri = [1, 3, 8, 31, 32, 33, 48, 49, 65];
+    if cfg!(miri) {
+        miri.to_vec()
+    } else {
+        all.to_vec()
+    }
+}
+
+#[test]
+fn multiplies_every_shape_of_long_operands_as_the_reference() {
+    // The shorter operand of each of the limb counts above, the longer one as long, a limb
+    // longer, about one and a half, two and three times as long, with a few bytes above the whole
+    // limbs, in runs of zeros, ones and random limbs.
+    let mut state = 0x7A2B_E3C1_D0F9_4B65;
+    for ny in product_limbs() {
+        for nx in [
+            ny,
+            ny + 1,
+            ny + ny / 2 + 1,
+            2 * ny - 1,
+            2 * ny,
+            2 * ny + 1,
+            3 * ny + 5,
+        ] {
+            let ex = EXTRA_BYTES[below(&mut state, 3)];
+            let ey = EXTRA_BYTES[below(&mut state, 3)];
+            let x = limb_runs(&mut state, nx, ex);
+            let y = limb_runs(&mut state, ny, ey);
+            let k = below(&mut state, 16);
+            let (left, right) = ORDER_PAIRS[k % 4];
+            let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+            let a = number(&x, negative_a, left);
+            let b = number(&y, negative_b, right);
+            let expected = product(&a, &b);
+            let form = FORMS[below(&mut state, 6)];
+            assert_multiplies_in(&[form], &a, &b, &expected);
+            assert_multiplies_in(&[form], &b, &a, &product(&b, &a));
+        }
+    }
+}
+
+#[test]
+fn multiplies_numbers_of_hundreds_of_kilobytes() {
+    // Too long for the schoolbook reference in a debug build: checked by their residues.
+    let mut state = 0x1E37_79B9_7F4A_7C15;
+    let len = size(200_000, 3_000);
+    for (len_a, len_b) in [(len, len), (len, len / 3 + 5), (len / 2 + 7, len)] {
+        let x = random_magnitude(&mut state, len_a);
+        let y = random_magnitude(&mut state, len_b);
+        let k = below(&mut state, 16);
+        let (left, right) = ORDER_PAIRS[k % 4];
+        let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+        let a = number(&x, negative_a, left);
+        let b = number(&y, negative_b, right);
+        for form in [Form::RefRef, Form::AssignRef, Form::ValueValue] {
+            let result = form.apply(copy(&a, 0), copy(&b, 0));
+            let inputs = || format!("{} with {len_a} and {len_b} bytes", form.name());
+            assert_product_residues(&result, &a, &b, &inputs);
+        }
+    }
+}
+
+#[test]
+fn products_of_long_runs_agree_with_their_residues() {
+    // Long operands of runs of zeros, ones and random limbs, past the lengths of the reference:
+    // the levels of Karatsuba's recursion on uneven halves, and pieces of a shorter operand.
+    let mut state = 0x3C6E_F372_A54F_F53A;
+    let counts = if cfg!(miri) {
+        vec![70, 100]
+    } else {
+        vec![300, 511, 512, 513, 777, 1024, 1500, 2049]
+    };
+    for &nx in &counts {
+        for ny in [nx, nx - 1, nx / 2 + 1, nx / 2, nx / 3, 33] {
+            let extra = below(&mut state, 8);
+            let x = limb_runs(&mut state, nx, extra);
+            let extra = below(&mut state, 8);
+            let y = limb_runs(&mut state, ny, extra);
+            let a = number(&x, below(&mut state, 2) == 0, ORDERS[below(&mut state, 2)]);
+            let b = number(&y, below(&mut state, 2) == 0, ORDERS[below(&mut state, 2)]);
+            let form = FORMS[below(&mut state, 6)];
+            let result = form.apply(copy(&a, 0), copy(&b, 0));
+            let inputs = || format!("{} with {nx} and {ny} limbs", form.name());
+            assert_product_residues(&result, &a, &b, &inputs);
+        }
+    }
+}
+
+// Squares
+
+#[test]
+fn squares_a_borrowed_number_multiplied_by_itself() {
+    // `&a * &a` takes the square, which computes each product of two different limbs once.
+    let mut state = 0x6C07_8965_D5F1_9B2E;
+    let mut lens: Vec<usize> = (0..=40).collect();
+    for limbs in product_limbs() {
+        lens.push(8 * limbs);
+        lens.push(8 * limbs + 3);
+    }
+    for len in lens {
+        for x in [
+            random_magnitude(&mut state, len),
+            vec![0xFF; len],
+            limb_runs(&mut state, len / 8, len % 8),
+        ] {
+            let a = number(&x, below(&mut state, 2) == 0, ORDERS[below(&mut state, 2)]);
+            #[allow(clippy::eq_op)]
+            let result = &a * &a;
+            let inputs = || format!("&a * &a with a = {}", describe(&a));
+            assert_result(&result, &product(&a, &a), a.byte_order, &inputs);
+        }
+    }
+    if !cfg!(miri) {
+        for len in [4000, 8191, 12_000] {
+            let a = number(&random_magnitude(&mut state, len), true, ORDERS[len % 2]);
+            #[allow(clippy::eq_op)]
+            let result = &a * &a;
+            let inputs = || format!("&a * &a with {len} bytes");
+            assert_product_residues(&result, &a, &a, &inputs);
+        }
+    }
+}
+
+// Carries
+
+#[test]
+fn products_of_all_ones_carry_through_every_limb() {
+    // (256^n - 1)(256^m - 1) = 256^(n+m) - 256^n - 256^m + 1: the largest products of their
+    // lengths, whose columns all carry.
+    for n in (1..=size(100, 20)).chain([size(300, 40), size(1000, 70), size(2000, 80)]) {
+        for m in [1, 2, 7, 8, 9, n / 2 + 1, n] {
+            for (left, right) in ORDER_PAIRS {
+                let a = number(&vec![0xFF; n], false, left);
+                let b = number(&vec![0xFF; m], true, right);
+                let expected = product(&a, &b);
+                for form in forms_to_run() {
+                    assert_multiplies_in(&[*form], &a, &b, &expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn powers_of_two_shift_the_other_operand() {
+    // 2^k times x is x shifted up by k bits: for every bit of a few limbs.
+    let mut state = 0x9216_D5D9_8979_FB1B;
+    for len in [1, 9, 33, 300] {
+        let x = random_magnitude(&mut state, len);
+        for k in (0..size(140, 20)).step_by(size(1, 7)) {
+            let mut power = vec![0; k / 8];
+            power.push(1 << (k % 8));
+            for (left, right) in ORDER_PAIRS {
+                let a = number(&x, false, left);
+                let b = number(&power, false, right);
+                assert_multiplies_in(forms_to_run(), &a, &b, &product(&a, &b));
+                assert_multiplies_in(forms_to_run(), &b, &a, &product(&b, &a));
+            }
+        }
+    }
+}
+
+// Zero and one
+
+#[test]
+fn a_product_with_zero_is_one_zero_byte() {
+    // Every way of writing zero, times zero or a number of any length, either side, is `[0]` and
+    // not negative.
+    let mut state = 0xF7B4_2C15_7EE6_38AD;
+    for (left, right) in ORDER_PAIRS {
+        for z in zeros(left) {
+            for other in zeros(right) {
+                assert_multiplies(&z, &other, &zero());
+            }
+            for len in [1, 8, 16, 17, 100] {
+                for negative in [false, true] {
+                    let x = number(&random_magnitude(&mut state, len), negative, right);
+                    assert_multiplies_in(forms_to_run(), &z, &x, &zero());
+                    assert_multiplies_in(forms_to_run(), &x, &z, &zero());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn multiplying_by_one_or_minus_one_gives_the_number_or_its_negation() {
+    // x * 1 = x and x * -1 = -x in the byte order of x, also when x has zero bytes above its most
+    // significant byte, and 1 * x the same in the byte order of the one.
+    let mut state = 0x2FE1_66C5_4C04_8A9B;
+    for len in (1..=size(40, 4)).chain([size(500, 40)]) {
+        let magnitude = random_magnitude(&mut state, len);
+        let mut padded = magnitude.clone();
+        padded.resize(len + 3, 0);
+        for (left, right) in ORDER_PAIRS {
+            for negative in [false, true] {
+                for x in [
+                    number(&magnitude, negative, left),
+                    number(&padded, negative, left),
+                ] {
+                    for one_negative in [false, true] {
+                        let one = number(&[1], one_negative, right);
+                        let result = expected(&magnitude, negative != one_negative);
+                        assert_multiplies_in(forms_to_run(), &x, &one, &result);
+                        assert_multiplies_in(forms_to_run(), &one, &x, &result);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Signs and byte orders
+
+#[test]
+fn multiplies_every_combination_of_signs() {
+    let magnitudes: [(i128, i128); 8] = [
+        (5, 3),
+        (0xFF, 0xFF),
+        (0x1_0000, 0xFFFF),
+        ((1 << 63) - 1, (1 << 63) - 1),
+        (1 << 62, 3),
+        (0x0123_4567_89AB_CDEF, 0x0FED_CBA9_8765_4321),
+        (1, (1 << 63) - 1),
+        (0x100, 0x100),
+    ];
+    for (x, y) in magnitudes {
+        for (negative_a, negative_b) in SIGN_PAIRS {
+            let x = if negative_a { -x } else { x };
+            let y = if negative_b { -y } else { y };
+            for (left, right) in ORDER_PAIRS {
+                let a = Number::new_from_i128(x, left);
+                let b = Number::new_from_i128(y, right);
+                assert_multiplies(&a, &b, &expected_i128(x * y));
+            }
+        }
+    }
+    // The same on long numbers, against the reference.
+    let mut state = 0x0B4E_5AC7_2D1F_9E63;
+    let long = random_magnitude(&mut state, size(300, 40));
+    let short = random_magnitude(&mut state, size(29, 9));
+    for (x, y) in [(&long, &short), (&short, &long), (&long, &long)] {
+        for (negative_a, negative_b) in SIGN_PAIRS {
+            for (left, right) in ORDER_PAIRS {
+                let a = number(x, negative_a, left);
+                let b = number(y, negative_b, right);
+                assert_multiplies(&a, &b, &product(&a, &b));
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_byte_orders_in_every_form() {
+    let be = ByteOrder::BigEndian;
+    let le = ByteOrder::LittleEndian;
+    // (a, b, the product as stored in the byte order of a, and its sign)
+    let cases = [
+        // 0x01_02 * 0x03 = 0x03_06.
+        (
+            plus(&[0x01, 0x02], be, 2),
+            plus(&[0x03], le, 1),
+            vec![0x03, 0x06],
+            false,
+        ),
+        (
+            plus(&[0x03], le, 1),
+            plus(&[0x01, 0x02], be, 2),
+            vec![0x06, 0x03],
+            false,
+        ),
+        // 0x01_02_03 * -0x20_10 = -0x20_50_80_30.
+        (
+            plus(&[0x01, 0x02, 0x03], be, 3),
+            minus(&[0x10, 0x20], le, 2),
+            vec![0x20, 0x50, 0x80, 0x30],
+            true,
+        ),
+        (
+            minus(&[0x10, 0x20], le, 2),
+            plus(&[0x01, 0x02, 0x03], be, 3),
+            vec![0x30, 0x80, 0x50, 0x20],
+            true,
+        ),
+        // Seventeen bytes each, past the short path: (2^136 - 1)^2 = 2^272 - 2^137 + 1.
+        (
+            plus(&[0xFF; 17], be, 17),
+            plus(&[0xFF; 17], le, 17),
+            [vec![0xFF; 16], vec![0xFE], vec![0; 16], vec![1]].concat(),
+            false,
+        ),
+    ];
+    for (a, b, result, negative) in cases {
+        let magnitude = le_bytes(&Number {
+            value: result,
+            negative,
+            byte_order: a.byte_order,
+        });
+        assert_multiplies(&a, &b, &expected(&magnitude, negative));
+    }
+}
+
+#[test]
+fn ref_times_value_reverses_into_the_left_byte_order() {
+    let be = ByteOrder::BigEndian;
+    let le = ByteOrder::LittleEndian;
+    let mut state = 0x4D1C_2E79_A3B8_6F05;
+    // Short and long, written as `a` writes them, in the vector of `b`, which has room.
+    for (len_a, len_b) in [(2, 1), (16, 16), (20, 30), (300, 200)] {
+        for (left, right) in [(be, le), (le, be)] {
+            let a = number(&random_magnitude(&mut state, len_a), false, left);
+            let b = stored(
+                &in_order(&random_magnitude(&mut state, len_b), right),
+                true,
+                right,
+                len_a + len_b,
+            );
+            let expected = product(&a, &b);
+            let pointer = b.value.as_ptr();
+            let message = format!("&a * b with a = {}, b = {}", describe(&a), describe(&b));
+            let (result, allocations) = count(|| &a * b);
+            assert_result(&result, &expected, left, &|| message.clone());
+            assert_eq!(result.value.as_ptr(), pointer, "{message}");
+            assert_eq!(allocations, 0, "{message}");
+        }
+    }
+}
+
+// Properties
+
+#[test]
+fn multiplication_is_commutative() {
+    let mut state = 0xBB67_AE85_84CA_A73B;
+    for _ in 0..size(300, 8) {
+        let a = random_operand(&mut state, 300);
+        let b = random_operand(&mut state, 300);
+        let form = FORMS[below(&mut state, 6)];
+        let (ab, ba) = (multiply(form, &a, &b), multiply(form, &b, &a));
+        assert_eq!(
+            value_of(&ab),
+            value_of(&ba),
+            "{}: a = {}, b = {}",
+            form.name(),
+            describe(&a),
+            describe(&b)
+        );
+    }
+}
+
+#[test]
+fn multiplication_is_associative() {
+    let mut state = 0x3C6E_F372_FE94_F82B;
+    for _ in 0..size(200, 6) {
+        let a = random_operand(&mut state, 200);
+        let b = random_operand(&mut state, 200);
+        let c = random_operand(&mut state, 200);
+        let form = FORMS[below(&mut state, 6)];
+        let ab_c = multiply(form, &multiply(form, &a, &b), &c);
+        let a_bc = multiply(form, &a, &multiply(form, &b, &c));
+        assert_eq!(
+            value_of(&ab_c),
+            value_of(&a_bc),
+            "{}: a = {}, b = {}, c = {}",
+            form.name(),
+            describe(&a),
+            describe(&b),
+            describe(&c)
+        );
+    }
+}
+
+#[test]
+fn multiplication_distributes_over_addition_and_subtraction() {
+    // a (b + c) = a b + a c and a (b - c) = a b - a c.
+    let mut state = 0xA54F_F53A_5F1D_36F1;
+    for _ in 0..size(200, 6) {
+        let a = random_operand(&mut state, 200);
+        let b = random_operand(&mut state, 200);
+        let c = random_operand(&mut state, 200);
+        let message = format!(
+            "a = {}, b = {}, c = {}",
+            describe(&a),
+            describe(&b),
+            describe(&c)
+        );
+        let (ab, ac) = (&a * &b, &a * &c);
+        assert_eq!(
+            value_of(&(&a * &(&b + &c))),
+            value_of(&(&ab + &ac)),
+            "a (b + c), {message}"
+        );
+        assert_eq!(
+            value_of(&(&a * &(&b - &c))),
+            value_of(&(&ab - &ac)),
+            "a (b - c), {message}"
+        );
+    }
+}
+
+#[test]
+fn borrowed_operands_are_left_as_they_were() {
+    let mut state = 0x1F83_D9AB_FB41_BD6B;
+    for _ in 0..size(200, 8) {
+        let a = random_operand(&mut state, 100);
+        let b = random_operand(&mut state, 100);
+        let (a_before, b_before) = (copy(&a, 0), copy(&b, 0));
+        let message = format!("a = {}, b = {}", describe(&a), describe(&b));
+        let _ = &a * &b;
+        assert!(
+            same(&a, &a_before) && same(&b, &b_before),
+            "&a * &b: {message}"
+        );
+        #[allow(clippy::eq_op)]
+        let _ = &a * &a;
+        assert!(same(&a, &a_before), "&a * &a: {message}");
+        let _ = copy(&a, 1) * &b;
+        assert!(same(&b, &b_before), "a * &b: {message}");
+        let _ = &a * copy(&b, 1);
+        assert!(same(&a, &a_before), "&a * b: {message}");
+        let mut result = copy(&a, 1);
+        result *= &b;
+        assert!(same(&b, &b_before), "a *= &b: {message}");
+    }
+}
+
+// Allocation
+
+/// Checks where `a * b` in `form` puts the product, with the operands in vectors of the
+/// capacities of `a` and `b`, and that nothing else is allocated. The forms that take `a` by
+/// value build it in the vector of `a` whenever that has room for it, and `&a * b` in that of `b`
+/// whenever that has room; when only `b` has room, `a * b` and `a *= b` build it there too.
+/// Otherwise the product gets one new vector, as it always does from `&a * &b`.
+fn assert_placement(form: Form, a: &Number, b: &Number) {
+    let expected = product(a, b);
+    let len = expected.magnitude.len();
+    let left = copy_with_capacity(a);
+    let right = copy_with_capacity(b);
+    let left_has_room = left.value.capacity() >= len;
+    let right_has_room = right.value.capacity() >= len;
+    let (left_pointer, right_pointer) = (left.value.as_ptr(), right.value.as_ptr());
+    let (result, allocations) = count(|| form.apply(left, right));
+    let inputs = || {
+        format!(
+            "{} with a = {} (capacity {}), b = {} (capacity {})",
+            form.name(),
+            describe(a),
+            a.value.capacity(),
+            describe(b),
+            b.value.capacity()
+        )
+    };
+    assert_result(&result, &expected, a.byte_order, &inputs);
+    let in_left = result.value.as_ptr() == left_pointer;
+    let in_right = result.value.as_ptr() == right_pointer;
+    match placement(form, left_has_room, right_has_room) {
+        Placement::Left => {
+            assert!(in_left, "{}: not in the vector of a", inputs());
+            assert_eq!(allocations, 0, "{}: allocations", inputs());
+        }
+        Placement::Right => {
+            assert!(in_right, "{}: not in the vector of b", inputs());
+            assert_eq!(allocations, 0, "{}: allocations", inputs());
+        }
+        Placement::New => assert_eq!(allocations, 1, "{}: allocations", inputs()),
+    }
+}
+
+/// Where the allocation promises put the product of `form`, given which operands have room for
+/// it.
+fn placement(form: Form, left_has_room: bool, right_has_room: bool) -> Placement {
+    match form {
+        Form::RefRef => Placement::New,
+        Form::RefValue if right_has_room => Placement::Right,
+        Form::RefValue => Placement::New,
+        _ if left_has_room => Placement::Left,
+        Form::ValueValue | Form::AssignValue if right_has_room => Placement::Right,
+        _ => Placement::New,
+    }
+}
+
+#[test]
+fn placement_follows_the_capacities_of_random_operands() {
+    // Capacities around the length of the product, where a vector just has room for it or just
+    // lacks it, for short operands and for long ones that are computed on the stack.
+    let mut state = 0x2545_F491_4F6C_DD1D;
+    for round in 0..size(1500, 40) {
+        let max = if round % 3 == 0 { 300 } else { 24 };
+        let a = random_operand(&mut state, max);
+        let b = random_operand(&mut state, max);
+        if a.value.len() + b.value.len() > 1000 {
+            continue;
+        }
+        let len = product(&a, &b).magnitude.len();
+        let mut capacity = |n: &Number| {
+            let capacity = match below(&mut state, 5) {
+                0 => len.saturating_sub(1),
+                1 => len,
+                2 => len + 1,
+                3 => 0,
+                _ => len + 9,
+            };
+            stored(
+                &n.value,
+                n.negative,
+                n.byte_order,
+                capacity.max(n.value.len()),
+            )
+        };
+        let a = capacity(&a);
+        let b = capacity(&b);
+        for form in FORMS {
+            assert_placement(form, &a, &b);
+        }
+    }
+}
+
+#[test]
+fn mul_assign_grows_a_number_in_its_own_vector() {
+    // 0xFF * 0xFF = 0xFE_01 and (2^136 - 1)^2 in their operand's vector: in big-endian order the
+    // old bytes move back to make room.
+    for order in ORDERS {
+        for len in [1, 17, 100] {
+            for form in [
+                Form::AssignRef,
+                Form::AssignValue,
+                Form::ValueRef,
+                Form::ValueValue,
+            ] {
+                let a = plus(&vec![0xFF; len], order, 2 * len);
+                let b = number(&vec![0xFF; len], false, ByteOrder::LittleEndian);
+                let expected = product(&a, &b);
+                let pointer = a.value.as_ptr();
+                let result = form.apply(a, b);
+                let inputs = || format!("{} with {len} bytes of 0xFF", form.name());
+                assert_result(&result, &expected, order, &inputs);
+                assert_eq!(result.value.as_ptr(), pointer, "{}", inputs());
+            }
+        }
+    }
+}
+
+#[test]
+fn long_products_allocate_one_temporary_buffer_at_most() {
+    // Past the working memory on the stack, one buffer is allocated for the computation and freed
+    // before the product is returned: a product built in an operand's vector makes one
+    // allocation, one built in a new vector two.
+    let mut state = 0x5BE0_CD19_137E_2179;
+    let len = size(20_000, 2_000);
+    let a = number(
+        &random_magnitude(&mut state, len),
+        false,
+        ByteOrder::LittleEndian,
+    );
+    let b = number(
+        &random_magnitude(&mut state, len),
+        true,
+        ByteOrder::BigEndian,
+    );
+    let (result, allocations) = count(|| &a * &b);
+    assert_product_residues(&result, &a, &b, &|| "&a * &b".into());
+    assert_eq!(allocations, 2, "&a * &b");
+    let roomy = copy(&a, len);
+    let pointer = roomy.value.as_ptr();
+    let (result, allocations) = count(|| roomy * &b);
+    assert_product_residues(&result, &a, &b, &|| "a * &b".into());
+    assert_eq!(result.value.as_ptr(), pointer, "a * &b");
+    assert_eq!(allocations, 1, "a * &b");
+}

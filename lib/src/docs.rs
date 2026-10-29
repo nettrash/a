@@ -85,3 +85,6 @@ struct MathAdd;
 
 #[doc = include_str!("../docs/math/sub.md")]
 struct MathSub;
+
+#[doc = include_str!("../docs/math/mul.md")]
+struct MathMul;

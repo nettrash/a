@@ -133,6 +133,34 @@ mod kernels;
 
 use kernels::{add_n_be, add_n_le, sub_n_be, sub_n_le};
 
+/// `r = a + b` over the `n` native limbs at the pointers, for the multiplication; returns the
+/// carry out. On a little-endian target native limbs are little-endian ones, and the kernels of
+/// the addition take them as they are; `r` may be `a` or `b`.
+///
+/// # Safety
+///
+/// As for the kernels: the `n` limbs at each pointer must be valid, and `r` equal to an input or
+/// apart from both.
+#[cfg(target_endian = "little")]
+#[inline]
+pub(super) unsafe fn add_limbs(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
+    // SAFETY: as the caller guarantees; a native limb is a little-endian one here.
+    unsafe { add_n_le(r.cast(), a.cast(), b.cast(), n, false) }
+}
+
+/// `r = a - b` over the `n` native limbs at the pointers, as [`add_limbs`] adds them; returns the
+/// borrow out.
+///
+/// # Safety
+///
+/// As for [`add_limbs`].
+#[cfg(target_endian = "little")]
+#[inline]
+pub(super) unsafe fn sub_limbs(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
+    // SAFETY: as for `add_limbs`.
+    unsafe { sub_n_le(r.cast(), a.cast(), b.cast(), n, false) }
+}
+
 impl Add<&Number> for &Number {
     type Output = Number;
 
@@ -472,7 +500,7 @@ fn replace_with_sum(a: &mut Number, b: &Number, plan: &Plan) {
 
 /// The longest vector, in bytes, of the operands that take the small path: with both this
 /// short, their magnitudes are added or subtracted as `u128`s.
-const SMALL: usize = 16;
+pub(super) const SMALL: usize = 16;
 
 /// Whether `a + b` takes the small path: both vectors hold at most [`SMALL`] bytes.
 #[inline(always)]
@@ -571,7 +599,7 @@ fn small_sum(a: &Number, b: &Number, negative_b: bool) -> Small {
 ///
 /// `v` must hold at most 16 bytes.
 #[inline(always)]
-unsafe fn read_small(v: &[u8], order: ByteOrder) -> u128 {
+pub(super) unsafe fn read_small(v: &[u8], order: ByteOrder) -> u128 {
     let (p, n) = (v.as_ptr(), v.len());
     let be = order == ByteOrder::BigEndian;
     // SAFETY: every read lies inside the `n` bytes of `v`: `[0, k)` and `[n - k, n)` with
@@ -648,7 +676,7 @@ unsafe fn read_small(v: &[u8], order: ByteOrder) -> u128 {
 ///
 /// `len` must be from 1 to 17, and `p` valid for writing `len` bytes.
 #[inline(always)]
-unsafe fn write_small(p: *mut u8, order: ByteOrder, lo: u64, hi: u64, len: usize) {
+pub(super) unsafe fn write_small(p: *mut u8, order: ByteOrder, lo: u64, hi: u64, len: usize) {
     let be = order == ByteOrder::BigEndian;
     // The shift that puts the high bytes of the class from 4 or 8 bytes at the top of their
     // store, `8 * (2k - len)` for stores of `k` bytes, modulo `8k`.
@@ -933,7 +961,7 @@ unsafe fn plan_sub<const A: bool, const B: bool>(
 /// trailing ones little-endian. The bytes are read eight at a time while they are zero, so
 /// a number in the shortest form costs one read, and a long run of zeros little more.
 #[inline]
-fn significant_len<const BE: bool>(v: &[u8]) -> usize {
+pub(super) fn significant_len<const BE: bool>(v: &[u8]) -> usize {
     let (p, len) = (v.as_ptr(), v.len());
     // SAFETY: every read lies inside `v`: big-endian `[i, i + 8)` with `i + 8 <= len` and `i`
     // with `i < len`; little-endian `[end - 8, end)` with `end >= 8` and `end - 1` with
@@ -1945,7 +1973,7 @@ unsafe fn copy_reversed(dst: *mut u8, src: *const u8, m: usize) {
 ///
 /// The bytes must be valid for reading; they need no alignment.
 #[inline(always)]
-unsafe fn read<const N: usize>(p: *const u8) -> [u8; N] {
+pub(super) unsafe fn read<const N: usize>(p: *const u8) -> [u8; N] {
     // SAFETY: as the caller guarantees; `[u8; N]` is aligned at any address.
     unsafe { p.cast::<[u8; N]>().read() }
 }
@@ -1956,7 +1984,7 @@ unsafe fn read<const N: usize>(p: *const u8) -> [u8; N] {
 ///
 /// The bytes must be valid for writing; they need no alignment.
 #[inline(always)]
-unsafe fn write<const N: usize>(p: *mut u8, v: [u8; N]) {
+pub(super) unsafe fn write<const N: usize>(p: *mut u8, v: [u8; N]) {
     // SAFETY: as the caller guarantees; `[u8; N]` is aligned at any address.
     unsafe { p.cast::<[u8; N]>().write(v) }
 }
