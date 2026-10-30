@@ -1,4 +1,5 @@
 use super::ByteOrder;
+use core::fmt;
 
 /// An integer of any size, stored as its sign and the bytes of its absolute value.
 ///
@@ -306,6 +307,11 @@ impl Number {
 
     /// Returns whether the number is below zero.
     ///
+    /// It reads `negative`, as the constructors and the operators keep it: never set for zero. A
+    /// number built directly from its fields is stored as given, and a zero magnitude with
+    /// `negative` set says it is negative here, though it is zero to the comparisons and the
+    /// arithmetic, and to [`is_zero`](Self::is_zero) and [`signum`](Self::signum).
+    ///
     /// # Examples
     ///
     /// ```
@@ -331,5 +337,70 @@ impl Number {
     /// ```
     pub fn byte_order(&self) -> ByteOrder {
         self.byte_order
+    }
+}
+
+impl Clone for Number {
+    /// Returns a copy of the number, its bytes exactly as they are stored, high zero bytes
+    /// included, in a new vector of their length.
+    #[inline]
+    fn clone(&self) -> Self {
+        Number {
+            value: self.value.clone(),
+            negative: self.negative,
+            byte_order: self.byte_order,
+        }
+    }
+
+    /// Makes `self` a copy of `source`, in the vector of `self` when it has room.
+    #[inline]
+    fn clone_from(&mut self, source: &Self) {
+        self.value.clone_from(&source.value);
+        self.negative = source.negative;
+        self.byte_order = source.byte_order;
+    }
+}
+
+impl Default for Number {
+    /// Returns zero, little-endian, with an empty vector, which allocates nothing: `mem::take` of
+    /// a number leaves this behind. Little-endian is the order of the limbs of the arithmetic on
+    /// every target this crate has kernels for: the kernels read and write its bytes as limbs as
+    /// they are, where big-endian bytes are turned around.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{ByteOrder, Number};
+    ///
+    /// let zero = Number::default();
+    /// assert!(zero.is_zero());
+    /// assert!(zero.byte_order() == ByteOrder::LittleEndian);
+    /// assert_eq!(zero.value.capacity(), 0);
+    /// ```
+    #[inline]
+    fn default() -> Self {
+        Number {
+            value: Vec::new(),
+            negative: false,
+            byte_order: ByteOrder::LittleEndian,
+        }
+    }
+}
+
+impl fmt::Debug for Number {
+    /// Writes the number in decimal, as [`Display`](fmt::Display) does, so that numbers that are
+    /// equal look alike; the bytes are in the public fields.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{ByteOrder, Number};
+    ///
+    /// let n = Number::new_from_i32(-1000, ByteOrder::BigEndian);
+    /// assert_eq!(format!("{n:?}"), "-1000");
+    /// assert_eq!(format!("{:?}", [n]), "[-1000]");
+    /// ```
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }

@@ -171,6 +171,21 @@ pub(super) unsafe fn mul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 
     carry
 }
 
+/// Sets the `n` little-endian limbs at `r` to those at `x` times `y`, at any addresses, and returns
+/// the limb above them: [`mul_1`] on the bytes of a number, whose loads and stores of eight bytes
+/// need no alignment on the systems these kernels are built for, the same that the addition's
+/// kernels read unaligned limbs on.
+///
+/// # Safety
+///
+/// As for [`mul_1`], for the `8 n` bytes at each pointer.
+#[inline(always)]
+pub(crate) unsafe fn mul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    // SAFETY: as the caller guarantees; the assembly reads and writes the limbs with `ldr` and
+    // `str`, which take any address here, and the pointers are not dereferenced in Rust.
+    unsafe { mul_1(r.cast(), x.cast(), n, y) }
+}
+
 /// Adds the `n` limbs at `x` times `y` to the `n` limbs at `r`, and returns the limb that
 /// carries out of them: two chains a step, as the module documentation describes.
 ///
@@ -179,7 +194,7 @@ pub(super) unsafe fn mul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 
 /// `n >= 1`; the `n` limbs at `x` must be valid for reads and those at `r` for reads and writes,
 /// and apart from them.
 #[inline(always)]
-pub(super) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+pub(in super::super) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
     let carry: u64;
     // SAFETY: as in `mul_1`, with limbs `0..n` of `r` read as well.
     unsafe {
@@ -303,7 +318,7 @@ pub(super) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u
 /// `n >= 1`; the `n` limbs at `x` must be valid for reads, the `n` at `r` for reads and the
 /// `n + 1` at `r` for writes, apart from `x`.
 #[inline(always)]
-pub(super) unsafe fn addmul_2(
+pub(in super::super) unsafe fn addmul_2(
     r: *mut u64,
     x: *const u64,
     n: usize,

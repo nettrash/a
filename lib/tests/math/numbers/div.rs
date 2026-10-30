@@ -1,4 +1,4 @@
-use a::math::numbers::{ByteOrder, Number};
+use a::math::numbers::{ByteOrder, Divisor, Number};
 use std::panic::{self, AssertUnwindSafe};
 
 use super::common::*;
@@ -771,6 +771,86 @@ fn divides_by_one_limb_through_the_folded_steps() {
     }
 }
 
+#[test]
+fn remainders_by_one_limb_take_eight_limbs_a_step() {
+    // The remainder alone by a limb takes eight limbs a step, then four, then one, from the powers
+    // of `B` modulo the divisor, the partial remainder in two limbs up to `u64::MAX / 9` and in
+    // three above: dividends of every count of whole limbs modulo 8 above the thresholds, all ones
+    // (the largest sums) or random, by divisors around that bound, of every shift from 0 to 3,
+    // around powers of two, and small; with `%`, `rem_euclid`, `rem_floor`, a `Divisor` and a
+    // primitive integer.
+    let mut state = 0x5EED_0E11;
+    let bound = u64::MAX / 9;
+    let divisors: [u64; 17] = [
+        1 << 61,
+        (1 << 62) + 7,
+        (1 << 63) - 1,
+        1 << 63,
+        0xFFFF_FFFF_FFFF_FFC5,
+        2,
+        3,
+        7,
+        10,
+        255,
+        (1 << 32) + 15,
+        (1 << 60) - 59,
+        1 << 60,
+        bound - 1,
+        bound,
+        bound + 1,
+        u64::MAX,
+    ];
+    let lengths: Vec<usize> = (64..=64 + 17 * 8)
+        .step_by(8)
+        .flat_map(|l| [l, l + 1, l + 7])
+        .chain([size(1000, 300), size(4099, 300)])
+        .collect();
+    // Random divisors of every shift from 0 to 3 too, whose powers, unlike those of the divisors
+    // near powers of two, are large, and make the partial remainder's third limb nonzero.
+    let random: Vec<u64> = (0..4)
+        .map(|shift| (xorshift(&mut state) | (1 << 63)) >> shift)
+        .collect();
+    for d in divisors.into_iter().chain(random) {
+        let prepared = Divisor::new(&Number::from(d));
+        for &len in &lengths {
+            for kind in 0..3 {
+                let x = match kind {
+                    0 => vec![0xFF; len],
+                    1 => random_magnitude(&mut state, len),
+                    _ => {
+                        let mut x = vec![0; len];
+                        x[len - 1] = 1;
+                        x
+                    }
+                };
+                let a = number(&x, below(&mut state, 2) == 0, ORDERS[below(&mut state, 2)]);
+                let b = Number::from(d);
+                let (_, r) = quotient_and_remainder(&a, &b);
+                let (_, er) = euclid(&a, &b);
+                let inputs = || format!("a = {}, d = {d}", describe(&a));
+                for (what, got, expected) in [
+                    ("%", &a % &b, &r),
+                    ("rem_euclid", a.rem_euclid(&b), &er),
+                    ("rem_floor", a.rem_floor(&b), &er),
+                    ("% Divisor", &a % &prepared, &r),
+                    ("Divisor::rem_euclid", prepared.rem_euclid(&a), &er),
+                    ("% u64", &a % d, &r),
+                ] {
+                    assert_eq!(&value_of(&got), expected, "{what} with {}", inputs());
+                    assert_eq!(got.byte_order, a.byte_order, "{what} with {}", inputs());
+                    assert_shortest(&got, &|| format!("{what} with {}", inputs()));
+                }
+                let mut n = copy(&a, 0);
+                n %= &prepared;
+                assert_eq!(&value_of(&n), &r, "%= Divisor with {}", inputs());
+                if cfg!(miri) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // Zero, non-shortest operands and division by zero
 
 #[test]
@@ -923,6 +1003,62 @@ fn euclid_s_division_puts_the_dividend_between_multiples_of_the_divisor() {
             describe(&b)
         );
     }
+}
+
+/// The quotient and the remainder of floor division, from the truncated ones of the reference:
+/// one further from zero, and the remainder `|b| - r` with the sign of `b`, when the remainder is
+/// not zero and the signs differ.
+fn floor(a: &Number, b: &Number) -> (Expected, Expected) {
+    let (q, r) = quotient_and_remainder(a, b);
+    let negative_b = value_of(b).negative;
+    if r.magnitude == [0] || r.negative == negative_b {
+        return (q, r);
+    }
+    let q = expected(&plus_one(&q.magnitude), true);
+    let r = expected(&sub_magnitudes(&le_bytes(b), &r.magnitude), negative_b);
+    (q, r)
+}
+
+#[test]
+fn floor_division_rounds_toward_negative_infinity() {
+    let mut state = 0x5EED_F100;
+    let mut pairs: Vec<(Number, Number)> = Vec::new();
+    for x in [-7i128, 7, -6, 6, 0] {
+        for y in [2i128, -2, 3, -3, 7, -7, 1, -1] {
+            pairs.push((Number::from(x), Number::from(y)));
+        }
+    }
+    for _ in 0..size(600, 16) {
+        let a = random_operand(&mut state, size(200, 40));
+        let mut b = random_operand(&mut state, size(120, 30));
+        if b.is_zero() {
+            b = number(&[5, 1], below(&mut state, 2) == 0, b.byte_order);
+        }
+        pairs.push((a, b));
+    }
+    for (a, b) in &pairs {
+        let (q, r) = floor(a, b);
+        let d = Divisor::new(b);
+        let inputs = || format!("a = {}, b = {}", describe(a), describe(b));
+        for (what, got, expected) in [
+            ("div_floor", a.div_floor(b), &q),
+            ("rem_floor", a.rem_floor(b), &r),
+            ("Divisor::div_floor", d.div_floor(a), &q),
+            ("Divisor::rem_floor", d.rem_floor(a), &r),
+        ] {
+            assert_eq!(&value_of(&got), expected, "{what} with {}", inputs());
+            assert_eq!(got.byte_order, a.byte_order, "{what} with {}", inputs());
+            assert_shortest(&got, &|| format!("{what} with {}", inputs()));
+        }
+    }
+    let zero = Number::from(0);
+    let message = panic_message(|| drop(Number::from(1).div_floor(&zero)));
+    assert_eq!(message, "attempt to divide by zero");
+    let message = panic_message(|| drop(Number::from(-1).rem_floor(&zero)));
+    assert_eq!(
+        message,
+        "attempt to calculate the remainder with a divisor of zero"
+    );
 }
 
 #[test]

@@ -247,7 +247,7 @@ impl SubAssign<Number> for Number {
 
 /// A borrowed number with the opposite sign, for the addition: a copy of its fields that shares
 /// its vector, which it lets be read only and never drops.
-struct Negated<'a> {
+pub(super) struct Negated<'a> {
     number: ManuallyDrop<Number>,
     borrowed: PhantomData<&'a Number>,
 }
@@ -255,7 +255,7 @@ struct Negated<'a> {
 impl<'a> Negated<'a> {
     /// `n` with the opposite sign, for as long as `n` is borrowed.
     #[inline(always)]
-    fn new(n: &'a Number) -> Self {
+    pub(super) fn new(n: &'a Number) -> Self {
         Negated {
             number: ManuallyDrop::new(Number {
                 // SAFETY: the copy shares the vector of `n`, which stays borrowed, and so

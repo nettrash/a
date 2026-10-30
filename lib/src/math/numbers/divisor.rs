@@ -8,10 +8,12 @@
 
 use super::add::{SMALL, read_small};
 use super::div::{
-    EUCLID, Medium, Normal, Short, TRUNCATED, WIDER, Want, by_medium, by_zero, compute_by,
-    normalize, wide_division, wide_number, wider_division, working_memory,
+    EUCLID, Medium, Normal, Powers, REM_1_PREPARED, Short, TRUNCATED, WIDER, Want, by_medium,
+    by_zero, compute_by, normalize, rem_1, remainder_of_1, wide_division, wide_number,
+    wider_division, working_memory,
 };
 use super::mul::{Operand, Product, STACK_LIMBS, WIDE, Wide, on_heap, on_stack, put_wide};
+use super::sub::Negated;
 use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 use core::ops::{Div, DivAssign, Rem, RemAssign};
@@ -60,6 +62,9 @@ pub struct Divisor {
     /// The limbs as the division in registers by three or four of them takes them, when the
     /// magnitude has 17 to 32 bytes.
     medium: Option<Medium>,
+    /// The powers of `B` modulo the magnitude for the remainders of long dividends, when it is
+    /// one limb, 2 or more.
+    powers: Option<Powers>,
 }
 
 /// Two limbs on 16 bytes: the elements of [`Divisor::limbs`].
@@ -116,6 +121,10 @@ impl Divisor {
             // SAFETY: the pairs hold the three or four limbs.
             unsafe { Medium::normalized(normal.d, n, normal.shift, normal.v, d.negative) }
         });
+        let powers = short
+            .map(|s| s.y)
+            .filter(|&y| (2..=u128::from(u64::MAX)).contains(&y))
+            .map(|y| Powers::of(y as u64));
         Divisor {
             limbs,
             n,
@@ -124,6 +133,7 @@ impl Divisor {
             negative: d.negative,
             short,
             medium,
+            powers,
         }
     }
 
@@ -192,6 +202,46 @@ impl Divisor {
     /// ```
     pub fn rem_euclid(&self, a: &Number) -> Number {
         self.one_new::<EUCLID, true>(a)
+    }
+
+    /// Returns the quotient of `a` divided by this divisor rounded toward negative infinity, as
+    /// [`Number::div_floor`] gives it, in the byte order of `a` and in the shortest form.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{Divisor, Number};
+    ///
+    /// let d = Divisor::new(&Number::from(-2));
+    /// assert_eq!(d.div_floor(&Number::from(7)), -4);
+    /// assert_eq!(d.div_floor(&Number::from(-7)), 3);
+    /// ```
+    pub fn div_floor(&self, a: &Number) -> Number {
+        if self.negative {
+            -self.one_new::<EUCLID, false>(&Negated::new(a))
+        } else {
+            self.one_new::<EUCLID, false>(a)
+        }
+    }
+
+    /// Returns the remainder of `a` divided by this divisor rounded toward negative infinity, as
+    /// [`Number::rem_floor`] gives it: it has the sign of the divisor, unless it is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{Divisor, Number};
+    ///
+    /// let d = Divisor::new(&Number::from(-2));
+    /// assert_eq!(d.rem_floor(&Number::from(7)), -1);
+    /// assert_eq!(d.rem_floor(&Number::from(-7)), -1);
+    /// ```
+    pub fn rem_floor(&self, a: &Number) -> Number {
+        if self.negative {
+            -self.one_new::<EUCLID, true>(&Negated::new(a))
+        } else {
+            self.one_new::<EUCLID, true>(a)
+        }
     }
 
     /// The divisor as the general path of the division reads it.
@@ -285,6 +335,14 @@ impl Divisor {
         want: Want,
         place: impl FnOnce(&Product, &Product) -> R,
     ) -> R {
+        if want == Want::Remainder
+            && x.significant >= REM_1_PREPARED
+            && let Some(p) = &self.powers
+        {
+            // SAFETY: as the caller guarantees.
+            let r = unsafe { rem_1(x, p) };
+            return remainder_of_1::<EUCLIDEAN, R>(r, p.d, negative_x && x.significant != 0, place);
+        }
         let nx = x.significant.div_ceil(8).max(self.n);
         let need = working_memory(nx, self.n, want);
         let (y, negative_y) = (self.normal(), self.negative);

@@ -79,15 +79,20 @@ mod kernels;
 )))]
 #[path = "div/portable.rs"]
 mod kernels;
-mod limbs;
+pub(super) mod limbs;
+mod rem1;
 
 pub(super) use limbs::{div_2by1 as divide_2by1, invert_limb as reciprocal};
+pub(super) use rem1::{
+    Powers, REM_1_BYTES, REM_1_BYTES_WIDE, REM_1_MAX, REM_1_PREPARED, limb_of, rem_1,
+};
 
 use super::add::{SMALL, read, read_small, small, write_small};
 use super::mul::limbs::{add_1, sub_n};
 use super::mul::{
     Operand, Product, STACK_LIMBS, WIDE, Wide, on_heap, on_stack, put_wide, read_wide,
 };
+use super::sub::Negated;
 use super::{ByteOrder, Number};
 use core::cmp::Ordering::Less;
 use core::mem::{self, MaybeUninit};
@@ -638,6 +643,72 @@ impl Number {
     }
 }
 
+impl Number {
+    /// Returns the quotient of `self` divided by `rhs` rounded toward negative infinity, `⌊self /
+    /// rhs⌋`, in the byte order of `self` and in the shortest form, as Python's `//` and GMP's
+    /// `mpz_fdiv_q` give it.
+    ///
+    /// It is `self / rhs` unless the remainder `self % rhs` is not zero and the operands have
+    /// different signs, and then one less: `-7 / 2 = -3`, but `⌊-7 / 2⌋ = -4`. For a positive
+    /// `rhs` it is [`div_euclid`](Self::div_euclid); for a negative one, `-((-self).div_euclid(rhs))`,
+    /// which is how it is computed, with `-self` a view of `self` with the other sign, so that it
+    /// costs what `div_euclid` does.
+    ///
+    /// # Panics
+    ///
+    /// When `rhs` is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{ByteOrder, Number};
+    ///
+    /// let a = Number::new_from_i32(-7, ByteOrder::BigEndian);
+    /// assert_eq!(a.div_floor(&Number::from(2)), -4);
+    /// assert_eq!(a.div_floor(&Number::from(-2)), 3);
+    /// assert_eq!(Number::from(7).div_floor(&Number::from(-2)), -4);
+    /// ```
+    #[track_caller]
+    pub fn div_floor(&self, rhs: &Number) -> Number {
+        if rhs.is_negative() {
+            -Negated::new(self).div_euclid(rhs)
+        } else {
+            self.div_euclid(rhs)
+        }
+    }
+
+    /// Returns the remainder of `self` divided by `rhs` rounded toward negative infinity, `self -
+    /// rhs·⌊self / rhs⌋`, in the byte order of `self` and in the shortest form, as Python's `%`
+    /// and GMP's `mpz_fdiv_r` give it: it has the sign of `rhs`, unless it is zero, and a magnitude
+    /// below that of `rhs`.
+    ///
+    /// For a positive `rhs` it is [`rem_euclid`](Self::rem_euclid); for a negative one,
+    /// `-((-self).rem_euclid(rhs))`, computed as [`div_floor`](Self::div_floor) is.
+    ///
+    /// # Panics
+    ///
+    /// When `rhs` is zero.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{ByteOrder, Number};
+    ///
+    /// let a = Number::new_from_i32(-7, ByteOrder::BigEndian);
+    /// assert_eq!(a.rem_floor(&Number::from(2)), 1);
+    /// assert_eq!(a.rem_floor(&Number::from(-2)), -1);
+    /// assert_eq!(Number::from(7).rem_floor(&Number::from(-2)), -1);
+    /// ```
+    #[track_caller]
+    pub fn rem_floor(&self, rhs: &Number) -> Number {
+        if rhs.is_negative() {
+            -Negated::new(self).rem_euclid(rhs)
+        } else {
+            self.rem_euclid(rhs)
+        }
+    }
+}
+
 /// The division whose quotient is truncated toward zero, and whose remainder has the sign of the
 /// dividend: `/`, `%` and `div_rem`.
 pub(super) const TRUNCATED: bool = false;
@@ -847,7 +918,7 @@ unsafe fn register_division<const EUCLIDEAN: bool, const REM: bool>(
 /// of `d`'s top limb when `y` is one limb and of both otherwise, and its sign.
 #[derive(Clone, Copy)]
 pub(super) struct Short {
-    y: u128,
+    pub(super) y: u128,
     s: u32,
     d: u128,
     v: u64,
@@ -1502,6 +1573,20 @@ unsafe fn divide<const EUCLIDEAN: bool, R>(
     place: impl FnOnce(&Product, &Product) -> R,
 ) -> R {
     let ny = y.significant.div_ceil(8);
+    if ny == 1 && want == Want::Remainder && x.significant >= REM_1_BYTES.min(REM_1_BYTES_WIDE) {
+        // SAFETY: the divisor has one limb.
+        let d = unsafe { limb_of(y) };
+        let from = if d <= REM_1_MAX {
+            REM_1_BYTES
+        } else {
+            REM_1_BYTES_WIDE
+        };
+        if d >= 2 && x.significant >= from {
+            // SAFETY: as the caller guarantees.
+            let r = unsafe { rem_1(x, &Powers::of(d)) };
+            return remainder_of_1::<EUCLIDEAN, R>(r, d, negative_x && x.significant != 0, place);
+        }
+    }
     let nx = x.significant.div_ceil(8).max(ny);
     // The divisor, normalized, and a limb to start it on 16 bytes, then what `compute_by` needs.
     let need = ny + 1 + working_memory(nx, ny, want);
@@ -1514,6 +1599,28 @@ unsafe fn divide<const EUCLIDEAN: bool, R>(
     } else {
         on_heap(need, compute)
     }
+}
+
+/// Hands the remainder `r` by the one-limb divisor `d` of a dividend of sign `negative_x` (not set
+/// for zero) to `place`, with zero for the quotient: truncated, or Euclid's with `EUCLIDEAN`.
+#[inline(always)]
+pub(super) fn remainder_of_1<const EUCLIDEAN: bool, R>(
+    r: u64,
+    d: u64,
+    negative_x: bool,
+    place: impl FnOnce(&Product, &Product) -> R,
+) -> R {
+    let r = if EUCLIDEAN && negative_x && r != 0 {
+        d - r
+    } else {
+        r
+    };
+    let remainder = Product {
+        r: if r == 0 { ptr::null() } else { &r },
+        len: 8 - (r | 1).leading_zeros() as usize / 8,
+        negative: negative_x && !EUCLIDEAN && r != 0,
+    };
+    place(&ZERO, &remainder)
 }
 
 /// The limbs of working memory that [`compute_by`] needs for a dividend of `nx` limbs, at least as

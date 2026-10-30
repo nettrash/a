@@ -80,6 +80,9 @@ struct SortingSleep;
 #[doc = include_str!("../docs/math/numbers.md")]
 struct MathNumbers;
 
+#[doc = include_str!("../docs/math/traits.md")]
+struct MathTraits;
+
 #[doc = include_str!("../docs/math/add.md")]
 struct MathAdd;
 
@@ -97,3 +100,21 @@ struct MathRadix;
 
 #[doc = include_str!("../docs/math/shift.md")]
 struct MathShift;
+
+#[doc = include_str!("../docs/math/bits.md")]
+struct MathBits;
+
+#[doc = include_str!("../docs/math/gcd.md")]
+struct MathGcd;
+
+#[doc = include_str!("../docs/math/root.md")]
+struct MathRoot;
+
+#[doc = include_str!("../docs/math/factorial.md")]
+struct MathFactorial;
+
+#[doc = include_str!("../docs/math/pow.md")]
+struct MathPow;
+
+#[doc = include_str!("../docs/math/prime.md")]
+struct MathPrime;

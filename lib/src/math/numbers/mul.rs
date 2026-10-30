@@ -45,7 +45,7 @@
     not(miri)
 ))]
 #[path = "mul/aarch64.rs"]
-mod kernels;
+pub(super) mod kernels;
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[path = "mul/x86_64.rs"]
 mod kernels;
@@ -73,7 +73,11 @@ mod kernels;
 pub(super) mod limbs;
 mod toom;
 
+pub(super) use kernels::mul_1_bytes;
+
 use super::add::{SMALL, read, read_small, significant_len, small, write, write_small};
+use super::div::limb_of;
+use super::prim::{copy_times_limb, times_limb};
 use super::{ByteOrder, Number};
 use core::mem::{self, MaybeUninit};
 use core::ops::{Mul, MulAssign};
@@ -824,6 +828,22 @@ fn ref_times_ref(a: &Number, b: &Number) -> Number {
         };
     }
     let (x, y) = (Operand::of(a), Operand::of(b));
+    // SAFETY: the operand read has at most eight significant bytes.
+    unsafe {
+        if y.significant <= 8
+            && a.byte_order == ByteOrder::LittleEndian
+            && let Some(p) = copy_times_limb(a, b.negative, limb_of(y), None)
+        {
+            return p;
+        }
+        if x.significant <= 8
+            && a.byte_order == ByteOrder::LittleEndian
+            && b.byte_order == ByteOrder::LittleEndian
+            && let Some(p) = copy_times_limb(b, a.negative, limb_of(x), None)
+        {
+            return p;
+        }
+    }
     let negative = a.negative != b.negative;
     let square = ptr::eq(a, b);
     // SAFETY: the operands are those of `a` and `b`, which are borrowed until the product is
@@ -869,6 +889,22 @@ fn ref_times_value(a: &Number, b: &mut Number) -> Number {
         };
     }
     let (x, y) = (Operand::of(a), Operand::of(b));
+    // SAFETY: the operand read has at most eight significant bytes.
+    unsafe {
+        if x.significant <= 8
+            && order == ByteOrder::LittleEndian
+            && b.byte_order == order
+            && times_limb(b, a.negative, limb_of(x), None)
+        {
+            return mem::take(b);
+        }
+        if y.significant <= 8 && order == ByteOrder::LittleEndian {
+            let negative = b.negative;
+            if let Some(p) = copy_times_limb(a, negative, limb_of(y), Some(&mut b.value)) {
+                return p;
+            }
+        }
+    }
     let negative = a.negative != b.negative;
     // SAFETY: the operands are those of `a` and `b`; `b`'s vector is written only once both are
     // read into limbs.
@@ -903,6 +939,13 @@ fn mul_assign_ref(a: &mut Number, b: &Number) {
         return;
     }
     let (x, y) = (Operand::of(a), Operand::of(b));
+    // SAFETY: the operand has at most eight significant bytes.
+    if y.significant <= 8
+        && order == ByteOrder::LittleEndian
+        && times_limb(a, b.negative, unsafe { limb_of(y) }, None)
+    {
+        return;
+    }
     let negative = a.negative != b.negative;
     // SAFETY: the operands are those of `a` and `b`; `a`'s vector is written only once both are
     // read into limbs.
@@ -941,6 +984,13 @@ fn mul_assign_value(a: &mut Number, b: &mut Number) {
         return;
     }
     let (x, y) = (Operand::of(a), Operand::of(b));
+    if y.significant <= 8 && order == ByteOrder::LittleEndian {
+        let negative = b.negative;
+        // SAFETY: the operand has at most eight significant bytes.
+        if times_limb(a, negative, unsafe { limb_of(y) }, Some(&mut b.value)) {
+            return;
+        }
+    }
     let negative = a.negative != b.negative;
     // SAFETY: as in `mul_assign_ref`.
     unsafe {

@@ -244,6 +244,33 @@ fn random_i64(state: &mut u64) -> i128 {
 // Small values against `i128` arithmetic
 
 #[test]
+fn products_by_one_limb_are_built_in_one_pass() {
+    // A long operand times one of at most eight bytes is multiplied in place, limb by limb, its top
+    // bytes then taking the last carry: every count of bytes above the whole limbs, all ones (the
+    // longest carries, and a product a byte longer) or random, by one limb of every length, all
+    // ones, 1 and 0, either way round, in every form and byte order.
+    let mut state = 0x5EED_1111;
+    let limbs: [u64; 8] = [0, 1, 2, 10, 0xFF, 1 << 63, u64::MAX, 0x0123_4567_89AB_CDEF];
+    for len in (17..=size(90, 40)).chain([size(300, 60), size(1000, 70)]) {
+        for kind in 0..2 {
+            let x = if kind == 0 {
+                vec![0xFF; len]
+            } else {
+                random_magnitude(&mut state, len)
+            };
+            let m = limbs[below(&mut state, limbs.len())] >> below(&mut state, 64);
+            let (oa, ob) = ORDER_PAIRS[below(&mut state, 4)];
+            let (na, nb) = SIGN_PAIRS[below(&mut state, 4)];
+            let a = number(&x, na, oa);
+            let b = number(&m.to_le_bytes(), nb, ob);
+            let expected = product(&a, &b);
+            assert_multiplies_in(forms_to_run(), &a, &b, &expected);
+            assert_multiplies_in(forms_to_run(), &b, &a, &expected);
+        }
+    }
+}
+
+#[test]
 fn multiplies_small_values_as_i128() {
     let mut state = 0x8F1B_BCDC_CA62_C1D6;
     for _ in 0..size(1000, 40) {

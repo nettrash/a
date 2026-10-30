@@ -134,7 +134,7 @@ pub(in super::super) fn mul_itch(nx: usize, ny: usize) -> usize {
 }
 
 /// The limbs of scratch space that [`sqr`] needs for an operand of `n` limbs.
-pub(super) fn sqr_itch(n: usize) -> usize {
+pub(in super::super) fn sqr_itch(n: usize) -> usize {
     match sqr_method(n) {
         Method::Schoolbook | Method::Pieces | Method::Toom42 => 0,
         Method::Karatsuba => {
@@ -181,7 +181,7 @@ pub(in super::super) unsafe fn mul(
 ///
 /// `n >= 1`; the limbs of `x` must be valid for reads, those of `r` for writes, and the
 /// [`sqr_itch`]`(n)` limbs at `s` for reads and writes, all apart from each other.
-pub(super) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
+pub(in super::super) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
     debug_assert!(n >= 1);
     // SAFETY: forwarded.
     unsafe {

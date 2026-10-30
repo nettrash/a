@@ -178,6 +178,26 @@ pub(super) unsafe fn mul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 
     }
 }
 
+/// Sets the `n` little-endian limbs at `r` to those at `x` times `y`, at any addresses, and returns
+/// the limb above them: the kernel with BMI2, whose `mov`s take any address; the portable code,
+/// which reads bytes, without.
+///
+/// # Safety
+///
+/// As for [`mul_1`], for the `8 n` bytes at each pointer.
+#[inline]
+pub(crate) unsafe fn mul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    // SAFETY: forwarded; BMI2 is checked before its kernel runs, and its pointers are not
+    // dereferenced in Rust.
+    unsafe {
+        if bmi2() {
+            mul_1_bmi2(r.cast(), x.cast(), n, y)
+        } else {
+            portable::mul_1_bytes(r, x, n, y)
+        }
+    }
+}
+
 /// Completes an exact division in place, as the portable code does.
 ///
 /// # Safety

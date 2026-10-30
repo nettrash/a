@@ -1238,7 +1238,7 @@ fn adc(x: u64, y: u64, carry: bool) -> (u64, bool) {
 ///
 /// `v` must hold at most `8 L` bytes.
 #[inline(always)]
-unsafe fn read_limbs<const L: usize>(v: &[u8], order: ByteOrder) -> [u64; 9] {
+pub(super) unsafe fn read_limbs<const L: usize>(v: &[u8], order: ByteOrder) -> [u64; 9] {
     let n = v.len();
     // SAFETY: as the caller guarantees.
     unsafe {
@@ -1363,14 +1363,14 @@ fn medium_sum<const L: usize>(
 
 /// Whether the sum `r` of operands of at most `L` limbs is at least `8 (L - 1)` bytes long.
 #[inline(always)]
-fn long<const L: usize>(r: &[u64; 9]) -> bool {
+pub(super) fn long<const L: usize>(r: &[u64; 9]) -> bool {
     (r[L] | r[L - 1]) != 0 || r[L - 2] >> 56 != 0
 }
 
 /// The length of the sum `r` of operands of at most `L` limbs, at least `8 (L - 1)` bytes long,
 /// and its eight most significant positions.
 #[inline(always)]
-fn top_of<const L: usize>(r: &[u64; 9]) -> (usize, u64) {
+pub(super) fn top_of<const L: usize>(r: &[u64; 9]) -> (usize, u64) {
     let below = select_unpredictable(
         r[L - 1] != 0,
         (L - 1, r[L - 1], r[L - 2]),

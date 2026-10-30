@@ -26,7 +26,7 @@ use core::cmp::Ordering;
 /// an Apple M4 Max, a division of 80 limbs by 40 took 3222 cycles so against 3323 by the
 /// schoolbook method, and one of 200 limbs by 40, 12,023 against 12,441; the methods were as fast
 /// from 30 to 36 limbs.
-pub(super) const DC_DIV: usize = 40;
+pub(in super::super) const DC_DIV: usize = 40;
 
 /// From this many limbs in the divisor, the low limbs of a quotient alone come from the top ones
 /// ([`div_q_split`]) instead of a shrinking divisor ([`shrinking`]): measured on an Apple M4 Max
@@ -73,7 +73,7 @@ pub(in super::super) fn invert_limb(d: u64) -> u64 {
 /// The reciprocal of the normalized two-limb divisor `d1 B + d0`, `floor((B^3 - 1) / (d1 B + d0)) -
 /// B`: the reciprocal of `d1`, corrected for `d0` (Algorithm 6 of Möller and Granlund).
 #[inline]
-pub(super) fn invert_3by2(d1: u64, d0: u64) -> u64 {
+pub(in super::super) fn invert_3by2(d1: u64, d0: u64) -> u64 {
     let mut v = invert_limb(d1);
     let mut p = d1.wrapping_mul(v).wrapping_add(d0);
     if p < d0 {
@@ -182,7 +182,7 @@ fn once_more_2(q: u64, r: u128, d: u128) -> (u64, u128) {
 ///
 /// The limbs at `u` must be valid for reads, and with `QUOTIENT` those at `q` for writes; `q` may
 /// be `u`.
-pub(super) unsafe fn div_qr_1<const QUOTIENT: bool>(
+pub(in super::super) unsafe fn div_qr_1<const QUOTIENT: bool>(
     q: *mut u64,
     u: *const u64,
     n: usize,
@@ -275,7 +275,7 @@ pub(super) unsafe fn div_qr_1<const QUOTIENT: bool>(
 ///
 /// `n >= 2`, and the top two limbs of `u` below `d1 B + d0`; the limbs at `u` must be valid for
 /// reads and those at `q` for writes.
-pub(super) unsafe fn div_qr_2(
+pub(in super::super) unsafe fn div_qr_2(
     q: *mut u64,
     u: *const u64,
     n: usize,
@@ -389,7 +389,7 @@ unsafe fn sb_steps(
 /// As for `sb_div_qr`, with the [`qr_itch`] limbs at `t` valid for reads and writes, apart from the
 /// others.
 #[inline(always)]
-pub(super) unsafe fn div_qr(
+pub(in super::super) unsafe fn div_qr(
     q: *mut u64,
     n: *mut u64,
     nn: usize,
@@ -410,7 +410,7 @@ pub(super) unsafe fn div_qr(
 
 /// The limbs of scratch space that [`div_qr`] needs for a dividend of `nn` limbs and a divisor of
 /// `dn`.
-pub(super) fn qr_itch(nn: usize, dn: usize) -> usize {
+pub(in super::super) fn qr_itch(nn: usize, dn: usize) -> usize {
     if dn >= DC_DIV && nn >= dn + 3 {
         dc_itch(nn, dn)
     } else {
@@ -981,7 +981,7 @@ unsafe fn dc_div_qr_n(
 /// The inverse of the odd limb `d` modulo `B = 2^64`: the `v` for which `d v = 1 mod B`. `3d XOR 2`
 /// is the inverse modulo `2^5`, and each Newton step `v (2 - d v)` doubles the bits that are right.
 #[inline]
-pub(super) fn binvert_limb(d: u64) -> u64 {
+pub(in super::super) fn binvert_limb(d: u64) -> u64 {
     debug_assert!(d & 1 == 1);
     let mut v = d.wrapping_mul(3) ^ 2;
     for _ in 0..4 {
@@ -1007,7 +1007,14 @@ pub(super) fn binvert_limb(d: u64) -> u64 {
 ///
 /// `dn >= 1` and `d` odd; the `qn` limbs at `n` must be valid for reads and writes, the
 /// `min(dn, qn)` at `d` for reads and the `qn` at `q` for writes, all apart.
-pub(super) unsafe fn bdiv_q(q: *mut u64, n: *mut u64, qn: usize, d: *const u64, dn: usize, v: u64) {
+pub(in super::super) unsafe fn bdiv_q(
+    q: *mut u64,
+    n: *mut u64,
+    qn: usize,
+    d: *const u64,
+    dn: usize,
+    v: u64,
+) {
     // SAFETY: as the caller guarantees: step `i` reads and writes limbs `i..qn` of `n` and the
     // limbs of `d` below `qn - i`.
     unsafe {
@@ -1028,7 +1035,7 @@ pub(super) unsafe fn bdiv_q(q: *mut u64, n: *mut u64, qn: usize, d: *const u64, 
 /// # Safety
 ///
 /// The limbs must be valid for reads and writes.
-pub(super) unsafe fn rshift(x: *mut u64, n: usize, s: u32) {
+pub(in super::super) unsafe fn rshift(x: *mut u64, n: usize, s: u32) {
     debug_assert!(0 < s && s < 64);
     // SAFETY: as the caller guarantees.
     unsafe {

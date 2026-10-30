@@ -1642,6 +1642,28 @@ fn read_split(text: &[u8], radix: u32, powers: &mut Vec<Power>) -> Option<Number
     Some(trimmed(value))
 }
 
+impl core::str::FromStr for Number {
+    type Err = ParseNumberError;
+
+    /// Reads a number from decimal text, as [`Number::from_str_radix`] does with radix 10, and
+    /// builds it little-endian, the byte order of [`Number::default`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::Number;
+    ///
+    /// let n: Number = "-123456789012345678901234567890".parse().unwrap();
+    /// assert!(n.is_negative());
+    /// assert_eq!(n.to_string(), "-123456789012345678901234567890");
+    /// assert!("12a".parse::<Number>().is_err());
+    /// ```
+    #[inline]
+    fn from_str(src: &str) -> Result<Number, ParseNumberError> {
+        Number::from_str_radix(src, 10, ByteOrder::LittleEndian)
+    }
+}
+
 /// An error from [`Number::from_str_radix`]: what was wrong with the text, from
 /// [`kind`](Self::kind).
 #[derive(Debug, Clone, PartialEq, Eq)]
