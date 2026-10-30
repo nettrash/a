@@ -33,7 +33,7 @@ mod portable;
 /// The CPU must have BMI2; `n >= 1`; the `n` limbs at `x` must be valid for reads and those at `r`
 /// for writes, and `r` must be `x` or apart from it.
 #[target_feature(enable = "bmi2")]
-unsafe fn mul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+unsafe fn mul_1_bmi2(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
     let carry: u64;
     // SAFETY: the loops read limbs `0..n` of `x` and write limbs `0..n` of `r`, each limb of `x`
     // before the limb of `r` at its position; the asm uses no stack and names every register it
@@ -159,6 +159,36 @@ unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
     carry
 }
 
+/// Sets the `n` limbs at `r` to the `n` limbs at `x` times `y`, and returns the limb above them:
+/// the kernel with BMI2, the portable code without, for the linear steps of Toom's methods.
+///
+/// # Safety
+///
+/// `n >= 1`; the `n` limbs at `x` must be valid for reads and those at `r` for writes, and `r`
+/// must be `x` or apart from it.
+#[inline]
+pub(super) unsafe fn mul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+    // SAFETY: forwarded; BMI2 is checked before its kernel runs.
+    unsafe {
+        if bmi2() {
+            mul_1_bmi2(r, x, n, y)
+        } else {
+            portable::mul_1(r, x, n, y)
+        }
+    }
+}
+
+/// Completes an exact division in place, as the portable code does.
+///
+/// # Safety
+///
+/// `n >= 1`; the `n` limbs at `r` must be valid for reads and writes.
+#[inline]
+pub(super) unsafe fn divexact_finish(r: *mut u64, n: usize) {
+    // SAFETY: forwarded.
+    unsafe { portable::divexact_finish(r, n) }
+}
+
 /// Whether the CPU has BMI2, which the kernels need: looked up once, by the standard library.
 #[inline(always)]
 fn bmi2() -> bool {
@@ -181,7 +211,7 @@ pub(super) unsafe fn mul_basecase(r: *mut u64, x: *const u64, nx: usize, y: *con
             portable::mul_basecase(r, x, nx, y, ny);
             return;
         }
-        *r.add(nx) = mul_1(r, x, nx, *y);
+        *r.add(nx) = mul_1_bmi2(r, x, nx, *y);
         for j in 1..ny {
             *r.add(nx + j) = addmul_1(r.add(j), x, nx, *y.add(j));
         }
@@ -203,7 +233,7 @@ pub(super) unsafe fn sqr_basecase(r: *mut u64, x: *const u64, n: usize) {
             portable::sqr_basecase(r, x, n);
             return;
         }
-        *r.add(n) = mul_1(r.add(1), x.add(1), n - 1, *x);
+        *r.add(n) = mul_1_bmi2(r.add(1), x.add(1), n - 1, *x);
         for i in 1..n - 1 {
             *r.add(n + i) = addmul_1(r.add(2 * i + 1), x.add(i + 1), n - i - 1, *x.add(i));
         }

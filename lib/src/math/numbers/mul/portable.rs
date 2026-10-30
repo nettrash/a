@@ -125,3 +125,27 @@ pub(super) unsafe fn double_and_add_squares(r: *mut u64, x: *const u64, n: usize
         }
     }
 }
+
+/// Completes an exact division in place: with the `n` limbs at `r` holding `a d` (modulo
+/// `B^n`), sets them to the `q` for which `q B - q = a d`, limb `i` of `q` being limb `i - 1` less
+/// limb `i` of `a d` and the borrow from below. The aarch64 kernels, which include this module,
+/// have one chain of `sbcs` instead.
+///
+/// # Safety
+///
+/// `n >= 1`; the `n` limbs at `r` must be valid for reads and writes.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[inline]
+pub(super) unsafe fn divexact_finish(r: *mut u64, n: usize) {
+    let (mut q, mut borrow) = (0u64, false);
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        for i in 0..n {
+            let (v, b1) = q.overflowing_sub(*r.add(i));
+            let (v, b2) = v.overflowing_sub(u64::from(borrow));
+            *r.add(i) = v;
+            q = v;
+            borrow = b1 | b2;
+        }
+    }
+}

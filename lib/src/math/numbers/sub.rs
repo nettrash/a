@@ -1,7 +1,7 @@
 //! Subtraction of [`Number`]s: `-` and `-=`, with either operand owned or borrowed.
 //!
 //! `a - b` is `a + (-b)`, and it is computed as that sum, by the addition and with everything it
-//! does: the short path in registers for operands of at most 16 bytes, the plan of the exact
+//! does: the paths in registers for operands of at most 16 and 64 bytes, the plan of the exact
 //! length, and the kernels in inline assembly on `x86_64` (`sbb` and `adc` chains through the
 //! carry flag) and on 64-bit little-endian `aarch64` (`sbcs` and `adcs`, in several interleaved
 //! chains for long operands), portable Rust elsewhere. So a difference costs what a sum of the
@@ -14,14 +14,16 @@
 //!
 //! The sign of `b` is turned over without changing the code of the addition:
 //!
-//! - Operands of at most 16 bytes take the short path of the addition, inlined, with the sign of
-//!   `b` turned over as it is read into a register.
+//! - Operands of at most 64 bytes take the paths of the addition in registers, inlined up to 16
+//!   bytes and out of line from there, with the sign of `b` turned over as it is read into a
+//!   register.
 //! - An owned `b` has its sign turned over in place, and is then added.
 //! - `a -= &b` on longer operands cannot change `b`, so it turns over the sign of `a` instead:
 //!   `a - b` is `-(-a + b)`. The sign of `a` is turned over, `b` is added, and the sign of the
 //!   sum is turned back, unless the sum is zero, which stays not negative. Only the sign of `a`
 //!   goes through memory on its way to the addition, and it decides only branches, which the
-//!   core predicts; the vectors of both operands are read where they are.
+//!   core predicts; the vectors of both operands are read where they are. The addition hands
+//!   `a` back, so that the shorter paths, which end in calls, save no registers for it.
 //! - `&a - &b` on longer operands can change neither, so it adds to `a` a copy of the fields of
 //!   `b` with the sign turned over, which shares the vector of `b` and is only read (see
 //!   [`Negated`]). The addition reads the vector's address and length from that copy, a store
@@ -30,7 +32,10 @@
 //!   wait for them.
 
 use super::Number;
-use super::add::{add_assign_ref, ref_plus_ref, small, small_add_to, small_number_of};
+use super::add::{
+    Fallback, add_assign_ref, medium, medium_into, medium_new, ref_plus_ref, small, small_add_to,
+    small_number_of,
+};
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, Sub, SubAssign};
@@ -66,6 +71,9 @@ impl Sub<&Number> for &Number {
     fn sub(self, rhs: &Number) -> Number {
         if small(self, rhs) {
             return small_number_of(self, rhs, !rhs.negative);
+        }
+        if medium(self, rhs) {
+            return medium_new(self, rhs, !rhs.negative);
         }
         ref_plus_ref(self, &Negated::new(rhs))
     }
@@ -186,15 +194,24 @@ impl SubAssign<&Number> for Number {
             small_add_to(self, rhs, !rhs.negative);
             return;
         }
+        if medium(self, rhs) {
+            let (a, b) = (ptr::from_mut(self), ptr::from_ref(rhs).cast_mut());
+            // SAFETY: both operands are valid and take the medium path, the difference goes to
+            // `a`, and `b` is only read.
+            unsafe { medium_into(a, b, !rhs.negative, a, Fallback::New) };
+            return;
+        }
         // a - b = -(-a + b). A zero `a` turned negative is zero to the addition, and a zero sum
         // is `[0]` and not negative, which it stays. The sign of the sum is turned back without
         // a branch on it, a coin toss for random operands of the same length; the branch on the
         // length is not, as a sum this long is one byte long only when its operands nearly
-        // cancel, and then only is its byte read, which may still be on its way to memory.
+        // cancel, and then only is its byte read, which may still be on its way to memory. The
+        // addition gives `self` back, so that no register keeps it across the call, and the
+        // shorter paths above, which end in calls, save none.
         self.negative = !self.negative;
-        add_assign_ref(self, rhs);
-        let zero = self.value.len() == 1 && self.value[0] == 0;
-        self.negative = !self.negative & !zero;
+        let a = add_assign_ref(self, rhs);
+        let zero = a.value.len() == 1 && a.value[0] == 0;
+        a.negative = !a.negative & !zero;
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "nettrash-a"
-version = "0.0.20"
+version = "0.0.21"
 edition = "2024"
 description = "A library of algorithms in Rust"
 license = "MIT"

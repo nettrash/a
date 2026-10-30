@@ -270,6 +270,192 @@ fn adds_numbers_of_millions_of_bytes() {
     }
 }
 
+// The paths in registers: up to 16 bytes, and up to 64
+
+/// Vector lengths at the limits of the paths in registers: around every whole number of limbs
+/// up to nine, and around 16 and 64 bytes, where the short and the medium path end.
+const REGISTER_LENGTHS: [usize; 29] = [
+    0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 40, 41, 47, 48, 49, 55, 56, 57, 63,
+    64, 65, 72,
+];
+
+#[test]
+fn adds_every_pair_of_lengths_at_the_limits_of_the_paths_in_registers() {
+    // Every pair runs in every combination of byte orders and signs, or under Miri in one picked
+    // at random, and over the limbs of each length a random sum carries out of the top and
+    // a random difference borrows, a coin toss each.
+    let mut state = 0x1F83_D9AB_FB41_BD6B;
+    for len_a in REGISTER_LENGTHS {
+        for len_b in REGISTER_LENGTHS {
+            if cfg!(miri) && below(&mut state, 4) != 0 {
+                continue;
+            }
+            for k in 0..size(16, 1) {
+                let k = if cfg!(miri) { below(&mut state, 16) } else { k };
+                let (left, right) = ORDER_PAIRS[k % 4];
+                let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+                let a = number(&random_magnitude(&mut state, len_a), negative_a, left);
+                let b = number(&random_magnitude(&mut state, len_b), negative_b, right);
+                assert_adds_in(forms_to_run(), &a, &b, &reference(&a, &b));
+            }
+        }
+    }
+}
+
+#[test]
+fn small_sums_one_byte_longer_or_much_shorter_than_the_operands() {
+    // Up to 16 bytes the stores are chosen by the length of the longer operand's vector, `k`:
+    // a sum of `k` or `k + 1` bytes takes the same stores, and a shorter one the stores of its
+    // length. Here sums with and without a carry out of the top byte, and differences that leave
+    // one byte to `k - 1` of them, for every `k`.
+    let mut state = 0x6A09_E667_F3BC_C909;
+    for k in 1..=16 {
+        let carries = {
+            let mut x = random_magnitude(&mut state, k);
+            x[k - 1] |= 0x80;
+            x
+        };
+        let stays = {
+            let mut x = random_magnitude(&mut state, k);
+            x[k - 1] = 1;
+            x
+        };
+        for short in (1..k).chain([0]) {
+            for (left, right) in ORDER_PAIRS {
+                for negative in [false, true] {
+                    for x in [&carries, &stays] {
+                        // x + x: a carry out of the top byte, or none.
+                        let a = number(x, negative, left);
+                        let b = number(x, negative, right);
+                        assert_adds_in(forms_to_run(), &a, &b, &reference(&a, &b));
+                        // x - y with `y` equal to `x` above its lowest `short` bytes: at most
+                        // `short` bytes are left, or none.
+                        let mut y = x.clone();
+                        y[..short].copy_from_slice(&random_bytes(&mut state, short));
+                        let b = number(&y, !negative, right);
+                        assert_adds_in(forms_to_run(), &a, &b, &reference(&a, &b));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn medium_sums_much_shorter_than_their_vectors() {
+    // Up to 64 bytes, a sum of operands of up to `L` limbs that is shorter than `L - 1` limbs,
+    // from zero bytes above the most significant ones or from operands that nearly cancel,
+    // takes the slower path that writes it from a buffer: with the vector it is built in chosen
+    // as the operators promise, which every capacity setup checks.
+    let mut state = 0xBB67_AE85_84CA_A73B;
+    let vectors = [17, 24, 25, 33, 40, 48, 56, 63, 64];
+    let significant = [0, 1, 7, 8, 9, 15, 16, 17, 24, 31, 40, 55];
+    for len_a in vectors {
+        for len_b in [0, 3, 16, 17, 24, 40, 64] {
+            for sig_a in significant.into_iter().filter(|&s| s <= len_a) {
+                let sig_b = significant[below(&mut state, significant.len())].min(len_b);
+                let mut x = random_magnitude(&mut state, sig_a);
+                x.resize(len_a, 0);
+                let mut y = random_magnitude(&mut state, sig_b);
+                y.resize(len_b, 0);
+                let k = below(&mut state, 16);
+                let (left, right) = ORDER_PAIRS[k % 4];
+                let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+                let a = number(&x, negative_a, left);
+                let b = number(&y, negative_b, right);
+                assert_adds_in(forms_to_run(), &a, &b, &reference(&a, &b));
+                assert_adds_in(forms_to_run(), &b, &a, &reference(&b, &a));
+            }
+        }
+    }
+    // x + -(x + d) for small d: a few bytes are left of up to 64.
+    for len in [17, 24, 25, 32, 40, 47, 56, 64] {
+        for d in [1u8, 2, 0xFF] {
+            let x = random_magnitude(&mut state, len);
+            let a = number(&x, false, ByteOrder::LittleEndian);
+            let mut y = x.clone();
+            let carry = y.iter_mut().try_for_each(|byte| {
+                let (sum, over) = byte.overflowing_add(d);
+                *byte = sum;
+                if over { Some(()) } else { None }
+            });
+            if carry.is_some() {
+                y.push(1);
+            }
+            for (left, right) in ORDER_PAIRS {
+                for negative in [false, true] {
+                    let a = number(&le_bytes(&a), negative, left);
+                    let b = number(&y, !negative, right);
+                    assert_adds_in(forms_to_run(), &a, &b, &reference(&a, &b));
+                    assert_adds_in(forms_to_run(), &b, &a, &reference(&b, &a));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn placement_follows_the_capacities_of_operands_in_registers() {
+    // As `placement_follows_the_capacities_of_random_operands`, for operands of up to 72 bytes,
+    // one time in four with zero bytes above their most significant ones.
+    let mut state = 0x3C6E_F372_FE94_F82B;
+    for _ in 0..size(3000, 40) {
+        let operand = |state: &mut u64| {
+            let len = REGISTER_LENGTHS[below(state, REGISTER_LENGTHS.len())];
+            let mut magnitude = random_magnitude(state, len);
+            if below(state, 4) == 0 {
+                let high = below(state, 3 * len + 2);
+                magnitude.resize(len + high, 0);
+            }
+            number(&magnitude, below(state, 2) == 0, ORDERS[below(state, 2)])
+        };
+        let (a, b) = (operand(&mut state), operand(&mut state));
+        let len = reference(&a, &b).magnitude.len();
+        let mut capacity = |n: &Number| {
+            let capacity = match below(&mut state, 5) {
+                0 => len.saturating_sub(1),
+                1 => len,
+                2 => len + 1,
+                3 => 0,
+                _ => len + 9,
+            };
+            stored(
+                &n.value,
+                n.negative,
+                n.byte_order,
+                capacity.max(n.value.len()),
+            )
+        };
+        let a = capacity(&a);
+        let b = capacity(&b);
+        for form in FORMS {
+            assert_placement(form, &a, &b);
+        }
+    }
+}
+
+#[test]
+fn ref_plus_ref_builds_a_vector_of_exactly_the_sum() {
+    // The one new vector of `&a + &b` has the length of the sum as its capacity, on every path.
+    let mut state = 0xA54F_F53A_5F1D_36F1;
+    for len in REGISTER_LENGTHS.into_iter().chain([100, 300]) {
+        for k in 0..size(16, 2) {
+            let (left, right) = ORDER_PAIRS[k % 4];
+            let (negative_a, negative_b) = SIGN_PAIRS[(k / 4) % 4];
+            let a = number(&random_magnitude(&mut state, len), negative_a, left);
+            let b = number(&random_magnitude(&mut state, len), negative_b, right);
+            let sum = &a + &b;
+            assert_eq!(
+                sum.value.capacity(),
+                sum.value.len(),
+                "&a + &b with a = {}, b = {}",
+                describe(&a),
+                describe(&b)
+            );
+        }
+    }
+}
+
 // Carry and borrow ripples
 
 #[test]

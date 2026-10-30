@@ -1,6 +1,11 @@
 mod add;
 mod byte_order;
 mod common;
+mod div;
+mod divisor;
+mod exact;
 mod mul;
 mod number;
+mod radix;
+mod shift;
 mod sub;

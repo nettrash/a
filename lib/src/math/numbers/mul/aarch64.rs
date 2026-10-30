@@ -47,7 +47,30 @@
 //! half of the steps' overhead; and one row a pass beyond, where the four chains' extra moves
 //! cost more than the overhead saved.
 //!
-//! The kernels read and write limbs where they are: `ldp` and `stp` need no alignment.
+//! # Squares
+//!
+//! A square adds each product of two different limbs once, a triangle of rows, then doubles the
+//! triangle and adds the squares of the limbs in one chain ([`diag_addlsh1`]). Its rows get
+//! shorter, one limb a row, so one row a pass spends much of the square on the steps of 1, 2 and 4
+//! positions; [`sqr_basecase`] takes the rows of up to [`SQR_ONE_ROW`] limbs two at a time by
+//! [`addmul_2`], the one product of the pair that the other row does not have added first, and
+//! from there into the kernel's first position as a carry. Measured on an Apple M4 Max, the
+//! median of 21 runs, in cycles for an `n`-limb square, against GMP 6.3's `mpn_sqr_basecase`:
+//!
+//! | `n` | one row a pass | two rows a pass up to 10 limbs | GMP |
+//! | --- | --- | --- | --- |
+//! | 16 | 238 | 215 | 248 |
+//! | 20 | 340 | 305 | 380 |
+//! | 24 | 454 | 419 | 516 |
+//! | 32 | 697 | 657 | 842 |
+//! | 48 | 1373 | 1332 | 1692 |
+//! | 64 | 2352 | 2304 | 2710 |
+//!
+//! Pairs of rows of up to 4, 6, 8, 12, 16 or 24 limbs were within 1 to 4 % of these.
+//!
+//! The kernels read and write limbs where they are: `ldp` and `stp` need no alignment, though
+//! pairs that straddle 16 bytes cost the longer products up to about 1 %, and the working memory
+//! of the multiplication starts its operands, product and scratch on 16 bytes.
 
 use core::arch::asm;
 
@@ -271,16 +294,23 @@ pub(super) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u
     carry
 }
 
-/// Adds the `n` limbs at `x` times `y0 + y1 B` to the `n` limbs at `r`, writing `n + 1` limbs,
-/// and returns the limb at position `n + 1`: four chains a step, as the module documentation
-/// describes.
+/// Adds the `n` limbs at `x` times `y0 + y1 B`, and the limb `c`, to the `n` limbs at `r`, writing
+/// `n + 1` limbs, and returns the limb at position `n + 1`: four chains a step, as the module
+/// documentation describes; `c` goes in as the high limb carried into the first position.
 ///
 /// # Safety
 ///
 /// `n >= 1`; the `n` limbs at `x` must be valid for reads, the `n` at `r` for reads and the
 /// `n + 1` at `r` for writes, apart from `x`.
 #[inline(always)]
-pub(super) unsafe fn addmul_2(r: *mut u64, x: *const u64, n: usize, y0: u64, y1: u64) -> u64 {
+pub(super) unsafe fn addmul_2(
+    r: *mut u64,
+    x: *const u64,
+    n: usize,
+    y0: u64,
+    y1: u64,
+    c: u64,
+) -> u64 {
     let top: u64;
     // SAFETY: as in `addmul_1`, with limb `n` of `r` written as well. The terms carried from one
     // step to the next: `h0p`, the high limb of `x_{k-1} y0` with chain 1's carry folded in;
@@ -288,7 +318,7 @@ pub(super) unsafe fn addmul_2(r: *mut u64, x: *const u64, n: usize, y0: u64, y1:
     // carry folded in; `h1p`, the high limb of `x_{k-1} y1`; and `c2`, chain 2's carry.
     unsafe {
         asm!(
-            "mov {h0p}, #0", "mov {l1p}, #0", "mov {h1pp}, #0", "mov {h1p}, #0", "mov {c2}, #0",
+            "mov {l1p}, #0", "mov {h1pp}, #0", "mov {h1p}, #0", "mov {c2}, #0",
             "cmn xzr, xzr",
             "tbz {n}, #0, 1f",
             "ldr {a0}, [{xp}], #8",
@@ -384,7 +414,7 @@ pub(super) unsafe fn addmul_2(r: *mut u64, x: *const u64, n: usize, y0: u64, y1:
             rp = inout(reg) r => _, xp = inout(reg) x => _, n = inout(reg) n => _,
             y0 = in(reg) y0, y1 = in(reg) y1,
             u1 = out(reg) top,
-            h0p = out(reg) _, l1p = out(reg) _, h1pp = out(reg) _, h1p = out(reg) _, c2 = out(reg) _,
+            h0p = inout(reg) c => _, l1p = out(reg) _, h1pp = out(reg) _, h1p = out(reg) _, c2 = out(reg) _,
             a0 = out(reg) _, a1 = out(reg) _, a2 = out(reg) _, a3 = out(reg) _,
             u0 = out(reg) _, u2 = out(reg) _, u3 = out(reg) _,
             l0 = out(reg) _, l1 = out(reg) _, l2 = out(reg) _, l3 = out(reg) _,
@@ -393,6 +423,54 @@ pub(super) unsafe fn addmul_2(r: *mut u64, x: *const u64, n: usize, y0: u64, y1:
         );
     }
     top
+}
+
+/// Completes an exact division in place: with the `n` limbs at `r` holding `a d` (modulo
+/// `B^n`), sets them to the `q` for which `q B - q = a d`, limb `i` of `q` being limb `i - 1` less
+/// limb `i` of `a d` and the borrow from below; one `sbcs` chain, a cycle per limb.
+///
+/// # Safety
+///
+/// `n >= 1`; the `n` limbs at `r` must be valid for reads and writes.
+#[inline]
+pub(super) unsafe fn divexact_finish(r: *mut u64, n: usize) {
+    // SAFETY: limbs `0..n` of `r`, each read before it is written; the asm uses no stack, and
+    // names every register it writes.
+    unsafe {
+        asm!(
+            "mov {q}, #0",
+            "cmp xzr, xzr",
+            "tbz {n}, #0, 1f",
+            "ldr {a0}, [{rp}]",
+            "sbcs {q}, {q}, {a0}",
+            "str {q}, [{rp}], #8",
+            "1:",
+            "tbz {n}, #1, 1f",
+            "ldp {a0}, {a1}, [{rp}]",
+            "sbcs {a0}, {q}, {a0}",
+            "sbcs {q}, {a0}, {a1}",
+            "stp {a0}, {q}, [{rp}], #16",
+            "1:",
+            "lsr {n}, {n}, #2",
+            "cbz {n}, 3f",
+            "2:",
+            "ldp {a0}, {a1}, [{rp}]",
+            "ldp {a2}, {a3}, [{rp}, #16]",
+            "sbcs {a0}, {q}, {a0}",
+            "sbcs {a1}, {a0}, {a1}",
+            "sbcs {a2}, {a1}, {a2}",
+            "sbcs {q}, {a2}, {a3}",
+            "stp {a0}, {a1}, [{rp}]",
+            "stp {a2}, {q}, [{rp}, #16]",
+            "add {rp}, {rp}, #32",
+            "sub {n}, {n}, #1",
+            "cbnz {n}, 2b",
+            "3:",
+            rp = inout(reg) r => _, n = inout(reg) n => _,
+            q = out(reg) _, a0 = out(reg) _, a1 = out(reg) _, a2 = out(reg) _, a3 = out(reg) _,
+            options(nostack),
+        );
+    }
 }
 
 /// Doubles the `2n` limbs at `r` and adds the squares of the `n` limbs at `x` at the even
@@ -432,6 +510,10 @@ unsafe fn diag_addlsh1(r: *mut u64, x: *const u64, n: usize) {
     }
 }
 
+/// The longest rows of a square's triangle that [`sqr_basecase`] adds two at a time; longer ones
+/// go one at a time (see the module documentation).
+pub(super) const SQR_ONE_ROW: usize = 10;
+
 /// Sets the `nx + ny` limbs at `r` to the product of the `nx` limbs at `x` and the `ny` at `y`:
 /// the portable code for the smallest shapes, then two rows a pass up to 16 limbs and one beyond
 /// (see the module documentation).
@@ -453,7 +535,7 @@ pub(super) unsafe fn mul_basecase(r: *mut u64, x: *const u64, nx: usize, y: *con
         let mut j = 1;
         if nx <= 16 {
             while j + 1 < ny {
-                *r.add(nx + j + 1) = addmul_2(r.add(j), x, nx, *y.add(j), *y.add(j + 1));
+                *r.add(nx + j + 1) = addmul_2(r.add(j), x, nx, *y.add(j), *y.add(j + 1), 0);
                 j += 2;
             }
         }
@@ -465,7 +547,14 @@ pub(super) unsafe fn mul_basecase(r: *mut u64, x: *const u64, nx: usize, y: *con
 }
 
 /// Sets the `2n` limbs at `r` to the square of the `n` limbs at `x`: the products of two
-/// different limbs once, by rows, then doubled with the squares added.
+/// different limbs once, then doubled with the squares added.
+///
+/// The products `x_i x_j` for `i < j` make a triangle of rows, row `i` adding `x_i` times the
+/// limbs above it at position `2i + 1`. Rows longer than [`SQR_ONE_ROW`] limbs are added one at a
+/// time; shorter ones two at a time by [`addmul_2`], rows `i` and `i + 1` over the limbs from
+/// `x_{i+2}` at position `2i + 2`, with the one product they do not share, `x_i x_{i+1}` at
+/// position `2i + 1`, added before: its low limb to the limb there, its high limb and the carry as
+/// the kernel's carry in.
 ///
 /// # Safety
 ///
@@ -473,16 +562,32 @@ pub(super) unsafe fn mul_basecase(r: *mut u64, x: *const u64, nx: usize, y: *con
 /// from them.
 #[inline]
 pub(super) unsafe fn sqr_basecase(r: *mut u64, x: *const u64, n: usize) {
-    // SAFETY: as in `portable::sqr_basecase`; the triangle leaves the top bit of `r` clear, as it
-    // is below half the square.
+    // SAFETY: as in `portable::sqr_basecase`: row `i` adds into limbs `2i + 1..n + i` of `r`, all
+    // written by the rows before it, and writes limb `n + i`; a pair of rows writes limbs `n + i`
+    // and `n + i + 1`. The triangle leaves the top bit of `r` clear, as it is below half the
+    // square.
     unsafe {
         if n <= 3 {
             portable::sqr_basecase(r, x, n);
             return;
         }
         *r.add(n) = mul_1(r.add(1), x.add(1), n - 1, *x);
-        for i in 1..n - 1 {
+        let mut i = 1;
+        while i + 2 < n && n - i - 1 > SQR_ONE_ROW {
             *r.add(n + i) = addmul_1(r.add(2 * i + 1), x.add(i + 1), n - i - 1, *x.add(i));
+            i += 1;
+        }
+        while i + 2 < n {
+            let (y0, y1) = (*x.add(i), *x.add(i + 1));
+            let p = u128::from(y0) * u128::from(y1);
+            let (low, carry) = (*r.add(2 * i + 1)).overflowing_add(p as u64);
+            *r.add(2 * i + 1) = low;
+            let c = (p >> 64) as u64 + u64::from(carry);
+            *r.add(n + i + 1) = addmul_2(r.add(2 * i + 2), x.add(i + 2), n - i - 2, y0, y1, c);
+            i += 2;
+        }
+        if i + 2 == n {
+            *r.add(n + i) = addmul_1(r.add(2 * i + 1), x.add(i + 1), 1, *x.add(i));
         }
         *r = 0;
         *r.add(2 * n - 1) = 0;

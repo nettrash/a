@@ -314,6 +314,109 @@ fn subtracts_numbers_of_millions_of_bytes() {
     }
 }
 
+// The paths in registers: up to 16 bytes, and up to 64
+
+/// Vector lengths at the limits of the paths in registers: around every whole number of limbs
+/// up to nine, and around 16 and 64 bytes, where the short and the medium path end.
+const REGISTER_LENGTHS: [usize; 29] = [
+    0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 40, 41, 47, 48, 49, 55, 56, 57, 63,
+    64, 65, 72,
+];
+
+#[test]
+fn subtracts_every_pair_of_lengths_at_the_limits_of_the_paths_in_registers() {
+    // Every pair runs in every combination of byte orders and signs, or under Miri in one picked
+    // at random: `a -= &b` and `&a - &b` hand the sign of `b` turned over to the paths in
+    // registers, and the forms that own `b` turn it over in place.
+    let mut state = 0x9B05_688C_2B3E_6C1F;
+    for len_a in REGISTER_LENGTHS {
+        for len_b in REGISTER_LENGTHS {
+            if cfg!(miri) && below(&mut state, 4) != 0 {
+                continue;
+            }
+            for k in 0..size(16, 1) {
+                let k = if cfg!(miri) { below(&mut state, 16) } else { k };
+                let (left, right) = ORDER_PAIRS[k % 4];
+                let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+                let a = number(&random_magnitude(&mut state, len_a), negative_a, left);
+                let b = number(&random_magnitude(&mut state, len_b), negative_b, right);
+                assert_subtracts_in(forms_to_run(), &a, &b, &difference(&a, &b));
+            }
+        }
+    }
+}
+
+#[test]
+fn medium_differences_much_shorter_than_their_vectors() {
+    // Differences of operands of up to 64 bytes that leave a few bytes, or none: equal high
+    // limbs, and zero bytes above the most significant ones, in every combination of byte orders
+    // and signs, so that the sum the subtraction is computed as is short in either way.
+    let mut state = 0x1F83_D9AB_FB41_BD6B;
+    for len in [17, 24, 25, 33, 40, 48, 56, 63, 64] {
+        for low in [0, 1, 7, 8, 9, 16, 17, 31] {
+            let x = random_magnitude(&mut state, len);
+            let mut y = x.clone();
+            let low = low.min(len);
+            y[..low].copy_from_slice(&random_bytes(&mut state, low));
+            let mut padded = random_magnitude(&mut state, low);
+            padded.resize(len + below(&mut state, 9), 0);
+            for k in 0..size(16, 2) {
+                let k = if cfg!(miri) { below(&mut state, 16) } else { k };
+                let (left, right) = ORDER_PAIRS[k % 4];
+                let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+                let a = number(&x, negative_a, left);
+                for b in [
+                    number(&y, negative_b, right),
+                    number(&padded, negative_b, right),
+                ] {
+                    assert_subtracts_in(forms_to_run(), &a, &b, &difference(&a, &b));
+                    assert_subtracts_in(forms_to_run(), &b, &a, &difference(&b, &a));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn placement_follows_the_capacities_of_operands_in_registers() {
+    // As `placement_follows_the_capacities_of_random_operands`, for operands of up to 72 bytes,
+    // one time in four with zero bytes above their most significant ones.
+    let mut state = 0x5BE0_CD19_137E_2179;
+    for _ in 0..size(3000, 40) {
+        let operand = |state: &mut u64| {
+            let len = REGISTER_LENGTHS[below(state, REGISTER_LENGTHS.len())];
+            let mut magnitude = random_magnitude(state, len);
+            if below(state, 4) == 0 {
+                let high = below(state, 3 * len + 2);
+                magnitude.resize(len + high, 0);
+            }
+            number(&magnitude, below(state, 2) == 0, ORDERS[below(state, 2)])
+        };
+        let (a, b) = (operand(&mut state), operand(&mut state));
+        let len = difference(&a, &b).magnitude.len();
+        let mut capacity = |n: &Number| {
+            let capacity = match below(&mut state, 5) {
+                0 => len.saturating_sub(1),
+                1 => len,
+                2 => len + 1,
+                3 => 0,
+                _ => len + 9,
+            };
+            stored(
+                &n.value,
+                n.negative,
+                n.byte_order,
+                capacity.max(n.value.len()),
+            )
+        };
+        let a = capacity(&a);
+        let b = capacity(&b);
+        for form in FORMS {
+            assert_placement(form, &a, &b);
+        }
+    }
+}
+
 // Borrow and carry ripples
 
 #[test]

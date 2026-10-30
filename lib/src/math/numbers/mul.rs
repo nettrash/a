@@ -7,17 +7,17 @@
 //! Operands whose vectors both hold at most 16 bytes take a short path in registers: their
 //! magnitudes are read into `u128`s as the addition reads them, multiplied into four limbs, and
 //! the product, at most 32 bytes, is written in the byte order of the left operand. Up to 32 bytes
-//! each, the general path does the same with four limbs an operand and a product of eight, in
-//! registers too.
+//! each, the general path does the same with four limbs an operand and a product of eight, and up
+//! to 48 with six and a product of twelve, in registers too.
 //!
 //! Longer operands are read into limbs of eight bytes, native `u64`s, the least significant first,
 //! in working memory: a buffer in the operator's own frame when the operands have at most
 //! [`MEDIUM_LIMBS`] limbs together, which the schoolbook kernels multiply directly; otherwise a
 //! buffer on the stack of [`STACK_LIMBS`] limbs, or one on the heap past it, for the operands, the
-//! product and the scratch of Karatsuba's method (see [`limbs`]). The kernels are inline assembly
-//! on 64-bit little-endian `aarch64` and, with BMI2, on `x86_64`, and portable Rust elsewhere and
-//! under Miri. A borrowed operand multiplied by itself (`&a * &a`) is squared, which needs about
-//! half the products of limbs.
+//! product and the scratch of Karatsuba's and Toom-Cook's methods (see [`limbs`]), each starting on
+//! 16 bytes. The kernels are inline assembly on 64-bit little-endian `aarch64` and, with BMI2, on
+//! `x86_64`, and portable Rust elsewhere and under Miri. A borrowed operand multiplied by itself
+//! (`&a * &a`) is squared, which needs about half the products of limbs.
 //!
 //! The product's length in the shortest form is then known, and a vector is chosen for it as for
 //! a sum: the vector of an operand taken by value, or of the target of `*=`, when it has room for
@@ -70,7 +70,8 @@ mod kernels;
 )))]
 #[path = "mul/portable.rs"]
 mod kernels;
-mod limbs;
+pub(super) mod limbs;
+mod toom;
 
 use super::add::{SMALL, read, read_small, significant_len, small, write, write_small};
 use super::{ByteOrder, Number};
@@ -428,7 +429,7 @@ fn small_number(order: ByteOrder, p: Small) -> Number {
 
 /// The longest vector, in bytes, of the operands that the general path multiplies in registers,
 /// four limbs each, as the short path does with two.
-const WIDE: usize = 32;
+pub(super) const WIDE: usize = 32;
 
 /// Whether `a * b` is computed in registers as four limbs each: both vectors hold at most
 /// [`WIDE`] bytes.
@@ -439,13 +440,13 @@ fn wide(a: &Number, b: &Number) -> bool {
 
 /// The product of two operands of up to 32 bytes, computed in registers.
 #[derive(Clone, Copy)]
-struct Wide {
+pub(super) struct Wide {
     /// The eight limbs of the magnitude, the least significant first.
-    limbs: [u64; 8],
+    pub(super) limbs: [u64; 8],
     /// The length of the product in the shortest form, from 1 to 64: one byte for zero.
-    len: usize,
+    pub(super) len: usize,
     /// Whether the product is negative; never for zero.
-    negative: bool,
+    pub(super) negative: bool,
 }
 
 /// The magnitude in the at most 32 bytes of `v`, in the layout of `order`, as four limbs: up to 16
@@ -456,7 +457,7 @@ struct Wide {
 ///
 /// `v` must hold at most [`WIDE`] bytes.
 #[inline(always)]
-unsafe fn read_wide(v: &[u8], order: ByteOrder) -> [u64; 4] {
+pub(super) unsafe fn read_wide(v: &[u8], order: ByteOrder) -> [u64; 4] {
     let (p, n) = (v.as_ptr(), v.len());
     // SAFETY: every read lies inside the `n` bytes of `v`: `[0, 16)` and `[n - 16, n)` with
     // `n > 16`, or what `read_small` reads.
@@ -534,7 +535,7 @@ unsafe fn wide_product(a: &Number, b: &Number) -> Wide {
 ///
 /// `dst` must be valid for writing `w.len` bytes.
 #[inline(always)]
-unsafe fn write_wide(dst: *mut u8, order: ByteOrder, w: &Wide) {
+pub(super) unsafe fn write_wide(dst: *mut u8, order: ByteOrder, w: &Wide) {
     let (l, len) = (w.limbs, w.len);
     // SAFETY: every write lies inside the `len` bytes at `dst`.
     unsafe {
@@ -578,7 +579,7 @@ unsafe fn write_wide(dst: *mut u8, order: ByteOrder, w: &Wide) {
 /// Writes the product `w` as the whole value of `v`, in its vector when it has room, in a new one
 /// otherwise.
 #[inline(always)]
-fn put_wide(v: &mut Vec<u8>, order: ByteOrder, w: &Wide) {
+pub(super) fn put_wide(v: &mut Vec<u8>, order: ByteOrder, w: &Wide) {
     if v.capacity() < w.len {
         *v = Vec::with_capacity(w.len);
     }
@@ -590,20 +591,197 @@ fn put_wide(v: &mut Vec<u8>, order: ByteOrder, w: &Wide) {
     }
 }
 
+// Operands of up to 48 bytes
+
+/// The longest vector, in bytes, of the operands that the general path multiplies in registers as
+/// six limbs each, past [`WIDE`]. Measured on an Apple M4 Max, `a *= &b` of 33 to 48 bytes took
+/// 53 to 60 cycles so, against 70 to 91 through limbs in memory. Eight limbs each, up to 64 bytes,
+/// did not pay: the compiler's code for the 64 limb products took about twice the instructions.
+const WIDEST: usize = 48;
+
+/// Whether `a * b` is computed in registers as six limbs each: both vectors hold at most
+/// [`WIDEST`] bytes.
+#[inline(always)]
+fn widest(a: &Number, b: &Number) -> bool {
+    a.value.len() <= WIDEST && b.value.len() <= WIDEST
+}
+
+/// The product of two operands of up to 48 bytes, computed in registers.
+#[derive(Clone, Copy)]
+struct Widest {
+    /// The twelve limbs of the magnitude, the least significant first.
+    limbs: [u64; 12],
+    /// The length of the product in the shortest form, from 1 to 96: one byte for zero.
+    len: usize,
+    /// Whether the product is negative; never for zero.
+    negative: bool,
+}
+
+/// The magnitude in the at most 48 bytes of `v`, in the layout of `order`, as six limbs: up to 32
+/// bytes as [`read_wide`] reads them; from 33, the 32 least significant bytes and the 16 most
+/// significant ones, which overlap and agree where they do.
+///
+/// # Safety
+///
+/// `v` must hold at most [`WIDEST`] bytes.
+#[inline(always)]
+unsafe fn read_widest(v: &[u8], order: ByteOrder) -> [u64; 6] {
+    let (p, n) = (v.as_ptr(), v.len());
+    // SAFETY: every read lies inside the `n` bytes of `v`: `[0, 32)` and `[n - 16, n)` with
+    // `n > 32`, or what `read_wide` reads.
+    unsafe {
+        if n <= WIDE {
+            let [l0, l1, l2, l3] = read_wide(v, order);
+            return [l0, l1, l2, l3, 0, 0];
+        }
+        let (low, middle, top) = if order == ByteOrder::BigEndian {
+            (
+                u128::from_be_bytes(read(p.add(n - 16))),
+                u128::from_be_bytes(read(p.add(n - 32))),
+                u128::from_be_bytes(read(p)),
+            )
+        } else {
+            (
+                u128::from_le_bytes(read(p)),
+                u128::from_le_bytes(read(p.add(16))),
+                u128::from_le_bytes(read(p.add(n - 16))),
+            )
+        };
+        // `top` holds positions `n - 16..n`; those from 32 up are the high part, a shift by
+        // `8 (48 - n)` down, below 128.
+        let high = top >> (8 * (WIDEST - n));
+        [
+            low as u64,
+            (low >> 64) as u64,
+            middle as u64,
+            (middle >> 64) as u64,
+            high as u64,
+            (high >> 64) as u64,
+        ]
+    }
+}
+
+/// The product of the operands `a` and `b` of up to 48 bytes: the schoolbook method on six limbs
+/// each, which the compiler unrolls and keeps in registers.
+///
+/// # Safety
+///
+/// Both vectors must hold at most [`WIDEST`] bytes.
+#[inline(always)]
+unsafe fn widest_product(a: &Number, b: &Number) -> Widest {
+    // SAFETY: as the caller guarantees.
+    let (x, y) = unsafe {
+        (
+            read_widest(&a.value, a.byte_order),
+            read_widest(&b.value, b.byte_order),
+        )
+    };
+    let mut r = [0u64; 12];
+    for i in 0..6 {
+        let mut carry = 0u64;
+        for j in 0..6 {
+            let t = u128::from(x[i]) * u128::from(y[j]) + u128::from(r[i + j]) + u128::from(carry);
+            r[i + j] = t as u64;
+            carry = (t >> 64) as u64;
+        }
+        r[i + 6] = carry;
+    }
+    let top = r.iter().rposition(|&l| l != 0);
+    let len = match top {
+        Some(t) => 8 * t + 8 - r[t].leading_zeros() as usize / 8,
+        None => 1,
+    };
+    let nonzero = |v: [u64; 6]| v.iter().any(|&l| l != 0);
+    Widest {
+        limbs: r,
+        len,
+        negative: a.negative != b.negative && nonzero(x) && nonzero(y),
+    }
+}
+
+/// Writes the product `w` over the first `w.len` bytes at `dst`, in the layout of `order`: up to
+/// 64 bytes as [`write_wide`] writes them; from 65, the 64 least significant bytes and the 32 most
+/// significant ones, which overlap and agree where they do.
+///
+/// # Safety
+///
+/// `dst` must be valid for writing `w.len` bytes.
+#[inline(always)]
+unsafe fn write_widest(dst: *mut u8, order: ByteOrder, w: &Widest) {
+    let (l, len) = (w.limbs, w.len);
+    // SAFETY: every write lies inside the `len` bytes at `dst`.
+    unsafe {
+        if len <= 4 * SMALL {
+            let mut limbs = [0; 8];
+            limbs.copy_from_slice(&l[..8]);
+            let wide = Wide {
+                limbs,
+                len,
+                negative: w.negative,
+            };
+            write_wide(dst, order, &wide);
+            return;
+        }
+        // Positions `len - 32..len`: the limbs shifted down by `8 (len - 32)` bits, 264 to 512.
+        let k = 8 * (len - 32);
+        let (q, b) = (k / 64, (k % 64) as u32);
+        let limb = |i: usize| if i < 12 { l[i] } else { 0 };
+        let mut t = [0u64; 4];
+        for (i, v) in t.iter_mut().enumerate() {
+            *v = if b == 0 {
+                limb(i + q)
+            } else {
+                (limb(i + q) >> b) | (limb(i + q + 1) << (64 - b))
+            };
+        }
+        let u = |a: u64, b: u64| u128::from(a) | (u128::from(b) << 64);
+        let low = [u(l[0], l[1]), u(l[2], l[3]), u(l[4], l[5]), u(l[6], l[7])];
+        let (t01, t23) = (u(t[0], t[1]), u(t[2], t[3]));
+        if order == ByteOrder::BigEndian {
+            for (i, v) in low.iter().enumerate() {
+                write(dst.add(len - 16 * i - 16), v.to_be_bytes());
+            }
+            write(dst.add(16), t01.to_be_bytes());
+            write(dst, t23.to_be_bytes());
+        } else {
+            for (i, v) in low.iter().enumerate() {
+                write(dst.add(16 * i), v.to_le_bytes());
+            }
+            write(dst.add(len - 32), t01.to_le_bytes());
+            write(dst.add(len - 16), t23.to_le_bytes());
+        }
+    }
+}
+
+/// Writes the product `w` as the whole value of `v`, in its vector when it has room, in a new one
+/// otherwise.
+#[inline(always)]
+fn put_widest(v: &mut Vec<u8>, order: ByteOrder, w: &Widest) {
+    if v.capacity() < w.len {
+        *v = Vec::with_capacity(w.len);
+    }
+    // SAFETY: the vector has room for the `w.len` bytes, all of which are written before the
+    // length is set.
+    unsafe {
+        write_widest(v.as_mut_ptr(), order, w);
+        v.set_len(w.len);
+    }
+}
+
 // The general path: operands of more than 16 bytes, out of line, so that the small path saves no
 // registers for it.
 
 /// An operand of the general path: its vector, its byte order and its significant length.
 #[derive(Clone, Copy)]
-struct Operand {
-    ptr: *const u8,
-    len: usize,
-    big_endian: bool,
-    significant: usize,
+pub(super) struct Operand {
+    pub(super) ptr: *const u8,
+    pub(super) len: usize,
+    pub(super) big_endian: bool,
+    pub(super) significant: usize,
 }
 
 impl Operand {
-    fn of(n: &Number) -> Self {
+    pub(super) fn of(n: &Number) -> Self {
         let big_endian = n.byte_order == ByteOrder::BigEndian;
         let significant = if big_endian {
             significant_len::<true>(&n.value)
@@ -628,6 +806,17 @@ fn ref_times_ref(a: &Number, b: &Number) -> Number {
         let w = unsafe { wide_product(a, b) };
         let mut value = Vec::new();
         put_wide(&mut value, order, &w);
+        return Number {
+            value,
+            negative: w.negative,
+            byte_order: order,
+        };
+    }
+    if widest(a, b) {
+        // SAFETY: both vectors hold at most 48 bytes.
+        let w = unsafe { widest_product(a, b) };
+        let mut value = Vec::new();
+        put_widest(&mut value, order, &w);
         return Number {
             value,
             negative: w.negative,
@@ -669,6 +858,16 @@ fn ref_times_value(a: &Number, b: &mut Number) -> Number {
             byte_order: order,
         };
     }
+    if widest(a, b) {
+        // SAFETY: both vectors hold at most 48 bytes.
+        let w = unsafe { widest_product(a, b) };
+        put_widest(&mut b.value, order, &w);
+        return Number {
+            value: mem::take(&mut b.value),
+            negative: w.negative,
+            byte_order: order,
+        };
+    }
     let (x, y) = (Operand::of(a), Operand::of(b));
     let negative = a.negative != b.negative;
     // SAFETY: the operands are those of `a` and `b`; `b`'s vector is written only once both are
@@ -693,6 +892,13 @@ fn mul_assign_ref(a: &mut Number, b: &Number) {
         // SAFETY: both vectors hold at most 32 bytes.
         let w = unsafe { wide_product(a, b) };
         put_wide(&mut a.value, order, &w);
+        a.negative = w.negative;
+        return;
+    }
+    if widest(a, b) {
+        // SAFETY: both vectors hold at most 48 bytes.
+        let w = unsafe { widest_product(a, b) };
+        put_widest(&mut a.value, order, &w);
         a.negative = w.negative;
         return;
     }
@@ -724,6 +930,16 @@ fn mul_assign_value(a: &mut Number, b: &mut Number) {
         a.negative = w.negative;
         return;
     }
+    if widest(a, b) {
+        // SAFETY: both vectors hold at most 48 bytes.
+        let w = unsafe { widest_product(a, b) };
+        if a.value.capacity() < w.len && b.value.capacity() >= w.len {
+            mem::swap(&mut a.value, &mut b.value);
+        }
+        put_widest(&mut a.value, order, &w);
+        a.negative = w.negative;
+        return;
+    }
     let (x, y) = (Operand::of(a), Operand::of(b));
     let negative = a.negative != b.negative;
     // SAFETY: as in `mul_assign_ref`.
@@ -739,14 +955,14 @@ fn mul_assign_value(a: &mut Number, b: &mut Number) {
 }
 
 /// A product computed in limbs, before it is written out.
-struct Product {
+pub(super) struct Product {
     /// The limbs of the magnitude, the least significant first: `limbs` of them, or none for
     /// zero.
-    r: *const u64,
+    pub(super) r: *const u64,
     /// The length of the product in the shortest form: one byte for zero.
-    len: usize,
+    pub(super) len: usize,
     /// Whether the product is negative; never for zero.
-    negative: bool,
+    pub(super) negative: bool,
 }
 
 impl Product {
@@ -755,7 +971,7 @@ impl Product {
     /// # Safety
     ///
     /// `dst` must be valid for writing `self.len` bytes, apart from the limbs.
-    unsafe fn write(&self, dst: *mut u8, order: ByteOrder) {
+    pub(super) unsafe fn write(&self, dst: *mut u8, order: ByteOrder) {
         // SAFETY: as the caller guarantees; the limbs hold at least `len` bytes.
         unsafe {
             if self.r.is_null() {
@@ -779,7 +995,7 @@ impl Product {
     ///
     /// As for [`Product::write`]; the bytes of `v` are not needed any more.
     #[inline(always)]
-    unsafe fn put_in(&self, v: &mut Vec<u8>, order: ByteOrder) {
+    pub(super) unsafe fn put_in(&self, v: &mut Vec<u8>, order: ByteOrder) {
         if v.capacity() < self.len {
             *v = Vec::with_capacity(self.len);
         }
@@ -798,7 +1014,23 @@ const MEDIUM_LIMBS: usize = 16;
 
 /// The limbs of working memory on the stack for longer products: those whose operands and scratch
 /// fit take no allocation besides the vector of the result.
-const STACK_LIMBS: usize = 1024;
+pub(super) const STACK_LIMBS: usize = 1024;
+
+/// Two limbs of working memory, aligned to 16 bytes: the kernels load and store limbs in pairs,
+/// and pairs that straddle 16 bytes cost them up to a few percent (see [`compute`]).
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct Pair([MaybeUninit<u64>; 2]);
+
+/// An uninitialised pair of limbs.
+const PAIR: Pair = Pair([MaybeUninit::uninit(); 2]);
+
+/// `n` rounded up to an even number of limbs, so that a buffer after `n` limbs of an aligned one
+/// is aligned too.
+#[inline(always)]
+const fn even(n: usize) -> usize {
+    (n + 1) & !1
+}
 
 /// Computes the product of the operands `x` and `y` (with `square`, of `x` by itself) and hands
 /// it to `place`, which writes it where it belongs; returns what `place` returns.
@@ -828,7 +1060,8 @@ unsafe fn product<R>(
     // the longer products, the scratch.
     unsafe {
         if nx + ny <= MEDIUM_LIMBS {
-            let mut s = [MaybeUninit::<u64>::uninit(); 2 * MEDIUM_LIMBS];
+            // The operands, each in an even number of limbs, and the product.
+            let mut s = [PAIR; MEDIUM_LIMBS + 1];
             return compute(s.as_mut_ptr().cast(), x, y, square, negative, place);
         }
         let (long, short) = if nx >= ny { (nx, ny) } else { (ny, nx) };
@@ -837,8 +1070,12 @@ unsafe fn product<R>(
         } else {
             limbs::mul_itch(long, short)
         };
-        let operands = if square { nx } else { nx + ny };
-        let need = operands + nx + ny + itch;
+        let operands = if square {
+            even(nx)
+        } else {
+            even(nx) + even(ny)
+        };
+        let need = operands + even(nx + ny) + itch;
         let compute = |s: *mut MaybeUninit<u64>| compute(s.cast(), x, y, square, negative, place);
         if need <= STACK_LIMBS {
             on_stack(compute)
@@ -851,10 +1088,18 @@ unsafe fn product<R>(
 /// [`product`] in the working memory at `s`: the operands read into limbs, then the product of
 /// the limbs after them, its length in the shortest form, and `place`.
 ///
+/// The limbs are placed for the kernels, which load and store them in pairs, and `s` is aligned
+/// to 16 bytes as the buffers of [`product`] are. The kernels take an odd limb first and the pairs
+/// after it, so an operand of an odd number of limbs starts 8 bytes past 16, and its pairs on 16;
+/// the product and the scratch start on 16 bytes. Pairs that straddle 16 bytes, just after
+/// `to_limbs` has stored the operand a limb at a time, measured on an Apple M4 Max: 913 cycles
+/// for `a *= &b` of 17 limbs each against 389, as the loads waited for the stores; with the
+/// scratch 8 bytes off, Toom-Cook products of 1024 and 2048 limbs took 0.6 and 1.3 % longer.
+///
 /// # Safety
 ///
 /// As for [`product`], with the operands not zero, and `s` valid for the operands' limbs, the
-/// product's and the scratch the product needs.
+/// product's and the scratch the product needs, each rounded up to an even number.
 #[inline(always)]
 unsafe fn compute<R>(
     s: *mut u64,
@@ -868,11 +1113,15 @@ unsafe fn compute<R>(
     let (nx, ny) = (la.div_ceil(8), lb.div_ceil(8));
     // SAFETY: as the caller guarantees.
     unsafe {
-        let (a, b) = (s, s.add(nx));
+        let (a, b) = (s.add(nx & 1), s.add(even(nx) + (ny & 1)));
         to_limbs(x, a);
-        let operands = if square { nx } else { nx + ny };
+        let operands = if square {
+            even(nx)
+        } else {
+            even(nx) + even(ny)
+        };
         let r = s.add(operands);
-        let t = r.add(nx + ny);
+        let t = r.add(even(nx + ny));
         // Short operands go straight to the kernels, without the dispatch of the longer ones.
         let medium = nx + ny <= MEDIUM_LIMBS;
         if square {
@@ -903,20 +1152,29 @@ unsafe fn compute<R>(
     }
 }
 
-/// Runs `f` on [`STACK_LIMBS`] limbs of working memory on the stack. Out of line, so that the
-/// small path's frame does not hold them.
+/// Limbs of the buffer of [`on_stack`] past the [`STACK_LIMBS`] it hands out, 2 KiB.
+const STACK_PAD: usize = 256;
+
+/// Runs `f` on [`STACK_LIMBS`] limbs of working memory on the stack, aligned to 16 bytes. Out of
+/// line, so that the small path's frame does not hold them.
+///
+/// The buffer is the bottom of the frame, and the working memory its first limbs. A buffer of
+/// exactly 8 KiB put them a multiple of 4 KiB below the caller's frame, and loads whose addresses
+/// agree with those of earlier stores in their low 12 bits wait for those stores: measured on an
+/// Apple M4 Max, `a *= &b` of 129 to 136 bytes took up to 2.5 times as long, some sizes from 65
+/// bytes on 1.3 to 2.3 times, depending on the build. 2 KiB more of buffer keep them apart.
 #[inline(never)]
-fn on_stack<R>(f: impl FnOnce(*mut MaybeUninit<u64>) -> R) -> R {
-    let mut s = [MaybeUninit::<u64>::uninit(); STACK_LIMBS];
-    f(s.as_mut_ptr())
+pub(super) fn on_stack<R>(f: impl FnOnce(*mut MaybeUninit<u64>) -> R) -> R {
+    let mut s = [PAIR; (STACK_LIMBS + STACK_PAD) / 2];
+    f(s.as_mut_ptr().cast())
 }
 
-/// Runs `f` on `need` limbs of working memory on the heap, freed on return.
+/// Runs `f` on `need` limbs of working memory on the heap, aligned to 16 bytes, freed on return.
 #[cold]
 #[inline(never)]
-fn on_heap<R>(need: usize, f: impl FnOnce(*mut MaybeUninit<u64>) -> R) -> R {
-    let mut s = Vec::<MaybeUninit<u64>>::with_capacity(need);
-    f(s.as_mut_ptr())
+pub(super) fn on_heap<R>(need: usize, f: impl FnOnce(*mut MaybeUninit<u64>) -> R) -> R {
+    let mut s = Vec::<Pair>::with_capacity(need.div_ceil(2));
+    f(s.as_mut_ptr().cast())
 }
 
 /// Reads the significant bytes of the operand `x` into `x.significant.div_ceil(8)` limbs at
@@ -926,7 +1184,7 @@ fn on_heap<R>(need: usize, f: impl FnOnce(*mut MaybeUninit<u64>) -> R) -> R {
 ///
 /// The operand's vector must be valid for reads, and `out` for writing its limbs.
 #[inline(always)]
-unsafe fn to_limbs(x: Operand, out: *mut u64) {
+pub(super) unsafe fn to_limbs(x: Operand, out: *mut u64) {
     let l = x.significant;
     let (full, rem) = (l / 8, l % 8);
     // SAFETY: every read lies inside the significant bytes: big-endian the last `l` of the

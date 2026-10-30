@@ -8,12 +8,21 @@
 //! `x y = x1 y1 B^2n + (x0 y0 + x1 y1 - (x0 - x1)(y0 - y1)) B^n + x0 y0`.
 //!
 //! The middle term takes the differences, whose signs are kept apart from their magnitudes, so
-//! that no product is longer than its halves allow. A shorter operand of at most half the
-//! longer one's limbs multiplies the longer one in pieces of its own length.
+//! that no product is longer than its halves allow.
+//!
+//! From [`TOOM3_MUL`] limbs in the shorter operand ([`TOOM3_SQR`] for a square) Toom-3 takes over,
+//! five products of thirds, and from [`TOOM4_MUL`] ([`TOOM4_SQR`]) Toom-4, seven products of
+//! quarters (see [`toom`]). Each needs operands of about the same length: Toom-4 a
+//! shorter one of more than three quarters of the longer one, Toom-3 of more than two thirds.
+//! Below that, down to a quarter, the longer operand is cut in four parts and the shorter one in
+//! two (Toom-4x2, five products); a shorter operand shorter still, or of at most half the longer
+//! one below Toom-3, multiplies the longer one in pieces, each about twice its own length in the
+//! range of Toom's methods and its own length below.
 
 #[cfg(target_endian = "little")]
-use super::super::add::{add_limbs as add_n, sub_limbs as sub_n};
+pub(in super::super) use super::super::add::{add_limbs as add_n, sub_limbs as sub_n};
 use super::kernels::{mul_basecase, sqr_basecase};
+use super::toom;
 
 /// From this many limbs in the shorter operand, a product is computed by Karatsuba's method:
 /// measured on an Apple M4 Max, a balanced product of 24 limbs took 529 cycles so, against 570 by
@@ -21,32 +30,119 @@ use super::kernels::{mul_basecase, sqr_basecase};
 pub(super) const KARATSUBA_MUL: usize = 24;
 
 /// From this many limbs, a square is computed by Karatsuba's method: the schoolbook square needs
-/// only about half the limb products, and measured on an Apple M4 Max it was faster up to 56 limbs
-/// (1857 cycles against 1925), and as fast at 64.
-pub(super) const KARATSUBA_SQR: usize = 64;
+/// only about half the limb products, and measured on an Apple M4 Max it was faster up to 48 limbs
+/// (1331 cycles against 1359), and slower from 56 (1780 against 1694).
+pub(super) const KARATSUBA_SQR: usize = 56;
+
+/// From this many limbs in the shorter operand, a product of operands that Toom-3 can cut is
+/// computed by it: measured on an Apple M4 Max, Toom-3 over products of thirds by Karatsuba's
+/// method took 7954 cycles for 120 limbs against 8108 by Karatsuba's method alone, and 9943
+/// against 10,620 for 136; at 112 limbs, 7339 against 7195.
+pub(super) const TOOM3_MUL: usize = 120;
+
+/// From this many limbs in the shorter operand, a product of operands that Toom-4 can cut is
+/// computed by it: measured on an Apple M4 Max, 20,663 cycles for 224 limbs against 21,820 by
+/// Toom-3, 70,030 against 74,210 for 512, and 16,678 against 16,602 for 192. Where the parts of
+/// one land just above a threshold and those of the other just below, either can be a few percent
+/// ahead: 384 limbs took 49,053 cycles by Toom-4 and 47,798 by Toom-3.
+pub(super) const TOOM4_MUL: usize = 224;
+
+/// From this many limbs, a square is computed by Toom-3: measured on an Apple M4 Max, 9860 cycles
+/// for 168 limbs against 10,203 by Karatsuba's method, and 9494 against 9373 for 160.
+pub(super) const TOOM3_SQR: usize = 168;
+
+/// From this many limbs, a square is computed by Toom-4: measured on an Apple M4 Max, 15,419
+/// cycles for 224 limbs against 15,486 by Toom-3, 26,214 against 29,286 for 320, and 14,009
+/// against 13,847 for 208.
+pub(super) const TOOM4_SQR: usize = 224;
+
+/// The method of a product, or of a square.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Method {
+    /// The schoolbook method, in the kernels.
+    Schoolbook,
+    /// The longer operand in pieces, each multiplied by the shorter one.
+    Pieces,
+    /// Karatsuba's method, three products of halves.
+    Karatsuba,
+    /// Toom-3, five products of thirds.
+    Toom3,
+    /// Toom-4, seven products of quarters.
+    Toom4,
+    /// Toom-4x2, the longer operand in four parts and the shorter one in two: five products.
+    Toom42,
+}
+
+/// The method [`mul`] takes for operands of `nx >= ny` limbs.
+#[inline]
+fn method(nx: usize, ny: usize) -> Method {
+    if ny < KARATSUBA_MUL {
+        Method::Schoolbook
+    } else if ny < TOOM3_MUL {
+        if ny <= nx.div_ceil(2) {
+            Method::Pieces
+        } else {
+            Method::Karatsuba
+        }
+    } else if ny >= TOOM4_MUL && toom::toom44_fits(nx, ny) {
+        Method::Toom4
+    } else if toom::toom33_fits(nx, ny) {
+        Method::Toom3
+    } else if toom::toom42_fits(nx, ny) {
+        Method::Toom42
+    } else if ny <= nx.div_ceil(2) {
+        Method::Pieces
+    } else {
+        Method::Karatsuba
+    }
+}
+
+/// The method [`sqr`] takes for an operand of `n` limbs.
+#[inline]
+fn sqr_method(n: usize) -> Method {
+    if n < KARATSUBA_SQR {
+        Method::Schoolbook
+    } else if n < TOOM3_SQR {
+        Method::Karatsuba
+    } else if n < TOOM4_SQR {
+        Method::Toom3
+    } else {
+        Method::Toom4
+    }
+}
 
 /// The limbs of scratch space that [`mul`] needs for operands of `nx >= ny` limbs.
-pub(super) fn mul_itch(nx: usize, ny: usize) -> usize {
-    if ny < KARATSUBA_MUL {
-        0
-    } else if ny <= nx.div_ceil(2) {
-        let last = nx % ny;
-        let rest = if last == 0 { 0 } else { mul_itch(ny, last) };
-        2 * ny + mul_itch(ny, ny).max(rest)
-    } else {
-        let n = nx.div_ceil(2);
-        let (sx, ty) = (nx - n, ny - n);
-        2 * n + mul_itch(n, n).max(mul_itch(sx, ty))
+pub(in super::super) fn mul_itch(nx: usize, ny: usize) -> usize {
+    match method(nx, ny) {
+        Method::Schoolbook => 0,
+        Method::Pieces => {
+            let (p, full, last) = pieces(nx, ny);
+            let itch = |len: usize| mul_itch(len.max(ny), len.min(ny));
+            let rest = if full > 0 { itch(p) } else { 0 }.max(itch(last));
+            let t = if full > 0 { p.max(last) } else { last };
+            itch(p).max(t + ny + rest)
+        }
+        Method::Karatsuba => {
+            let n = nx.div_ceil(2);
+            let (sx, ty) = (nx - n, ny - n);
+            2 * n + mul_itch(n, n).max(mul_itch(sx, ty))
+        }
+        Method::Toom3 => toom::toom33_itch(nx, ny),
+        Method::Toom4 => toom::toom44_itch(nx, ny),
+        Method::Toom42 => toom::toom42_itch(nx, ny),
     }
 }
 
 /// The limbs of scratch space that [`sqr`] needs for an operand of `n` limbs.
 pub(super) fn sqr_itch(n: usize) -> usize {
-    if n < KARATSUBA_SQR {
-        0
-    } else {
-        let h = n.div_ceil(2);
-        2 * h + sqr_itch(h)
+    match sqr_method(n) {
+        Method::Schoolbook | Method::Pieces | Method::Toom42 => 0,
+        Method::Karatsuba => {
+            let h = n.div_ceil(2);
+            2 * h + sqr_itch(h).max(sqr_itch(n - h))
+        }
+        Method::Toom3 => toom::toom3_sqr_itch(n),
+        Method::Toom4 => toom::toom4_sqr_itch(n),
     }
 }
 
@@ -57,7 +153,7 @@ pub(super) fn sqr_itch(n: usize) -> usize {
 ///
 /// `nx >= ny >= 1`; the limbs of `x` and `y` must be valid for reads, those of `r` for writes,
 /// and the [`mul_itch`]`(nx, ny)` limbs at `s` for reads and writes, all apart from each other.
-pub(super) unsafe fn mul(
+pub(in super::super) unsafe fn mul(
     r: *mut u64,
     x: *const u64,
     nx: usize,
@@ -68,12 +164,13 @@ pub(super) unsafe fn mul(
     debug_assert!(nx >= ny && ny >= 1);
     // SAFETY: forwarded.
     unsafe {
-        if ny < KARATSUBA_MUL {
-            mul_basecase(r, x, nx, y, ny);
-        } else if ny <= nx.div_ceil(2) {
-            mul_pieces(r, x, nx, y, ny, s);
-        } else {
-            karatsuba(r, x, nx, y, ny, s);
+        match method(nx, ny) {
+            Method::Schoolbook => mul_basecase(r, x, nx, y, ny),
+            Method::Pieces => mul_pieces(r, x, nx, y, ny, s),
+            Method::Karatsuba => karatsuba(r, x, nx, y, ny, s),
+            Method::Toom3 => toom::toom33(r, x, nx, y, ny, s),
+            Method::Toom4 => toom::toom44(r, x, nx, y, ny, s),
+            Method::Toom42 => toom::toom42(r, x, nx, y, ny, s),
         }
     }
 }
@@ -88,31 +185,72 @@ pub(super) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
     debug_assert!(n >= 1);
     // SAFETY: forwarded.
     unsafe {
-        if n < KARATSUBA_SQR {
-            sqr_basecase(r, x, n);
+        match sqr_method(n) {
+            Method::Schoolbook | Method::Pieces | Method::Toom42 => sqr_basecase(r, x, n),
+            Method::Karatsuba => karatsuba_sqr(r, x, n, s),
+            Method::Toom3 => toom::toom3_sqr(r, x, n, s),
+            Method::Toom4 => toom::toom4_sqr(r, x, n, s),
+        }
+    }
+}
+
+/// How [`mul_pieces`] cuts the longer operand: into pieces of `p` limbs, the first one and `full`
+/// more, then a last one of `last` limbs. Pieces are of `ny` limbs, or of `2ny` in the range of
+/// Toom's methods, where Toom-4x2 multiplies a piece; the last one, what is left, is at least half
+/// of `ny` and less than half of it more than a piece.
+fn pieces(nx: usize, ny: usize) -> (usize, usize, usize) {
+    let half = ny / 2;
+    let p = if ny >= TOOM3_MUL && nx >= 2 * ny + half {
+        2 * ny
+    } else {
+        ny
+    };
+    let left = nx - p;
+    let full = if left >= p + half {
+        (left - half) / p
+    } else {
+        0
+    };
+    (p, full, left - full * p)
+}
+
+/// Sets the `nx + ny` limbs at `r` to the product of the `nx` limbs at `x` and the `ny` at `y`,
+/// either of which may be the longer: [`mul`] with the longer one first.
+///
+/// # Safety
+///
+/// As for [`mul`], with `nx, ny >= 1` in either order, and the scratch that [`mul_itch`] gives for
+/// the longer one first.
+unsafe fn mul_any(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: *mut u64) {
+    // SAFETY: forwarded.
+    unsafe {
+        if nx >= ny {
+            mul(r, x, nx, y, ny, s);
         } else {
-            karatsuba_sqr(r, x, n, s);
+            mul(r, y, ny, x, nx, s);
         }
     }
 }
 
 /// [`mul`] for a shorter operand of at most half the longer one's limbs: the longer one is
-/// multiplied in pieces of `ny` limbs, each product added in at the position of its piece.
+/// multiplied in pieces (see [`pieces`]), each product added in at the position of its piece.
 ///
 /// # Safety
 ///
 /// As for [`mul`], with `ny <= nx.div_ceil(2)`.
 unsafe fn mul_pieces(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: *mut u64) {
-    // SAFETY: every piece lies in `x`, every product of a piece in the scratch, and every
-    // position of `r` written is below `nx + ny`; the scratch holds the `2ny` limbs of a product
-    // and what multiplying a piece needs after them.
+    let (p, full, last) = pieces(nx, ny);
+    // SAFETY: every piece lies in `x`, every product of a piece but the first in the scratch, and
+    // every position of `r` written is below `nx + ny`; the scratch holds the product of the
+    // longest of the other pieces and what multiplying a piece needs after it.
     unsafe {
-        mul(r, x, ny, y, ny, s);
-        let (t, rest) = (s, s.add(2 * ny));
-        let mut done = ny;
-        while done < nx {
-            let len = (nx - done).min(ny);
-            mul(t, y, ny, x.add(done), len, rest);
+        mul_any(r, x, p, y, ny, s);
+        let longest = if full > 0 { p.max(last) } else { last };
+        let (t, rest) = (s, s.add(longest + ny));
+        let mut done = p;
+        for i in 0..=full {
+            let len = if i < full { p } else { last };
+            mul_any(t, x.add(done), len, y, ny, rest);
             // The top `ny` limbs of the product so far are at `done`; above them nothing yet.
             let carry = add_n(r.add(done), r.add(done), t, ny);
             core::ptr::copy_nonoverlapping(t.add(ny), r.add(done + ny), len);
@@ -120,6 +258,7 @@ unsafe fn mul_pieces(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: u
             debug_assert!(out == 0, "a product of pieces carried out of its limbs");
             done += len;
         }
+        debug_assert!(done == nx);
     }
 }
 
@@ -156,7 +295,7 @@ unsafe fn karatsuba(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: us
 ///
 /// # Safety
 ///
-/// As for [`sqr`], with `n >= KARATSUBA_SQR`.
+/// As for [`sqr`], with `n >= 2`.
 unsafe fn karatsuba_sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
     let h = n.div_ceil(2);
     let sx = n - h;
@@ -218,7 +357,13 @@ unsafe fn middle(r: *mut u64, n: usize, len: usize, s: *mut u64, subtract: bool)
 ///
 /// The limbs of `a` and `b` must be valid for reads and those of `r` for writes, `r` apart from
 /// both.
-unsafe fn abs_diff(r: *mut u64, a: *const u64, na: usize, b: *const u64, nb: usize) -> bool {
+pub(super) unsafe fn abs_diff(
+    r: *mut u64,
+    a: *const u64,
+    na: usize,
+    b: *const u64,
+    nb: usize,
+) -> bool {
     // SAFETY: as the caller guarantees.
     unsafe {
         let above = (nb..na).any(|i| *a.add(i) != 0);
@@ -241,7 +386,11 @@ unsafe fn abs_diff(r: *mut u64, a: *const u64, na: usize, b: *const u64, nb: usi
 /// # Safety
 ///
 /// The limbs must be valid for reads.
-unsafe fn cmp_n(a: *const u64, b: *const u64, n: usize) -> core::cmp::Ordering {
+pub(in super::super) unsafe fn cmp_n(
+    a: *const u64,
+    b: *const u64,
+    n: usize,
+) -> core::cmp::Ordering {
     // SAFETY: as the caller guarantees.
     unsafe {
         for i in (0..n).rev() {
@@ -260,7 +409,13 @@ unsafe fn cmp_n(a: *const u64, b: *const u64, n: usize) -> core::cmp::Ordering {
 /// # Safety
 ///
 /// The limbs of `a` and `b` must be valid for reads and those of `r` for writes; `r` may be `a`.
-unsafe fn add_ext(r: *mut u64, a: *const u64, na: usize, b: *const u64, nb: usize) -> bool {
+pub(super) unsafe fn add_ext(
+    r: *mut u64,
+    a: *const u64,
+    na: usize,
+    b: *const u64,
+    nb: usize,
+) -> bool {
     // SAFETY: as the caller guarantees.
     unsafe {
         let carry = add_n(r, a, b, nb);
@@ -271,12 +426,35 @@ unsafe fn add_ext(r: *mut u64, a: *const u64, na: usize, b: *const u64, nb: usiz
     }
 }
 
+/// Sets the `na` limbs at `r` to `a - b` for the `na` limbs at `a` and the `nb <= na` limbs at
+/// `b`, and returns the borrow out.
+///
+/// # Safety
+///
+/// The limbs of `a` and `b` must be valid for reads and those of `r` for writes; `r` may be `a`.
+pub(super) unsafe fn sub_ext(
+    r: *mut u64,
+    a: *const u64,
+    na: usize,
+    b: *const u64,
+    nb: usize,
+) -> bool {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        let borrow = sub_n(r, a, b, nb);
+        if r.cast_const() != a {
+            core::ptr::copy_nonoverlapping(a.add(nb), r.add(nb), na - nb);
+        }
+        sub_1(r.add(nb), na - nb, u64::from(borrow)) != 0
+    }
+}
+
 /// Adds `c` to the `n` limbs at `r`, and returns what carries out of them.
 ///
 /// # Safety
 ///
 /// The limbs must be valid for reads and writes.
-unsafe fn add_1(r: *mut u64, n: usize, mut c: u64) -> u64 {
+pub(in super::super) unsafe fn add_1(r: *mut u64, n: usize, mut c: u64) -> u64 {
     // SAFETY: as the caller guarantees.
     unsafe {
         let mut i = 0;
@@ -295,7 +473,7 @@ unsafe fn add_1(r: *mut u64, n: usize, mut c: u64) -> u64 {
 /// # Safety
 ///
 /// The limbs must be valid for reads and writes.
-unsafe fn sub_1(r: *mut u64, n: usize, mut c: u64) -> u64 {
+pub(in super::super) unsafe fn sub_1(r: *mut u64, n: usize, mut c: u64) -> u64 {
     // SAFETY: as the caller guarantees.
     unsafe {
         let mut i = 0;
@@ -316,7 +494,7 @@ unsafe fn sub_1(r: *mut u64, n: usize, mut c: u64) -> u64 {
 ///
 /// The limbs must be valid; `r` may be `a` or `b`, and is otherwise apart from them.
 #[cfg(target_endian = "big")]
-unsafe fn add_n(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
+pub(in super::super) unsafe fn add_n(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
     let mut carry = false;
     // SAFETY: as the caller guarantees; limb `i` of the inputs is read before limb `i` of `r`
     // is written.
@@ -337,7 +515,7 @@ unsafe fn add_n(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
 ///
 /// As for [`add_n`].
 #[cfg(target_endian = "big")]
-unsafe fn sub_n(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
+pub(in super::super) unsafe fn sub_n(r: *mut u64, a: *const u64, b: *const u64, n: usize) -> bool {
     let mut borrow = false;
     // SAFETY: as in `add_n`.
     unsafe {

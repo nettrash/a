@@ -322,12 +322,14 @@ fn multiplies_random_big_numbers_as_the_reference() {
 }
 
 #[test]
-fn multiplies_every_pair_of_lengths_up_to_40_bytes() {
-    // Up to five 8-byte limbs, with every remainder after whole limbs. Every pair of lengths runs
-    // in every combination of byte orders and signs, or under Miri in one picked at random.
+fn multiplies_every_pair_of_lengths_up_to_50_bytes() {
+    // Up to six 8-byte limbs and a bit more, with every remainder after whole limbs: the paths in
+    // registers up to 16, 32 and 48 bytes, and the limbs in memory past them. Every pair of
+    // lengths runs in every combination of byte orders and signs, or under Miri in one picked at
+    // random.
     let mut state = 0x5851_F42D_4C95_7F2D;
-    for len_a in 0..=40 {
-        for len_b in 0..=40 {
+    for len_a in 0..=50 {
+        for len_b in 0..=50 {
             for k in 0..size(16, 1) {
                 let k = if cfg!(miri) { below(&mut state, 16) } else { k };
                 let (left, right) = ORDER_PAIRS[k % 4];
@@ -341,13 +343,14 @@ fn multiplies_every_pair_of_lengths_up_to_40_bytes() {
 }
 
 /// Numbers of limbs around the sizes at which a product changes method: the schoolbook method,
-/// Karatsuba's from a few dozen limbs in the shorter operand, a shorter operand of at most half
-/// the longer one, which multiplies it in pieces, and the levels of Karatsuba's recursion. Under
-/// Miri, fewer.
+/// Karatsuba's from 24 limbs in the shorter operand (56 for a square), Toom-3 from 120 (168) and
+/// Toom-4 from 224, a shorter operand of at most half the longer one, which multiplies it in
+/// pieces, and the levels of the recursions. Under Miri, fewer.
 fn product_limbs() -> Vec<usize> {
     let all = [
-        1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 63, 64, 65, 95, 96,
-        97, 127, 128, 129, 191, 192, 193, 255, 256, 257,
+        1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 23, 24, 25, 31, 32, 33, 47, 48, 49, 55, 56, 57, 63, 64,
+        65, 95, 96, 97, 119, 120, 121, 127, 128, 129, 167, 168, 169, 191, 192, 193, 223, 224, 225,
+        255, 256, 257,
     ];
     let miri = [1, 3, 8, 31, 32, 33, 48, 49, 65];
     if cfg!(miri) {
@@ -437,6 +440,203 @@ fn products_of_long_runs_agree_with_their_residues() {
     }
 }
 
+/// The limbs of the shorter operand around the sizes from which Toom-3 (120) and Toom-4 (224)
+/// multiply, and a few past them, where their parts recurse into Karatsuba's method and Toom-3.
+/// Under Miri, one past each threshold.
+fn toom_limbs() -> Vec<usize> {
+    if cfg!(miri) {
+        vec![121, 225]
+    } else {
+        vec![
+            119, 120, 121, 122, 123, 128, 129, 223, 224, 225, 226, 227, 256, 300, 365, 400,
+        ]
+    }
+}
+
+#[test]
+fn multiplies_operands_of_every_shape_by_toom_cook() {
+    // From the thresholds up, the longer operand as long as the shorter one or a few limbs
+    // longer (Toom-4 and Toom-3), about 1.4 times as long (Toom-3 only), 1.5 to 4 times (Toom-4
+    // cutting the longer one in four parts and the shorter one in two), and longer (pieces of
+    // twice the shorter one, each multiplied by Toom-4x2, and a last one of what is left).
+    let mut state = 0x2F8E_44D1_9AC3_57B0;
+    for ny in toom_limbs() {
+        let shapes = if cfg!(miri) {
+            vec![ny, 2 * ny - 1]
+        } else {
+            vec![
+                ny,
+                ny + 1,
+                ny + 3,
+                ny * 4 / 3 + 1,
+                ny * 7 / 5,
+                ny * 3 / 2,
+                ny * 3 / 2 + 1,
+                ny * 7 / 4,
+                2 * ny - 1,
+                2 * ny,
+                2 * ny + 1,
+                ny * 5 / 2,
+                3 * ny + 2,
+                4 * ny - 1,
+                4 * ny + 1,
+                ny * 9 / 2 + 3,
+                7 * ny + 5,
+            ]
+        };
+        for nx in shapes {
+            let ex = EXTRA_BYTES[below(&mut state, 3)];
+            let ey = EXTRA_BYTES[below(&mut state, 3)];
+            let x = if below(&mut state, 2) == 0 {
+                limb_runs(&mut state, nx, ex)
+            } else {
+                random_magnitude(&mut state, 8 * nx + ex)
+            };
+            let y = limb_runs(&mut state, ny, ey);
+            let k = below(&mut state, 16);
+            let (left, right) = ORDER_PAIRS[k % 4];
+            let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+            let a = number(&x, negative_a, left);
+            let b = number(&y, negative_b, right);
+            let form = FORMS[below(&mut state, 6)];
+            if nx <= 4 * ny + 1 {
+                assert_multiplies_in(&[form], &a, &b, &product(&a, &b));
+                assert_multiplies_in(&[form], &b, &a, &product(&b, &a));
+            } else {
+                let result = form.apply(copy(&a, 0), copy(&b, 0));
+                let inputs = || format!("{} with {nx} and {ny} limbs", form.name());
+                assert_product_residues(&result, &a, &b, &inputs);
+            }
+        }
+    }
+}
+
+/// A magnitude of `n` limbs cut as Toom's methods cut it, into parts of `k` limbs (the top one
+/// shorter), each part one of: a random block, the block plus or minus one, all ones, all zeros,
+/// or the sum of the parts below it and the one above it, which makes the value at -1 zero.
+fn toom_parts(state: &mut u64, n: usize, k: usize) -> Vec<u8> {
+    let block = random_magnitude(state, 8 * k);
+    let mut limbs: Vec<u64> = Vec::with_capacity(n);
+    let block_limbs: Vec<u64> = block
+        .chunks(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    while limbs.len() < n {
+        let len = (n - limbs.len()).min(k);
+        let mut part: Vec<u64> = block_limbs[..len].to_vec();
+        match below(state, 6) {
+            0 => {
+                // Plus one, with the carry, unless it would carry out.
+                if let Some(i) = part.iter().position(|&l| l != u64::MAX) {
+                    part[..i].iter_mut().for_each(|l| *l = 0);
+                    part[i] += 1;
+                }
+            }
+            1 => {
+                if let Some(i) = part.iter().position(|&l| l != 0) {
+                    part[..i].iter_mut().for_each(|l| *l = u64::MAX);
+                    part[i] -= 1;
+                }
+            }
+            2 => part.iter_mut().for_each(|l| *l = u64::MAX),
+            3 => part.iter_mut().for_each(|l| *l = 0),
+            _ => {}
+        }
+        limbs.extend(part);
+    }
+    // One time in three, for three parts, the middle one the sum of the others (halved, so that
+    // it fits): x0 - x1 + x2 = 0.
+    if below(state, 3) == 0 && n > 2 * k {
+        let s = n - 2 * k;
+        for i in 0..k {
+            limbs[i] >>= 1;
+            if i < s {
+                limbs[2 * k + i] >>= 1;
+            }
+        }
+        let mut carry = 0u64;
+        for i in 0..k {
+            let high = if i < s { limbs[2 * k + i] } else { 0 };
+            let (v, c1) = limbs[i].overflowing_add(high);
+            let (v, c2) = v.overflowing_add(carry);
+            limbs[k + i] = v;
+            carry = u64::from(c1 | c2);
+        }
+        assert_eq!(carry, 0);
+    }
+    let mut bytes: Vec<u8> = limbs.iter().flat_map(|l| l.to_le_bytes()).collect();
+    if let Some(top @ 0) = bytes.last_mut() {
+        *top = 1;
+    }
+    bytes
+}
+
+#[test]
+fn toom_cook_takes_values_that_are_zero_negative_or_all_ones() {
+    // Operands whose parts are equal, a unit apart, all ones, zero, or sum to zero at -1, for the
+    // parts of Toom-3 and Toom-4 on both operands: the values at -1 and -2 zero, negative and
+    // positive in every combination, and the values at 1, 2 and 1/2 at their largest, in
+    // products and squares.
+    let mut state = 0xD1B5_4A32_D192_ED03;
+    let (count, sizes): (usize, Vec<usize>) = if cfg!(miri) {
+        (2, vec![121, 225])
+    } else {
+        (12, vec![120, 121, 128, 170, 224, 225, 240, 300, 401])
+    };
+    for &n in &sizes {
+        for _ in 0..count {
+            let parts = [n.div_ceil(3), n.div_ceil(4)];
+            let kx = parts[below(&mut state, 2)];
+            let ky = parts[below(&mut state, 2)];
+            let ny = n - below(&mut state, 3);
+            let x = toom_parts(&mut state, n, kx);
+            let y = toom_parts(&mut state, ny, ky);
+            let k = below(&mut state, 16);
+            let (left, right) = ORDER_PAIRS[k % 4];
+            let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+            let a = number(&x, negative_a, left);
+            let b = number(&y, negative_b, right);
+            let form = FORMS[below(&mut state, 6)];
+            assert_multiplies_in(&[form], &a, &b, &product(&a, &b));
+            #[allow(clippy::eq_op)]
+            let square = &a * &a;
+            let inputs = || format!("&a * &a with a = {}", describe(&a));
+            assert_result(&square, &product(&a, &a), a.byte_order, &inputs);
+        }
+    }
+}
+
+#[test]
+fn toom_3_carries_out_of_its_low_coefficients() {
+    // With X = B^k, x = 2^(64k - 1) + X + (X - 1) X^2 and y = 2^(64k - 1) + (X - 1) X + (X - 1) X^2,
+    // the coefficient of X^2 of the product is X^2 - 1 and the sum of the coefficients below it
+    // carries out of limb 4k - 1, into the top limb of that coefficient: a carry that random
+    // operands meet about once in B^k products.
+    let ks: Vec<usize> = if cfg!(miri) {
+        vec![41]
+    } else {
+        vec![40, 41, 50, 63, 74]
+    };
+    for k in ks {
+        let half = {
+            let mut part = vec![0u8; 8 * k];
+            part[8 * k - 1] = 0x80;
+            part
+        };
+        let mut one = vec![0u8; 8 * k];
+        one[0] = 1;
+        let ones = vec![0xFF; 8 * k];
+        let x = [half.as_slice(), &one, &ones].concat();
+        let y = [half.as_slice(), &ones, &ones].concat();
+        for (left, right) in ORDER_PAIRS {
+            let a = number(&x, false, left);
+            let b = number(&y, true, right);
+            let form = FORMS[k % 6];
+            assert_multiplies_in(&[form], &a, &b, &product(&a, &b));
+        }
+    }
+}
+
 // Squares
 
 #[test]
@@ -462,7 +662,7 @@ fn squares_a_borrowed_number_multiplied_by_itself() {
         }
     }
     if !cfg!(miri) {
-        for len in [4000, 8191, 12_000] {
+        for len in [1800, 4000, 8191, 12_000, 40_000] {
             let a = number(&random_magnitude(&mut state, len), true, ORDERS[len % 2]);
             #[allow(clippy::eq_op)]
             let result = &a * &a;

@@ -12,17 +12,32 @@
 //! both their sum and their difference are computed: the one the signs ask for, the sign, and
 //! the length in the shortest form (17 bytes when the sum carries out of the sixteenth) are
 //! then chosen without a branch. The sum is stored in the byte order of the left operand, in
-//! the vector chosen as below, with no reversal and no other pass over its bytes. Longer
-//! operands, and a new vector for a short sum, are handled out of line, so that the short path
-//! saves no registers.
+//! the vector chosen as below, with no reversal and no other pass over its bytes. The stores are
+//! chosen by the length `k` of the longer operand's vector rather than by the length of the sum:
+//! a sum of magnitudes of `k` bytes is `k` or `k + 1` bytes long, a coin toss for random ones,
+//! and the two lengths take the same stores (see [`write_sum`]). Longer operands, and a new
+//! vector for a short sum, are handled out of line, so that the short path saves no registers.
 //!
-//! For longer operands, everything about the sum but its bytes is planned first, from the
-//! operands as they are: the operation, which magnitude is `x`, the one the other (`y`) is
-//! added to or subtracted from, the sign, and the exact length of the sum in its shortest form.
-//! A sum of magnitudes of `lx >= ly` significant bytes is `lx` bytes long, or one more when it
-//! carries out of the top, and whether it does is found from the top down: the first byte
-//! position at which the bytes add up to anything but `0xFF` decides. A difference reaches up
-//! to the highest position at which the magnitudes differ, unless that position differs by
+//! Operands whose vectors both hold at most 64 bytes, not both at most 16, take the medium path,
+//! out of line, also in registers, with code for each number `L` of limbs of eight bytes of the
+//! longer vector, from 3 to 8. The magnitudes are read as `L` limbs each, loaded where they are
+//! (the top one of a vector from the eight bytes that end it, shifted), and one chain of
+//! additions gives their sum, or `x - y` when the signs differ, while a second one gives `y - x`
+//! alongside, which is taken when the first borrowed: neither the signs nor which magnitude is the
+//! larger, a coin toss for random operands, are branched on. The length of the sum is found from
+//! its top three limbs, and the sum stored from the limbs below its top eight bytes, at their
+//! places, and then those eight bytes; a vector of `+=` is written only once both operands have
+//! been read. A sum shorter than `L - 1` limbs, of operands that nearly cancel or have zero bytes
+//! above their most significant ones, and a sum the vector has no room for, go to slower code
+//! (see [`medium_slow`]).
+//!
+//! For operands of more than 64 bytes, everything about the sum but its bytes is planned first,
+//! from the operands as they are: the operation, which magnitude is `x`, the one the other (`y`)
+//! is added to or subtracted from, the sign, and the exact length of the sum in its shortest
+//! form. A sum of magnitudes of `lx >= ly` significant bytes is `lx` bytes long, or one more
+//! when it carries out of the top, and whether it does is found from the top down: the first
+//! byte position at which the bytes add up to anything but `0xFF` decides. A difference reaches
+//! up to the highest position at which the magnitudes differ, unless that position differs by
 //! exactly 1 and a borrow from below cancels it. It then ends at the bottom of the run of
 //! positions under it at which `x` has `0x00` and `y` has `0xFF`, which pass the borrow on, or
 //! a byte lower when a borrow comes into that run too, as in `0x01_00_00 - 0xFF_FF = 1`. The
@@ -193,6 +208,9 @@ impl Add<&Number> for &Number {
         if small(self, rhs) {
             return small_number_of(self, rhs, rhs.negative);
         }
+        if medium(self, rhs) {
+            return medium_new(self, rhs, rhs.negative);
+        }
         ref_plus_ref(self, rhs)
     }
 }
@@ -262,9 +280,9 @@ impl Add<Number> for &Number {
             // has room for it.
             unsafe {
                 if rhs.value.capacity() >= sum.len {
-                    write_small_in(&mut rhs.value, order, sum.lo, sum.hi, sum.len);
+                    write_small_in(&mut rhs.value, order, &sum);
                 } else {
-                    replace_small(&mut rhs.value, order, sum.lo, sum.hi, sum.len);
+                    replace_small(&mut rhs.value, order, sum.lo, sum.hi, sum.len, sum.k);
                 }
             }
             return Number {
@@ -272,6 +290,12 @@ impl Add<Number> for &Number {
                 negative: sum.negative,
                 byte_order: order,
             };
+        }
+        if medium(self, &rhs) {
+            let (b, negative): (*mut Number, bool) = (&mut rhs, rhs.negative);
+            // SAFETY: both operands are valid and take the medium path, and the sum goes to `b`.
+            unsafe { medium_into(self, b, negative, b, Fallback::New) };
+            return rhs;
         }
         // `rhs` is dropped on return, with the vector it holds then, if any.
         ref_plus_value(self, &mut rhs)
@@ -332,6 +356,13 @@ impl AddAssign<&Number> for Number {
             small_add_to(self, rhs, rhs.negative);
             return;
         }
+        if medium(self, rhs) {
+            let (a, b) = (ptr::from_mut(self), ptr::from_ref(rhs).cast_mut());
+            // SAFETY: both operands are valid and take the medium path, the sum goes to `a`, and
+            // `b` is only read.
+            unsafe { medium_into(a, b, rhs.negative, a, Fallback::New) };
+            return;
+        }
         add_assign_ref(self, rhs);
     }
 }
@@ -369,15 +400,22 @@ impl AddAssign<Number> for Number {
             // has room for it.
             unsafe {
                 if self.value.capacity() >= sum.len {
-                    write_small_in(&mut self.value, order, sum.lo, sum.hi, sum.len);
+                    write_small_in(&mut self.value, order, &sum);
                 } else if rhs.value.capacity() >= sum.len {
-                    write_small_in(&mut rhs.value, order, sum.lo, sum.hi, sum.len);
+                    write_small_in(&mut rhs.value, order, &sum);
                     // The vector of `self` goes to `rhs`, and is dropped with it.
                     mem::swap(&mut self.value, &mut rhs.value);
                 } else {
-                    replace_small(&mut self.value, order, sum.lo, sum.hi, sum.len);
+                    replace_small(&mut self.value, order, sum.lo, sum.hi, sum.len, sum.k);
                 }
             }
+            return;
+        }
+        if medium(self, &rhs) {
+            let (a, negative) = (ptr::from_mut(self), rhs.negative);
+            // SAFETY: both operands are valid and take the medium path, the sum goes to `a`, and
+            // `rhs` is taken by value.
+            unsafe { medium_into(a, &mut rhs, negative, a, Fallback::Other) };
             return;
         }
         // `rhs` is dropped on return, with the vector it holds then.
@@ -385,10 +423,10 @@ impl AddAssign<Number> for Number {
     }
 }
 
-// The general path: operands of more than 16 bytes, out of line, so that the small path saves no
-// registers for it.
+// The general path: operands of more than 64 bytes, out of line, so that the paths in registers
+// save no registers for it.
 
-/// `a + b` for borrowed operands, of which at least one has more than 16 bytes.
+/// `a + b` for borrowed operands, of which at least one has more than 64 bytes.
 #[inline(never)]
 pub(super) fn ref_plus_ref(a: &Number, b: &Number) -> Number {
     let plan = plan(a, b);
@@ -401,7 +439,7 @@ pub(super) fn ref_plus_ref(a: &Number, b: &Number) -> Number {
     }
 }
 
-/// `a + b` for a borrowed `a` and an owned `b`, of which at least one has more than 16 bytes.
+/// `a + b` for a borrowed `a` and an owned `b`, of which at least one has more than 64 bytes.
 /// The sum takes the vector of `b` when it is built there, leaving `b` an empty one; the
 /// caller drops `b` either way.
 #[inline(never)]
@@ -429,13 +467,14 @@ fn ref_plus_value(a: &Number, b: &mut Number) -> Number {
     }
 }
 
-/// `a += b` for a borrowed `b`, where at least one of them has more than 16 bytes.
+/// `a += b` for a borrowed `b`, where at least one of them has more than 64 bytes; returns `a`,
+/// for the subtraction.
 #[inline(never)]
-pub(super) fn add_assign_ref(a: &mut Number, b: &Number) {
+pub(super) fn add_assign_ref<'a>(a: &'a mut Number, b: &Number) -> &'a mut Number {
     let plan = plan(a, b);
     if !plan.fits(a.value.capacity()) {
         replace_with_sum(a, b, &plan);
-        return;
+        return a;
     }
     // A borrowed `b` cannot be reversed: when the byte orders differ, `a` is reversed into the
     // byte order of `b` instead, and the sum reversed back. One call, so that the computation
@@ -451,9 +490,10 @@ pub(super) fn add_assign_ref(a: &mut Number, b: &Number) {
         a.value.reverse();
     }
     a.negative = plan.negative;
+    a
 }
 
-/// `a += b` for an owned `b`, where at least one of them has more than 16 bytes. When the sum
+/// `a += b` for an owned `b`, where at least one of them has more than 64 bytes. When the sum
 /// is built in the vector of `b`, the vector of `a` goes to `b`; the caller drops `b` either
 /// way.
 #[inline(never)]
@@ -518,7 +558,7 @@ pub(super) fn small(a: &Number, b: &Number) -> bool {
 pub(super) fn small_number_of(a: &Number, b: &Number, negative_b: bool) -> Number {
     let sum = small_sum(a, b, negative_b);
     // SAFETY: a small sum is from 1 to 17 bytes long.
-    unsafe { small_number(a.byte_order, sum.lo, sum.hi, sum.len, sum.negative) }
+    unsafe { small_number(a.byte_order, sum.lo, sum.hi, sum.len, sum.k, sum.negative) }
 }
 
 /// `a += b` for small operands and a borrowed `b`, taken with the sign `negative_b`.
@@ -531,9 +571,9 @@ pub(super) fn small_add_to(a: &mut Number, b: &Number, negative_b: bool) {
     // for it.
     unsafe {
         if a.value.capacity() >= sum.len {
-            write_small_in(&mut a.value, order, sum.lo, sum.hi, sum.len);
+            write_small_in(&mut a.value, order, &sum);
         } else {
-            replace_small(&mut a.value, order, sum.lo, sum.hi, sum.len);
+            replace_small(&mut a.value, order, sum.lo, sum.hi, sum.len, sum.k);
         }
     }
 }
@@ -547,13 +587,16 @@ struct Small {
     /// The length of the sum in the shortest form, from 1 to 17: one byte for zero, and 17
     /// when it carries out of the sixteenth byte, whose seventeenth byte is then 1.
     len: usize,
+    /// The length of the longer of the operands' vectors, up to 16, which the stores of the sum
+    /// are chosen by (see [`write_sum`]).
+    k: usize,
     /// Whether the sum is negative; never for zero.
     negative: bool,
 }
 
-/// The sum of the small operands `a` and `b`, `b` taken with the sign `negative_b`: both the
-/// sum and the difference of their magnitudes are computed, and the one the signs ask for
-/// chosen without a branch, as is the difference of the larger magnitude and the smaller.
+/// The sum of the small operands `a` and `b`, `b` taken with the sign `negative_b`: the sum of
+/// their magnitudes and both differences are computed, and the one the signs ask for chosen
+/// without a branch, as is the difference of the larger magnitude and the smaller.
 #[inline(always)]
 fn small_sum(a: &Number, b: &Number, negative_b: bool) -> Small {
     // SAFETY: both vectors hold at most 16 bytes, as `small` checked.
@@ -563,12 +606,13 @@ fn small_sum(a: &Number, b: &Number, negative_b: bool) -> Small {
             read_small(&b.value, b.byte_order),
         )
     };
-    let negative_x = a.negative && x != 0;
-    let negative_y = negative_b && y != 0;
-    let subtract = negative_x != negative_y;
+    // A zero magnitude with a sign is subtracted from the other one, or the other one from it,
+    // which gives the other one with its own sign, as adding it would; a zero sum is never
+    // negative.
+    let subtract = a.negative != negative_b;
     let (sum, carry) = x.overflowing_add(y);
     let (difference, borrow) = x.overflowing_sub(y);
-    let difference = select_unpredictable(borrow, difference.wrapping_neg(), difference);
+    let difference = select_unpredictable(borrow, y.wrapping_sub(x), difference);
     let magnitude = select_unpredictable(subtract, difference, sum);
     let carry = carry & !subtract;
     // One byte for zero, and 17 with a carry, chosen without a branch: the carry of two
@@ -583,9 +627,10 @@ fn small_sum(a: &Number, b: &Number, negative_b: bool) -> Small {
         lo: magnitude as u64,
         hi: (magnitude >> 64) as u64,
         len,
+        k: a.value.len().max(b.value.len()),
         // The sign of the larger magnitude, which is that of `y` when it is subtracted from a
         // smaller `x`; never for zero.
-        negative: negative_x != (subtract && borrow) && (magnitude != 0 || carry),
+        negative: a.negative != (subtract && borrow) && (magnitude != 0 || carry),
     }
 }
 
@@ -734,52 +779,153 @@ pub(super) unsafe fn write_small(p: *mut u8, order: ByteOrder, lo: u64, hi: u64,
     }
 }
 
-/// Writes the small sum of magnitude `hi:lo` and length `len` over `v`, in the layout of
-/// `order`, as its whole value.
+/// Writes the small sum of magnitude `hi:lo` and length `len` over the first `len` bytes at
+/// `p`, in the layout of `order`, for operands whose longer vector holds `k` bytes.
+///
+/// The stores are chosen by `k`, not by `len`: a sum of two magnitudes of `k` bytes is `k` or
+/// `k + 1` bytes long, a coin toss for random ones, and a branch on the length would mispredict
+/// half of them where the two lengths take different stores in [`write_small`] (`k` of 3, 7
+/// and 16). So for `k` of 16, two stores of eight bytes and one of the seventeenth or sixteenth
+/// byte; from 8, two of eight that overlap; from 4, two of four, which also store 8 bytes; for 3,
+/// two of two, which also store 4; below, three of a byte. A shorter sum, of operands that nearly
+/// cancel or have zero bytes above their most significant ones, takes the stores of its length.
 ///
 /// # Safety
 ///
-/// `len` must be from 1 to 17, and the capacity of `v` at least `len`.
+/// `len` must be from 1 to 17 and at most `k + 1`, and `p` valid for writing `len` bytes.
 #[inline(always)]
-unsafe fn write_small_in(v: &mut Vec<u8>, order: ByteOrder, lo: u64, hi: u64, len: usize) {
-    // SAFETY: as the caller guarantees; `write_small` writes all of the first `len` bytes, so
-    // they are initialised when the length is set.
+unsafe fn write_sum(p: *mut u8, order: ByteOrder, lo: u64, hi: u64, len: usize, k: usize) {
+    let be = order == ByteOrder::BigEndian;
+    // SAFETY: every write lies inside the `len` bytes at `p`: from 16, `[0, 16)` and the byte
+    // `min(16, len - 1)`; from 8, `[0, 8)` and `[len - 8, len)`; from 4, `[0, 4)` and
+    // `[len - 4, len)`; from 2, `[0, 2)` and `[len - 2, len)`; below, the bytes `0`, `len / 2` and
+    // `len - 1`. Of two writes that overlap, the later one puts the sum's bytes there.
     unsafe {
-        write_small(v.as_mut_ptr(), order, lo, hi, len);
-        v.set_len(len);
+        if k >= 8 {
+            if len < 8 {
+                // A sum much shorter than the operands' vectors.
+                write_small(p, order, lo, hi, len);
+            } else if k == SMALL && len >= SMALL {
+                // The seventeenth byte, 1, with a carry, and otherwise the sixteenth again.
+                let top = select_unpredictable(len > SMALL, 1, (hi >> 56) as u8);
+                if be {
+                    write(p.add(len - 8), lo.to_be_bytes());
+                    write(p.add(len - 16), hi.to_be_bytes());
+                    *p = top;
+                } else {
+                    write(p, lo.to_le_bytes());
+                    write(p.add(8), hi.to_le_bytes());
+                    *p.add(len - 1) = top;
+                }
+            } else {
+                // As `write_small` writes 8 to 16 bytes.
+                let top = hi.wrapping_shl((len as u32).wrapping_neg().wrapping_mul(8));
+                if be {
+                    write(p, top.to_be_bytes());
+                    write(p.add(len - 8), lo.to_be_bytes());
+                } else {
+                    write(p.add(len - 8), top.to_le_bytes());
+                    write(p, lo.to_le_bytes());
+                }
+            }
+        } else if k >= 4 && len >= 4 {
+            // As `write_small` writes 4 to 7 bytes, and also 8: the high four bytes of the eight,
+            // shifted by `8 (8 - len)` modulo 32, at the top.
+            let shift = (len as u32).wrapping_neg().wrapping_mul(8);
+            let top = ((lo >> 32) as u32).wrapping_shl(shift);
+            if be {
+                write(p, top.to_be_bytes());
+                write(p.add(len - 4), (lo as u32).to_be_bytes());
+            } else {
+                write(p.add(len - 4), top.to_le_bytes());
+                write(p, (lo as u32).to_le_bytes());
+            }
+        } else if k == 3 && len >= 2 {
+            // Two to four bytes: the high two of the four, shifted by `8 (4 - len)` modulo 16,
+            // at the top.
+            let shift = (len as u32).wrapping_neg().wrapping_mul(8) % 16;
+            let top = ((lo >> 16) as u16) << shift;
+            if be {
+                write(p, top.to_be_bytes());
+                write(p.add(len - 2), (lo as u16).to_be_bytes());
+            } else {
+                write(p.add(len - 2), top.to_le_bytes());
+                write(p, (lo as u16).to_le_bytes());
+            }
+        } else {
+            // One to three bytes, as `write_small` writes them.
+            let (mid, last) = (len / 2, len - 1);
+            let (b0, b1, b2) = (lo as u8, (lo >> (8 * mid)) as u8, (lo >> (8 * last)) as u8);
+            if be {
+                *p.add(last) = b0;
+                *p.add(last - mid) = b1;
+                *p = b2;
+            } else {
+                *p = b0;
+                *p.add(mid) = b1;
+                *p.add(last) = b2;
+            }
+        }
     }
 }
 
-/// The small sum of magnitude `hi:lo` and length `len` in one new vector of exactly its
-/// length, in the layout of `order`.
+/// Writes the small sum `sum` over `v`, in the layout of `order`, as its whole value.
 ///
 /// # Safety
 ///
-/// `len` must be from 1 to 17.
+/// The capacity of `v` must be at least the length of the sum.
 #[inline(always)]
-unsafe fn new_small(order: ByteOrder, lo: u64, hi: u64, len: usize) -> Vec<u8> {
+unsafe fn write_small_in(v: &mut Vec<u8>, order: ByteOrder, sum: &Small) {
+    // SAFETY: as the caller guarantees; `write_sum` writes all of the first `len` bytes, so
+    // they are initialised when the length is set.
+    unsafe {
+        write_sum(v.as_mut_ptr(), order, sum.lo, sum.hi, sum.len, sum.k);
+        v.set_len(sum.len);
+    }
+}
+
+/// The small sum of magnitude `hi:lo` and length `len`, of operands whose longer vector holds
+/// `k` bytes, in one new vector of exactly its length, in the layout of `order`.
+///
+/// # Safety
+///
+/// `len` must be from 1 to 17 and at most `k + 1`.
+#[inline(always)]
+unsafe fn new_small(order: ByteOrder, lo: u64, hi: u64, len: usize, k: usize) -> Vec<u8> {
     let mut v = Vec::with_capacity(len);
-    // SAFETY: as the caller guarantees, and the new vector has room for the `len` bytes.
-    unsafe { write_small_in(&mut v, order, lo, hi, len) };
+    // SAFETY: as the caller guarantees, and the new vector has room for the `len` bytes, all of
+    // which `write_sum` writes.
+    unsafe {
+        write_sum(v.as_mut_ptr(), order, lo, hi, len, k);
+        v.set_len(len);
+    }
     v
 }
 
-/// The small sum of magnitude `hi:lo`, length `len` and sign `negative` as a number in one new
-/// vector of exactly its length, in the byte order `order`. Out of line, and given the sum in
-/// registers, so that the small path of `&a + &b` saves no registers for the allocation.
+/// The small sum of magnitude `hi:lo`, length `len` and sign `negative`, of operands whose
+/// longer vector holds `k` bytes, as a number in one new vector of exactly its length, in the
+/// byte order `order`. Out of line, and given the sum in registers, so that the small path of
+/// `&a + &b` saves no registers for the allocation.
 ///
 /// # Safety
 ///
-/// `len` must be from 1 to 17.
+/// `len` must be from 1 to 17 and at most `k + 1`.
 #[inline(never)]
-unsafe fn small_number(order: ByteOrder, lo: u64, hi: u64, len: usize, negative: bool) -> Number {
+unsafe fn small_number(
+    order: ByteOrder,
+    lo: u64,
+    hi: u64,
+    len: usize,
+    k: usize,
+    negative: bool,
+) -> Number {
     // SAFETY: as the caller guarantees: told so, the compiler checks neither the size of the
     // allocation nor a zero length.
     unsafe {
         core::hint::assert_unchecked(len != 0);
         core::hint::assert_unchecked(len <= SMALL + 1);
         Number {
-            value: new_small(order, lo, hi, len),
+            value: new_small(order, lo, hi, len, k),
             negative,
             byte_order: order,
         }
@@ -787,17 +933,493 @@ unsafe fn small_number(order: ByteOrder, lo: u64, hi: u64, len: usize, negative:
 }
 
 /// Replaces `v` with one new vector of exactly the small sum's length, holding the sum of
-/// magnitude `hi:lo` and length `len` in the layout of `order`. Out of line and cold, and
-/// given the sum in registers, so that the small path saves no registers for it.
+/// magnitude `hi:lo` and length `len`, of operands whose longer vector holds `k` bytes, in the
+/// layout of `order`. Out of line and cold, and given the sum in registers, so that the small
+/// path saves no registers for it.
 ///
 /// # Safety
 ///
-/// `len` must be from 1 to 17.
+/// `len` must be from 1 to 17 and at most `k + 1`.
 #[cold]
 #[inline(never)]
-unsafe fn replace_small(v: &mut Vec<u8>, order: ByteOrder, lo: u64, hi: u64, len: usize) {
+unsafe fn replace_small(v: &mut Vec<u8>, order: ByteOrder, lo: u64, hi: u64, len: usize, k: usize) {
     // SAFETY: as the caller guarantees.
-    *v = unsafe { new_small(order, lo, hi, len) };
+    *v = unsafe { new_small(order, lo, hi, len, k) };
+}
+
+// Operands of up to 64 bytes
+
+/// The longest vector, in bytes, of the operands that the medium path adds in registers.
+pub(super) const MEDIUM: usize = 64;
+
+/// Whether `a + b` takes the medium path, when it does not take the small one: both vectors
+/// hold at most [`MEDIUM`] bytes.
+#[inline(always)]
+pub(super) fn medium(a: &Number, b: &Number) -> bool {
+    a.value.len() <= MEDIUM && b.value.len() <= MEDIUM
+}
+
+/// A sum computed in registers by the medium path.
+struct Medium {
+    /// The limbs of the magnitude, the least significant first: those of the operands, then
+    /// the carry out of the top one, then zeros.
+    limbs: [u64; 9],
+    /// Whether the sum is negative, unless it is zero.
+    negative: bool,
+}
+
+/// Calls `$f::<L>($args)` for the number of limbs `L` of the longer of the vectors `$a` and `$b`,
+/// from 3 (for at most 24 bytes) to 8.
+macro_rules! by_limbs {
+    ($a:expr, $b:expr, $f:ident($($arg:expr),*)) => {
+        match $a.len().max($b.len()).div_ceil(8) {
+            ..=3 => $f::<3>($($arg),*),
+            4 => $f::<4>($($arg),*),
+            5 => $f::<5>($($arg),*),
+            6 => $f::<6>($($arg),*),
+            7 => $f::<7>($($arg),*),
+            _ => $f::<8>($($arg),*),
+        }
+    };
+}
+
+/// Where the medium path builds a sum when the vector of the operand it goes to has no room for
+/// it, as the operators promise.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Fallback {
+    /// In one new vector of exactly its length.
+    New,
+    /// In the vector of `b`, an operand taken by value, when that has room, and otherwise in one
+    /// new vector of exactly its length.
+    Other,
+}
+
+/// Writes `a + b`, `b` taken with the sign `negative_b`, over `out`, one of the operands: its
+/// vector, in the byte order of `a`, its sign and its byte order. The sum is built in the vector
+/// of `out` when that has room for it, and otherwise as `fallback` says; the vector of `out`
+/// then goes to `b`, or is dropped. For operands of at most 64 bytes, not both of at most 16.
+///
+/// The code for the number `L` of limbs of the longer vector computes the sum, and hands a sum
+/// shorter than `8 (L - 1)` bytes, or one the vector of `out` has no room for, to
+/// [`medium_slow`]. Each call is the last step of its caller, so that none saves registers.
+///
+/// # Safety
+///
+/// `a` and `b` must be valid for reading, both their vectors hold at most 64 bytes and one more
+/// than 16, and `out` must be `a` or `b`, valid for writing. With [`Fallback::Other`], `out` must
+/// be `a`, and `b` an operand taken by value, valid for writing.
+#[inline(never)]
+pub(super) unsafe fn medium_into(
+    a: *const Number,
+    b: *mut Number,
+    negative_b: bool,
+    out: *mut Number,
+    fallback: Fallback,
+) {
+    // SAFETY: as the caller guarantees; the vectors hold at most `8 L` bytes for the `L` chosen.
+    unsafe {
+        let (x, y) = (&(*a).value, &(*b).value);
+        by_limbs!(x, y, medium_into_in(a, b, negative_b, out, fallback))
+    }
+}
+
+/// [`medium_into`] for vectors of at most `L` limbs, out of line, so that each length saves only
+/// the registers it needs, and the call is the dispatch's last step.
+///
+/// # Safety
+///
+/// As for [`medium_into`], with vectors of at most `8 L` bytes.
+#[inline(never)]
+unsafe fn medium_into_in<const L: usize>(
+    a: *const Number,
+    b: *mut Number,
+    negative_b: bool,
+    out: *mut Number,
+    fallback: Fallback,
+) {
+    // SAFETY: as the caller guarantees. Both operands are read before `out` is written, and
+    // the references to them end before it is.
+    unsafe {
+        let order = (*a).byte_order;
+        let m = medium_sum::<L>(
+            read_limbs::<L>(&(*a).value, order),
+            read_limbs::<L>(&(*b).value, (*b).byte_order),
+            (*a).negative,
+            negative_b,
+        );
+        let r = &m.limbs;
+        let (len, top) = top_of::<L>(r);
+        let v = &mut (*out).value;
+        if !long::<L>(r) || v.capacity() < len {
+            return medium_slow(a, b, negative_b, out, fallback);
+        }
+        write_long::<L>(v.as_mut_ptr(), order, r, len, top);
+        v.set_len(len);
+        (*out).negative = m.negative;
+        (*out).byte_order = order;
+    }
+}
+
+/// `a + b`, `b` taken with the sign `negative_b`, in one new vector of exactly its length, for
+/// operands of at most 64 bytes, not both of at most 16.
+#[inline(never)]
+pub(super) fn medium_new(a: &Number, b: &Number, negative_b: bool) -> Number {
+    // SAFETY: the vectors hold at most `8 L` bytes for the `L` chosen.
+    unsafe { by_limbs!(a.value, b.value, medium_new_in(a, b, negative_b)) }
+}
+
+/// [`medium_new`] for vectors of at most `L` limbs.
+///
+/// # Safety
+///
+/// Both vectors must hold at most `8 L` bytes, and one more than 16.
+#[inline(never)]
+unsafe fn medium_new_in<const L: usize>(a: &Number, b: &Number, negative_b: bool) -> Number {
+    let order = a.byte_order;
+    // SAFETY: as the caller guarantees.
+    let m = unsafe {
+        medium_sum::<L>(
+            read_limbs::<L>(&a.value, order),
+            read_limbs::<L>(&b.value, b.byte_order),
+            a.negative,
+            negative_b,
+        )
+    };
+    let r = &m.limbs;
+    if !long::<L>(r) {
+        return medium_new_slow(a, b, negative_b);
+    }
+    let (len, top) = top_of::<L>(r);
+    let mut v = Vec::with_capacity(len);
+    // SAFETY: the new vector has room for the sum, all of whose bytes are written before the
+    // length is set.
+    unsafe {
+        write_long::<L>(v.as_mut_ptr(), order, r, len, top);
+        v.set_len(len);
+    }
+    Number {
+        value: v,
+        negative: m.negative,
+        byte_order: order,
+    }
+}
+
+// The cases the medium path leaves to slower code: a sum much shorter than the longer operand's
+// vector, and no room in the vector it would be built in. The sum is computed as above and
+// written to a buffer, whose bytes then go where the operator promises.
+
+/// A sum of the medium path in a buffer.
+struct Bytes {
+    /// The bytes of the magnitude, least significant first.
+    bytes: [u8; 72],
+    /// The length of the sum in the shortest form: one byte for zero.
+    len: usize,
+    /// Whether the sum is negative; never for zero.
+    negative: bool,
+}
+
+impl Bytes {
+    /// `a + b`, `b` taken with the sign `negative_b`, for operands of at most 64 bytes.
+    fn of(a: &Number, b: &Number, negative_b: bool) -> Self {
+        // The limbs of a magnitude of at most 64 bytes, a byte at a time: this code is rare, and
+        // kept short.
+        let limbs = |n: &Number| {
+            let mut x = [0u64; 9];
+            let len = n.value.len();
+            for (i, &byte) in n.value.iter().enumerate() {
+                let p = if n.byte_order == ByteOrder::BigEndian {
+                    len - 1 - i
+                } else {
+                    i
+                };
+                x[p / 8] |= u64::from(byte) << (8 * (p % 8));
+            }
+            x
+        };
+        let m = medium_sum::<8>(limbs(a), limbs(b), a.negative, negative_b);
+        let mut bytes = [0; 72];
+        for (chunk, limb) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(m.limbs) {
+            *chunk = limb.to_le_bytes();
+        }
+        let top = bytes.iter().rposition(|&b| b != 0);
+        Bytes {
+            bytes,
+            len: top.map_or(1, |p| p + 1),
+            negative: m.negative && top.is_some(),
+        }
+    }
+
+    /// Writes the sum over `v`, in the layout of `order`, as its whole value.
+    ///
+    /// # Safety
+    ///
+    /// The capacity of `v` must be at least the length of the sum.
+    unsafe fn put(&self, v: &mut Vec<u8>, order: ByteOrder) {
+        let (p, len) = (v.as_mut_ptr(), self.len);
+        // SAFETY: as the caller guarantees; every one of the `len` bytes is written before the
+        // length is set.
+        unsafe {
+            if order == ByteOrder::BigEndian {
+                for (i, &byte) in self.bytes[..len].iter().enumerate() {
+                    *p.add(len - 1 - i) = byte;
+                }
+            } else {
+                ptr::copy_nonoverlapping(self.bytes.as_ptr(), p, len);
+            }
+            v.set_len(len);
+        }
+    }
+
+    /// The sum as a number in one new vector of exactly its length, in the byte order `order`.
+    fn into_new(self, order: ByteOrder) -> Number {
+        let mut value = Vec::with_capacity(self.len);
+        // SAFETY: the new vector has room for the sum.
+        unsafe { self.put(&mut value, order) };
+        Number {
+            value,
+            negative: self.negative,
+            byte_order: order,
+        }
+    }
+}
+
+/// [`medium_into`] for a sum much shorter than the longer operand's vector, or that the vector of
+/// `out` has no room for: out of line and cold.
+///
+/// # Safety
+///
+/// As for [`medium_into`].
+#[cold]
+#[inline(never)]
+unsafe fn medium_slow(
+    a: *const Number,
+    b: *mut Number,
+    negative_b: bool,
+    out: *mut Number,
+    fallback: Fallback,
+) {
+    // SAFETY: as the caller guarantees; the sum is computed before anything is written, and the
+    // references to the operands end before it is.
+    unsafe {
+        let sum = Bytes::of(&*a, &*b, negative_b);
+        let order = (*a).byte_order;
+        let v = &mut (*out).value;
+        if v.capacity() < sum.len {
+            if fallback == Fallback::Other && (*b).value.capacity() >= sum.len {
+                mem::swap(v, &mut (*b).value);
+            } else {
+                *v = Vec::with_capacity(sum.len);
+            }
+        }
+        sum.put(v, order);
+        (*out).negative = sum.negative;
+        (*out).byte_order = order;
+    }
+}
+
+/// [`medium_new`] for a sum much shorter than the longer operand's vector.
+#[cold]
+#[inline(never)]
+fn medium_new_slow(a: &Number, b: &Number, negative_b: bool) -> Number {
+    Bytes::of(a, b, negative_b).into_new(a.byte_order)
+}
+
+/// `x + y + carry`, and the carry out.
+#[inline(always)]
+fn adc(x: u64, y: u64, carry: bool) -> (u64, bool) {
+    let (s, c1) = x.overflowing_add(y);
+    let (s, c2) = s.overflowing_add(u64::from(carry));
+    (s, c1 | c2)
+}
+
+/// The magnitude in `v`, of at most `8 L` bytes, as limbs, those above it zero.
+///
+/// # Safety
+///
+/// `v` must hold at most `8 L` bytes.
+#[inline(always)]
+unsafe fn read_limbs<const L: usize>(v: &[u8], order: ByteOrder) -> [u64; 9] {
+    let n = v.len();
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        if n > 8 * (L - 1) {
+            if order == ByteOrder::BigEndian {
+                exact_limbs::<true, L>(v.as_ptr(), n)
+            } else {
+                exact_limbs::<false, L>(v.as_ptr(), n)
+            }
+        } else if n <= SMALL {
+            let s = read_small(v, order);
+            let mut x = [0; 9];
+            x[0] = s as u64;
+            x[1] = (s >> 64) as u64;
+            x
+        } else if order == ByteOrder::BigEndian {
+            clamped_limbs::<true, L>(v.as_ptr(), n)
+        } else {
+            clamped_limbs::<false, L>(v.as_ptr(), n)
+        }
+    }
+}
+
+/// The eight positions from `p` of the `n` bytes at `v` in the layout `BE`, as a `u64`.
+///
+/// # Safety
+///
+/// `p + 8 <= n`, and the `n` bytes must be valid for reading.
+#[inline(always)]
+unsafe fn limb_at<const BE: bool>(v: *const u8, n: usize, p: usize) -> u64 {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        if BE {
+            u64::from_be_bytes(read(v.add(n - 8 - p)))
+        } else {
+            u64::from_le_bytes(read(v.add(p)))
+        }
+    }
+}
+
+/// The `n` bytes at `v` in the layout `BE`, `8 (L - 1) < n <= 8 L`, as `L` limbs.
+///
+/// # Safety
+///
+/// The `n` bytes must be valid for reading.
+#[inline(always)]
+unsafe fn exact_limbs<const BE: bool, const L: usize>(v: *const u8, n: usize) -> [u64; 9] {
+    let mut x = [0; 9];
+    // SAFETY: limbs `0..L - 1` lie below `8 (L - 1) < n`, and the top one is read from the eight
+    // positions that end at `n`, `n >= 8`, and shifted down by `8 L - n` of them.
+    unsafe {
+        for (i, limb) in x.iter_mut().enumerate().take(L - 1) {
+            *limb = limb_at::<BE>(v, n, 8 * i);
+        }
+        // `8 (8 L - n)` bits, which is `-8 n` modulo 64.
+        let shift = (n as u32).wrapping_mul(8).wrapping_neg();
+        x[L - 1] = limb_at::<BE>(v, n, n - 8).wrapping_shr(shift);
+    }
+    x
+}
+
+/// The `n` bytes at `v` in the layout `BE`, `16 < n <= 8 (L - 1)`, as `L` limbs, the top ones
+/// zero.
+///
+/// # Safety
+///
+/// The `n` bytes must be valid for reading.
+#[inline(always)]
+unsafe fn clamped_limbs<const BE: bool, const L: usize>(v: *const u8, n: usize) -> [u64; 9] {
+    let mut x = [0; 9];
+    // SAFETY: the limb at position `8 i` is read at the position `c = min(8 i, n - 8)`, inside
+    // the `n` bytes, and shifted down by the positions from `c` up to `8 i`, fewer than eight
+    // unless the limb is above the magnitude.
+    unsafe {
+        for (i, limb) in x.iter_mut().enumerate().take(L) {
+            let c = (8 * i).min(n - 8);
+            let w = limb_at::<BE>(v, n, c);
+            *limb = if 8 * i < n { w >> (8 * (8 * i - c)) } else { 0 };
+        }
+    }
+    x
+}
+
+/// `x + y` over `L` limbs, `x` with the sign `negative_x` and `y` with `negative_y`.
+///
+/// One chain of additions gives the sum, or, when the signs differ, `x - y` as `x + !y + 1`.
+/// Alongside it a second one gives `y - x`, which is taken instead when the first one borrowed,
+/// without a branch: which magnitude is the larger is a coin toss for random operands of the same
+/// length, and so, for random signs, is whether they are subtracted at all. The second chain
+/// subtracts whatever the signs are, its low limbs as such and the others as the addition of the
+/// complement with the carry, `y + !x + c`: for these LLVM makes one chain of `subs` and `adcs`,
+/// while the carry of a first `y + !x + 1` would be worked out apart.
+#[inline(always)]
+fn medium_sum<const L: usize>(
+    x: [u64; 9],
+    y: [u64; 9],
+    negative_x: bool,
+    negative_y: bool,
+) -> Medium {
+    let subtract = negative_x != negative_y;
+    let m = u64::from(subtract).wrapping_neg();
+    let (mut s, mut d) = ([0u64; 9], [0u64; 9]);
+    let (d0, borrow_d) = y[0].overflowing_sub(x[0]);
+    let (mut carry, mut carry_d) = (subtract, !borrow_d);
+    d[0] = d0;
+    (s[0], carry) = adc(x[0], y[0] ^ m, carry);
+    for i in 1..L {
+        (s[i], carry) = adc(x[i], y[i] ^ m, carry);
+        (d[i], carry_d) = adc(y[i], !x[i], carry_d);
+    }
+    let borrow = subtract & !carry;
+    let mut r = [0u64; 9];
+    for i in 0..L {
+        r[i] = select_unpredictable(borrow, d[i], s[i]);
+    }
+    r[L] = u64::from(carry & !subtract);
+    Medium {
+        limbs: r,
+        negative: negative_x != borrow,
+    }
+}
+
+/// Whether the sum `r` of operands of at most `L` limbs is at least `8 (L - 1)` bytes long.
+#[inline(always)]
+fn long<const L: usize>(r: &[u64; 9]) -> bool {
+    (r[L] | r[L - 1]) != 0 || r[L - 2] >> 56 != 0
+}
+
+/// The length of the sum `r` of operands of at most `L` limbs, at least `8 (L - 1)` bytes long,
+/// and its eight most significant positions.
+#[inline(always)]
+fn top_of<const L: usize>(r: &[u64; 9]) -> (usize, u64) {
+    let below = select_unpredictable(
+        r[L - 1] != 0,
+        (L - 1, r[L - 1], r[L - 2]),
+        (L - 2, r[L - 2], r[L - 3]),
+    );
+    let (t, high, low) = select_unpredictable(r[L] != 0, (L, r[L], r[L - 1]), below);
+    let z = high.leading_zeros();
+    let shift = z & 56;
+    (
+        8 * t + 8 - z as usize / 8,
+        (high << shift) | ((low >> 1) >> (63 - shift)),
+    )
+}
+
+/// Writes the sum `r` of operands of at most `L` limbs, of `len >= 8 (L - 1)` bytes whose top
+/// eight are `top`, over the `len` bytes at `p` in the layout of `order`.
+///
+/// Limbs `0..L - 1` lie below the top eight positions of the sum or reach up to them; limb
+/// `L - 1` is written below the top eight positions when the sum carried out of it, and at them
+/// otherwise; then `top` over the top eight positions.
+///
+/// # Safety
+///
+/// `p` must be valid for writing `len` bytes.
+#[inline(always)]
+unsafe fn write_long<const L: usize>(
+    p: *mut u8,
+    order: ByteOrder,
+    r: &[u64; 9],
+    len: usize,
+    top: u64,
+) {
+    let c = (8 * (L - 1)).min(len - 8);
+    // SAFETY: every write lies inside the `len >= 8 (L - 1)` bytes.
+    unsafe {
+        if order == ByteOrder::BigEndian {
+            for (i, limb) in r.iter().enumerate().take(L - 1) {
+                write(p.add(len - 8 - 8 * i), limb.to_be_bytes());
+            }
+            write(p.add(len - 8 - c), r[L - 1].to_be_bytes());
+            write(p, top.to_be_bytes());
+        } else {
+            for (i, limb) in r.iter().enumerate().take(L - 1) {
+                write(p.add(8 * i), limb.to_le_bytes());
+            }
+            write(p.add(c), r[L - 1].to_le_bytes());
+            write(p.add(len - 8), top.to_le_bytes());
+        }
+    }
 }
 
 // Planning
