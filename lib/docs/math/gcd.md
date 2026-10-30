@@ -129,5 +129,5 @@ fn main() {
 ## Efficiency
 
 - Time complexity: O(n²) for numbers of n limbs below 800 (300 for the cofactors), and from there O(M(n)·log n) for a product of n limbs in M(n), O(n^1.40·log n) with Toom-4's; a much longer number costs one division more
-- Space complexity: the vectors of the results; working memory of a few times the longer number's limbs, on the stack up to 8 KiB, one temporary buffer on the heap beyond; `lcm` allocates the greatest common divisor and the quotient
+- Space complexity: the vectors of the results; working memory of a few times the longer number's limbs, on the stack up to 8 KiB, one temporary buffer on the heap beyond, and one more for each product of 360 limbs or more, which the [multiplication](mul.md) computes by transforms; `lcm` allocates the greatest common divisor and the quotient
 - Soundness: the bytes beyond a vector's length, which may be uninitialised, are never read, and every byte of a result is written before the vector's length is set; both operands are left as they were

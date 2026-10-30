@@ -27,8 +27,8 @@ Measured on an Apple M4 Max, the results in the byte order given, against GMP 6.
 | 100 | 250 | 243 | 136 | 1857 |
 | 1000 | 7620 | 7461 | 8331 | 118,987 |
 | 10^4 | 360,770 | 360,706 | 416,394 | 17,627,290 |
-| 10^5 | 15,436,890 | 15,284,677 | 13,986,789 | 2,294,276,893 |
-| 10^6 | 520,104,855 | 511,704,774 | 237,275,082 | — |
+| 10^5 | 6,226,360 | 6,083,217 | 13,986,789 | 2,294,276,893 |
+| 10^6 | 91,793,145 | 91,773,983 | 237,275,082 | — |
 
 | C(n, k) | LE | BE | GMP | num-bigint |
 | --- | --- | --- | --- | --- |
@@ -36,11 +36,11 @@ Measured on an Apple M4 Max, the results in the byte order given, against GMP 6.
 | C(1000, 10) | 125 | 127 | 66 | 809 |
 | C(10^4, 5000) | 23,274 | 22,854 | 29,853 | 16,923,282 |
 | C(10^5, 100) | 1378 | 1373 | 1103 | 33,458 |
-| C(10^6, 5·10^5) | 15,709,590 | 15,596,373 | 17,226,816 | — |
+| C(10^6, 5·10^5) | 9,040,306 | 8,991,282 | 17,226,816 | — |
 | C(2^40, 3) | 124 | 125 | 69 | 296 |
 
-- From `1000!` to `10^4!`, 9–13% less than GMP's time; `10^5!` takes 9–10% more, and `10^6!` 2.2 times as long: their last products, for results of about 24,000 and 290,000 limbs, are FFT products for GMP and Toom-4 ones here, as the multiplication of this crate has no FFT.
-- Binomial coefficients from their primes take 9–23% less than GMP's; `C(10^5, 100)`, by a division, 25% more: GMP divides as it multiplies, a few limbs at a time.
+- From `1000!` to `10^4!`, 9–13% less than GMP's time; `10^5!` takes 0.44 of GMP's time and `10^6!` 0.39 (1.10 and 2.2 times before the multiplication had number-theoretic transforms): their last products, for results of about 24,000 and 290,000 limbs, are computed by the transforms, faster than GMP's Schönhage–Strassen products.
+- Binomial coefficients from their primes take 9–23% less than GMP's, and `C(10^6, 5·10^5)`, whose last products reach the transforms, 48% less; `C(10^5, 100)`, by a division, 25% more: GMP divides as it multiplies, a few limbs at a time.
 - Up to a few hundred cycles, the result's allocation, about 50 cycles of `malloc` and `free`, is most of the difference: `10!`, `C(100, 50)`, `C(1000, 10)` and `C(2^40, 3)` come from a table or from `u128`s.
 - Against num-bigint's products, from 1.6 to 730 times faster.
 

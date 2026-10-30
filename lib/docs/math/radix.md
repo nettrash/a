@@ -33,12 +33,12 @@ Measured on an Apple M4 Max on random magnitudes of the length given in bytes, w
 | 2048 | 16 | 1936 | 10,079 | 6120 | 4304 | 18,242 | 42,228 |
 | 8192 | 10 | 504,112 | 607,962 | 2,328,377 | 270,570 | 305,921 | 1,165,632 |
 | 8192 | 16 | 6477 | 38,301 | 23,267 | 16,858 | 72,317 | 171,393 |
-| 32,768 | 10 | 4,631,238 | 5,389,200 | 18,823,031 | 2,440,786 | 2,342,864 | 17,900,633 |
+| 32,768 | 10 | 4,111,333 | 4,794,894 | 17,743,217 | 1,534,735 | 2,238,511 | 17,465,915 |
 | 32,768 | 16 | 25,213 | 137,452 | 89,067 | 67,035 | 280,094 | 687,631 |
-| 65,536 | 10 | 14,307,310 | 13,646,829 | 53,474,718 | 7,982,222 | 6,418,217 | 71,138,443 |
+| 65,536 | 10 | 10,888,381 | 12,792,689 | 50,260,714 | 3,688,716 | 5,836,601 | 69,649,316 |
 | 65,536 | 16 | 52,778 | 274,488 | 179,159 | 134,256 | 551,025 | 1,390,697 |
 
-- Decimal is written in 40% to 64% of GMP's time up to 512 bytes and in 74% to 86% from 2 to 32 KiB; at 64 KiB, 5% more. It is read in 42% to 95% of GMP's time up to 8 KiB, 4% more at 32 KiB and 24% more at 64 KiB. For the longest numbers, the time goes to the divisions and products of divide and conquer, for which GMP has Toom-Cook and FFT methods from a few kilobytes and this crate Karatsuba's.
+- Decimal is written in 40% to 64% of GMP's time up to 512 bytes and in 74% to 86% from 2 to 64 KiB, and at 1 MiB in 99% (1.56 times before the multiplication had number-theoretic transforms). It is read in 42% to 95% of GMP's time up to 8 KiB, 69% at 32 KiB, 63% at 64 KiB and 52% at 1 MiB (1.57 times before). For the longest numbers, the time goes to the divisions and products of divide and conquer, whose products the transforms compute from a few KiB; writing, which divides, stays at about GMP's time, as the [division](div.md) does. The rows of 32 and 64 KiB in decimal were measured again with the transforms.
 - Hexadecimal is written 3.9 to 5.9 times faster than GMP writes it from 128 bytes, and read 3.6 to 4.3 times faster from 64 bytes; binary is written 11 to 14 times faster from 128 bytes, and octal 2.8 to 3.5 times. In radix 3 (and 36), writing takes 67% to 80% (79% to 101%) of GMP's time from 128 bytes to 4 KiB, and reading 64% to 65% (75% to 95%). For 8 bytes in hexadecimal, octal and radices 3 and 36, writing takes 1.25 to 2 times GMP's time: the cost is the string's allocation, where GMP writes into the buffer it is given.
 - Against num-bigint, decimal text is written 1.7 to 6 times faster and read 2.4 to 9 times faster; hexadecimal is written 1.3 to 3.6 times and read 3.2 to 10 times faster.
 

@@ -18,9 +18,16 @@
 //! two (Toom-4x2, five products); a shorter operand shorter still, or of at most half the longer
 //! one below Toom-3, multiplies the longer one in pieces, each about twice its own length in the
 //! range of Toom's methods and its own length below.
+//!
+//! From [`FFT_MUL`] limbs in the shorter operand, or from [`FFT_MUL_UNBALANCED`] when the longer
+//! one has at least twice as many, and from [`FFT_SQR`] for a square, number-theoretic
+//! transforms modulo primes compute the product in O(n log n) (see [`fft`]), whatever the shapes
+//! of the operands, as long as the product fits their longest transform; longer ones are cut by
+//! Toom's methods into parts that fit.
 
 #[cfg(target_endian = "little")]
 pub(in super::super) use super::super::add::{add_limbs as add_n, sub_limbs as sub_n};
+use super::fft::{self, FFT_MUL, FFT_MUL_UNBALANCED, FFT_SQR};
 use super::kernels::{mul_basecase, sqr_basecase};
 use super::toom;
 
@@ -71,12 +78,17 @@ enum Method {
     Toom4,
     /// Toom-4x2, the longer operand in four parts and the shorter one in two: five products.
     Toom42,
+    /// Number-theoretic transforms modulo primes (see [`fft`]).
+    Fft,
 }
 
 /// The method [`mul`] takes for operands of `nx >= ny` limbs.
 #[inline]
 fn method(nx: usize, ny: usize) -> Method {
-    if ny < KARATSUBA_MUL {
+    let fft = ny >= FFT_MUL || (ny >= FFT_MUL_UNBALANCED && nx >= 2 * ny);
+    if fft && fft::fits(nx, ny) {
+        Method::Fft
+    } else if ny < KARATSUBA_MUL {
         Method::Schoolbook
     } else if ny < TOOM3_MUL {
         if ny <= nx.div_ceil(2) {
@@ -100,7 +112,9 @@ fn method(nx: usize, ny: usize) -> Method {
 /// The method [`sqr`] takes for an operand of `n` limbs.
 #[inline]
 fn sqr_method(n: usize) -> Method {
-    if n < KARATSUBA_SQR {
+    if n >= FFT_SQR && fft::fits(n, n) {
+        Method::Fft
+    } else if n < KARATSUBA_SQR {
         Method::Schoolbook
     } else if n < TOOM3_SQR {
         Method::Karatsuba
@@ -130,13 +144,14 @@ pub(in super::super) fn mul_itch(nx: usize, ny: usize) -> usize {
         Method::Toom3 => toom::toom33_itch(nx, ny),
         Method::Toom4 => toom::toom44_itch(nx, ny),
         Method::Toom42 => toom::toom42_itch(nx, ny),
+        Method::Fft => 0,
     }
 }
 
 /// The limbs of scratch space that [`sqr`] needs for an operand of `n` limbs.
 pub(in super::super) fn sqr_itch(n: usize) -> usize {
     match sqr_method(n) {
-        Method::Schoolbook | Method::Pieces | Method::Toom42 => 0,
+        Method::Schoolbook | Method::Pieces | Method::Toom42 | Method::Fft => 0,
         Method::Karatsuba => {
             let h = n.div_ceil(2);
             2 * h + sqr_itch(h).max(sqr_itch(n - h))
@@ -171,6 +186,7 @@ pub(in super::super) unsafe fn mul(
             Method::Toom3 => toom::toom33(r, x, nx, y, ny, s),
             Method::Toom4 => toom::toom44(r, x, nx, y, ny, s),
             Method::Toom42 => toom::toom42(r, x, nx, y, ny, s),
+            Method::Fft => fft::mul(r, x, nx, y, ny),
         }
     }
 }
@@ -187,6 +203,7 @@ pub(in super::super) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize, s: *mut
     unsafe {
         match sqr_method(n) {
             Method::Schoolbook | Method::Pieces | Method::Toom42 => sqr_basecase(r, x, n),
+            Method::Fft => fft::sqr(r, x, n),
             Method::Karatsuba => karatsuba_sqr(r, x, n, s),
             Method::Toom3 => toom::toom3_sqr(r, x, n, s),
             Method::Toom4 => toom::toom4_sqr(r, x, n, s),

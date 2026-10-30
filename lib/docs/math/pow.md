@@ -84,11 +84,11 @@ Modulo even numbers, measured the same way with an exponent as long as the modul
 | 1024, 8 | 82,986 | 82,927 | 105,840 | 103,683 | 403,465 |
 | 4096, 4 | 204,958 | 210,965 | 239,390 | 245,699 | 993,942 |
 | 8, 1000 | 81,263 | 81,539 | 101,481 | 102,418 | 537,496 |
-| 8, 10,000 | 2.38 M | 2.39 M | 2.17 M | 2.21 M | 18.7 M |
-| 8, 100,000 | 61.9 M | 63.3 M | 29.6 M | 29.1 M | 535 M |
+| 8, 10,000 | 0.94 M | 0.94 M | 2.17 M | 2.21 M | 18.7 M |
+| 8, 100,000 | 11.1 M | 11.0 M | 29.6 M | 29.1 M | 535 M |
 
 - Small powers cost little beyond their vector: allocating and freeing one takes about 66 cycles on this machine, the difference against GMP writing into a result allocated before; against `GMP new`, which allocates its result too, from 0.73 to 1.04 of its time in registers. Powers of 100 to 300 bytes, on limbs, take 1.02 to 1.34 times `GMP new`'s, where the steps' fixed costs are not yet small against squares of a few limbs.
-- From about 1 KiB of result to 16 KiB, 0.69 to 0.86 of GMP's time; beyond, the longest squares are where GMP's FFT multiplication wins, as on the [multiplication](mul.md)'s page: a power of 80 KiB took 1.10 times GMP's time, and one of 800 KiB 2.1 times.
+- From about 1 KiB of result to 16 KiB, 0.69 to 0.86 of GMP's time; beyond, the longest squares go to the number-theoretic transforms of the [multiplication](mul.md): a power of 80 KiB took 0.43 of GMP's time and one of 800 KiB 0.37 (1.10 and 2.1 times before the transforms), and powers of 1 MiB, a base of 1 KiB to the 1024th or of 64 bytes to the 16,384th, 0.37.
 - Against num-bigint, 1.7 to 8.7 times faster.
 
 ## Examples
@@ -163,5 +163,5 @@ fn main() {
 ## Efficiency
 
 - Time complexity: `pow` about that of the last square, `S(n·e/2)` for an `n`-limb base, with the multiplication's methods; `pow_mod` about `1.2·b` reductions of products of `n` limbs for an exponent of `b` bits, each `O(n²)` below 100 limbs and about 1.7 products of `n` limbs beyond, whatever the signs and byte orders
-- Space complexity: the vector of the result; `pow`'s working memory about three times the power's limbs; `pow_mod`'s the operands' limbs, the window's table (up to 512 residues for exponents of more than 28,161 bits, 16 of 512-bit ones) and the scratch of a product, on the stack up to 8 KiB, one temporary buffer on the heap beyond
+- Space complexity: the vector of the result; `pow`'s working memory about three times the power's limbs; `pow_mod`'s the operands' limbs, the window's table (up to 512 residues for exponents of more than 28,161 bits, 16 of 512-bit ones) and the scratch of a product, on the stack up to 8 KiB, one temporary buffer on the heap beyond, and one more for each product of 360 limbs or more, which the [multiplication](mul.md) computes by transforms
 - Soundness: the bytes beyond a vector's length, which may be uninitialised, are never read, and every byte of a result is written before the vector's length is set; the operands are left as they were

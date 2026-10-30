@@ -87,5 +87,5 @@ fn main() {
 ## Efficiency
 
 - Time complexity: trial division in `O(n·t)` for `n` limbs and `t` products of primes; the test in about `b` squares for the strong test and `2b` to `3b` for the Lucas test, for `b` bits, each `O(n²)` below 100 limbs and about 2.7 products of `n` limbs beyond; the next prime about `g / ln(P)` tests and one remainder by each product of primes per interval, for a gap `g` to it and primes up to `P`, whatever the byte order
-- Space complexity: the number's limbs and ten residues, on the stack up to 8 KiB, one temporary buffer on the heap beyond; the next prime the interval's flags and the primes beyond the table; tables of the 1027 odd primes below 8192 and of their products, computed at compile time
+- Space complexity: the number's limbs and ten residues, on the stack up to 8 KiB, one temporary buffer on the heap beyond, and one more for each product of 360 limbs or more, which the [multiplication](mul.md) computes by transforms; the next prime the interval's flags and the primes beyond the table; tables of the 1027 odd primes below 8192 and of their products, computed at compile time
 - Soundness: the bytes beyond a vector's length, which may be uninitialised, are never read, and every byte of a result is written before the vector's length is set; the number is left as it was

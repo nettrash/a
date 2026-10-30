@@ -664,6 +664,210 @@ fn toom_3_carries_out_of_its_low_coefficients() {
     }
 }
 
+// Number-theoretic transforms
+
+/// Limbs of the shorter operand at and around the sizes from which products and squares are
+/// computed by number-theoretic transforms: 180 for a longer operand of at least twice as many
+/// limbs, 360 for a product and 380 for a square on aarch64 with NEON; 8192 and 16,384 on the
+/// other targets; 125 and 250 under Miri.
+fn transform_limbs() -> Vec<usize> {
+    if cfg!(miri) {
+        vec![125, 250]
+    } else if cfg!(target_arch = "aarch64") {
+        vec![179, 180, 181, 359, 360, 361, 379, 380, 381]
+    } else {
+        vec![8191, 8192, 16_383, 16_384]
+    }
+}
+
+/// Checks `a * b` in `form` against the schoolbook reference when the operands are short enough
+/// for it, and against the residues of the operands otherwise.
+fn assert_long_product(form: Form, a: &Number, b: &Number) {
+    let limbs = |n: &Number| n.value.len().div_ceil(8);
+    if limbs(a) * limbs(b) <= size(1_000_000, 80_000) {
+        assert_multiplies_in(&[form], a, b, &product(a, b));
+    } else {
+        let result = form.apply(copy(a, 0), copy(b, 0));
+        let inputs = || format!("{} with {} and {} limbs", form.name(), limbs(a), limbs(b));
+        assert_product_residues(&result, a, b, &inputs);
+    }
+}
+
+#[test]
+fn multiplies_by_transforms_around_their_thresholds() {
+    // The shorter operand at and around the thresholds, the longer one as long, a limb longer,
+    // just below and from twice as long (where the threshold for unbalanced operands applies),
+    // and longer, with a few bytes above the whole limbs, in runs of zeros, ones and random
+    // limbs; products in both orders, and squares.
+    let mut state = 0x4B1D_2C9E_83F7_A065;
+    for ny in transform_limbs() {
+        let shapes = if cfg!(miri) {
+            vec![ny, 2 * ny]
+        } else {
+            vec![ny, ny + 1, 2 * ny - 1, 2 * ny, 2 * ny + 1, 3 * ny + 5]
+        };
+        for nx in shapes {
+            let ex = EXTRA_BYTES[below(&mut state, 3)];
+            let ey = EXTRA_BYTES[below(&mut state, 3)];
+            let x = limb_runs(&mut state, nx, ex);
+            let y = limb_runs(&mut state, ny, ey);
+            let k = below(&mut state, 16);
+            let (left, right) = ORDER_PAIRS[k % 4];
+            let (negative_a, negative_b) = SIGN_PAIRS[k / 4];
+            let a = number(&x, negative_a, left);
+            let b = number(&y, negative_b, right);
+            let form = FORMS[below(&mut state, 6)];
+            assert_long_product(form, &a, &b);
+            assert_long_product(form, &b, &a);
+            if nx <= ny + 1 && !cfg!(miri) {
+                #[allow(clippy::eq_op)]
+                let square = &b * &b;
+                let inputs = || format!("&b * &b with b = {}", describe(&b));
+                assert_product_residues(&square, &b, &b, &inputs);
+            }
+        }
+    }
+}
+
+/// Every pair of byte orders, or under Miri one picked at random.
+fn order_pairs_to_run() -> Vec<(ByteOrder, ByteOrder)> {
+    if cfg!(miri) {
+        vec![ORDER_PAIRS[pick(4)]]
+    } else {
+        ORDER_PAIRS.to_vec()
+    }
+}
+
+/// The magnitude `(256^n - 1)(256^m - 1) = 256^(n+m) - 256^n - 256^m + 1` for `n >= m >= 1`,
+/// least significant byte first: a one, `m - 1` zeros, `n - m` bytes of `0xFF`, `0xFE` and
+/// `m - 1` bytes of `0xFF`.
+fn all_ones_product(n: usize, m: usize) -> Vec<u8> {
+    let mut bytes = vec![1];
+    bytes.resize(m, 0);
+    bytes.resize(n, 0xFF);
+    bytes.push(0xFE);
+    bytes.resize(n + m, 0xFF);
+    bytes
+}
+
+/// Limbs of operands for which the transforms take each of their widths of coefficients and
+/// numbers of primes on aarch64: 4 primes and 48 bits for 1500 and 3000 limbs, 5 and 56 for
+/// 36,000 by 18,000, 5 and 64 for 500, 8192 and 16,384, 6 and 72 for 32,768, 7 and 88 for 700 and
+/// 5000, 8 and 104 for 400 and for 6000 by 181. At 16,384 limbs each, the 2^14 coefficients of
+/// 64 bits are the most that 5 primes take: all ones give the largest coefficient they are exact
+/// for. Under Miri, and on the other targets where the transforms start at 16,384 limbs, a few
+/// that reach them.
+fn transform_shapes() -> Vec<(usize, usize)> {
+    if cfg!(miri) {
+        vec![(250, 250), (260, 130)]
+    } else if cfg!(target_arch = "aarch64") {
+        vec![
+            (400, 400),
+            (500, 500),
+            (700, 700),
+            (1500, 1500),
+            (3000, 3000),
+            (5000, 5000),
+            (8192, 8192),
+            (16_384, 16_384),
+            (32_768, 32_768),
+            (36_000, 18_000),
+            (6000, 181),
+        ]
+    } else {
+        vec![(16_384, 16_384), (20_000, 20_000), (40_000, 20_000)]
+    }
+}
+
+#[test]
+fn transforms_are_exact_for_the_largest_coefficients() {
+    // Operands of all ones give every coefficient of the product its largest value,
+    // m (2^w - 1)^2 for a shorter operand of m coefficients, which the primes must exceed twice:
+    // products and squares for each width of coefficients, in both byte orders, against the
+    // product's closed form.
+    let extras: &[usize] = if cfg!(miri) { &[5] } else { &[0, 5] };
+    for (nx, ny) in transform_shapes() {
+        for &extra in extras {
+            let (n, m) = (8 * nx + extra, 8 * ny);
+            let want = expected(&all_ones_product(n, m), true);
+            for (left, right) in order_pairs_to_run() {
+                let a = number(&vec![0xFF; n], false, left);
+                let b = number(&vec![0xFF; m], true, right);
+                let result = &a * &b;
+                let inputs = || format!("&a * &b of all ones, {n} and {m} bytes");
+                assert_result(&result, &want, left, &inputs);
+            }
+            let a = number(&vec![0xFF; n], true, ORDERS[extra % 2]);
+            #[allow(clippy::eq_op)]
+            let square = &a * &a;
+            let inputs = || format!("&a * &a of {n} bytes of 0xFF");
+            assert_result(
+                &square,
+                &expected(&all_ones_product(n, n), false),
+                a.byte_order,
+                &inputs,
+            );
+        }
+    }
+}
+
+#[test]
+fn transforms_take_sparse_operands_and_powers_of_two() {
+    // A power of two times a number is the number shifted, and (256^n + 1)(256^n - 1) is
+    // 256^(2n) - 1: operands whose coefficients are mostly zero, with their nonzero ones at the
+    // ends, where the transforms fold the upper half of an operand onto the lower one.
+    let mut state = 0x7F4A_7C15_9E37_79B9;
+    for (nx, ny) in transform_shapes() {
+        let x = random_magnitude(&mut state, 8 * nx);
+        let shift = 64 * ny - 1 - below(&mut state, 8);
+        let mut power = vec![0u8; shift / 8];
+        power.push(1 << (shift % 8));
+        for (left, right) in order_pairs_to_run() {
+            let a = number(&x, false, left);
+            let b = number(&power, true, right);
+            let result = &a * &b;
+            let shifted = &number(&x, true, left) << shift;
+            let inputs = || format!("&a * 2^{shift} with {nx} limbs");
+            assert_result(&result, &value_of(&shifted), left, &inputs);
+        }
+        let n = 8 * ny;
+        let mut plus = vec![1u8];
+        plus.resize(n, 0);
+        plus.push(1);
+        let a = number(&plus, false, ORDERS[nx % 2]);
+        let b = number(&vec![0xFF; n], false, ORDERS[ny % 2]);
+        let result = &a * &b;
+        let inputs = || format!("(256^{n} + 1)(256^{n} - 1)");
+        assert_result(
+            &result,
+            &expected(&vec![0xFF; 2 * n], false),
+            a.byte_order,
+            &inputs,
+        );
+    }
+}
+
+#[test]
+fn squares_by_transforms_agree_with_products() {
+    // `&a * &a` takes one transform of `a` where `&a * &b` takes two: both must give the same
+    // number, and its residues the square of `a`'s.
+    let mut state = 0x1F83_D9AB_FB41_BD6B;
+    for (n, _) in transform_shapes() {
+        let x = if below(&mut state, 2) == 0 {
+            limb_runs(&mut state, n, 3)
+        } else {
+            random_magnitude(&mut state, 8 * n)
+        };
+        let a = number(&x, below(&mut state, 2) == 0, ORDERS[below(&mut state, 2)]);
+        let b = copy(&a, 0);
+        #[allow(clippy::eq_op)]
+        let square = &a * &a;
+        let inputs = || format!("&a * &a with {n} limbs");
+        assert_result(&square, &value_of(&(&a * &b)), a.byte_order, &inputs);
+        assert_product_residues(&square, &a, &a, &inputs);
+    }
+}
+
 // Squares
 
 #[test]
@@ -1121,9 +1325,10 @@ fn mul_assign_grows_a_number_in_its_own_vector() {
 fn long_products_allocate_one_temporary_buffer_at_most() {
     // Past the working memory on the stack, one buffer is allocated for the computation and freed
     // before the product is returned: a product built in an operand's vector makes one
-    // allocation, one built in a new vector two.
+    // allocation, one built in a new vector two. The operands are below the transforms on every
+    // target.
     let mut state = 0x5BE0_CD19_137E_2179;
-    let len = size(20_000, 2_000);
+    let len = size(2_800, 1_600);
     let a = number(
         &random_magnitude(&mut state, len),
         false,
@@ -1143,4 +1348,37 @@ fn long_products_allocate_one_temporary_buffer_at_most() {
     assert_product_residues(&result, &a, &b, &|| "a * &b".into());
     assert_eq!(result.value.as_ptr(), pointer, "a * &b");
     assert_eq!(allocations, 1, "a * &b");
+}
+
+#[test]
+fn products_by_transforms_allocate_one_buffer_more() {
+    // The transforms allocate their own buffer besides the working memory of the operands and
+    // the product, both freed before the product is returned. The operands are long enough for
+    // the transforms on every target, and for the working memory of a square, the operand and
+    // the product, to be past the stack's 1024 limbs.
+    let mut state = 0x6A09_E667_F3BC_C908;
+    let len = size(140_000, 2_800);
+    let a = number(
+        &random_magnitude(&mut state, len),
+        true,
+        ByteOrder::BigEndian,
+    );
+    let b = number(
+        &random_magnitude(&mut state, len),
+        false,
+        ByteOrder::LittleEndian,
+    );
+    let (result, allocations) = count(|| &a * &b);
+    assert_product_residues(&result, &a, &b, &|| "&a * &b".into());
+    assert_eq!(allocations, 3, "&a * &b");
+    let roomy = copy(&a, len);
+    let pointer = roomy.value.as_ptr();
+    let (result, allocations) = count(|| roomy * &b);
+    assert_product_residues(&result, &a, &b, &|| "a * &b".into());
+    assert_eq!(result.value.as_ptr(), pointer, "a * &b");
+    assert_eq!(allocations, 2, "a * &b");
+    #[allow(clippy::eq_op)]
+    let (result, allocations) = count(|| &a * &a);
+    assert_product_residues(&result, &a, &a, &|| "&a * &a".into());
+    assert_eq!(allocations, 3, "&a * &a");
 }
