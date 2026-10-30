@@ -16,10 +16,12 @@
 //! and Ziegler, as GMP's `mpn_dcpi1_div_qr` carries it out: a quotient of `n` limbs by a divisor
 //! of `n` is computed as two halves, each a division of `n` limbs by the top `n / 2` of the divisor
 //! followed by a multiplication that corrects the partial remainder, so the work is that of the
-//! multiplication, O(n^1.58) with Karatsuba's method instead of O(n^2).
+//! multiplication, O(n^1.58) with Karatsuba's method instead of O(n^2). [`div_qr`] hands the longest
+//! divisions to Newton's method (see [`newton`](super::newton)).
 
 use super::super::mul::limbs::{add_1, add_n, cmp_n, mul, mul_itch, sub_1, sub_n};
 use super::kernels::submul_1;
+use super::newton::{mu, mu_div_q, mu_div_qr};
 use core::cmp::Ordering;
 
 /// From this many limbs in the divisor, a division takes the divide-and-conquer method: measured on
@@ -382,7 +384,8 @@ unsafe fn sb_steps(
 }
 
 /// The exact division of [`sb_div_qr`], by divide and conquer, [`dc_div_qr`], for a divisor of at
-/// least [`DC_DIV`] limbs and a quotient of at least three.
+/// least [`DC_DIV`] limbs and a quotient of at least three, and by Newton's method,
+/// [`mu_div_qr`], for the longest (see [`mu`]).
 ///
 /// # Safety
 ///
@@ -390,6 +393,33 @@ unsafe fn sb_steps(
 /// others.
 #[inline(always)]
 pub(in super::super) unsafe fn div_qr(
+    q: *mut u64,
+    n: *mut u64,
+    nn: usize,
+    d: *const u64,
+    dn: usize,
+    v: u64,
+    t: *mut u64,
+) -> bool {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        if mu(nn, dn) {
+            mu_div_qr(q, n, nn, d, dn)
+        } else if dn >= DC_DIV && nn >= dn + 3 {
+            dc_div_qr(q, n, nn, d, dn, v, t)
+        } else {
+            sb_div_qr(q, n, nn, d, dn, v)
+        }
+    }
+}
+
+/// [`div_qr`] by the schoolbook method or divide and conquer alone, never Newton's method, whose
+/// inverse divides by it: with the [`dc_itch`] limbs at `t` when `dn >= DC_DIV` and `nn >= dn + 3`.
+///
+/// # Safety
+///
+/// As for [`div_qr`], with that scratch.
+pub(super) unsafe fn div_qr_classic(
     q: *mut u64,
     n: *mut u64,
     nn: usize,
@@ -409,9 +439,11 @@ pub(in super::super) unsafe fn div_qr(
 }
 
 /// The limbs of scratch space that [`div_qr`] needs for a dividend of `nn` limbs and a divisor of
-/// `dn`.
+/// `dn`: none for Newton's method, which allocates its own.
 pub(in super::super) fn qr_itch(nn: usize, dn: usize) -> usize {
-    if dn >= DC_DIV && nn >= dn + 3 {
+    if mu(nn, dn) {
+        0
+    } else if dn >= DC_DIV && nn >= dn + 3 {
         dc_itch(nn, dn)
     } else {
         0
@@ -586,7 +618,7 @@ pub(super) unsafe fn div_q(
     // SAFETY: as the caller guarantees.
     unsafe {
         if dn >= DC_DIV && nn - m >= dn + 3 {
-            let qh = dc_div_qr(q.add(m), n.add(m), nn - m, d, dn, v, t);
+            let qh = div_qr(q.add(m), n.add(m), nn - m, d, dn, v, t);
             shrinking(q, n, m, d, dn, v).then_some(qh)
         } else {
             sb_div_q(q, n, nn, d, dn, v)
@@ -615,7 +647,10 @@ pub(super) fn from_top(nn: usize, dn: usize) -> bool {
 /// The limbs of scratch space that [`div_q_top`] needs for a quotient of `k` limbs, after its
 /// operands.
 pub(super) fn top_itch(k: usize) -> usize {
-    if k + 1 < DC_DIV_Q {
+    if mu(2 * k + 2, k + 1) {
+        // Newton's method allocates its own.
+        0
+    } else if k + 1 < DC_DIV_Q {
         // The copy of the top limbs, and the exact division of them or of their own top limbs.
         (2 * k + 2) + qr_itch(2 * k + 2, k + 1).max(q_itch(2 * k + 2, k + 1))
     } else {
@@ -690,10 +725,13 @@ pub(super) unsafe fn div_q_top(
         if k == 1 {
             div_qr_2(h, w, 4, *dt.add(1), *dt, v);
         } else {
-            // Only the quotient of the top limbs counts, exactly: below `DC_DIV_Q` limbs, its last
-            // limbs from a shrinking divisor, on a copy, and from the limbs themselves when that
-            // gives up; from it, its low limbs from the top ones in turn, when there are enough.
-            let high = if k + 1 < DC_DIV_Q {
+            // Only the quotient of the top limbs counts, exactly: by Newton's method for the
+            // longest; below `DC_DIV_Q` limbs, its last limbs from a shrinking divisor, on a copy,
+            // and from the limbs themselves when that gives up; from it, its low limbs from the top
+            // ones in turn, when there are enough.
+            let high = if mu(2 * k + 2, k + 1) {
+                mu_div_q(h, w, 2 * k + 2, dt, k + 1)
+            } else if k + 1 < DC_DIV_Q {
                 let (c, s) = (s, s.add(2 * k + 2));
                 core::ptr::copy_nonoverlapping(w, c, 2 * k + 2);
                 match div_q(h, c, 2 * k + 2, dt, k + 1, v, s) {

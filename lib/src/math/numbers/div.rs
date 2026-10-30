@@ -21,10 +21,11 @@
 //! one limb or two divides limb by limb; a longer one by the schoolbook method, each quotient limb
 //! times the divisor subtracted from the partial remainder by kernels in inline assembly on 64-bit
 //! little-endian `aarch64` and, with BMI2, on `x86_64`, and portable Rust elsewhere and under Miri;
-//! a divisor of 40 limbs or more by divide and conquer, on the multiplication. The remainder is
-//! shifted back, and the quotient and the remainder are written as the operators promise. `/`
-//! computes the quotient alone, from the top limbs of the operands when it is much shorter than
-//! the divisor, and `%` by a divisor of one limb the remainder alone.
+//! a divisor of 40 limbs or more by divide and conquer, on the multiplication; and the longest
+//! divisions, from 128 limbs in the divisor and 768 in the quotient, the quotient at least an
+//! eighth of the divisor, by Newton's method (see [`newton`]). The remainder is shifted back, and the quotient and the remainder are written as
+//! the operators promise. `/` computes the quotient alone, from the top limbs of the operands when
+//! it is much shorter than the divisor, and `%` by a divisor of one limb the remainder alone.
 //!
 //! A quotient is never longer than the dividend, nor a remainder than the divisor or the dividend,
 //! so the dividend's vector, when it is taken by value or is the target of `/=` or `%=`, has room
@@ -80,6 +81,7 @@ mod kernels;
 #[path = "div/portable.rs"]
 mod kernels;
 pub(super) mod limbs;
+mod newton;
 mod rem1;
 
 pub(super) use limbs::{div_2by1 as divide_2by1, invert_limb as reciprocal};
@@ -103,6 +105,8 @@ use limbs::{
     div_q_top, div_qr, div_qr_1, div_qr_2, from_top, invert_3by2, invert_limb, q_itch, qr_itch,
     rshift, split_itch, split_low, top_itch,
 };
+pub(super) use newton::{Prepared, mu, mu_prepared, prepare};
+use newton::{mu_div_prepared, mu_div_q};
 
 impl Div<&Number> for &Number {
     type Output = Number;
@@ -1644,7 +1648,9 @@ pub(super) fn working_memory(nx: usize, ny: usize, want: Want) -> usize {
         let itch = |nn: usize| {
             let mut itch = qr_itch(nn, ny);
             if want == Want::Quotient && ny >= 3 {
-                if ny < DC_DIV_Q {
+                if mu(nn, ny) {
+                    // Newton's method allocates its own.
+                } else if ny < DC_DIV_Q {
                     itch = itch.max(q_itch(nn, ny));
                 } else if let l @ 1.. = split_low(nn, ny) {
                     itch = itch.max(split_itch(nn, ny, l));
@@ -1659,13 +1665,16 @@ pub(super) fn working_memory(nx: usize, ny: usize, want: Want) -> usize {
 
 /// A divisor of the general path as the division reads it: its `n` limbs at `d`, the least
 /// significant first, shifted left by `shift` bits so that the top bit is set, starting on 16
-/// bytes, and their reciprocal `v`, of the top limb for one limb and of the top two otherwise.
+/// bytes, and their reciprocal `v`, of the top limb for one limb and of the top two otherwise;
+/// and what a [`Divisor`](super::Divisor) keeps for Newton's method, when it has it, at `pre`
+/// (null otherwise).
 #[derive(Clone, Copy)]
 pub(super) struct Normal {
     pub(super) d: *const u64,
     pub(super) n: usize,
     pub(super) shift: u32,
     pub(super) v: u64,
+    pub(super) pre: *const Prepared,
 }
 
 /// The shift that sets the top bit of the operand `y`, not zero, from its most significant byte,
@@ -1705,7 +1714,13 @@ pub(super) unsafe fn normalize(y: Operand, d: *mut u64) -> Normal {
         } else {
             invert_3by2(*d.add(n - 1), *d.add(n - 2))
         };
-        Normal { d, n, shift, v }
+        Normal {
+            d,
+            n,
+            shift,
+            v,
+            pre: ptr::null(),
+        }
     }
 }
 
@@ -1802,8 +1817,14 @@ pub(super) unsafe fn compute_by<const EUCLIDEAN: bool, R>(
                 // quotient's top limb then comes out of the steps, and otherwise from the
                 // comparison that precedes them.
                 let nn = if *u.add(nx) != 0 { nx + 1 } else { nx };
-                let qh = if want != Want::Quotient {
+                let qh = if !y.pre.is_null() && mu_prepared(nn, ny) {
+                    // A divisor's inverse and transforms, kept for its divisions.
+                    mu_div_prepared(q, u, nn, d, ny, y.v, &*y.pre, want != Want::Quotient)
+                } else if want != Want::Quotient {
                     div_qr(q, u, nn, d, ny, y.v, t)
+                } else if mu(nn, ny) {
+                    // The quotient alone by Newton's method, whose last block skips its remainder.
+                    mu_div_q(q, u, nn, d, ny)
                 } else if ny < DC_DIV_Q {
                     // The quotient alone: its last limbs from a shrinking divisor, the others
                     // exactly.

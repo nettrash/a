@@ -259,7 +259,7 @@ unsafe fn write_magnitude(x: Operand, radix: u32, dst: *mut u8) -> usize {
             return write_limbs(u, n, radix, None, dst);
         }
         let mut powers = Vec::new();
-        write_split(le_number(x), radix, None, dst, &mut powers)
+        write_split(le_number(x), radix, None, dst, &mut powers, true)
     }
 }
 
@@ -995,7 +995,8 @@ fn largest(
 /// first, then the remainder in `k 2^i` places.
 ///
 /// The power is `odd 256^zeros`; only the bytes of `x` from `zeros` up are divided by `odd`,
-/// and the remainder's are put above the bytes below them.
+/// and the remainder's are put above the bytes below them. `top` is set for the first split, whose
+/// power divides nothing else.
 ///
 /// # Safety
 ///
@@ -1006,6 +1007,7 @@ unsafe fn write_split(
     width: Option<usize>,
     dst: *mut u8,
     powers: &mut Vec<Power>,
+    top: bool,
 ) -> usize {
     let limbs = x.value.len().div_ceil(8);
     // SAFETY: as the caller guarantees.
@@ -1024,16 +1026,23 @@ unsafe fn write_split(
         let i = largest(powers, b, k, |bytes, _| bytes <= half);
         let power = &mut powers[i];
         let (zeros, places) = (power.zeros, power.places);
-        let divisor = power
-            .divisor
-            .get_or_insert_with(|| Divisor::new(&power.odd));
         let (q, r) = if x.value.len() > zeros {
             let high = Number {
                 value: x.value[zeros..].to_vec(),
                 negative: false,
                 byte_order: ByteOrder::LittleEndian,
             };
-            let (q, r) = divisor.div_rem(&high);
+            // The largest power divides once, at the top; the others divide the parts below it,
+            // each at least twice, and are prepared as divisors, which keep the inverse of
+            // Newton's method from one division to the next.
+            let (q, r) = if top {
+                high.div_rem(&power.odd)
+            } else {
+                power
+                    .divisor
+                    .get_or_insert_with(|| Divisor::new(&power.odd))
+                    .div_rem(&high)
+            };
             let mut low = x.value;
             low.truncate(zeros);
             if r.value != [0] {
@@ -1045,11 +1054,11 @@ unsafe fn write_split(
         };
         let n = match width {
             // Without a quotient, the remainder is the number, and has no zeros in front.
-            None if q.value == [0] => return write_split(r, radix, None, dst, powers),
-            None => write_split(q, radix, None, dst, powers),
-            Some(w) => write_split(q, radix, Some(w - places), dst, powers),
+            None if q.value == [0] => return write_split(r, radix, None, dst, powers, top),
+            None => write_split(q, radix, None, dst, powers, false),
+            Some(w) => write_split(q, radix, Some(w - places), dst, powers, false),
         };
-        n + write_split(r, radix, Some(places), dst.add(n), powers)
+        n + write_split(r, radix, Some(places), dst.add(n), powers, false)
     }
 }
 

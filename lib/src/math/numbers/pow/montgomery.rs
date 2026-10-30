@@ -44,9 +44,10 @@ pub(in super::super) const fn even(n: usize) -> usize {
 
 // Remainders by division
 
-/// The limbs of scratch space that [`rem`] needs for a dividend of `nu` limbs by a divisor of `n`.
+/// The limbs of scratch space that [`rem`] needs for a dividend of `nu` limbs by a divisor of `n`:
+/// the division's, of the dividend shifted, with the limb above it or without.
 pub(in super::super) fn rem_itch(nu: usize, n: usize) -> usize {
-    even(n) + 2 * even(nu + 1) + qr_itch(nu + 1, n)
+    even(n) + 2 * even(nu + 1) + qr_itch(nu + 1, n).max(qr_itch(nu, n))
 }
 
 /// Sets the `n` limbs at `r` to the remainder of the `nu` limbs at `u` times `B^k` by the `n`

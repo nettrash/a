@@ -397,7 +397,10 @@ fn power_of(x: Operand, exp: u32, negative: bool, order: ByteOrder) -> Number {
     }
     // The scratch of the squares and products, at the lengths the power reaches: none while they
     // are short enough for the schoolbook method (squares below 56 limbs, products by a base below
-    // 24).
+    // 24). The lengths are bounds: a square's top limb may be zero, and then the power is shorter,
+    // and the scratch of a shorter length may be more (`sqr_itch` and `mul_itch` are not
+    // monotonic: a square of 202 limbs takes 486 limbs, of 203 and 204 less), which `power_in`
+    // allocates when it needs it.
     let mut scratch = 0;
     if rn >= 112 || on >= 24 {
         let mut len = on;
@@ -414,7 +417,7 @@ fn power_of(x: Operand, exp: u32, negative: bool, order: ByteOrder) -> Number {
     let need = even(xn) + even(on) + 2 * even(rn + 1) + scratch;
     let compute = |s: *mut MaybeUninit<u64>| {
         // SAFETY: the working memory holds `need` limbs, as the layout below takes them.
-        unsafe { power_in(s.cast(), x, xn, z, on, exp, rn, negative, order) }
+        unsafe { power_in(s.cast(), x, xn, z, on, exp, rn, scratch, negative, order) }
     };
     if need <= SHORT_LIMBS {
         let mut s = [PAIR; SHORT_LIMBS / 2];
@@ -642,7 +645,8 @@ unsafe fn shifted_number(
 }
 
 /// [`power_of`] in the working memory at `s`, for the operand `x` of `xn` limbs and `z` zero bits
-/// at its low end, whose odd part has `on` limbs.
+/// at its low end, whose odd part has `on` limbs; `room` limbs of it are for the scratch of the
+/// squares and products, and one that needs more takes a buffer of its own.
 ///
 /// # Safety
 ///
@@ -657,6 +661,7 @@ unsafe fn power_in(
     on: usize,
     exp: u32,
     rn: usize,
+    room: usize,
     negative: bool,
     order: ByteOrder,
 ) -> Number {
@@ -681,18 +686,21 @@ unsafe fn power_in(
         ptr::copy_nonoverlapping(o, r, on);
         let mut len = on;
         for i in (0..31 - exp.leading_zeros()).rev() {
-            sqr(w, r, len, t);
+            with_room(t, room, sqr_itch(len), |t| sqr(w, r, len, t));
             len *= 2;
             if *w.add(len - 1) == 0 {
                 len -= 1;
             }
             (r, w) = (w, r);
             if exp >> i & 1 == 1 {
-                if len >= on {
-                    mul(w, r, len, o, on, t);
-                } else {
-                    mul(w, o, on, r, len, t);
-                }
+                let itch = mul_itch(len.max(on), len.min(on));
+                with_room(t, room, itch, |t| {
+                    if len >= on {
+                        mul(w, r, len, o, on, t);
+                    } else {
+                        mul(w, o, on, r, len, t);
+                    }
+                });
                 len += on;
                 if *w.add(len - 1) == 0 {
                     len -= 1;
@@ -702,6 +710,28 @@ unsafe fn power_in(
         }
         shifted_number(r, len, z as u128 * u128::from(exp), negative, order)
     }
+}
+
+/// Runs `f` on scratch of `need` limbs: the `room` limbs at `t` when they are enough, and otherwise a
+/// buffer of its own, on 16 bytes, freed on return.
+///
+/// # Safety
+///
+/// The `room` limbs at `t` must be valid for reads and writes.
+unsafe fn with_room<R>(t: *mut u64, room: usize, need: usize, f: impl FnOnce(*mut u64) -> R) -> R {
+    if need <= room {
+        f(t)
+    } else {
+        more_room(need, f)
+    }
+}
+
+/// The buffer of [`with_room`] when the planned scratch is not enough. Out of line and cold.
+#[cold]
+#[inline(never)]
+fn more_room<R>(need: usize, f: impl FnOnce(*mut u64) -> R) -> R {
+    let mut s = Vec::<Pair>::with_capacity(need.div_ceil(2));
+    f(s.as_mut_ptr().cast())
 }
 
 // Powers modulo a number

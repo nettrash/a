@@ -1,7 +1,10 @@
 use a::math::numbers::{ByteOrder, Divisor, Number};
 
 use super::common::*;
-use super::div::{euclid, panic_message, quotient_and_remainder};
+use super::div::{
+    MU_PREPARED, euclid, mul_magnitudes, newton_divisor, panic_message, quotient_and_remainder,
+    sub_magnitudes,
+};
 use crate::allocations::count;
 
 /// A form of division by a divisor that takes its dividend by value.
@@ -182,6 +185,48 @@ fn owned_dividends_keep_their_vector() {
             let (result, allocations) = count(|| &a / &d);
             assert_result(&result, &q, order, &|| "&a / &d".into());
             assert_eq!(allocations, 1, "&a / &d");
+        }
+    }
+}
+
+#[test]
+fn a_prepared_divisor_divides_numbers_of_every_length_by_newton_s_method() {
+    // From its first division by Newton's method, a divisor keeps the inverse of all its limbs and
+    // the transforms: quotients of whole blocks of its length; of a block and one limb, two, or
+    // up to a quarter of a block, whose last limbs the schoolbook method or divide and conquer
+    // computes; of a block and a quarter or more, a last block of its own; shorter than two
+    // thirds of a block, from the top limbs of the inverse. Exact multiples and their neighbours
+    // make the guard limb of a quotient alone ask for the remainder.
+    let mut state = 0x1F83_D9AB_5BE0_CD19;
+    let n = if cfg!(miri) { MU_PREPARED + 1 } else { 400 };
+    for kind in 0..size(3, 1) {
+        let y = newton_divisor(&mut state, n, kind);
+        let b = number(&y, kind == 1, ByteOrder::BigEndian);
+        let d = Divisor::new(&b);
+        let quotients = if cfg!(miri) {
+            vec![MU_PREPARED, n + 1, 2 * n]
+        } else {
+            vec![
+                MU_PREPARED,
+                2 * n / 3 - 1,
+                2 * n / 3 + 1,
+                n,
+                n + 1,
+                n + 2,
+                n + n / 4 - 1,
+                n + n / 4,
+                3 * n + 7,
+            ]
+        };
+        for (i, qn) in quotients.into_iter().enumerate() {
+            let q = random_magnitude(&mut state, 8 * qn);
+            let qy = mul_magnitudes(&q, &y);
+            let order = ORDERS[(kind + i) % 2];
+            let x = random_magnitude(&mut state, 8 * (n + qn));
+            for x in [x, qy.clone(), sub_magnitudes(&qy, &[1])] {
+                let a = number(&x, i % 2 == 1, order);
+                assert_divides_by(&a, &b, &d);
+            }
         }
     }
 }

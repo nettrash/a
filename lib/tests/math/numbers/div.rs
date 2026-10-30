@@ -1220,10 +1220,11 @@ fn the_dividend_s_vector_always_has_room_but_when_empty() {
 #[test]
 fn long_divisions_allocate_one_temporary_buffer_at_most() {
     // Past the working memory on the stack, one buffer is allocated for the computation and freed
-    // before the result is returned.
+    // before the result is returned, below the divisors of Newton's method (see
+    // `newton_divisions_give_their_results_where_the_others_do`).
     let mut state = 0x6A09_E667_BB67_AE85;
-    // Working memory of more than 1024 limbs: under Miri, 525 limbs by 100.
-    let (la, lb) = (size(12_000, 4_200), size(5_000, 800));
+    // Working memory of more than 1024 limbs: 1500 limbs by 125, under Miri 525 by 20.
+    let (la, lb) = (size(12_000, 4_200), size(1_000, 160));
     let a = number(
         &random_magnitude(&mut state, la),
         false,
@@ -1248,4 +1249,192 @@ fn long_divisions_allocate_one_temporary_buffer_at_most() {
     assert_result(&quotient, &q, a.byte_order, &|| "div_rem".into());
     assert_result(&remainder, &r, a.byte_order, &|| "div_rem".into());
     assert_eq!(allocations, 3, "div_rem");
+}
+
+// Newton's method
+
+/// The thresholds of Newton's method in limbs, as the division has them: of the divisor, of the
+/// quotient, and of both for a prepared divisor; lower under Miri.
+pub(super) const MU_DIV: usize = if cfg!(miri) { 24 } else { 128 };
+pub(super) const MU_QUOTIENT: usize = if cfg!(miri) { 40 } else { 768 };
+pub(super) const MU_PREPARED: usize = if cfg!(miri) { 40 } else { 256 };
+
+/// Divisors of `n` limbs for Newton's method, as bytes: random; with the top limbs all ones, so
+/// that the top limbs plus one, whose inverse the division takes, carry out of them; all ones; a
+/// top bit alone, with the limbs below it zeros or random; random but not normalized.
+pub(super) fn newton_divisor(state: &mut u64, n: usize, kind: usize) -> Vec<u8> {
+    let mut y = random_magnitude(state, 8 * n);
+    let top = 1 + below(state, n);
+    match kind % 6 {
+        1 => y[8 * (n - top)..].fill(0xFF),
+        2 => y.fill(0xFF),
+        3 => {
+            y.fill(0);
+            y[8 * n - 1] = 0x80;
+        }
+        4 => {
+            y[8 * (n - top)..].fill(0);
+            y[8 * n - 1] = 0x80;
+        }
+        5 => {
+            y[8 * (n - top)..].fill(0xFF);
+            y[8 * n - 1] >>= 1 + below(state, 7);
+        }
+        _ => y[8 * n - 1] |= 0x80,
+    }
+    y
+}
+
+/// Shapes for Newton's method, as limbs of the dividend and of the divisor: divisors around its
+/// threshold and longer, by quotients around their threshold, as long as the divisor and a few
+/// limbs more, two to three times longer, and much longer, in blocks of every kind.
+fn newton_shapes() -> Vec<(usize, usize)> {
+    let mut shapes = vec![];
+    let divisors = if cfg!(miri) {
+        vec![MU_DIV, MU_DIV + 1, 41]
+    } else {
+        vec![MU_DIV - 1, MU_DIV, MU_DIV + 1, 300, 801, 1500]
+    };
+    for &n in &divisors {
+        let mut quotients = vec![
+            MU_QUOTIENT - 1,
+            MU_QUOTIENT,
+            MU_QUOTIENT + 1,
+            n,
+            n + 1,
+            2 * n + 3,
+        ];
+        if !cfg!(miri) {
+            quotients.extend([n + n / 2, 3 * n - 1, 8 * n + 5]);
+        }
+        for qn in quotients {
+            if qn >= MU_QUOTIENT - 1 || qn > n {
+                shapes.push((n + qn, n));
+            }
+        }
+    }
+    shapes
+}
+
+#[test]
+fn divides_every_shape_of_newton_s_method_as_the_reference() {
+    // Random operands, and divisors whose top limbs plus one carry out of them, which are all
+    // ones, a top bit alone, or not normalized, in every shape around the thresholds.
+    let mut state = 0x3C6E_F372_FE94_F82B;
+    for (i, (m, n)) in newton_shapes().into_iter().enumerate() {
+        let cut = below(&mut state, 8);
+        let x = random_magnitude(&mut state, 8 * m - cut);
+        let y = newton_divisor(&mut state, n, i);
+        let (oa, ob) = ORDER_PAIRS[i % 4];
+        let (na, nb) = SIGN_PAIRS[(i / 4) % 4];
+        let (a, b) = (number(&x, na, oa), number(&y, nb, ob));
+        if cfg!(miri) {
+            assert_divides_quickly(&a, &b);
+        } else {
+            assert_divides(&a, &b);
+        }
+    }
+}
+
+#[test]
+fn quotients_of_newton_s_method_that_need_correcting_come_out_right() {
+    // Exact multiples and the dividends one below and one above them, and `q b + b - 1`, by
+    // divisors of every kind: an estimate that falls short of the quotient is corrected, and an
+    // exact multiple makes the guard limb of the last block of a quotient alone ask for its
+    // remainder; quotients of all ones, as long as several blocks, or as one.
+    let mut state = 0xA54F_F53A_5F1D_36F1;
+    let shapes: Vec<(usize, usize)> = if cfg!(miri) {
+        vec![(MU_DIV, MU_QUOTIENT), (MU_DIV + 1, 2 * MU_DIV + 1)]
+    } else {
+        vec![
+            (MU_DIV, MU_QUOTIENT),
+            (MU_DIV, 4 * MU_QUOTIENT + 1),
+            (300, MU_QUOTIENT + 1),
+            (801, 800),
+            (801, 801),
+            (801, 1603),
+            (1500, 1100),
+        ]
+    };
+    for (i, &(n, qn)) in shapes.iter().enumerate() {
+        for kind in 0..size(6, 2) {
+            let y = newton_divisor(&mut state, n, kind + i);
+            let q = if kind % 2 == 0 {
+                vec![0xFF; 8 * qn]
+            } else {
+                random_magnitude(&mut state, 8 * qn)
+            };
+            let qy = mul_magnitudes(&q, &y);
+            let dividends = [
+                qy.clone(),
+                sub_magnitudes(&qy, &[1]),
+                plus_one(&qy),
+                add_magnitudes(&qy, &sub_magnitudes(&y, &[1])),
+            ];
+            for (j, x) in dividends.iter().enumerate() {
+                let (oa, ob) = ORDER_PAIRS[(kind + j) % 4];
+                let (na, nb) = SIGN_PAIRS[(i + j) % 4];
+                assert_divides_quickly(&number(x, na, oa), &number(&y, nb, ob));
+            }
+        }
+    }
+}
+
+#[test]
+fn newton_divisions_give_their_results_where_the_others_do() {
+    // Newton's method allocates its working memory, but the results go where the operators put
+    // them: `a % &b` and `a /= &b` in `a`'s vector, `&a / &b` in one new vector of the exact
+    // length.
+    let mut state = 0x510E_527F_ADE6_82D1;
+    let (n, qn) = (MU_DIV + 3, MU_QUOTIENT + 5);
+    let a = number(
+        &random_magnitude(&mut state, 8 * (n + qn)),
+        true,
+        ByteOrder::LittleEndian,
+    );
+    let b = number(
+        &newton_divisor(&mut state, n, 0),
+        false,
+        ByteOrder::BigEndian,
+    );
+    let (q, r) = quotient_and_remainder(&a, &b);
+    let roomy = copy(&a, 0);
+    let pointer = roomy.value.as_ptr();
+    let remainder = roomy % &b;
+    assert_result(&remainder, &r, a.byte_order, &|| "a % &b".into());
+    assert_eq!(remainder.value.as_ptr(), pointer, "a % &b");
+    let mut roomy = copy(&a, 0);
+    let pointer = roomy.value.as_ptr();
+    roomy /= &b;
+    assert_result(&roomy, &q, a.byte_order, &|| "a /= &b".into());
+    assert_eq!(roomy.value.as_ptr(), pointer, "a /= &b");
+    let quotient = &a / &b;
+    assert_result(&quotient, &q, a.byte_order, &|| "&a / &b".into());
+    assert_eq!(quotient.value.capacity(), quotient.value.len(), "&a / &b");
+}
+
+#[test]
+fn quotients_alone_of_newton_s_method_by_much_longer_divisors() {
+    // A quotient much shorter than the divisor comes from the top limbs of both, whose division
+    // takes Newton's method when it is long enough: exact multiples and their neighbours.
+    let mut state = 0x9B05_688C_2B3E_6C1F;
+    let (k, n) = if cfg!(miri) {
+        (MU_QUOTIENT + 2, 3 * MU_QUOTIENT)
+    } else {
+        (MU_QUOTIENT + 2, 2 * MU_QUOTIENT + 30)
+    };
+    for kind in 0..size(4, 1) {
+        let y = newton_divisor(&mut state, n, kind);
+        let q = random_magnitude(&mut state, 8 * k);
+        let qy = mul_magnitudes(&q, &y);
+        for x in [qy.clone(), sub_magnitudes(&qy, &[1]), plus_one(&qy)] {
+            let (oa, ob) = ORDER_PAIRS[kind % 4];
+            let a = number(&x, kind % 2 == 1, oa);
+            let b = number(&y, kind >= 2, ob);
+            let (expected, _) = quotient_and_remainder(&a, &b);
+            assert_result(&(&a / &b), &expected, a.byte_order, &|| {
+                format!("&a / &b with a = {}, b = {}", describe(&a), describe(&b))
+            });
+        }
+    }
 }

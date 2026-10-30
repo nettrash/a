@@ -28,7 +28,7 @@
 // The kernels of the schoolbook method, one set per target under the name `kernels`, chosen as
 // those of the addition are: assembly on 64-bit little-endian aarch64 where the system allows
 // unaligned accesses and on x86_64, and portable Rust elsewhere and under Miri.
-mod fft;
+pub(super) mod fft;
 #[cfg(all(
     target_arch = "aarch64",
     target_endian = "little",

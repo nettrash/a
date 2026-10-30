@@ -654,16 +654,16 @@ unsafe fn forward<S: Lanes>(a: *mut i32, k: u32, t: *const i32, c: S::C) {
     }
 }
 
-/// The inverse transform of the `2^k` values at `a` but the levels of [`finish`].
+/// The inverse transform of the `2^k` values at `a` but the levels of [`finish`], with the
+/// inverse twiddles at `w`.
 ///
 /// # Safety
 ///
-/// As for [`forward`].
-unsafe fn inverse<S: Lanes>(a: *mut i32, k: u32, t: *const i32, c: S::C) {
+/// As for [`forward`], with the inverse twiddles of [`twiddles`] at `w`.
+unsafe fn inverse<S: Lanes>(a: *mut i32, k: u32, w: *const i32, c: S::C) {
     let l = 1usize << k;
-    // SAFETY: as the caller guarantees; the inverse twiddles follow the forward ones.
+    // SAFETY: as the caller guarantees.
     unsafe {
-        let w = t.add(l);
         inv_last4::<S>(a, l, w, c);
         let mut s = k as i32 - 6;
         while s >= split_levels(k) as i32 {
@@ -789,12 +789,13 @@ unsafe fn split<S: Lanes>(
 }
 
 /// The last [`split_levels`] levels of the inverse transform of the `2^k` values at `a`, each
-/// result multiplied by `mu` and moved to `[0, q)`; only the first `n` are needed and kept.
+/// result multiplied by `mu` and moved to `[0, q)`; only the first `n` are needed and kept. `w`
+/// holds the inverse twiddles.
 ///
 /// # Safety
 ///
-/// As for [`forward`].
-unsafe fn finish<S: Lanes>(a: *mut i32, k: u32, n: usize, mu: (i32, i32), t: *const i32, c: S::C) {
+/// As for [`inverse`].
+unsafe fn finish<S: Lanes>(a: *mut i32, k: u32, n: usize, mu: (i32, i32), w: *const i32, c: S::C) {
     let (m, mp) = (S::splat(mu.0), S::splat(mu.1));
     let scale = |x: S| x.mul(m, mp, c).normalize(c);
     // SAFETY: every access lies in the `2^k` values at `a` and the inverse twiddle `Z[1]^-1`.
@@ -811,7 +812,7 @@ unsafe fn finish<S: Lanes>(a: *mut i32, k: u32, n: usize, mu: (i32, i32), t: *co
             return;
         }
         let qq = 1usize << (k - 2);
-        let iz1 = S::pair(t.add((1 << k) + 2));
+        let iz1 = S::pair(w.add(2));
         for j in (0..qq.min(n.next_multiple_of(4))).step_by(4) {
             let a0 = S::load(a.add(j));
             let a1 = S::load(a.add(j + qq));
@@ -1013,10 +1014,12 @@ unsafe fn group<const W: usize, const ND: usize, const NL: usize>(
 /// Sets the `rn` limbs at `r` to the sum of the `n` coefficients of the product, from their
 /// residues, `l` apart at `res`, coefficient `j` at bit `j W`.
 ///
+/// Returns the two limbs of the sum above the `rn` limbs: zeros for a product, which fits them.
+///
 /// # Safety
 ///
 /// `n <= l`, `l` a multiple of 8; the `np l` residues at `res` must be valid for reads and the
-/// limbs at `r` for writes; the product fits them.
+/// limbs at `r` for writes; the sum is below `2^(64 rn + 128)`.
 #[inline(never)]
 unsafe fn crt<const W: usize, const ND: usize, const NL: usize>(
     r: *mut u64,
@@ -1025,7 +1028,7 @@ unsafe fn crt<const W: usize, const ND: usize, const NL: usize>(
     l: usize,
     n: usize,
     c: &Crt,
-) {
+) -> [u64; 2] {
     // SAFETY: the residues of prime `i` are `res[i l..(i + 1) l]`; the groups read residues below
     // `n.next_multiple_of(8) <= l`.
     unsafe {
@@ -1042,13 +1045,24 @@ unsafe fn crt<const W: usize, const ND: usize, const NL: usize>(
             carry = s >> 64;
             e += 1;
         }
+        // What lies above the `rn` limbs: nothing for a product, which fits them, and for a
+        // cyclic product (see [`mul_cyclic`]) the part of its sum above `2^(w L)`, below `2^126`.
+        let mut above = [0; 2];
+        for a in &mut above {
+            let s = if e < 8 { pend[e] } else { 0 } + carry;
+            *a = s as u64;
+            carry = s >> 64;
+            e += 1;
+        }
+        debug_assert!(carry == 0 && (e..8).all(|e| pend[e] == 0));
+        above
     }
 }
 
 // Configurations and plans
 
 /// A width of coefficients, the primes that make it exact, and the digits of a coefficient.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Config {
     /// The number of primes.
     np: usize,
@@ -1251,28 +1265,313 @@ unsafe fn product(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usiz
                 forward::<V>(yt, k, t, c);
                 pointwise::<V>(a, yt, l, c);
             }
-            inverse::<V>(a, k, t, c);
+            inverse::<V>(a, k, t.add(l), c);
             let q = data.prime.q as i64;
             let mu = centred(
                 (crt_data.mu[i] as i64 * data.inv2k[k as usize] as i64).rem_euclid(q) as u64,
                 q as u64,
             );
-            finish::<V>(a, k, n, (mu, barrett(mu, q as u32)), t, c);
+            finish::<V>(a, k, n, (mu, barrett(mu, q as u32)), t.add(l), c);
         }
         let rn = if square { 2 * nx } else { nx + ny };
-        macro_rules! go {
-            ($w:literal, $nd:literal, $nl:literal) => {
-                crt::<$w, $nd, $nl>(r, rn, res, l, n, crt_data)
-            };
+        let above = theorem(r, rn, res, l, n, cf);
+        debug_assert!(above == [0, 0], "a product fits its limbs");
+    }
+}
+
+/// Sets the `rn` limbs at `r` to the sum of the `n` coefficients whose residues for the primes of
+/// `cf` are `l` apart at `res`, by [`crt`], and returns the two limbs above them.
+///
+/// # Safety
+///
+/// As for [`crt`].
+unsafe fn theorem(
+    r: *mut u64,
+    rn: usize,
+    res: *const i32,
+    l: usize,
+    n: usize,
+    cf: Config,
+) -> [u64; 2] {
+    let crt_data = &CRT[cf.np];
+    macro_rules! go {
+        ($w:literal, $nd:literal, $nl:literal) => {
+            // SAFETY: as the caller guarantees.
+            unsafe { crt::<$w, $nd, $nl>(r, rn, res, l, n, crt_data) }
+        };
+    }
+    match (cf.w, crt_data.nd) {
+        (48, 4) => go!(48, 4, 2),
+        (56, 5) => go!(56, 5, 3),
+        (64, 5) => go!(64, 5, 3),
+        (72, 6) => go!(72, 6, 3),
+        (88, 7) => go!(88, 7, 4),
+        (104, 8) => go!(104, 8, 4),
+        _ => unreachable!("a configuration without its theorem"),
+    }
+}
+
+// Wrap-around products
+
+/// The plan of a product modulo `B^n - 1` for `n = w 2^k / 64` limbs: a cyclic convolution of
+/// length `L = 2^k` of coefficients of `w` bits, by the configuration `cf`.
+///
+/// `X^L - 1` for `X = 2^w` is `B^n - 1`, so the cyclic convolution of the operands' coefficients,
+/// which the transforms of length `L` compute whatever the number of coefficients of the product,
+/// gives the product modulo `B^n - 1`: a coefficient past the `L`-th wraps around to the bottom.
+/// That is a product of up to `n` limbs at the cost of one whose result has `n` limbs, half that
+/// of a product of two operands of `n` limbs, where the division knows the high or the low half
+/// of the product it needs (see the division's `newton`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in super::super) struct Cyclic {
+    cf: Config,
+    k: u32,
+}
+
+impl Cyclic {
+    /// The limbs `n` of the modulus `B^n - 1`.
+    pub(in super::super) fn limbs(self) -> usize {
+        (self.cf.w << self.k) / 64
+    }
+
+    /// The estimated cycles of a product, in the units of [`plan`]: three transforms, or two when
+    /// an operand is `ready` (a [`Transform`]), and the Chinese remainder theorem.
+    pub(in super::super) fn cost(self, ready: bool) -> u64 {
+        let transforms = if ready { 2 } else { 3 };
+        transforms * self.transform_cost() + (self.cf.crt_cycles << self.k) as u64
+    }
+
+    /// The estimated cycles of a transform of an operand, its residues and its share of the
+    /// pointwise products, in the units of [`plan`].
+    pub(in super::super) fn transform_cost(self) -> u64 {
+        let k = u64::from(self.k);
+        self.cf.np as u64 * ((2 * k + 10) << k)
+    }
+}
+
+/// The plan of least estimated cost for products modulo `B^n - 1` with `n >= min` limbs, whose
+/// shorter operand has at most `shorter` limbs, if any fits the transforms; for every product by
+/// it, each operand has at most `n` limbs.
+///
+/// Each coefficient of the cyclic convolution is a sum of at most as many products of two
+/// coefficients as the shorter operand has, at most `L` (for each coefficient of one operand,
+/// one of the other lands on it), so [`exact`] tells for it what it tells for a product.
+pub(in super::super) fn cyclic(min: usize, shorter: usize) -> Option<Cyclic> {
+    let mut best: Option<(Cyclic, u64)> = None;
+    if min > 1 << 22 {
+        return None;
+    }
+    for cf in CONFIGS {
+        // The least `k` whose `w 2^k / 64` limbs are at least `min`.
+        let coefficients = (64 * min).div_ceil(cf.w);
+        let k = (usize::BITS - (coefficients - 1).leading_zeros()).max(MIN_K);
+        if k > MAX_K {
+            continue;
         }
-        match (cf.w, crt_data.nd) {
-            (48, 4) => go!(48, 4, 2),
-            (56, 5) => go!(56, 5, 3),
-            (64, 5) => go!(64, 5, 3),
-            (72, 6) => go!(72, 6, 3),
-            (88, 7) => go!(88, 7, 4),
-            (104, 8) => go!(104, 8, 4),
-            _ => unreachable!("a configuration without its theorem"),
+        let m = ((64 * shorter).div_ceil(cf.w)).min(1 << k);
+        if !exact(cf, m) {
+            continue;
+        }
+        let p = Cyclic { cf, k };
+        if best.is_none_or(|(_, c)| p.cost(false) < c) {
+            best = Some((p, p.cost(false)));
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
+/// The twiddles of the first `np` primes for transforms of up to `2^k` points, shared by the
+/// products of a division instead of built for each: the table of [`twiddles`] for `2^j` points is
+/// the first half of each of its two halves for `2^(j+1)`, as `Z[b]` and its inverse depend on `b`
+/// alone, so the tables for `2^k` serve every shorter transform.
+#[derive(Clone)]
+pub(in super::super) struct Twiddles {
+    k: u32,
+    np: usize,
+    /// For each prime, the `2^k` values of the forward twiddles, then those of the inverse ones.
+    t: Vec<i32>,
+}
+
+impl Twiddles {
+    /// The twiddles for the products by the plans `plans`: of their most primes and longest
+    /// transform.
+    pub(in super::super) fn of(plans: &[Cyclic]) -> Twiddles {
+        let k = plans.iter().map(|p| p.k).max().unwrap_or(MIN_K);
+        let np = plans.iter().map(|p| p.cf.np).max().unwrap_or(1);
+        let l = 1usize << k;
+        let mut t = Vec::<i32>::with_capacity(2 * l * np);
+        // SAFETY: each prime's `2^(k+1)` values are written by `twiddles`.
+        unsafe {
+            for (i, data) in PRIME_DATA.iter().enumerate().take(np) {
+                twiddles::<V>(t.as_mut_ptr().add(2 * l * i), k, data);
+            }
+            t.set_len(2 * l * np);
+        }
+        Twiddles { k, np, t }
+    }
+
+    /// The forward and the inverse twiddles of prime `i` for the plan `p`, if they are here.
+    fn get(&self, i: usize, p: Cyclic) -> Option<(*const i32, *const i32)> {
+        if p.k > self.k || i >= self.np {
+            return None;
+        }
+        let base = self.t.as_ptr().wrapping_add((2 * i) << self.k);
+        Some((base, base.wrapping_add(1 << self.k)))
+    }
+}
+
+/// The forward and the inverse twiddles of prime `i` (whose data is `data`) for the plan `p`: from
+/// `tw` when it has them, otherwise built at `t`, which has room for `2^(k+1)` values.
+///
+/// # Safety
+///
+/// The `2^(k+1)` values at `t` must be valid for writes.
+unsafe fn twiddles_of(
+    tw: Option<&Twiddles>,
+    i: usize,
+    p: Cyclic,
+    data: &PrimeData,
+    t: *mut i32,
+) -> (*const i32, *const i32) {
+    if let Some(pair) = tw.and_then(|tw| tw.get(i, p)) {
+        return pair;
+    }
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        twiddles::<V>(t, p.k, data);
+        (t, t.add(1 << p.k))
+    }
+}
+
+/// An operand transformed by a plan, for products by it that skip its transforms: the residues
+/// of its coefficients modulo each prime, transformed, in the order the forward transform leaves.
+#[derive(Clone)]
+pub(in super::super) struct Transform {
+    /// The plan.
+    plan: Cyclic,
+    /// The `np 2^k` values, prime after prime.
+    res: Vec<i32>,
+    /// The operand's coefficients.
+    nc: usize,
+}
+
+/// The `nx` limbs at `x` transformed by the plan `p`.
+///
+/// # Safety
+///
+/// `1 <= nx <= p.limbs()`, at most the `shorter` of the plan if it is the shorter operand of a
+/// product; the limbs at `x` must be valid for reads.
+pub(in super::super) unsafe fn transform(
+    x: *const u64,
+    nx: usize,
+    p: Cyclic,
+    tw: Option<&Twiddles>,
+) -> Transform {
+    let (cf, k) = (p.cf, p.k);
+    let (l, np) = (1usize << k, cf.np);
+    let cx = (64 * nx).div_ceil(cf.w);
+    let sx = cx.next_multiple_of(4);
+    debug_assert!(nx <= p.limbs() && cx <= l);
+    let mut res = Vec::<i32>::with_capacity(np * l);
+    let mut work = Vec::<i32>::with_capacity(2 * l + cf.dn * sx);
+    // SAFETY: the vectors hold the transforms of the `np` primes, and the twiddles and the
+    // digits of the operand, each written before it is read.
+    unsafe {
+        let (t, dx) = (work.as_mut_ptr(), work.as_mut_ptr().add(2 * l));
+        digits(dx, sx, x, nx, cf, cx);
+        for (i, data) in PRIME_DATA.iter().enumerate().take(np) {
+            let c = V::consts(&data.prime);
+            let (tf, _) = twiddles_of(tw, i, p, data, t);
+            let r_t: [(i32, i32); 4] = core::array::from_fn(|t| data.pow2[t * cf.b]);
+            let a = res.as_mut_ptr().add(i * l);
+            split::<V>(a, k, dx, sx, cx, cf.dn, &r_t, tf, c);
+            forward::<V>(a, k, tf, c);
+        }
+        res.set_len(np * l);
+    }
+    Transform {
+        plan: p,
+        res,
+        nc: cx,
+    }
+}
+
+/// Sets the `n = p.limbs()` limbs at `r` to the product of the `nx` limbs at `x` and the operand
+/// transformed as `y` modulo `B^n - 1`: a value from 0 to `B^n - 1`, where `B^n - 1` stands for 0.
+/// A product below `B^n - 1` is the product itself. `tw` may hold the twiddles.
+///
+/// The `L` coefficients of the cyclic convolution are added at their positions, `w` bits apart,
+/// into a sum `S` of the limbs at `r` and the two above them that [`crt`] returns: as each
+/// coefficient is below `L 2^(2w)`, `S < 2^(w L) L 2^w (1 + 2^-w)`, so `S / B^n < 2^126`. The
+/// limbs above `B^n` are then added at the bottom, as `B^n = 1` modulo `B^n - 1`, and so is the
+/// carry out of the top, which leaves the sum minus `B^n` below `2^126`, and cannot carry again.
+///
+/// # Safety
+///
+/// `1 <= nx <= n`, `y` made by `p`, one of the two operands of at most the plan's `shorter`
+/// limbs. The limbs at `x` must be valid for reads and the `n` limbs at `r` for writes, apart.
+pub(in super::super) unsafe fn mul_cyclic(
+    r: *mut u64,
+    p: Cyclic,
+    x: *const u64,
+    nx: usize,
+    y: &Transform,
+    tw: Option<&Twiddles>,
+) {
+    let (cf, k) = (p.cf, p.k);
+    let (l, np, n) = (1usize << k, cf.np, p.limbs());
+    let cx = (64 * nx).div_ceil(cf.w);
+    let sx = cx.next_multiple_of(4);
+    debug_assert!(nx <= n && cx <= l && y.plan == p && exact(cf, cx.min(y.nc)));
+    let mut buffer = Vec::<i32>::with_capacity((np + 2) * l + cf.dn * sx);
+    // SAFETY: the buffer holds the residues of the `np` primes, the twiddles and the digits of
+    // `x`, each written before it is read.
+    unsafe {
+        let res = buffer.as_mut_ptr();
+        let t = res.add(np * l);
+        let dx = t.add(2 * l);
+        digits(dx, sx, x, nx, cf, cx);
+        let crt_data = &CRT[np];
+        for (i, data) in PRIME_DATA.iter().enumerate().take(np) {
+            let c = V::consts(&data.prime);
+            let (tf, ti) = twiddles_of(tw, i, p, data, t);
+            let r_t: [(i32, i32); 4] = core::array::from_fn(|t| data.pow2[t * cf.b]);
+            let a = res.add(i * l);
+            split::<V>(a, k, dx, sx, cx, cf.dn, &r_t, tf, c);
+            forward::<V>(a, k, tf, c);
+            pointwise::<V>(a, y.res.as_ptr().add(i * l), l, c);
+            inverse::<V>(a, k, ti, c);
+            let q = data.prime.q as i64;
+            let mu = centred(
+                (crt_data.mu[i] as i64 * data.inv2k[k as usize] as i64).rem_euclid(q) as u64,
+                q as u64,
+            );
+            finish::<V>(a, k, l, (mu, barrett(mu, q as u32)), ti, c);
+        }
+        let [a0, a1] = theorem(r, n, res, l, l, cf);
+        let (s0, c0) = (*r).overflowing_add(a0);
+        *r = s0;
+        let (s1, c1) = (*r.add(1)).overflowing_add(a1);
+        let (s1, c2) = s1.overflowing_add(u64::from(c0));
+        *r.add(1) = s1;
+        let mut carry = u64::from(c1 | c2);
+        let mut i = 2;
+        while carry != 0 && i < n {
+            let (v, o) = (*r.add(i)).overflowing_add(1);
+            *r.add(i) = v;
+            carry = u64::from(o);
+            i += 1;
+        }
+        if carry != 0 {
+            let mut i = 0;
+            loop {
+                let (v, o) = (*r.add(i)).overflowing_add(1);
+                *r.add(i) = v;
+                if !o {
+                    break;
+                }
+                i += 1;
+            }
         }
     }
 }

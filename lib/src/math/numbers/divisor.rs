@@ -4,25 +4,34 @@
 //! set, and computes the reciprocal of the top limbs, by which each limb of the quotient is
 //! estimated. A [`Divisor`] does that once, and keeps the results: dividing by it skips those
 //! steps, and the scan of the divisor's bytes for its length. That is most of the cost of
-//! dividing a short number, and little of dividing a long one by a long divisor.
+//! dividing a short number, and little of dividing a long one by a long divisor. For the longest
+//! divisions, which take Newton's method, it also keeps, from the first one, the inverse of its
+//! limbs and the transforms of the products (see the division's `newton`), which make the later
+//! ones about twice as fast.
 
 use super::add::{SMALL, read_small};
 use super::div::{
-    EUCLID, Medium, Normal, Powers, REM_1_PREPARED, Short, TRUNCATED, WIDER, Want, by_medium,
-    by_zero, compute_by, normalize, rem_1, remainder_of_1, wide_division, wide_number,
-    wider_division, working_memory,
+    EUCLID, Medium, Normal, Powers, Prepared, REM_1_PREPARED, Short, TRUNCATED, WIDER, Want,
+    by_medium, by_zero, compute_by, mu_prepared, normalize, prepare, rem_1, remainder_of_1,
+    wide_division, wide_number, wider_division, working_memory,
 };
 use super::mul::{Operand, Product, STACK_LIMBS, WIDE, Wide, on_heap, on_stack, put_wide};
 use super::sub::Negated;
 use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 use core::ops::{Div, DivAssign, Rem, RemAssign};
+use core::ptr;
+use std::sync::OnceLock;
 
 /// A number prepared to divide others by: dividing by it gives what dividing by the number does,
 /// with the same operators, but skips reading the divisor and computing its reciprocal each time.
 ///
 /// It keeps the magnitude of the number in limbs of eight bytes, shifted so that the top bit is
-/// set, the reciprocal of the top limbs and the sign. A number divided by it with `/`, `/=`, `%`
+/// set, the reciprocal of the top limbs and the sign; and from its first division by Newton's
+/// method, from 256 limbs (2 KiB) in the divisor and in the quotient, the inverse of all its limbs
+/// and the transforms of the inverse and of the divisor, 10 to 11 times the divisor's bytes in all,
+/// which that first division takes about a third longer to compute than a division by the number,
+/// and which take the later ones to about half its time. A number divided by it with `/`, `/=`, `%`
 /// or `%=`, owned or borrowed, or by its methods [`div_rem`](Self::div_rem),
 /// [`div_euclid`](Self::div_euclid) and [`rem_euclid`](Self::rem_euclid), gives the results that
 /// dividing by the number gives, in the byte order of the dividend, in the shortest form, built in
@@ -65,6 +74,9 @@ pub struct Divisor {
     /// The powers of `B` modulo the magnitude for the remainders of long dividends, when it is
     /// one limb, 2 or more.
     powers: Option<Powers>,
+    /// The inverse of the limbs and the transforms of Newton's method, made by the first division
+    /// that takes it.
+    prepared: OnceLock<Prepared>,
 }
 
 /// Two limbs on 16 bytes: the elements of [`Divisor::limbs`].
@@ -134,6 +146,7 @@ impl Divisor {
             short,
             medium,
             powers,
+            prepared: OnceLock::new(),
         }
     }
 
@@ -252,6 +265,7 @@ impl Divisor {
             n: self.n,
             shift: self.shift,
             v: self.v,
+            pre: ptr::null(),
         }
     }
 
@@ -345,7 +359,12 @@ impl Divisor {
         }
         let nx = x.significant.div_ceil(8).max(self.n);
         let need = working_memory(nx, self.n, want);
-        let (y, negative_y) = (self.normal(), self.negative);
+        let (mut y, negative_y) = (self.normal(), self.negative);
+        if self.n >= 3 && mu_prepared(nx + 1, self.n) {
+            // SAFETY: `n >= 3`, and the limbs at `y.d` are the divisor's, normalized, valid for
+            // reads while `self` lives, which keeps what is prepared from them.
+            y.pre = self.prepared.get_or_init(|| unsafe { prepare(y.d, y.n) });
+        }
         let compute = |s: *mut MaybeUninit<u64>| {
             // SAFETY: the working memory holds `need` limbs; the rest as the caller guarantees.
             unsafe {
