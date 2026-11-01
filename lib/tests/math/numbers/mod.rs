@@ -15,6 +15,7 @@ mod number;
 mod pow;
 mod prim;
 mod prime;
+mod quadratic;
 mod radix;
 mod root;
 mod shift;

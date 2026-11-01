@@ -53,6 +53,8 @@
 //! power of a number modulo another by [`Number::pow_mod`], whose result is Euclid's remainder, never
 //! negative. [`Number::is_probable_prime`] tells whether a number is prime by the Baillie–PSW test,
 //! exact below `2^64`, and [`Number::next_prime`] gives the next probable prime.
+//! [`Number::jacobi`] gives the Jacobi symbol, and [`Number::sqrt_mod`] a square root modulo an odd
+//! prime.
 
 mod add;
 mod bits;
@@ -69,11 +71,15 @@ mod number;
 mod pow;
 mod prim;
 mod prime;
+mod quadratic;
 mod radix;
 mod root;
 mod shift;
 mod sign;
 mod sub;
+
+pub(crate) use mul::basecase;
+pub(crate) use pow::montgomery::{redc_inverse, redc_limbs};
 
 pub use byte_order::ByteOrder;
 pub use convert::TryFromNumberError;

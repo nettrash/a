@@ -118,3 +118,9 @@ struct MathPow;
 
 #[doc = include_str!("../docs/math/prime.md")]
 struct MathPrime;
+
+#[doc = include_str!("../docs/math/quadratic.md")]
+struct MathQuadratic;
+
+#[doc = include_str!("../docs/math/ec.md")]
+struct MathEc;

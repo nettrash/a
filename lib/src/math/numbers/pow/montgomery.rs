@@ -284,6 +284,36 @@ impl Ring for Montgomery {
     }
 }
 
+/// `-1/m mod B^2` for the odd `m0 + m1 B`, the low limb first, as [`redc_limbs`] takes it.
+pub(crate) fn redc_inverse(m0: u64, m1: u64) -> [u64; 2] {
+    let v = binvert_limb(m0);
+    let c = ((u128::from(m0) * u128::from(v)) >> 64) as u64;
+    let v1 = c
+        .wrapping_add(m1.wrapping_mul(v))
+        .wrapping_mul(v)
+        .wrapping_neg();
+    [v.wrapping_neg(), !v1]
+}
+
+/// The kernel's REDC, for the curves' fields: sets the `n` limbs at `r` to `u / B^n mod m`, below
+/// `B^n`, less `m` when it returns `true`, for the `2n` limbs at `u`, below `B^n m`, which it
+/// clobbers, with `minv` from [`redc_inverse`].
+///
+/// # Safety
+///
+/// `n >= 1`; the limbs must be valid, `r` apart from `u`, `m` apart from both.
+#[inline(always)]
+pub(crate) unsafe fn redc_limbs(
+    r: *mut u64,
+    u: *mut u64,
+    m: *const u64,
+    n: usize,
+    minv: [u64; 2],
+) -> bool {
+    // SAFETY: as the caller guarantees.
+    unsafe { redc(r, u, m, n, minv) }
+}
+
 /// REDC by the kernel: sets the `n` limbs at `r` to `u / R mod m`, below `R`, for the `2n` limbs at
 /// `u`, below `R m`, which it clobbers; the kernel's result, below `R + m`, less `m` when it carries
 /// out of the `n` limbs.
