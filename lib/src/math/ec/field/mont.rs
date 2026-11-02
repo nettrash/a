@@ -2,6 +2,8 @@
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 use super::aarch64::{mont_add_4, mont_add_6, mont_sub_4, mont_sub_6};
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+use super::same;
 use super::{Field, array_of, number_of};
 use crate::math::numbers::{Number, basecase, redc_inverse, redc_limbs};
 use core::hint::select_unpredictable;
@@ -213,23 +215,10 @@ impl<const N: usize> Field for Mont<N> {
     #[inline(always)]
     fn add(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-        if N == 4 || N == 6 {
-            let mut r = MaybeUninit::<[u64; N]>::uninit();
-            let (p, a, b, m) = (
-                r.as_mut_ptr().cast(),
-                a.as_ptr(),
-                b.as_ptr(),
-                self.m.as_ptr(),
-            );
-            // SAFETY: each array holds the `N` limbs its kernel takes, all of which it writes.
-            return unsafe {
-                if N == 4 {
-                    mont_add_4(p, a, b, m);
-                } else {
-                    mont_add_6(p, a, b, m);
-                }
-                r.assume_init()
-            };
+        match N {
+            4 => return *same(&mont_add_4(same(a), same(b), same(&self.m))),
+            6 => return *same(&mont_add_6(same(a), same(b), same(&self.m))),
+            _ => {}
         }
         let (s, carry) = add_n(a, b);
         let (d, borrow) = sub_n(&s, &self.m);
@@ -239,23 +228,10 @@ impl<const N: usize> Field for Mont<N> {
     #[inline(always)]
     fn sub(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-        if N == 4 || N == 6 {
-            let mut r = MaybeUninit::<[u64; N]>::uninit();
-            let (p, a, b, m) = (
-                r.as_mut_ptr().cast(),
-                a.as_ptr(),
-                b.as_ptr(),
-                self.m.as_ptr(),
-            );
-            // SAFETY: as in `add`.
-            return unsafe {
-                if N == 4 {
-                    mont_sub_4(p, a, b, m);
-                } else {
-                    mont_sub_6(p, a, b, m);
-                }
-                r.assume_init()
-            };
+        match N {
+            4 => return *same(&mont_sub_4(same(a), same(b), same(&self.m))),
+            6 => return *same(&mont_sub_6(same(a), same(b), same(&self.m))),
+            _ => {}
         }
         let (d, borrow) = sub_n(a, b);
         let (s, _) = add_n(&d, &self.m);

@@ -103,8 +103,8 @@ fn bits_at(k: &[u64], at: usize, n: u32) -> u64 {
 
 /// The width of the non-adjacent form for a scalar of `bits` bits: the one that minimizes the
 /// `2^(w - 2)` additions of the table and the `bits / (w + 1)` of the product. Measured on an Apple
-/// M4 Max, a product on Ed25519 took 70,700, 69,300 and 70,500 cycles for widths 4, 5 and 6, on
-/// P-384 385,000, 378,000 and 383,000, and on P-521 656,000, 649,000 and 652,000.
+/// M4 Max, a product on P-256 took 86,000, 85,000 and 89,000 cycles for widths 4, 5 and 6, on P-384
+/// 327,000, 314,000 and 321,000, and on P-521 457,000, 452,000 and 452,000.
 pub(super) fn window(bits: usize) -> u32 {
     match bits {
         0..=23 => 2,
@@ -194,9 +194,9 @@ pub(super) fn mul<G: Group + ?Sized>(g: &G, p: &G::Proj, k: &[u64], negative: bo
 }
 
 /// From this many terms [`multi_mul`] takes Pippenger's method instead of Straus's: measured on an
-/// Apple M4 Max on P-256, 64 terms took 2.0 million cycles by Straus's and 2.25 by Pippenger's, 128
-/// took 3.8 and 3.7, and 256 took 7.6 and 6.3.
-const PIPPENGER: usize = 128;
+/// Apple M4 Max on P-256, 64 terms took 1.4 million cycles either way, 96 took 2.10 million by
+/// Straus's and 1.94 by Pippenger's, and 112 took 2.40 and 2.19.
+const PIPPENGER: usize = 64;
 
 /// The sum of `k p`, for the magnitudes `k` with their signs and the points `p`.
 pub(super) fn multi_mul<G: Group + ?Sized>(g: &G, terms: &[(&[u64], bool, G::Proj)]) -> G::Proj {
@@ -240,11 +240,11 @@ fn straus<G: Group + ?Sized>(g: &G, terms: &[(&[u64], bool, G::Proj)]) -> G::Pro
     r
 }
 
-/// The width of Pippenger's windows for `n` terms, `log2 n - 2`, as each window costs an addition
-/// per term and two per bucket: measured on an Apple M4 Max on P-256, the best widths were 6 for 256
-/// terms, 8 for 1,024 and 10 for 4,096.
+/// The width of Pippenger's windows for `n` terms, `log2 n - 1`, as each window costs an addition
+/// per term and two per bucket: measured on an Apple M4 Max on P-256, a bit wider than `log2 n - 2`
+/// took 8 % less time for 128 terms, 5 % for 256 and 512, and as much for 1,024 and 4,096.
 fn bucket_bits(n: usize) -> u32 {
-    (usize::BITS - n.leading_zeros()).saturating_sub(3).max(2)
+    (usize::BITS - n.leading_zeros()).saturating_sub(2).max(2)
 }
 
 /// The digit of the signed window at bit `at` of `k`, `c` bits wide, with the `carry` from the
@@ -321,9 +321,9 @@ pub struct Table {
 }
 
 /// The window of a table for scalars of `bits` bits: each window costs an addition in a product, and
-/// each bit of width doubles the table. Measured on an Apple M4 Max, Ed25519's generator took 10,600,
-/// 9,100 and 8,100 cycles for widths 6, 7 and 8, and P-521's 117,000, 99,000 and 89,000; at width 8
-/// a table takes 300 KiB on P-256 and 1.3 MiB on P-521.
+/// each bit of width doubles the table. Measured on an Apple M4 Max, P-256's generator took 12,200
+/// and 10,800 cycles for widths 7 and 8, and P-521's 69,700 and 59,500; at width 8 a table takes
+/// 300 KiB on P-256 and 1.3 MiB on P-521.
 fn table_width(bits: usize) -> u32 {
     match bits {
         0..=63 => 4,

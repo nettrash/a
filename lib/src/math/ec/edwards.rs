@@ -1,7 +1,7 @@
 //! Twisted Edwards curves, `a x^2 + y^2 = 1 + d x^2 y^2`.
 
 use super::curve::{Arithmetic, Curve, CurveError, choose_root};
-use super::field::{Base, Field, invert_all, sqrt, with_prime};
+use super::field::{Base, Field, invert_all, sqrt_ratio, with_prime};
 use super::group::{Coordinates, Group};
 use super::montgomery::Montgomery;
 use super::point::Point;
@@ -456,7 +456,7 @@ impl<F: Field> Edw<'_, F> {
         let yy = f.sqr(y);
         let u = f.sub(&yy, &f.one());
         let v = f.sub(&f.mul(&self.d, &yy), &self.a);
-        sqrt(f, base.sqrt_plan(), &f.mul(&u, &f.invert(&v)?))
+        sqrt_ratio(f, base.sqrt_plan(), &u, &v)
     }
 }
 

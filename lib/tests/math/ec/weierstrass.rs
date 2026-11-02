@@ -167,6 +167,13 @@ fn primes_just_below_a_power_of_two() {
             (383, 187),
             (521, 1),
             (512, 569),
+            // The largest `c` the folds take, below `2^(62 - s)`, so that the `f` a carry or a
+            // borrow brings back carries or borrows once more about one time in four.
+            (256, 0x3fff_ffff_ffff_fe33),
+            (255, 0x1fff_ffff_ffff_fff5),
+            (384, 0x3fff_ffff_ffff_ffb9),
+            (576, 0x3fff_ffff_ffff_ffb9),
+            (575, 0x1fff_ffff_ffff_fde9),
         ]
     };
     for &(k, c) in shapes {
@@ -366,7 +373,7 @@ fn many_products_at_once() {
     let mut r = Rng(0x7777_1234_ABCD_EF01);
     let (curve, _, x) = random_curve(&p, &mut r);
     let g = curve.lift(&x, false).unwrap();
-    for len in [0usize, 1, 2, 3, 31, 32, 33, 100] {
+    for len in [0usize, 1, 2, 3, 31, 32, 33, 63, 64, 65, 100, 130] {
         if cfg!(miri) && len > 33 {
             continue;
         }

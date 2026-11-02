@@ -60,6 +60,29 @@ fn small_curves_exhaustively() {
     }
 }
 
+#[test]
+fn every_point_lifts() {
+    // Primes 5 and 1 modulo 8 and 3 modulo 4, the three ways to the square root of the ratio
+    // `x^2 = (y^2 - 1) / (d y^2 - a)`.
+    for &(a, d, p) in &[(1, 2, 13), (-1, 2, 29), (4, 3, 17), (-1, 3, 41), (1, 2, 19)] {
+        let curve = Edwards::new(&n(a), &n(d), &n(p)).unwrap();
+        let points = all_points(a, d, p);
+        let mut lifted = 0;
+        for y in 0..p {
+            for odd in [false, true] {
+                if let Some(q) = curve.lift(&n(y), odd) {
+                    let (qx, qy) = q.coordinates().unwrap();
+                    assert_eq!((qx.bit(0), &qy), (odd, &n(y)));
+                    assert!(points.contains(&(qx, qy)));
+                    lifted += 1;
+                }
+            }
+        }
+        // Each point once: `x` and `-x` have different parities, and `0` is even.
+        assert_eq!(lifted, points.len());
+    }
+}
+
 /// A complete curve modulo `p`, with `a = -1` or not.
 fn random_curve(p: &Number, minus_one: bool, r: &mut Rng) -> (Edwards, Number, Number) {
     loop {

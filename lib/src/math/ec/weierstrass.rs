@@ -395,33 +395,36 @@ impl<F: Field> Group for Wei<'_, F> {
 
     fn double(&self, p: &Jacobian<F::E>) -> Jacobian<F::E> {
         let f = self.f;
-        let z3 = f.twice(&f.mul(&p.y, &p.z));
-        let (x3, y3) = match self.shape {
-            // dbl-2009-l: 2M + 5S.
+        let (x3, y3, z3) = match self.shape {
+            // dbl-2009-l with `2 Y^2` for its `B`, which gives `4 X Y^2` by a product and `8 Y^4`
+            // by a square: 3M + 4S and 10 additions, against 2M + 5S and 14, as an addition costs
+            // about a quarter of a product.
             Shape::Zero => {
+                let b2 = f.twice(&f.sqr(&p.y));
                 let a = f.sqr(&p.x);
-                let b = f.sqr(&p.y);
-                let c = f.sqr(&b);
-                let d = f.twice(&f.sub(&f.sub(&f.sqr(&f.add(&p.x, &b)), &a), &c));
+                let z3 = f.twice(&f.mul(&p.y, &p.z));
+                let c8 = f.twice(&f.sqr(&b2));
                 let e = f.add(&f.twice(&a), &a);
+                let d = f.twice(&f.mul(&p.x, &b2));
                 let x3 = f.sub(&f.sqr(&e), &f.twice(&d));
-                let c8 = f.twice(&f.twice(&f.twice(&c)));
-                (x3.clone(), f.sub(&f.mul(&e, &f.sub(&d, &x3)), &c8))
+                (x3.clone(), f.sub(&f.mul(&e, &f.sub(&d, &x3)), &c8), z3)
             }
-            // dbl-2001-b: 3M + 5S.
+            // dbl-2001-b with `2 Y^2` for its `gamma` in the same way: 4M + 4S and 12 additions.
             Shape::MinusThree => {
+                let g2 = f.twice(&f.sqr(&p.y));
                 let delta = f.sqr(&p.z);
-                let gamma = f.sqr(&p.y);
-                let beta = f.mul(&p.x, &gamma);
-                let t = f.mul(&f.sub(&p.x, &delta), &f.add(&p.x, &delta));
+                let z3 = f.twice(&f.mul(&p.y, &p.z));
+                let (xp, xm) = (f.add(&p.x, &delta), f.sub(&p.x, &delta));
+                let g8 = f.twice(&f.sqr(&g2));
+                let t = f.mul(&xp, &xm);
+                let b4 = f.twice(&f.mul(&p.x, &g2));
                 let alpha = f.add(&f.twice(&t), &t);
-                let b4 = f.twice(&f.twice(&beta));
                 let x3 = f.sub(&f.sqr(&alpha), &f.twice(&b4));
-                let g8 = f.twice(&f.twice(&f.twice(&f.sqr(&gamma))));
-                (x3.clone(), f.sub(&f.mul(&alpha, &f.sub(&b4, &x3)), &g8))
+                (x3.clone(), f.sub(&f.mul(&alpha, &f.sub(&b4, &x3)), &g8), z3)
             }
             // dbl-2007-bl.
             Shape::General => {
+                let z3 = f.twice(&f.mul(&p.y, &p.z));
                 let xx = f.sqr(&p.x);
                 let yy = f.sqr(&p.y);
                 let yyyy = f.sqr(&yy);
@@ -430,7 +433,7 @@ impl<F: Field> Group for Wei<'_, F> {
                 let m = f.add(&f.add(&f.twice(&xx), &xx), &f.mul(&self.a, &f.sqr(&zz)));
                 let x3 = f.sub(&f.sqr(&m), &f.twice(&s));
                 let y8 = f.twice(&f.twice(&f.twice(&yyyy)));
-                (x3.clone(), f.sub(&f.mul(&m, &f.sub(&s, &x3)), &y8))
+                (x3.clone(), f.sub(&f.mul(&m, &f.sub(&s, &x3)), &y8), z3)
             }
         };
         Jacobian {
@@ -451,7 +454,7 @@ impl<F: Field> Group for Wei<'_, F> {
         }
     }
 
-    // add-2007-bl: 11M + 5S.
+    // add-1998-cmo-2: 12M + 4S and 7 additions, against add-2007-bl's 11M + 5S and 11.
     fn add(&self, p: &Jacobian<F::E>, q: &Jacobian<F::E>) -> Jacobian<F::E> {
         let f = self.f;
         if f.is_zero(&p.z) {
@@ -464,10 +467,13 @@ impl<F: Field> Group for Wei<'_, F> {
         let z2z2 = f.sqr(&q.z);
         let u1 = f.mul(&p.x, &z2z2);
         let u2 = f.mul(&q.x, &z1z1);
-        let s1 = f.mul(&f.mul(&p.y, &q.z), &z2z2);
-        let s2 = f.mul(&f.mul(&q.y, &p.z), &z1z1);
+        let y1z2 = f.mul(&p.y, &q.z);
+        let y2z1 = f.mul(&q.y, &p.z);
+        let z12 = f.mul(&p.z, &q.z);
         let h = f.sub(&u2, &u1);
-        let r = f.twice(&f.sub(&s2, &s1));
+        let s1 = f.mul(&y1z2, &z2z2);
+        let s2 = f.mul(&y2z1, &z1z1);
+        let r = f.sub(&s2, &s1);
         if f.is_zero(&h) {
             return if f.is_zero(&r) {
                 self.double(p)
@@ -475,20 +481,10 @@ impl<F: Field> Group for Wei<'_, F> {
                 self.identity()
             };
         }
-        let i = f.sqr(&f.twice(&h));
-        let j = f.mul(&h, &i);
-        let v = f.mul(&u1, &i);
-        let x3 = f.sub(&f.sub(&f.sqr(&r), &j), &f.twice(&v));
-        let y3 = f.sub(&f.mul(&r, &f.sub(&v, &x3)), &f.twice(&f.mul(&s1, &j)));
-        let z3 = f.mul(&f.sub(&f.sub(&f.sqr(&f.add(&p.z, &q.z)), &z1z1), &z2z2), &h);
-        Jacobian {
-            x: x3,
-            y: y3,
-            z: z3,
-        }
+        self.chord(&u1, &s1, &h, &r, &z12)
     }
 
-    // madd-2007-bl: 7M + 4S.
+    // madd-2004-hmv: 8M + 3S and 7 additions, against madd-2007-bl's 7M + 4S and 13.
     fn add_cached(&self, p: &Jacobian<F::E>, c: &Affine<F::E>) -> Jacobian<F::E> {
         let f = self.f;
         if c.infinity {
@@ -499,9 +495,10 @@ impl<F: Field> Group for Wei<'_, F> {
         }
         let z1z1 = f.sqr(&p.z);
         let u2 = f.mul(&c.x, &z1z1);
-        let s2 = f.mul(&f.mul(&c.y, &p.z), &z1z1);
+        let z1c = f.mul(&z1z1, &p.z);
         let h = f.sub(&u2, &p.x);
-        let r = f.twice(&f.sub(&s2, &p.y));
+        let s2 = f.mul(&z1c, &c.y);
+        let r = f.sub(&s2, &p.y);
         if f.is_zero(&h) {
             return if f.is_zero(&r) {
                 self.double(p)
@@ -509,13 +506,25 @@ impl<F: Field> Group for Wei<'_, F> {
                 self.identity()
             };
         }
-        let hh = f.sqr(&h);
-        let i = f.twice(&f.twice(&hh));
-        let j = f.mul(&h, &i);
-        let v = f.mul(&p.x, &i);
-        let x3 = f.sub(&f.sub(&f.sqr(&r), &j), &f.twice(&v));
-        let y3 = f.sub(&f.mul(&r, &f.sub(&v, &x3)), &f.twice(&f.mul(&p.y, &j)));
-        let z3 = f.sub(&f.sub(&f.sqr(&f.add(&p.z, &h)), &z1z1), &hh);
+        self.chord(&p.x, &p.y, &h, &r, &p.z)
+    }
+}
+
+impl<F: Field> Wei<'_, F> {
+    /// The sum of two points of different `x`, from the first one's `X` and `Y` brought to the
+    /// common `Z^2` and `Z^3` as `u1` and `s1`, the differences `h` of the `X`s and `r` of the `Y`s,
+    /// and the `Z` that the sum's is `h` times.
+    #[inline(always)]
+    fn chord(&self, u1: &F::E, s1: &F::E, h: &F::E, r: &F::E, z: &F::E) -> Jacobian<F::E> {
+        let f = self.f;
+        let hh = f.sqr(h);
+        let rr = f.sqr(r);
+        let hhh = f.mul(&hh, h);
+        let v = f.mul(u1, &hh);
+        let z3 = f.mul(z, h);
+        let x3 = f.sub(&f.sub(&rr, &hhh), &f.twice(&v));
+        let s1hhh = f.mul(s1, &hhh);
+        let y3 = f.sub(&f.mul(r, &f.sub(&v, &x3)), &s1hhh);
         Jacobian {
             x: x3,
             y: y3,

@@ -101,24 +101,69 @@ pub(super) trait Field {
     fn modulus(&self) -> &Number;
 }
 
-/// `x` to the power of the bits of `e`, the least significant limb first, by a sliding window of
-/// up to five bits: a product for each window of odd value, whose runs of zeros and ones the
-/// exponents of square roots are full of.
+/// `x` to the power of the bits of `e`, the least significant limb first.
+///
+/// The exponents of square roots modulo the primes of the named curves are mostly long runs of
+/// ones, `2^252 - 3` for Curve25519's and `2^519 - 1` for P-521's, so a run is appended by
+/// products by `x^(2^j - 1)` for powers of two `j`, which the run at the top builds by doubling,
+/// `x^(2^(2 j) - 1) = (x^(2^j - 1))^(2^j) x^(2^j - 1)`: Curve25519's takes 13 products, against 66
+/// by windows alone. The rest goes by a sliding window of up to five bits, a product for each
+/// window of odd value, whenever that takes fewer products than such a run.
 pub(super) fn pow<F: Field>(f: &F, x: &F::E, e: &[u64]) -> F::E {
-    let x2 = f.sqr(x);
-    let mut table = Vec::with_capacity(16);
-    table.push(x.clone());
-    for i in 1..16 {
-        let t = f.mul(&table[i - 1], &x2);
-        table.push(t);
-    }
     let bit = |i: usize| (e[i / 64] >> (i % 64)) & 1 != 0;
     let mut i = bit_length_of(e);
-    let mut r: Option<F::E> = None;
+    if i == 0 {
+        return f.one();
+    }
+    // The run of ones from the top bit, and `ones[k] = x^(2^(2^k) - 1)` for `2^k` up to it.
+    let run_at = |i: usize| (0..i).take_while(|&j| bit(i - 1 - j)).count();
+    let top = run_at(i);
+    let mut ones = vec![x.clone()];
+    while 2 << (ones.len() - 1) <= top {
+        let half = ones[ones.len() - 1].clone();
+        let mut t = half.clone();
+        for _ in 0..1usize << (ones.len() - 1) {
+            t = f.sqr(&t);
+        }
+        ones.push(f.mul(&t, &half));
+    }
+    // A run of `n` ones appended to `r`, the longest pieces first, and how many products that is.
+    let pieces = |mut n: usize| {
+        let mut count = 0;
+        while n > 0 {
+            n -= 1 << (usize::BITS - 1 - n.leading_zeros()).min(ones.len() as u32 - 1);
+            count += 1;
+        }
+        count
+    };
+    let append = |mut r: F::E, mut n: usize| {
+        while n > 0 {
+            let k = (usize::BITS - 1 - n.leading_zeros()).min(ones.len() as u32 - 1) as usize;
+            for _ in 0..1usize << k {
+                r = f.sqr(&r);
+            }
+            r = f.mul(&r, &ones[k]);
+            n -= 1 << k;
+        }
+        r
+    };
+    let first = 1 << (ones.len() - 1);
+    let mut r = append(ones[ones.len() - 1].clone(), top - first);
+    i -= top;
+    // The odd powers `x, x^3, ..., x^31` of the windows, made when one is first needed.
+    let mut table: Vec<F::E> = vec![x.clone()];
     while i > 0 {
         if !bit(i - 1) {
-            r = r.map(|v| f.sqr(&v));
+            r = f.sqr(&r);
             i -= 1;
+            continue;
+        }
+        let run = run_at(i);
+        // With pieces of 16 ones and more, a window's table costs more than the rest of such an
+        // exponent: secp256k1's ends in `1011`.
+        if pieces(run) < run.div_ceil(5) || (ones.len() > 4 && table.len() == 1) {
+            r = append(r, run);
+            i -= run;
             continue;
         }
         // The window from this bit down to the lowest set one of the next five.
@@ -130,18 +175,20 @@ pub(super) fn pow<F: Field>(f: &F, x: &F::E, e: &[u64]) -> F::E {
         for j in (low..i).rev() {
             d = 2 * d + usize::from(bit(j));
         }
-        r = Some(match r {
-            Some(mut v) => {
-                for _ in low..i {
-                    v = f.sqr(&v);
-                }
-                f.mul(&v, &table[d / 2])
+        if d > 1 && table.len() == 1 {
+            let x2 = f.sqr(x);
+            for k in 1..16 {
+                let t = f.mul(&table[k - 1], &x2);
+                table.push(t);
             }
-            None => table[d / 2].clone(),
-        });
+        }
+        for _ in low..i {
+            r = f.sqr(&r);
+        }
+        r = f.mul(&r, &table[d / 2]);
         i = low;
     }
-    r.unwrap_or_else(|| f.one())
+    r
 }
 
 /// The bits of the magnitude `e`.
@@ -179,28 +226,9 @@ pub(super) fn invert_all<F: Field>(f: &F, x: &mut [F::E]) {
 pub struct SqrtPlan {
     s: u32,
     half: Vec<u64>,
-    /// `z^q` for a non-square `z`, a generator of the group of order `2^s`.
-    c: Number,
-}
-
-impl SqrtPlan {
-    /// The plan for the odd prime `p`.
-    fn new(p: &Number) -> SqrtPlan {
-        let one = Number::new_from_u8(1, p.byte_order);
-        let p1 = p - &one;
-        let s = p1.trailing_zeros().unwrap_or(0);
-        let q = &p1 >> s as usize;
-        let half = (&q - &one) >> 1usize;
-        let mut z = Number::new_from_u8(2, p.byte_order);
-        while s > 1 && z.jacobi(p) != -1 {
-            z = &z + &one;
-        }
-        SqrtPlan {
-            s: s as u32,
-            half: limbs_of(&half),
-            c: z.pow_mod(&q, p),
-        }
-    }
+    /// `z^q` for a non-square `z`, a generator of the group of order `2^s`, stored as the field
+    /// stores its elements.
+    c: Vec<u64>,
 }
 
 /// A square root of `a`, or `None` when it has none, by Tonelli and Shanks (see
@@ -216,7 +244,7 @@ pub(super) fn sqrt<F: Field>(f: &F, plan: &SqrtPlan, a: &F::E) -> Option<F::E> {
     if plan.s == 1 {
         return f.equal(&b, &one).then_some(r);
     }
-    let mut c = f.enter(&plan.c);
+    let mut c = f.load(&plan.c);
     let mut m = plan.s;
     while !f.equal(&b, &one) {
         let mut t = 0;
@@ -238,6 +266,32 @@ pub(super) fn sqrt<F: Field>(f: &F, plan: &SqrtPlan, a: &F::E) -> Option<F::E> {
         m = t;
     }
     Some(r)
+}
+
+/// A square root of `u / v`, for `v` not zero, or `None` when it has none. For primes 3 modulo 4
+/// and 5 modulo 8 it takes one power and no inversion: `u v (u v^3)^((p - 3) / 4)`, and
+/// `u v^3 (u v^7)^((p - 5) / 8)`, whose square is `u / v` or `-u / v`, the second fixed by a square
+/// root of -1; other primes take an inversion and [`sqrt`].
+pub(super) fn sqrt_ratio<F: Field>(f: &F, plan: &SqrtPlan, u: &F::E, v: &F::E) -> Option<F::E> {
+    if plan.s > 2 {
+        return sqrt(f, plan, &f.mul(u, &f.invert(v)?));
+    }
+    let v2 = f.sqr(v);
+    let v3 = f.mul(&v2, v);
+    let (front, inner) = if plan.s == 2 {
+        let uv3 = f.mul(u, &v3);
+        let uv7 = f.mul(&uv3, &f.sqr(&v2));
+        (uv3, uv7)
+    } else {
+        (f.mul(u, v), f.mul(u, &v3))
+    };
+    let x = f.mul(&front, &pow(f, &inner, &plan.half));
+    let vxx = f.mul(v, &f.sqr(&x));
+    if f.equal(&vxx, u) {
+        return Some(x);
+    }
+    // `z^q` for a non-square `z` has the order `2^s = 4`: its square is -1.
+    (plan.s == 2 && f.equal(&vxx, &f.neg(u))).then(|| f.mul(&x, &f.load(&plan.c)))
 }
 
 /// The field of a curve, by the shape of its prime. A curve holds one for as long as it lives, so
@@ -357,7 +411,28 @@ impl Base {
 
     /// What square roots in this field need.
     pub(super) fn sqrt_plan(&self) -> &SqrtPlan {
-        self.sqrt.get_or_init(|| SqrtPlan::new(&self.p))
+        self.sqrt.get_or_init(|| {
+            let p = &self.p;
+            let one = Number::new_from_u8(1, p.byte_order);
+            let p1 = p - &one;
+            let s = p1.trailing_zeros().unwrap_or(0);
+            let q = &p1 >> s as usize;
+            let half = (&q - &one) >> 1usize;
+            let mut z = Number::new_from_u8(2, p.byte_order);
+            while s > 1 && z.jacobi(p) != -1 {
+                z = &z + &one;
+            }
+            let c = z.pow_mod(&q, p);
+            SqrtPlan {
+                s: s as u32,
+                half: limbs_of(&half),
+                c: with_prime!(&self.prime, f => {
+                    let mut r = vec![0; f.limbs()];
+                    f.store(&f.enter(&c), &mut r);
+                    r
+                }),
+            }
+        })
     }
 
     /// The bytes an element takes.
@@ -405,6 +480,13 @@ pub(super) fn number_of(x: &[u64], order: ByteOrder) -> Number {
         n.byte_order = ByteOrder::BigEndian;
     }
     n
+}
+
+/// `x` as the array of `M` limbs it is, in the branches of a field generic in `N` for `N = M`.
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+#[inline(always)]
+fn same<const N: usize, const M: usize>(x: &[u64; N]) -> &[u64; M] {
+    x.as_slice().try_into().unwrap_or_else(|_| unreachable!())
 }
 
 /// The limbs of the number in `[0, p)`, `N` of them.

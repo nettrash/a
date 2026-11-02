@@ -2,8 +2,6 @@
 
 use super::{Field, Mont};
 use crate::math::numbers::Number;
-#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-use core::mem::MaybeUninit;
 
 /// The field of a NIST prime: the arithmetic of [`Mont`], whose elements are in the same form, with
 /// the products of the kernels where a target has them.
@@ -26,14 +24,7 @@ macro_rules! products {
             #[inline(always)]
             fn product(&self, a: &[u64; $n], b: &[u64; $n]) -> [u64; $n] {
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-                {
-                    let mut r = MaybeUninit::<[u64; $n]>::uninit();
-                    // SAFETY: each array holds the limbs the kernel takes, and it writes them all.
-                    unsafe {
-                        $mul(r.as_mut_ptr().cast(), a.as_ptr(), b.as_ptr());
-                        r.assume_init()
-                    }
-                }
+                return $mul(a, b);
                 #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
                 self.mont.mul(a, b)
             }
@@ -41,14 +32,7 @@ macro_rules! products {
             #[inline(always)]
             fn square(&self, a: &[u64; $n]) -> [u64; $n] {
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-                {
-                    let mut r = MaybeUninit::<[u64; $n]>::uninit();
-                    // SAFETY: each array holds the limbs the kernel takes, and it writes them all.
-                    unsafe {
-                        $sqr(r.as_mut_ptr().cast(), a.as_ptr());
-                        r.assume_init()
-                    }
-                }
+                return $sqr(a);
                 #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
                 self.mont.sqr(a)
             }

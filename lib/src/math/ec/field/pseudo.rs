@@ -2,8 +2,11 @@
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 use super::aarch64::{
-    p521_mul, pseudo_add_4, pseudo_add_6, pseudo_mul_4, pseudo_sqr_4, pseudo_sub_4, pseudo_sub_6,
+    p521_mul, p521_sqr, pseudo_add_4, pseudo_add_6, pseudo_add_9, pseudo_mul_4, pseudo_sqr_4,
+    pseudo_sub_4, pseudo_sub_6, pseudo_sub_9,
 };
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+use super::same;
 use super::{Field, array_of, number_of};
 use crate::math::numbers::{Number, basecase};
 use core::mem::MaybeUninit;
@@ -71,11 +74,7 @@ impl<const N: usize> Pseudo<N> {
         r
     }
 
-    /// `a + b`, on the targets without kernels.
-    #[cfg_attr(
-        all(target_arch = "aarch64", target_endian = "little", not(miri)),
-        allow(dead_code)
-    )]
+    /// `a + b`, where there is no kernel.
     #[inline(always)]
     fn portable_add(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         // `2^(64 N) = f`, and a second carry leaves less than `f` to add it to.
@@ -86,11 +85,7 @@ impl<const N: usize> Pseudo<N> {
         r
     }
 
-    /// `a - b`, on the targets without kernels.
-    #[cfg_attr(
-        all(target_arch = "aarch64", target_endian = "little", not(miri)),
-        allow(dead_code)
-    )]
+    /// `a - b`, where there is no kernel.
     #[inline(always)]
     fn portable_sub(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         // A borrow took `2^(64 N) = f` too much; a second one leaves too much to borrow a third
@@ -246,13 +241,7 @@ macro_rules! products {
             fn mul(&self, a: &[u64; $n], b: &[u64; $n]) -> [u64; $n] {
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
                 if $n == 4 {
-                    let mut r = MaybeUninit::<[u64; $n]>::uninit();
-                    // SAFETY: each array holds the 4 limbs the kernel takes, all of which it
-                    // writes, and `f < 2^62`.
-                    return unsafe {
-                        pseudo_mul_4(r.as_mut_ptr().cast(), a.as_ptr(), b.as_ptr(), self.f);
-                        r.assume_init()
-                    };
+                    return *same(&pseudo_mul_4(same(a), same(b), self.f));
                 }
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
                 if $n == 9 && self.c == 1 {
@@ -280,19 +269,14 @@ macro_rules! products {
             fn sqr(&self, a: &[u64; $n]) -> [u64; $n] {
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
                 if $n == 4 {
-                    let mut r = MaybeUninit::<[u64; $n]>::uninit();
-                    // SAFETY: as in `mul`.
-                    return unsafe {
-                        pseudo_sqr_4(r.as_mut_ptr().cast(), a.as_ptr(), self.f);
-                        r.assume_init()
-                    };
+                    return *same(&pseudo_sqr_4(same(a), self.f));
                 }
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
                 if $n == 9 && self.c == 1 {
                     let mut r = MaybeUninit::<[u64; $n]>::uninit();
                     // SAFETY: as in `mul`.
                     return unsafe {
-                        p521_mul(r.as_mut_ptr().cast(), a.as_ptr(), a.as_ptr());
+                        p521_sqr(r.as_mut_ptr().cast(), a.as_ptr());
                         r.assume_init()
                     };
                 }
@@ -350,41 +334,24 @@ where
     #[inline(always)]
     fn add(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-        {
-            let mut r = MaybeUninit::<[u64; N]>::uninit();
-            let (p, a, b) = (r.as_mut_ptr().cast(), a.as_ptr(), b.as_ptr());
-            // SAFETY: the fields have 4, 6 or 9 limbs, so each array holds what the kernel takes,
-            // all of which it writes, and `f < 2^62`.
-            unsafe {
-                match N {
-                    4 => pseudo_add_4(p, a, b, self.f),
-                    6 => pseudo_add_6(p, a, b, self.f),
-                    _ => return self.portable_add(&*a.cast(), &*b.cast()),
-                }
-                r.assume_init()
-            }
+        match N {
+            4 => return *same(&pseudo_add_4(same(a), same(b), self.f)),
+            6 => return *same(&pseudo_add_6(same(a), same(b), self.f)),
+            9 => return *same(&pseudo_add_9(same(a), same(b), self.f)),
+            _ => {}
         }
-        #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
         self.portable_add(a, b)
     }
 
     #[inline(always)]
     fn sub(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-        {
-            let mut r = MaybeUninit::<[u64; N]>::uninit();
-            let (p, a, b) = (r.as_mut_ptr().cast(), a.as_ptr(), b.as_ptr());
-            // SAFETY: as in `add`.
-            unsafe {
-                match N {
-                    4 => pseudo_sub_4(p, a, b, self.f),
-                    6 => pseudo_sub_6(p, a, b, self.f),
-                    _ => return self.portable_sub(&*a.cast(), &*b.cast()),
-                }
-                r.assume_init()
-            }
+        match N {
+            4 => return *same(&pseudo_sub_4(same(a), same(b), self.f)),
+            6 => return *same(&pseudo_sub_6(same(a), same(b), self.f)),
+            9 => return *same(&pseudo_sub_9(same(a), same(b), self.f)),
+            _ => {}
         }
-        #[cfg(not(all(target_arch = "aarch64", target_endian = "little", not(miri))))]
         self.portable_sub(a, b)
     }
 

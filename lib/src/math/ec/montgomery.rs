@@ -2,7 +2,7 @@
 
 use super::curve::{Arithmetic, Curve, CurveError, choose_root, sec1_decode, sec1_encode};
 use super::edwards::Edwards;
-use super::field::{Base, Field, sqrt, with_prime};
+use super::field::{Base, Field, sqrt_ratio, with_prime};
 use super::group::{Group, bit_length};
 use super::point::Point;
 use super::weierstrass::{
@@ -238,11 +238,10 @@ macro_rules! with_group {
 use with_group;
 
 impl<F: Field> Mon<'_, F> {
-    /// `(x^3 + A x^2 + x) / B`, the square of `y`.
-    fn right_side(&self, x: &F::E) -> Option<F::E> {
+    /// `x^3 + A x^2 + x`, which is `B y^2`.
+    fn cubic(&self, x: &F::E) -> F::E {
         let f = self.f;
-        let s = f.mul(x, &f.add(&f.mul(x, &f.add(x, &self.a)), &f.one()));
-        Some(f.mul(&s, &f.invert(&self.b)?))
+        f.mul(x, &f.add(&f.mul(x, &f.add(x, &self.a)), &f.one()))
     }
 
     /// The ladder from the `x` coordinate `x1`: the projective `x` of `k P` and of `(k + 1) P`.
@@ -448,10 +447,7 @@ impl Arithmetic for Montgomery {
     fn satisfied(&self, x: &Number, y: &Number) -> bool {
         with_group!(self, g => {
             let f = g.f;
-            match g.right_side(&f.enter(x)) {
-                Some(s) => f.equal(&f.sqr(&f.enter(y)), &s),
-                None => false,
-            }
+            f.equal(&f.mul(&g.b, &f.sqr(&f.enter(y))), &g.cubic(&f.enter(x)))
         })
     }
 
@@ -459,7 +455,7 @@ impl Arithmetic for Montgomery {
         with_group!(self, g => {
             let f = g.f;
             let ex = f.enter(x);
-            let y = sqrt(f, self.base.sqrt_plan(), &g.right_side(&ex)?)?;
+            let y = sqrt_ratio(f, self.base.sqrt_plan(), &g.cubic(&ex), &g.b)?;
             let y = choose_root(f, y, odd)?;
             let mut r = vec![0; 3 * f.limbs()];
             g.store(&g.of_affine(&ex, &y), &mut r);
