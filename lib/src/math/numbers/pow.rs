@@ -52,7 +52,7 @@ mod kernels;
 #[path = "pow/portable.rs"]
 mod kernels;
 pub(super) mod low;
-pub(super) mod montgomery;
+pub(crate) mod montgomery;
 pub(super) mod window;
 
 use super::add::{SMALL, read_small, write_small};
