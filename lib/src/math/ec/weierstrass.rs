@@ -1,7 +1,7 @@
 //! Curves in short Weierstrass form, `y^2 = x^3 + a x + b`.
 
 use super::curve::{Arithmetic, Curve, CurveError, choose_root, sec1_decode, sec1_encode};
-use super::field::{Base, Field, invert_all, limbs_of, number_of, sqrt, with_prime};
+use super::field::{Base, Field, invert_all, limbs_of, number_of, reduced, sqrt, with_prime};
 use super::group::{self, Group, bit_length, odd_multiples, wnaf};
 use crate::math::numbers::Number;
 
@@ -98,8 +98,8 @@ impl Weierstrass {
         if p.is_negative() || *p <= three || !p.is_probable_prime() {
             return Err(CurveError::NotPrime);
         }
-        let a = a.rem_euclid(p);
-        let b = b.rem_euclid(p);
+        let a = reduced(a, p);
+        let b = reduced(b, p);
         let d = (&a * &a * &a * 4u8 + &b * &b * 27u8).rem_euclid(p);
         if d.is_zero() {
             return Err(CurveError::Singular);

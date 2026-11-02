@@ -142,11 +142,13 @@ fn sqrt_mod_of_any_operand() {
         assert_eq!(r.byte_order, order);
         assert_eq!(r, Number::new_from_u32(1024, order));
     }
-    // A composite modulus: no wrong root.
-    let m = n(21);
-    for a in 0..21 {
-        if let Some(r) = n(a).sqrt_mod(&m) {
-            assert_eq!((&r * &r).rem_euclid(&m), n(a));
+    // Composite moduli: no wrong root. Modulo the square of a prime no Jacobi symbol is -1, and
+    // the search for a non-square stops at the prime, as 4 modulo 9 once never did.
+    for m in [21, 9, 25, 45, 49] {
+        for a in 0..m {
+            if let Some(r) = n(a).sqrt_mod(&n(m)) {
+                assert_eq!((&r * &r).rem_euclid(&n(m)), n(a), "{a} modulo {m}");
+            }
         }
     }
 }

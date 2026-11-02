@@ -1,5 +1,5 @@
 use super::common::{Rng, add_e, n, size, times};
-use a::math::ec::{Curve, CurveError, Edwards, Point};
+use a::math::ec::{Curve, CurveError, Edwards, Montgomery, Point};
 use a::math::numbers::{ByteOrder, Number};
 
 /// Every point of `a x^2 + y^2 = 1 + d x^2 y^2` modulo the small prime `p`.
@@ -225,4 +225,25 @@ fn coefficients_and_invariants() {
     assert_eq!(curve.j_invariant(), (n(8) * n(33 * 33 * 33)).rem_euclid(&p));
     assert!(core::ptr::eq(curve.identity().curve(), &curve));
     assert_eq!(curve.modulus(), &p);
+    // Coefficients in the other byte order come back in the prime's.
+    let le = |x| Number::new_from_u32(x, ByteOrder::LittleEndian);
+    let curve = Edwards::new(&le(1 + 30 * 13), &le(2 + 40 * 13), &p).unwrap();
+    for c in [
+        curve.a(),
+        curve.d(),
+        &curve.discriminant(),
+        &curve.j_invariant(),
+    ] {
+        assert_eq!(c.byte_order, ByteOrder::BigEndian);
+    }
+    assert_eq!((curve.a(), curve.d()), (&n(1), &n(2)));
+}
+
+#[test]
+#[should_panic(expected = "the target is not this curve's Montgomery form")]
+fn the_montgomery_target_is_checked() {
+    // `9 y^2 = x^3 + 7 x^2 + x` is this curve's; (0, -1) goes to (0, 0), on every one.
+    let curve = Edwards::new(&n(1), &n(2), &n(13)).unwrap();
+    let other = Montgomery::new(&n(3), &n(2), &n(13)).unwrap();
+    curve.map_to_montgomery(&other, &curve.point(&n(0), &n(12)).unwrap());
 }

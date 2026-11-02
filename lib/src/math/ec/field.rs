@@ -498,6 +498,16 @@ pub(super) fn limbs_of(x: &Number) -> Vec<u64> {
     l
 }
 
+/// `x` modulo `p`, in `p`'s byte order.
+pub(super) fn reduced(x: &Number, p: &Number) -> Number {
+    let mut r = x.rem_euclid(p);
+    if r.byte_order != p.byte_order {
+        r.value.reverse();
+        r.byte_order = p.byte_order;
+    }
+    r
+}
+
 /// The number with the limbs `x`, the least significant first, in the byte order `order`.
 pub(super) fn number_of(x: &[u64], order: ByteOrder) -> Number {
     let mut bytes = Vec::with_capacity(8 * x.len());

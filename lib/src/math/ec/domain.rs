@@ -48,7 +48,7 @@ impl<C: Curve> Domain<C> {
     /// # Errors
     ///
     /// [`CurveError::NotOnCurve`] when `(x, y)` is not on the curve; [`CurveError::WrongOrder`]
-    /// when `order` times it is not the neutral element.
+    /// when `order` is not positive or `order` times it is not the neutral element.
     pub fn new(
         curve: C,
         x: &Number,
@@ -58,7 +58,7 @@ impl<C: Curve> Domain<C> {
     ) -> Result<Domain<C>, CurveError> {
         let generator = {
             let g = curve.point(x, y).map_err(|_| CurveError::NotOnCurve)?;
-            if !(&g * order).is_identity() {
+            if !order.is_positive() || !(&g * order).is_identity() {
                 return Err(CurveError::WrongOrder);
             }
             g.limbs.clone()
@@ -108,14 +108,22 @@ impl<C: Curve> Domain<C> {
         self.mul_generator(a) + point * b
     }
 
-    /// Whether `point` is in the generator's subgroup: `order` times it is the neutral element.
+    /// Whether `point` is on this curve and `order` times it is the neutral element. When the order
+    /// is coprime to the cofactor, as on every [named curve](super::named), those are the points
+    /// of the generator's subgroup. Otherwise more can be: on `y^2 = x^3 - x` modulo 5, with the
+    /// generator `(0, 0)` of order 2 and the cofactor 4, so is `(1, 0)`.
     pub fn in_subgroup(&self, point: &Point<'_, C>) -> bool {
-        (point * &self.order).is_identity()
+        point.belongs_to(&self.curve) && (point * &self.order).is_identity()
     }
 
-    /// `point` times the cofactor, which lands in the generator's subgroup when that is the
-    /// curve's largest prime-order one.
+    /// `point` times the cofactor, which lands in the generator's subgroup when the order is
+    /// coprime to the cofactor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `point` is not on this curve.
     pub fn clear_cofactor<'c>(&self, point: &Point<'c, C>) -> Point<'c, C> {
+        point.check_curve(&self.curve);
         point * &self.cofactor
     }
 

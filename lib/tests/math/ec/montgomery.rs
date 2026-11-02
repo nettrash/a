@@ -1,5 +1,5 @@
 use super::common::{Affine, Rng, add_m, hex, n, size, times};
-use a::math::ec::{Curve, CurveError, Montgomery, Point};
+use a::math::ec::{Curve, CurveError, Edwards, Montgomery, Point, Weierstrass};
 use a::math::numbers::{ByteOrder, Number};
 
 /// Every point of `B y^2 = x^3 + A x^2 + x` modulo the small prime `p`.
@@ -192,6 +192,44 @@ fn coefficients_and_invariants() {
     assert_eq!(curve.discriminant(), (n(16 * 32) * b6).rem_euclid(&p));
     let want = (n(256 * 33 * 33 * 33) * n(32).mod_inverse(&p).unwrap()).rem_euclid(&p);
     assert_eq!(curve.j_invariant(), want);
+    // Coefficients in the other byte order come back in the prime's.
+    let le = |x| Number::new_from_u32(x, ByteOrder::LittleEndian);
+    let curve = Montgomery::new(&le(6 + 3 * 101), &le(3 + 5 * 101), &p).unwrap();
+    for c in [
+        curve.a(),
+        curve.b(),
+        &curve.discriminant(),
+        &curve.j_invariant(),
+    ] {
+        assert_eq!(c.byte_order, ByteOrder::BigEndian);
+    }
+    assert_eq!((curve.a(), curve.b()), (&n(6), &n(3)));
+}
+
+#[test]
+#[should_panic(expected = "the target is not this curve's Weierstrass form")]
+fn the_weierstrass_target_is_checked() {
+    let curve = Montgomery::new(&n(6), &n(1), &n(101)).unwrap();
+    let other = Weierstrass::new(&n(2), &n(3), &n(101)).unwrap();
+    curve.map_to_weierstrass(&other, &curve.identity());
+}
+
+#[test]
+#[should_panic(expected = "the target is not this curve's Edwards form")]
+fn the_edwards_target_is_checked() {
+    // `9 x^2 + y^2 = 1 + 7 x^2 y^2` is this curve's; (0, 0) goes to (0, -1), on every one.
+    let curve = Montgomery::new(&n(3), &n(2), &n(13)).unwrap();
+    let other = Edwards::new(&n(1), &n(8), &n(13)).unwrap();
+    curve.map_to_edwards(&other, &curve.point(&n(0), &n(0)).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "the points are on different curves")]
+fn mapping_a_point_of_another_curve_panics() {
+    let curve = Montgomery::new(&n(3), &n(2), &n(13)).unwrap();
+    let edwards = curve.to_edwards().unwrap();
+    let other = Montgomery::new(&n(3), &n(5), &n(13)).unwrap();
+    curve.map_to_edwards(&edwards, &other.point(&n(0), &n(0)).unwrap());
 }
 
 #[test]

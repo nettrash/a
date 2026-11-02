@@ -53,11 +53,17 @@ impl<'c, C: Curve> Point<'c, C> {
         Point { curve, limbs }
     }
 
+    /// Whether the point is on `curve`: that value, or one of the same curve.
+    #[inline(always)]
+    pub(super) fn belongs_to(&self, curve: &C) -> bool {
+        core::ptr::eq(self.curve, curve) || self.curve.same_curve(curve)
+    }
+
     /// Panics unless the point is on `curve`.
     #[inline(always)]
     #[track_caller]
     pub(super) fn check_curve(&self, curve: &C) {
-        if !core::ptr::eq(self.curve, curve) && !self.curve.same_curve(curve) {
+        if !self.belongs_to(curve) {
             different_curves();
         }
     }

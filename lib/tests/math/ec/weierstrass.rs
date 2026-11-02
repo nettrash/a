@@ -234,8 +234,19 @@ fn the_coordinates_come_in_the_byte_order_of_the_prime() {
         assert_eq!(curve.modulus().byte_order, order);
         assert_eq!(curve.a().byte_order, order);
     }
+    // Coefficients in the other order, to be reduced.
+    let le = |x| Number::new_from_u32(x, ByteOrder::LittleEndian);
+    let curve = Weierstrass::new(&le(2 + 3 * 97), &le(3 + 5 * 97), &n(97)).unwrap();
+    for c in [
+        curve.a(),
+        curve.b(),
+        &curve.discriminant(),
+        &curve.j_invariant(),
+    ] {
+        assert_eq!(c.byte_order, ByteOrder::BigEndian);
+    }
+    assert_eq!((curve.a(), curve.b()), (&n(2), &n(3)));
     // Operands in the other order, and coordinates to be reduced.
-    let curve = Weierstrass::new(&n(2), &n(3), &n(97)).unwrap();
     let x = Number::new_from_u32(3 + 97, ByteOrder::LittleEndian);
     let y = Number::new_from_i32(6 - 97, ByteOrder::LittleEndian);
     assert_eq!(
@@ -476,4 +487,29 @@ fn domains() {
     };
     check(3, 7, 5, CurveError::NotOnCurve);
     check(3, 6, 4, CurveError::WrongOrder);
+    // Zero times any point is the neutral element, and an order is positive.
+    check(3, 6, 0, CurveError::WrongOrder);
+    check(3, 6, -5, CurveError::WrongOrder);
+
+    // A point of another curve is in none of this one's subgroups; one of the same curve built
+    // again is.
+    let other = Weierstrass::new(&n(2), &n(4), &n(97)).unwrap();
+    assert!(!d.in_subgroup(&other.identity()));
+    let again = Weierstrass::new(&n(2), &n(3), &n(97)).unwrap();
+    assert!(d.in_subgroup(&again.identity()));
+
+    // When the order and the cofactor share a factor, more points than the subgroup's have
+    // `order` times them neutral: on y^2 = x^3 - x modulo 5, (1, 0) as well as (0, 0).
+    let c = Weierstrass::new(&n(-1), &n(0), &n(5)).unwrap();
+    let d = Domain::new(c, &n(0), &n(0), &n(2), &n(4)).unwrap();
+    assert!(d.in_subgroup(&d.point(&n(1), &n(0)).unwrap()));
+}
+
+#[test]
+#[should_panic(expected = "the points are on different curves")]
+fn clearing_the_cofactor_of_another_curve_panics() {
+    let curve = Weierstrass::new(&n(2), &n(3), &n(97)).unwrap();
+    let d = Domain::new(curve, &n(3), &n(6), &n(5), &n(20)).unwrap();
+    let other = Weierstrass::new(&n(2), &n(4), &n(97)).unwrap();
+    d.clear_cofactor(&other.identity());
 }

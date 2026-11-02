@@ -1,7 +1,7 @@
 //! Twisted Edwards curves, `a x^2 + y^2 = 1 + d x^2 y^2`.
 
 use super::curve::{Arithmetic, Curve, CurveError, choose_root};
-use super::field::{Base, Field, invert_all, sqrt_ratio, with_prime};
+use super::field::{Base, Field, invert_all, reduced, sqrt_ratio, with_prime};
 use super::group::{Coordinates, Group};
 use super::montgomery::Montgomery;
 use super::point::Point;
@@ -55,8 +55,8 @@ impl Edwards {
         if p.is_negative() || *p <= three || !p.is_probable_prime() {
             return Err(CurveError::NotPrime);
         }
-        let a = a.rem_euclid(p);
-        let d = d.rem_euclid(p);
+        let a = reduced(a, p);
+        let d = reduced(d, p);
         if a.is_zero() || d.is_zero() || a == d {
             return Err(CurveError::Singular);
         }
@@ -94,12 +94,9 @@ impl Edwards {
     /// The Montgomery curve this one is birationally equivalent to, with
     /// `A = 2 (a + d) / (a - d)` and `B = 4 / (a - d)`.
     pub fn to_montgomery(&self) -> Montgomery {
-        let (a, d, p) = (&self.a, &self.d, &self.base.p);
-        let i = (a - d).rem_euclid(p).mod_inverse(p).unwrap_or_default();
-        let ma = ((a + d) * 2u8 * &i).rem_euclid(p);
-        let mb = (&i * 4u8).rem_euclid(p);
+        let (ma, mb) = self.montgomery_coefficients();
         // The curve is not singular, and so neither is this one; `p` was checked.
-        Montgomery::new(&ma, &mb, p).unwrap_or_else(|_| unreachable!())
+        Montgomery::new(&ma, &mb, &self.base.p).unwrap_or_else(|_| unreachable!())
     }
 
     /// The point of `target`, from [`to_montgomery`](Edwards::to_montgomery), that `point` of this
@@ -108,13 +105,20 @@ impl Edwards {
     ///
     /// # Panics
     ///
-    /// Panics if `target` is not the curve from [`to_montgomery`](Edwards::to_montgomery).
+    /// Panics if `point` is not on this curve or `target` is not the curve from
+    /// [`to_montgomery`](Edwards::to_montgomery).
     pub fn map_to_montgomery<'t>(
         &self,
         target: &'t Montgomery,
         point: &Point<'_, Edwards>,
     ) -> Point<'t, Montgomery> {
+        point.check_curve(self);
         let p = &self.base.p;
+        let (ma, mb) = self.montgomery_coefficients();
+        assert!(
+            target.modulus() == p && (target.a(), target.b()) == (&ma, &mb),
+            "the target is not this curve's Montgomery form"
+        );
         let Some((x, y)) = point.coordinates() else {
             return target.identity();
         };
@@ -125,14 +129,22 @@ impl Edwards {
             let zero = Number::new_from_u8(0, p.byte_order);
             return target
                 .point(&zero, &zero)
-                .unwrap_or_else(|_| panic!("the target is not this curve's Montgomery form"));
+                .unwrap_or_else(|_| unreachable!());
         }
         let inv = (1u8 - &y).rem_euclid(p).mod_inverse(p).unwrap_or_default();
         let u = ((&y + 1u8) * inv).rem_euclid(p);
         let v = (&u * x.mod_inverse(p).unwrap_or_default()).rem_euclid(p);
-        target
-            .point(&u, &v)
-            .unwrap_or_else(|_| panic!("the target is not this curve's Montgomery form"))
+        // `y = 1` only on the neutral element, so this is a point of the target.
+        target.point(&u, &v).unwrap_or_else(|_| unreachable!())
+    }
+
+    /// The coefficients `A` and `B` of [`to_montgomery`](Edwards::to_montgomery)'s curve.
+    fn montgomery_coefficients(&self) -> (Number, Number) {
+        let (a, d, p) = (&self.a, &self.d, &self.base.p);
+        let i = (a - d).rem_euclid(p).mod_inverse(p).unwrap_or_default();
+        let ma = ((a + d) * 2u8 * &i).rem_euclid(p);
+        let mb = (&i * 4u8).rem_euclid(p);
+        (ma, mb)
     }
 
     /// The bytes of RFC 8032's encoding of an element: enough for the prime and one bit more.

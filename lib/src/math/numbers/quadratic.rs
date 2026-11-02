@@ -119,8 +119,14 @@ fn tonelli_shanks(a: &Number, p: &Number) -> Option<Number> {
     let mut b = (&r * &x).rem_euclid(p);
     if s > 1 && b != one {
         let mut z = Number::new_from_u8(2, a.byte_order);
-        while z.jacobi(p) != -1 {
-            z = &z + &one;
+        loop {
+            match z.jacobi(p) {
+                -1 => break,
+                // A factor of `p`, which is composite, and maybe the square of a number, whose
+                // symbols are never -1.
+                0 => return None,
+                _ => z = &z + &one,
+            }
         }
         let mut c = z.pow_mod(&q, p);
         let mut m = s;

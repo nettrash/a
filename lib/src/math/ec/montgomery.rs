@@ -2,7 +2,7 @@
 
 use super::curve::{Arithmetic, Curve, CurveError, choose_root, sec1_decode, sec1_encode};
 use super::edwards::Edwards;
-use super::field::{Base, Field, sqrt_ratio, with_prime};
+use super::field::{Base, Field, reduced, sqrt_ratio, with_prime};
 use super::group::{Group, bit_length};
 use super::point::Point;
 use super::weierstrass::{
@@ -58,8 +58,8 @@ impl Montgomery {
         if p.is_negative() || *p <= three || !p.is_probable_prime() {
             return Err(CurveError::NotPrime);
         }
-        let a = a.rem_euclid(p);
-        let b = b.rem_euclid(p);
+        let a = reduced(a, p);
+        let b = reduced(b, p);
         if b.is_zero() || ((&a * &a) - 4u8).rem_euclid(p).is_zero() {
             return Err(CurveError::Singular);
         }
@@ -127,18 +127,9 @@ impl Montgomery {
     /// The short Weierstrass curve this one is isomorphic to, by
     /// `(x, y) -> (x / B + A / (3 B), y / B)`.
     pub fn to_weierstrass(&self) -> Weierstrass {
-        let (a, b, p) = (&self.a, &self.b, &self.base.p);
-        let i = |x: Number| x.rem_euclid(p).mod_inverse(p).unwrap_or_default();
-        let inv_b = i(b.clone());
-        let ib2 = (&inv_b * &inv_b).rem_euclid(p);
-        let ib3 = (&ib2 * &inv_b).rem_euclid(p);
-        let a2 = (a * a).rem_euclid(p);
-        let a3 = (&a2 * a).rem_euclid(p);
-        let wa = ((3u8 - &a2) * i(Number::new_from_u8(3, p.byte_order)) * ib2).rem_euclid(p);
-        let wb =
-            ((a3 * 2u8 - a * 9u8) * i(Number::new_from_u8(27, p.byte_order)) * ib3).rem_euclid(p);
+        let (wa, wb) = self.weierstrass_coefficients();
         // A curve isomorphic to one that is not singular isn't, and `p` is a prime above 3.
-        Weierstrass::new(&wa, &wb, p).unwrap_or_else(|_| unreachable!())
+        Weierstrass::new(&wa, &wb, &self.base.p).unwrap_or_else(|_| unreachable!())
     }
 
     /// The point of `target`, from [`to_weierstrass`](Montgomery::to_weierstrass), that `point` of
@@ -146,12 +137,19 @@ impl Montgomery {
     ///
     /// # Panics
     ///
-    /// Panics if `target` is not the curve from [`to_weierstrass`](Montgomery::to_weierstrass).
+    /// Panics if `point` is not on this curve or `target` is not the curve from
+    /// [`to_weierstrass`](Montgomery::to_weierstrass).
     pub fn map_to_weierstrass<'t>(
         &self,
         target: &'t Weierstrass,
         point: &Point<'_, Montgomery>,
     ) -> Point<'t, Weierstrass> {
+        point.check_curve(self);
+        let (wa, wb) = self.weierstrass_coefficients();
+        assert!(
+            target.modulus() == &self.base.p && (target.a(), target.b()) == (&wa, &wb),
+            "the target is not this curve's Weierstrass form"
+        );
         let Some((x, y)) = point.coordinates() else {
             return target.identity();
         };
@@ -161,9 +159,8 @@ impl Montgomery {
         let shift = a * three.mod_inverse(p).unwrap_or_default();
         let wx = ((x + shift) * &inv_b).rem_euclid(p);
         let wy = (y * &inv_b).rem_euclid(p);
-        target
-            .point(&wx, &wy)
-            .unwrap_or_else(|_| panic!("the target is not this curve's Weierstrass form"))
+        // The isomorphism takes every point of this curve to one of the target.
+        target.point(&wx, &wy).unwrap_or_else(|_| unreachable!())
     }
 
     /// The twisted Edwards curve this one is birationally equivalent to, with
@@ -173,11 +170,8 @@ impl Montgomery {
     ///
     /// [`CurveError::NotComplete`] when that curve's addition law is not complete.
     pub fn to_edwards(&self) -> Result<Edwards, CurveError> {
-        let (a, b, p) = (&self.a, &self.b, &self.base.p);
-        let inv_b = b.mod_inverse(p).unwrap_or_default();
-        let ea = ((a + 2u8) * &inv_b).rem_euclid(p);
-        let ed = ((a - 2u8) * &inv_b).rem_euclid(p);
-        Edwards::new(&ea, &ed, p)
+        let (ea, ed) = self.edwards_coefficients();
+        Edwards::new(&ea, &ed, &self.base.p)
     }
 
     /// The point of `target`, from [`to_edwards`](Montgomery::to_edwards), that `point` of this
@@ -186,13 +180,20 @@ impl Montgomery {
     ///
     /// # Panics
     ///
-    /// Panics if `target` is not the curve from [`to_edwards`](Montgomery::to_edwards).
+    /// Panics if `point` is not on this curve or `target` is not the curve from
+    /// [`to_edwards`](Montgomery::to_edwards).
     pub fn map_to_edwards<'t>(
         &self,
         target: &'t Edwards,
         point: &Point<'_, Montgomery>,
     ) -> Point<'t, Edwards> {
+        point.check_curve(self);
         let p = &self.base.p;
+        let (ea, ed) = self.edwards_coefficients();
+        assert!(
+            target.modulus() == p && (target.a(), target.d()) == (&ea, &ed),
+            "the target is not this curve's Edwards form"
+        );
         let Some((x, y)) = point.coordinates() else {
             return target.identity();
         };
@@ -205,9 +206,33 @@ impl Montgomery {
             let ey = ((x - 1u8) * inv).rem_euclid(p);
             (ex, ey)
         };
-        target
-            .point(&ex, &ey)
-            .unwrap_or_else(|_| panic!("the target is not this curve's Edwards form"))
+        // The target is complete, so this curve has no point with `y = 0` but `(0, 0)` and none
+        // with `x = -1`, where the map is not defined.
+        target.point(&ex, &ey).unwrap_or_else(|_| unreachable!())
+    }
+
+    /// The coefficients `a` and `b` of [`to_weierstrass`](Montgomery::to_weierstrass)'s curve.
+    fn weierstrass_coefficients(&self) -> (Number, Number) {
+        let (a, b, p) = (&self.a, &self.b, &self.base.p);
+        let i = |x: Number| x.rem_euclid(p).mod_inverse(p).unwrap_or_default();
+        let inv_b = i(b.clone());
+        let ib2 = (&inv_b * &inv_b).rem_euclid(p);
+        let ib3 = (&ib2 * &inv_b).rem_euclid(p);
+        let a2 = (a * a).rem_euclid(p);
+        let a3 = (&a2 * a).rem_euclid(p);
+        let wa = ((3u8 - &a2) * i(Number::new_from_u8(3, p.byte_order)) * ib2).rem_euclid(p);
+        let wb =
+            ((a3 * 2u8 - a * 9u8) * i(Number::new_from_u8(27, p.byte_order)) * ib3).rem_euclid(p);
+        (wa, wb)
+    }
+
+    /// The coefficients `a` and `d` of [`to_edwards`](Montgomery::to_edwards)'s curve.
+    fn edwards_coefficients(&self) -> (Number, Number) {
+        let (a, b, p) = (&self.a, &self.b, &self.base.p);
+        let inv_b = b.mod_inverse(p).unwrap_or_default();
+        let ea = ((a + 2u8) * &inv_b).rem_euclid(p);
+        let ed = ((a - 2u8) * &inv_b).rem_euclid(p);
+        (ea, ed)
     }
 }
 
