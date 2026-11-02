@@ -4,7 +4,7 @@
 use super::aarch64::{mont_add_4, mont_add_6, mont_sub_4, mont_sub_6};
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 use super::same;
-use super::{Field, array_of, number_of};
+use super::{Field, array_of, halve, number_of};
 use crate::math::numbers::{Number, basecase, redc_inverse, redc_limbs};
 use core::hint::select_unpredictable;
 use core::mem::MaybeUninit;
@@ -242,6 +242,11 @@ impl<const N: usize> Field for Mont<N> {
     fn neg(&self, a: &[u64; N]) -> [u64; N] {
         let (d, _) = sub_n(&self.m, a);
         select(self.is_zero(a), a, &d)
+    }
+
+    #[inline(always)]
+    fn half(&self, a: &[u64; N]) -> [u64; N] {
+        halve(a, &self.m)
     }
 
     #[inline(always)]

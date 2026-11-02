@@ -3,7 +3,8 @@
 //! A curve spends nearly all its time in the products of its field, so the field is chosen by the
 //! shape of the prime when the curve is built, and everything above it is compiled for that field:
 //!
-//! - [`Pseudo`]: a prime `2^k - c` with a small `c`, as secp256k1's, Curve25519's and P-521's, whose
+//! - [`P521`]: P-521's prime `2^521 - 1`, in limbs of 58 bits, whose products need no carry chains.
+//! - [`Pseudo`]: a prime `2^k - c` with a small `c`, as secp256k1's and Curve25519's, whose
 //!   products are reduced by folding the high half back onto the low one.
 //! - [`Mont`]: any other odd prime of up to nine limbs, P-521's length, in Montgomery's form.
 //! - [`Big`]: a prime of any length, on [`Number`] and its [`Divisor`](crate::math::numbers::Divisor).
@@ -12,11 +13,13 @@
 mod aarch64;
 mod big;
 mod mont;
+mod p521;
 mod pseudo;
 mod special;
 
 pub(super) use big::Big;
 pub(super) use mont::Mont;
+pub(super) use p521::P521;
 pub(super) use pseudo::Pseudo;
 pub(super) use special::Nist;
 
@@ -31,6 +34,10 @@ use std::sync::OnceLock;
 pub(super) trait Field {
     /// An element.
     type E: Clone;
+
+    /// Whether a square costs so much less than a product that a formula is faster with a square
+    /// and two subtractions in place of a product and an addition.
+    const CHEAP_SQUARES: bool = false;
 
     /// The limbs of an element.
     fn limbs(&self) -> usize;
@@ -82,6 +89,11 @@ pub(super) trait Field {
     #[inline(always)]
     fn twice(&self, a: &Self::E) -> Self::E {
         self.add(a, a)
+    }
+
+    /// `a / 2`.
+    fn half(&self, a: &Self::E) -> Self::E {
+        self.mul(a, &self.enter(&((self.modulus() + 1u8) >> 1usize)))
     }
 
     /// Whether `a` equals `b`.
@@ -312,6 +324,7 @@ pub enum Prime {
     Pseudo9(Pseudo<9>),
     P256(Nist<4>),
     P384(Nist<6>),
+    P521(P521),
     Big(Big),
 }
 
@@ -333,6 +346,7 @@ macro_rules! with_prime {
             $crate::math::ec::field::Prime::Pseudo9($f) => $body,
             $crate::math::ec::field::Prime::P256($f) => $body,
             $crate::math::ec::field::Prime::P384($f) => $body,
+            $crate::math::ec::field::Prime::P521($f) => $body,
             $crate::math::ec::field::Prime::Big($f) => $body,
         }
     };
@@ -352,6 +366,19 @@ const P384_LIMBS: [u64; 6] = [
     u64::MAX,
 ];
 
+/// P-521's prime, `2^521 - 1`.
+const P521_LIMBS: [u64; 9] = [
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    u64::MAX,
+    0x1ff,
+];
+
 impl Prime {
     /// The field of the odd prime `p`, the fastest for its shape.
     fn new(p: &Number) -> Prime {
@@ -361,6 +388,9 @@ impl Prime {
         }
         if l == P384_LIMBS {
             return Prime::P384(Nist::new(Mont::new(p, P384_LIMBS)));
+        }
+        if l == P521_LIMBS {
+            return Prime::P521(P521::new(p));
         }
         macro_rules! pseudo_or_mont {
             ($($n:literal, $mont:ident, $pseudo:ident);+ $(;)?) => {
@@ -480,6 +510,31 @@ pub(super) fn number_of(x: &[u64], order: ByteOrder) -> Number {
         n.byte_order = ByteOrder::BigEndian;
     }
     n
+}
+
+/// `a / 2` modulo the odd `m`, for `a` of `N` limbs: `a`, or `a + m` when `a` is odd, shifted down
+/// a bit, with the carry of the sum coming in at the top.
+#[inline(always)]
+fn halve<const N: usize>(a: &[u64; N], m: &[u64; N]) -> [u64; N] {
+    let mask = (a[0] & 1).wrapping_neg();
+    let mut s = [0; N];
+    let mut carry = false;
+    for i in 0..N {
+        let (x, c1) = a[i].overflowing_add(m[i] & mask);
+        let (x, c2) = x.overflowing_add(u64::from(carry));
+        s[i] = x;
+        carry = c1 | c2;
+    }
+    let mut r = [0; N];
+    for i in 0..N {
+        let above = if i + 1 < N {
+            s[i + 1]
+        } else {
+            u64::from(carry)
+        };
+        r[i] = (s[i] >> 1) | (above << 63);
+    }
+    r
 }
 
 /// `x` as the array of `M` limbs it is, in the branches of a field generic in `N` for `N = M`.

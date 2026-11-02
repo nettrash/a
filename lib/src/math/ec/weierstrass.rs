@@ -232,10 +232,17 @@ impl<F: Field> Wei<'_, F> {
             second = second.iter().map(|a| self.neg_cached(a)).collect();
         }
         let mut r = self.identity();
+        let mut zeros = 0;
         for i in (0..d1.len().max(d2.len())).rev() {
-            r = self.double(&r);
+            zeros += 1;
+            let digit = |d: &[i8]| d.get(i).copied().unwrap_or(0);
+            if digit(&d1) == 0 && digit(&d2) == 0 {
+                continue;
+            }
+            self.double_n(&mut r, zeros);
+            zeros = 0;
             for (digits, table) in [(&d1, &first), (&d2, &second)] {
-                let d = digits.get(i).copied().unwrap_or(0);
+                let d = digit(digits);
                 if d > 0 {
                     r = self.add_cached(&r, &table[(d as usize - 1) / 2]);
                 } else if d < 0 {
@@ -243,6 +250,7 @@ impl<F: Field> Wei<'_, F> {
                 }
             }
         }
+        self.double_n(&mut r, zeros);
         r
     }
 }
@@ -409,11 +417,13 @@ impl<F: Field> Group for Wei<'_, F> {
                 let x3 = f.sub(&f.sqr(&e), &f.twice(&d));
                 (x3.clone(), f.sub(&f.mul(&e, &f.sub(&d, &x3)), &c8), z3)
             }
-            // dbl-2001-b with `2 Y^2` for its `gamma` in the same way: 4M + 4S and 12 additions.
+            // dbl-2001-b with `2 Y^2` for its `gamma` in the same way: 4M + 4S and 12 additions,
+            // or 3M + 5S and 13 where squares are cheap.
             Shape::MinusThree => {
-                let g2 = f.twice(&f.sqr(&p.y));
+                let yy = f.sqr(&p.y);
+                let g2 = f.twice(&yy);
                 let delta = f.sqr(&p.z);
-                let z3 = f.twice(&f.mul(&p.y, &p.z));
+                let z3 = self.yz2(p, &yy, &delta);
                 let (xp, xm) = (f.add(&p.x, &delta), f.sub(&p.x, &delta));
                 let g8 = f.twice(&f.sqr(&g2));
                 let t = f.mul(&xp, &xm);
@@ -424,11 +434,11 @@ impl<F: Field> Group for Wei<'_, F> {
             }
             // dbl-2007-bl.
             Shape::General => {
-                let z3 = f.twice(&f.mul(&p.y, &p.z));
                 let xx = f.sqr(&p.x);
                 let yy = f.sqr(&p.y);
                 let yyyy = f.sqr(&yy);
                 let zz = f.sqr(&p.z);
+                let z3 = self.yz2(p, &yy, &zz);
                 let s = f.twice(&f.sub(&f.sub(&f.sqr(&f.add(&p.x, &yy)), &xx), &yyyy));
                 let m = f.add(&f.add(&f.twice(&xx), &xx), &f.mul(&self.a, &f.sqr(&zz)));
                 let x3 = f.sub(&f.sqr(&m), &f.twice(&s));
@@ -441,6 +451,48 @@ impl<F: Field> Group for Wei<'_, F> {
             y: y3,
             z: z3,
         }
+    }
+
+    // A run holds `W = 2 Y` in place of `Y`, which saves each doubling three additions for
+    // `a = 0` and `a = -3`: `Z3 = W Z` and `4 X Y^2 = X W^2` come without one, and so does
+    // `W3 = 2 M (4 X Y^2 - X3) - W^4`, for the slope's `M`, against the two that the `2 Y^2` of the
+    // doublings above saves, for an addition at either end of the run. Where squares are cheap,
+    // the square for `Z3` that the doubling above takes saves as much.
+    fn double_n(&self, p: &mut Jacobian<F::E>, n: usize) {
+        let f = self.f;
+        if n < 2 || matches!(self.shape, Shape::General) || F::CHEAP_SQUARES {
+            for _ in 0..n {
+                *p = self.double(p);
+            }
+            return;
+        }
+        let (mut x, mut w, mut z) = (p.x.clone(), f.twice(&p.y), p.z.clone());
+        for _ in 0..n {
+            let ww = f.sqr(&w);
+            let (m, z3, w4, b) = if matches!(self.shape, Shape::Zero) {
+                let xx = f.sqr(&x);
+                let z3 = f.mul(&w, &z);
+                let w4 = f.sqr(&ww);
+                let b = f.mul(&x, &ww);
+                (f.add(&f.twice(&xx), &xx), z3, w4, b)
+            } else {
+                let zz = f.sqr(&z);
+                let z3 = f.mul(&w, &z);
+                let (xp, xm) = (f.add(&x, &zz), f.sub(&x, &zz));
+                let w4 = f.sqr(&ww);
+                let t = f.mul(&xp, &xm);
+                let b = f.mul(&x, &ww);
+                (f.add(&f.twice(&t), &t), z3, w4, b)
+            };
+            let x3 = f.sub(&f.sqr(&m), &f.twice(&b));
+            w = f.sub(&f.twice(&f.mul(&m, &f.sub(&b, &x3))), &w4);
+            (x, z) = (x3, z3);
+        }
+        *p = Jacobian {
+            x,
+            y: f.half(&w),
+            z,
+        };
     }
 
     fn mul(&self, p: &Jacobian<F::E>, k: &[u64], negative: bool) -> Jacobian<F::E> {
@@ -511,6 +563,18 @@ impl<F: Field> Group for Wei<'_, F> {
 }
 
 impl<F: Field> Wei<'_, F> {
+    /// `2 Y Z` of `p`, from `yy = Y^2` and `zz = Z^2`: a product, or where squares are cheap,
+    /// `(Y + Z)^2 - Y^2 - Z^2`.
+    #[inline(always)]
+    fn yz2(&self, p: &Jacobian<F::E>, yy: &F::E, zz: &F::E) -> F::E {
+        let f = self.f;
+        if F::CHEAP_SQUARES {
+            f.sub(&f.sub(&f.sqr(&f.add(&p.y, &p.z)), yy), zz)
+        } else {
+            f.twice(&f.mul(&p.y, &p.z))
+        }
+    }
+
     /// The sum of two points of different `x`, from the first one's `X` and `Y` brought to the
     /// common `Z^2` and `Z^3` as `u1` and `s1`, the differences `h` of the `X`s and `r` of the `Y`s,
     /// and the `Z` that the sum's is `h` times.

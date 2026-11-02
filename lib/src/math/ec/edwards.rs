@@ -151,12 +151,12 @@ pub(super) struct Extended<E> {
 }
 
 /// A point prepared to be added: for `a = -1`, `(Y + X, Y - X, 2 Z, 2 d T)`; otherwise
-/// `(X, Y, Z, d T)`.
+/// `(X, Y, Z, d T)`. An affine one has no `Z`, as it is 1, which saves its addition a product.
 #[derive(Clone)]
 pub(super) struct Cached<E> {
     u: E,
     v: E,
-    z: E,
+    z: Option<E>,
     t: E,
 }
 
@@ -236,7 +236,8 @@ impl<F: Field> Group for Edw<'_, F> {
     type F = F;
     type Proj = Extended<F::E>;
     type Cached = Cached<F::E>;
-    const CACHED: usize = 4;
+    // A table holds affine points, without their `Z`.
+    const CACHED: usize = 3;
 
     #[inline(always)]
     fn field(&self) -> &F {
@@ -328,14 +329,47 @@ impl<F: Field> Group for Edw<'_, F> {
         p.iter().map(|q| self.cache_one(q)).collect()
     }
 
-    // add-2008-hwcd-3 for `a = -1`, 8M; add-2008-hwcd otherwise, 9M and a product by `a`.
+    // The points made affine with one inversion, at about seven products each.
+    fn cache_affine(&self, p: &[Extended<F::E>]) -> Vec<Cached<F::E>> {
+        let f = self.f;
+        let mut z: Vec<F::E> = p.iter().map(|q| q.z.clone()).collect();
+        invert_all(f, &mut z);
+        p.iter()
+            .zip(z.iter())
+            .map(|(q, i)| {
+                let (x, y) = (f.mul(&q.x, i), f.mul(&q.y, i));
+                let t = f.mul(&f.mul(&x, &y), &self.d);
+                if self.minus_one {
+                    Cached {
+                        u: f.add(&y, &x),
+                        v: f.sub(&y, &x),
+                        z: None,
+                        t: f.twice(&t),
+                    }
+                } else {
+                    Cached {
+                        u: x,
+                        v: y,
+                        z: None,
+                        t,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    // add-2008-hwcd-3 for `a = -1`, 8M; add-2008-hwcd otherwise, 9M and a product by `a`; a
+    // product less for an affine point.
     fn add_cached(&self, p: &Extended<F::E>, c: &Cached<F::E>) -> Extended<F::E> {
         let f = self.f;
         if self.minus_one {
             let a = f.mul(&f.sub(&p.y, &p.x), &c.v);
             let b = f.mul(&f.add(&p.y, &p.x), &c.u);
             let cc = f.mul(&p.t, &c.t);
-            let d = f.mul(&p.z, &c.z);
+            let d = match &c.z {
+                Some(z) => f.mul(&p.z, z),
+                None => f.twice(&p.z),
+            };
             self.combine(
                 &f.sub(&b, &a),
                 &f.sub(&d, &cc),
@@ -346,7 +380,10 @@ impl<F: Field> Group for Edw<'_, F> {
             let a = f.mul(&p.x, &c.u);
             let b = f.mul(&p.y, &c.v);
             let cc = f.mul(&p.t, &c.t);
-            let d = f.mul(&p.z, &c.z);
+            let d = match &c.z {
+                Some(z) => f.mul(&p.z, z),
+                None => p.z.clone(),
+            };
             let e = f.sub(
                 &f.sub(&f.mul(&f.add(&p.x, &p.y), &f.add(&c.u, &c.v)), &a),
                 &b,
@@ -379,12 +416,12 @@ impl<F: Field> Group for Edw<'_, F> {
         }
     }
 
+    // Of an affine point, which is all that `cache_affine` gives.
     fn store_cached(&self, c: &Cached<F::E>, r: &mut [u64]) {
         let (f, n) = (self.f, self.f.limbs());
         f.store(&c.u, &mut r[..n]);
         f.store(&c.v, &mut r[n..2 * n]);
-        f.store(&c.z, &mut r[2 * n..3 * n]);
-        f.store(&c.t, &mut r[3 * n..4 * n]);
+        f.store(&c.t, &mut r[2 * n..3 * n]);
     }
 
     fn load_cached(&self, x: &[u64]) -> Cached<F::E> {
@@ -392,8 +429,8 @@ impl<F: Field> Group for Edw<'_, F> {
         Cached {
             u: f.load(&x[..n]),
             v: f.load(&x[n..2 * n]),
-            z: f.load(&x[2 * n..3 * n]),
-            t: f.load(&x[3 * n..4 * n]),
+            z: None,
+            t: f.load(&x[2 * n..3 * n]),
         }
     }
 
@@ -426,14 +463,14 @@ impl<F: Field> Edw<'_, F> {
             Cached {
                 u: f.add(&q.y, &q.x),
                 v: f.sub(&q.y, &q.x),
-                z: f.twice(&q.z),
+                z: Some(f.twice(&q.z)),
                 t: f.twice(&f.mul(&q.t, &self.d)),
             }
         } else {
             Cached {
                 u: q.x.clone(),
                 v: q.y.clone(),
-                z: q.z.clone(),
+                z: Some(q.z.clone()),
                 t: f.mul(&q.t, &self.d),
             }
         }

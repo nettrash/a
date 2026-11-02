@@ -160,9 +160,14 @@ fn fields_of_every_shape() {
                 curve.multi_mul(&[(&k, &g), (&m, &product)]),
                 &product + &(&product * &m)
             );
-            let many: Vec<Number> = (0..40).map(|i| n(i * 3 + 1)).collect();
+            // Straus's method, and Pippenger's from 64 terms.
+            let count = if cfg!(miri) { 40 } else { 70 };
+            let many: Vec<Number> = (0..count).map(|i| n(i * 3 + 1)).collect();
             let terms: Vec<(&Number, &Point<'_, Edwards>)> = many.iter().map(|s| (s, &g)).collect();
-            assert_eq!(curve.multi_mul(&terms), &g * &n(40 * 39 / 2 * 3 + 40));
+            assert_eq!(
+                curve.multi_mul(&terms),
+                &g * &n(count * (count - 1) / 2 * 3 + count)
+            );
         }
     }
 }

@@ -101,6 +101,11 @@ where
     }
 
     #[inline(always)]
+    fn half(&self, a: &[u64; N]) -> [u64; N] {
+        self.mont.half(a)
+    }
+
+    #[inline(always)]
     fn mul(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         self.product(a, b)
     }

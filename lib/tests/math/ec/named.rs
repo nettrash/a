@@ -1,7 +1,7 @@
 //! The named curves against vectors from OpenSSL and curve25519-dalek, and from RFC 7748 and RFC 8032
 //! as a separate implementation in Python reproduced them.
 
-use super::common::{hex, hex_le, size};
+use super::common::{Rng, hex, hex_le, size};
 use a::math::ec::{Curve, Domain, Weierstrass, named};
 use a::math::numbers::{ByteOrder, Number};
 
@@ -171,6 +171,70 @@ fn the_generator_of_curve25519_has_the_stated_order() {
 #[test]
 fn the_generator_of_ed25519_has_the_stated_order() {
     group_order(named::ed25519());
+}
+
+/// Sums of products by Straus's method and by Pippenger's, against a product of the generator by
+/// the sum of the scalars: the points are multiples of the generator.
+fn products_at_once<C: Curve>(curve: &Domain<C>, seed: u64) {
+    let mut r = Rng(seed);
+    let order = curve.order();
+    let bytes = order.value.len();
+    for len in [2usize, 3, 70] {
+        if cfg!(miri) && len > 3 {
+            continue;
+        }
+        let multiples: Vec<Number> = (0..len).map(|_| r.number(bytes)).collect();
+        let points: Vec<_> = multiples.iter().map(|m| curve.mul_generator(m)).collect();
+        let scalars: Vec<Number> = (0..len)
+            .map(|i| match i % 4 {
+                0 => -r.number(bytes),
+                1 => r.number(2),
+                _ => r.number(bytes),
+            })
+            .collect();
+        let mut sum = Number::new_from_u8(0, ByteOrder::LittleEndian);
+        for (k, m) in scalars.iter().zip(&multiples) {
+            sum = &sum + &(k * m);
+        }
+        let terms: Vec<_> = scalars.iter().zip(points.iter()).collect();
+        assert_eq!(
+            curve.multi_mul(&terms),
+            curve.mul_generator(&sum.rem_euclid(order))
+        );
+        assert_eq!(
+            &points[0] * &scalars[0],
+            curve.mul_generator(&(&scalars[0] * &multiples[0]).rem_euclid(order))
+        );
+    }
+}
+
+#[test]
+fn products_at_once_on_secp256k1() {
+    products_at_once(named::secp256k1(), 1);
+}
+
+#[test]
+fn products_at_once_on_p256() {
+    products_at_once(named::p256(), 2);
+}
+
+#[test]
+fn products_at_once_on_p384() {
+    if !cfg!(miri) {
+        products_at_once(named::p384(), 3);
+    }
+}
+
+#[test]
+fn products_at_once_on_p521() {
+    if !cfg!(miri) {
+        products_at_once(named::p521(), 4);
+    }
+}
+
+#[test]
+fn products_at_once_on_ed25519() {
+    products_at_once(named::ed25519(), 5);
 }
 
 #[test]

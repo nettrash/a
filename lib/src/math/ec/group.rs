@@ -47,6 +47,12 @@ pub(super) trait Group {
     fn equal(&self, p: &Self::Proj, q: &Self::Proj) -> bool;
     /// The points of `p` prepared to be added, with one inversion for them all if any.
     fn cache(&self, p: &[Self::Proj]) -> Vec<Self::Cached>;
+    /// The points of `p` prepared to be added as cheaply as they can be, whatever an inversion
+    /// costs: for points that are added many times each.
+    #[inline]
+    fn cache_affine(&self, p: &[Self::Proj]) -> Vec<Self::Cached> {
+        self.cache(p)
+    }
     /// `p + c`.
     fn add_cached(&self, p: &Self::Proj, c: &Self::Cached) -> Self::Proj;
     /// `-c`.
@@ -104,7 +110,7 @@ fn bits_at(k: &[u64], at: usize, n: u32) -> u64 {
 /// The width of the non-adjacent form for a scalar of `bits` bits: the one that minimizes the
 /// `2^(w - 2)` additions of the table and the `bits / (w + 1)` of the product. Measured on an Apple
 /// M4 Max, a product on P-256 took 86,000, 85,000 and 89,000 cycles for widths 4, 5 and 6, on P-384
-/// 327,000, 314,000 and 321,000, and on P-521 457,000, 452,000 and 452,000.
+/// 327,000, 314,000 and 321,000, and on P-521 365,000, 361,000 and 368,000.
 pub(super) fn window(bits: usize) -> u32 {
     match bits {
         0..=23 => 2,
@@ -226,10 +232,17 @@ fn straus<G: Group + ?Sized>(g: &G, terms: &[(&[u64], bool, G::Proj)]) -> G::Pro
     }
     let table = g.cache(&all);
     let mut r = g.identity();
+    let mut zeros = 0;
     for i in (0..len).rev() {
-        r = g.double(&r);
+        zeros += 1;
+        let digit = |d: &Vec<i8>| d.get(i).copied().unwrap_or(0);
+        if digits.iter().all(|d| digit(d) == 0) {
+            continue;
+        }
+        g.double_n(&mut r, zeros);
+        zeros = 0;
         for (t, d) in digits.iter().enumerate() {
-            let d = d.get(i).copied().unwrap_or(0);
+            let d = digit(d);
             if d > 0 {
                 r = g.add_cached(&r, &table[start[t] + (d as usize - 1) / 2]);
             } else if d < 0 {
@@ -237,6 +250,7 @@ fn straus<G: Group + ?Sized>(g: &G, terms: &[(&[u64], bool, G::Proj)]) -> G::Pro
             }
         }
     }
+    g.double_n(&mut r, zeros);
     r
 }
 
@@ -272,7 +286,7 @@ fn pippenger<G: Group + ?Sized>(g: &G, terms: &[(&[u64], bool, G::Proj)]) -> G::
         .iter()
         .map(|(_, negative, p)| if *negative { g.neg(p) } else { p.clone() })
         .collect();
-    let table = g.cache(&based);
+    let table = g.cache_affine(&based);
     // The digits of each term in each window, the lowest window first.
     let mut digits = vec![0i32; windows * terms.len()];
     for (t, (k, _, _)) in terms.iter().enumerate() {
@@ -322,8 +336,8 @@ pub struct Table {
 
 /// The window of a table for scalars of `bits` bits: each window costs an addition in a product, and
 /// each bit of width doubles the table. Measured on an Apple M4 Max, P-256's generator took 12,200
-/// and 10,800 cycles for widths 7 and 8, and P-521's 69,700 and 59,500; at width 8 a table takes
-/// 300 KiB on P-256 and 1.3 MiB on P-521.
+/// and 10,800 cycles for widths 7 and 8, and P-521's 60,300 and 51,600; at width 8 a table takes
+/// 300 KiB on P-256 and 1.2 MiB on P-521.
 fn table_width(bits: usize) -> u32 {
     match bits {
         0..=63 => 4,
@@ -357,7 +371,7 @@ pub(super) fn prepare<G: Group + ?Sized>(g: &G, p: &G::Proj, bits: usize) -> Tab
     }
     let size = cached_limbs(g);
     let mut limbs = vec![0; all.len() * size];
-    for (c, r) in g.cache(&all).iter().zip(limbs.chunks_mut(size)) {
+    for (c, r) in g.cache_affine(&all).iter().zip(limbs.chunks_mut(size)) {
         g.store_cached(c, r);
     }
     Table { limbs, width, bits }

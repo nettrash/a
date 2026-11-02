@@ -2,12 +2,12 @@
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 use super::aarch64::{
-    p521_mul, p521_sqr, pseudo_add_4, pseudo_add_6, pseudo_add_9, pseudo_mul_4, pseudo_sqr_4,
-    pseudo_sub_4, pseudo_sub_6, pseudo_sub_9,
+    pseudo_add_4, pseudo_add_6, pseudo_add_9, pseudo_mul_4, pseudo_sqr_4, pseudo_sub_4,
+    pseudo_sub_6, pseudo_sub_9,
 };
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 use super::same;
-use super::{Field, array_of, number_of};
+use super::{Field, array_of, halve, number_of};
 use crate::math::numbers::{Number, basecase};
 use core::mem::MaybeUninit;
 
@@ -25,6 +25,8 @@ pub(in super::super) struct Pseudo<const N: usize> {
     f: u64,
     /// `s`, below 64.
     s: u32,
+    /// The prime, the low limb first.
+    m: [u64; N],
     /// The prime as a number.
     p: Number,
 }
@@ -43,6 +45,7 @@ impl<const N: usize> Pseudo<N> {
             c,
             f: c << s,
             s,
+            m: array_of(p),
             p: p.clone(),
         })
     }
@@ -102,9 +105,6 @@ impl<const N: usize> Pseudo<N> {
     /// carry out, if any, leaves too little for one more `f` to carry past the second limb.
     #[inline(always)]
     fn fold<const W: usize>(&self, t: &[u64; W]) -> [u64; N] {
-        if self.c == 1 {
-            return self.fold_shifted(t);
-        }
         let f = self.f;
         let mut r = [0u64; N];
         let mut c = 0u64;
@@ -117,32 +117,6 @@ impl<const N: usize> Pseudo<N> {
         let (a, carry) = add_2(&r, x as u64, (x >> 64) as u64);
         let (a, _) = add_2(&a, f & u64::from(carry).wrapping_neg(), 0);
         a
-    }
-}
-
-impl<const N: usize> Pseudo<N> {
-    /// [`fold`](Pseudo::fold) for `c = 1`, where `f` is the power `2^s`: shifts instead of products,
-    /// which measured on an Apple M4 Max took P-521's doubling from 1,447 to 1,326 cycles before
-    /// that field had a kernel.
-    #[inline(always)]
-    fn fold_shifted<const W: usize>(&self, t: &[u64; W]) -> [u64; N] {
-        let s = self.s;
-        // `lo + hi 2^s`: each limb of `hi`, shifted, spills `64 - s` bits into the next.
-        let mut r = [0u64; N];
-        let mut carry = false;
-        let mut spill = 0u64;
-        for i in 0..N {
-            let x = (t[N + i] << s) | spill;
-            spill = t[N + i] >> (64 - s);
-            let (y, c1) = t[i].overflowing_add(x);
-            let (y, c2) = y.overflowing_add(u64::from(carry));
-            r[i] = y;
-            carry = c1 | c2;
-        }
-        // The top: `spill + carry`, at most `2^s`, again times `2^s`, in two limbs.
-        let top = spill + u64::from(carry);
-        let (a, carry) = add_2(&r, top << s, top >> (64 - s));
-        add_2(&a, self.f & u64::from(carry).wrapping_neg(), 0).0
     }
 }
 
@@ -243,16 +217,6 @@ macro_rules! products {
                 if $n == 4 {
                     return *same(&pseudo_mul_4(same(a), same(b), self.f));
                 }
-                #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-                if $n == 9 && self.c == 1 {
-                    let mut r = MaybeUninit::<[u64; $n]>::uninit();
-                    // SAFETY: each array holds the 9 limbs the kernel takes, all of which it
-                    // writes, and the only prime `2^k - 1` of nine limbs is `2^521 - 1`.
-                    return unsafe {
-                        p521_mul(r.as_mut_ptr().cast(), a.as_ptr(), b.as_ptr());
-                        r.assume_init()
-                    };
-                }
                 if $n > 4 {
                     let mut t = MaybeUninit::<[u64; $w]>::uninit();
                     // SAFETY: `t` holds the `2 N` limbs the kernel writes, apart from `a` and `b`.
@@ -270,15 +234,6 @@ macro_rules! products {
                 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
                 if $n == 4 {
                     return *same(&pseudo_sqr_4(same(a), self.f));
-                }
-                #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-                if $n == 9 && self.c == 1 {
-                    let mut r = MaybeUninit::<[u64; $n]>::uninit();
-                    // SAFETY: as in `mul`.
-                    return unsafe {
-                        p521_sqr(r.as_mut_ptr().cast(), a.as_ptr());
-                        r.assume_init()
-                    };
                 }
                 if $n > 4 {
                     let mut t = MaybeUninit::<[u64; $w]>::uninit();
@@ -359,6 +314,12 @@ where
     fn neg(&self, a: &[u64; N]) -> [u64; N] {
         self.sub(&[0; N], a)
     }
+    // Any `N` limbs, and with the prime added still below `2^(64 N + 1)`.
+    #[inline(always)]
+    fn half(&self, a: &[u64; N]) -> [u64; N] {
+        halve(a, &self.m)
+    }
+
     #[inline(always)]
     fn mul(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         Product::mul(self, a, b)

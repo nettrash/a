@@ -250,22 +250,6 @@ def p384_sqr():
         L.append(f"csel {t[j]}, {t[j]}, {d[j]}, lo")
     return L, operands('a', a), t[:6]
 
-def load_regs(r, base, L):
-    n = len(r)
-    for j in range(0, n, 2):
-        if j + 1 < n:
-            L.append(f"ldp {r[j]}, {r[j+1]}, [{base}, #{8*j}]" if j else f"ldp {r[j]}, {r[j+1]}, [{base}]")
-        else:
-            L.append(f"ldr {r[j]}, [{base}, #{8*j}]")
-
-def store_regs(r, L):
-    n = len(r)
-    for j in range(0, n, 2):
-        if j + 1 < n:
-            L.append(f"stp {r[j]}, {r[j+1]}, [x0, #{8*j}]" if j else f"stp {r[j]}, {r[j+1]}, [x0]")
-        else:
-            L.append(f"str {r[j]}, [x0, #{8*j}]")
-
 REGS = ['x4','x5','x6','x7','x8','x9','x10','x11','x12']
 B = ['x10', 'x11', 'x12', 'x13', 'x14', 'x15']
 B9 = ['x13', 'x14', 'x15', 'x17', 'x20', 'x21', 'x22', 'x23', 'x24']
@@ -335,120 +319,6 @@ def mont_sub(n):
         L.append(f"csel {r[j]}, {b[j]}, {r[j]}, ne")
     return L, operands('a', r) | operands('b', b) | operands('m', m), r
 
-def p521_mul():
-    a = ['x3','x4','x5','x6','x7','x8','x9','x10','x11']; bi = 'x12'; p = 'x1'
-    T = ['x13','x14','x15','x16','x17','x20','x21','x22','x23','x24']
-    L = []
-    load_regs(a, 'x1', L)
-    L.append(f"ldr {bi}, [x2]")
-    rows_first(a, bi, T, p, L)
-    L.append(f"str {T[0]}, [x0]")
-    T = T[1:] + T[:1]
-    for i in range(1, 9):
-        L.append(f"ldr {bi}, [x2, #{8*i}]")
-        row_add(a, bi, T, p, L)
-        L.append(f"str {T[0]}, [x0, #{8*i}]")
-        if i < 8:
-            T = T[1:] + T[:1]
-    p521_fold(T[1:], a, 'x12', 'x1', 'x2', L)
-    return L
-
-def p521_fold(h, low, x, y, z, L):
-    """The low limbs back from `r` into `low`, and the high ones `h` shifted onto them: bit 576 of
-    the product is 2^55 modulo the prime."""
-    load_regs(low, 'x0', L)
-    L.append(f"lsl {x}, {h[0]}, #55")
-    L.append(f"adds {low[0]}, {low[0]}, {x}")
-    for j in range(1, 9):
-        L.append(f"extr {x}, {h[j]}, {h[j-1]}, #9")
-        L.append(f"adcs {low[j]}, {low[j]}, {x}")
-    L.append(f"lsr {x}, {h[8]}, #9")
-    L.append(f"adc {y}, {x}, xzr")
-    L.append(f"lsl {x}, {y}, #55")
-    L.append(f"lsr {y}, {y}, #9")
-    L.append(f"adds {low[0]}, {low[0]}, {x}")
-    L.append(f"adcs {low[1]}, {low[1]}, {y}")
-    for j in range(2, 9):
-        L.append(f"adcs {low[j]}, {low[j]}, xzr")
-    L.append(f"mov {z}, #0x80000000000000")
-    L.append(f"csel {x}, {z}, xzr, cs")
-    L.append(f"adds {low[0]}, {low[0]}, {x}")
-    L.append(f"adc {low[1]}, {low[1]}, xzr")
-    store_regs(low, L)
-
-def p521_sqr():
-    """The square of nine limbs: the products of different limbs once, as a triangle of rows whose
-    finished low limbs wait in `r`, then each limb doubled by `extr` and the squares of the limbs
-    added in one carry chain, then the fold of `p521_mul`."""
-    a = ['x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9', 'x10', 'x11']
-    L = []
-    load_regs(a, 'x1', L)
-    free = ['x1', 'x2', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17',
-            'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26', 'x27']
-    p = 'x28'
-    pos = {}
-    take = lambda: free.pop(0)
-    def spill(k):
-        L.append(f"str {pos[k]}, [x0, #{8*k}]")
-        free.append(pos.pop(k))
-    # Row 0 gives positions 1 to 9, row i adds a[i] a[i+1..] from position 2 i + 1 and a fresh top
-    # limb i + 9; positions 2 i + 1 and 2 i + 2 are final after it.
-    for k in range(1, 10):
-        pos[k] = take()
-    rows_first(a[1:], a[0], [pos[k] for k in range(1, 10)], p, L)
-    spill(1); spill(2)
-    for i in range(1, 8):
-        pos[i + 9] = take()
-        row_add(a[i+1:], a[i], [pos[k] for k in range(2*i + 1, i + 10)], p, L)
-        for k in (2*i + 1, 2*i + 2):
-            if k <= 8:
-                spill(k)
-    # Twice the high limbs in place, from the top down, each with the top bit of the one below.
-    top = take()
-    L.append(f"lsr {top}, {pos[16]}, #63")
-    for k in range(16, 9, -1):
-        L.append(f"extr {pos[k]}, {pos[k]}, {pos[k-1]}, #63")
-    prev = take()
-    L.append(f"ldr {prev}, [x0, #64]")
-    L.append(f"extr {pos[9]}, {pos[9]}, {prev}, #63")
-    t8 = prev
-    # The low limbs from the bottom up, doubled and with the squares added, back to r; then the
-    # high ones, in the same carry chain.
-    d = take()
-    L.append(f"mul {d}, {a[0]}, {a[0]}")
-    L.append(f"str {d}, [x0]")
-    free.append(d)
-    prev = None
-    for k in range(1, 9):
-        if k == 8:
-            cur = t8
-        else:
-            cur = take()
-            L.append(f"ldr {cur}, [x0, #{8*k}]")
-        d = take()
-        if k == 1:
-            L.append(f"lsl {d}, {cur}, #1")
-        else:
-            L.append(f"extr {d}, {cur}, {prev}, #63")
-            free.append(prev)
-        prev = cur
-        s = take()
-        L.append(f"{'umulh' if k % 2 else 'mul'} {s}, {a[k // 2]}, {a[k // 2]}")
-        L.append(f"{'adds' if k == 1 else 'adcs'} {d}, {d}, {s}")
-        L.append(f"str {d}, [x0, #{8*k}]")
-        free += [s, d]
-    free.append(prev)
-    high = [pos[k] for k in range(9, 17)] + [top]
-    for k in range(9, 18):
-        s = take()
-        L.append(f"{'umulh' if k % 2 else 'mul'} {s}, {a[k // 2]}, {a[k // 2]}")
-        L.append(f"{'adc' if k == 17 else 'adcs'} {high[k - 9]}, {high[k - 9]}, {s}")
-        free.append(s)
-    used = set(high)
-    rest = [r for r in a + free if r not in used]
-    p521_fold(high, rest[:9], rest[9], rest[10], rest[11], L)
-    return L
-
 def registers(name, doc, args, kernel):
     """A kernel on registers: `kernel` gives the lines, the registers that take the operands' limbs
     and those of the result, the low limb first; every other register it names is a scratch one.
@@ -490,26 +360,6 @@ pub(super) fn {name}({args}) -> [u64; {n}] {{
 }}
 '''
 
-def rust(name, doc, args, lines, inputs, clobbers):
-    body = ",\n".join(f'            "{l}"' for l in lines)
-    ins = "\n".join(f"            {i}," for i in inputs)
-    cl = "\n".join(f'            out("{c}") _,' for c in clobbers)
-    docs = "\n".join(f"/// {d}" if d else "///" for d in doc)
-    return f'''{docs}
-#[inline(never)]
-pub(super) unsafe fn {name}({args}) {{
-    // SAFETY: as the caller guarantees; the block reads the operands' limbs and writes `r`'s last.
-    unsafe {{
-        asm!(
-{body},
-{ins}
-{cl}
-            options(nostack),
-        );
-    }}
-}}
-'''
-
 HEAD = '''//! The aarch64 kernels of the curves' fields, in inline assembly. **This file is generated by
 //! `kernels.py`, next to it: change that, not this.**
 //!
@@ -530,8 +380,8 @@ HEAD = '''//! The aarch64 kernels of the curves' fields, in inline assembly. **T
 //! product by `c`, `f = 2^(64 n)` modulo the prime, which carries out of the low limbs about once in
 //! `2^64 / f`: that case goes to a branch around the end of the kernel, so that the other limbs are
 //! done after one chain. An addition on secp256k1 so took 7 cycles after the one before against 12,
-//! P-521's subtraction 13 against 42, and a product and a square of Curve25519's field 31 and 29
-//! against 37 and 33.
+//! a subtraction of nine limbs 13 against 42, and a product and a square of Curve25519's field 31
+//! and 29 against 37 and 33.
 //!
 //! - [`pseudo_mul_4`], [`pseudo_sqr_4`]: the eight limbs of the product, then the high half folded
 //!   onto the low one by a product by `f`, for a prime with `2^256 = f`.
@@ -542,19 +392,12 @@ HEAD = '''//! The aarch64 kernels of the curves' fields, in inline assembly. **T
 //!   `q (2^64 + 1) - q 2^32` above those.
 //! - [`p384_mul`], [`p384_sqr`]: the same for P-384's prime, where `-1 / p = 2^32 + 1`, so that a
 //!   round's `q` is a shift and an addition, and `q p = q 2^384 - q 2^128 - q 2^96 + q 2^32 - q`.
-//! - [`p521_mul`], [`p521_sqr`]: nine limbs, too many for the registers, so the operands are read
-//!   and the result written in memory, and the finished low limbs of the product wait in `r`; the
-//!   high half is shifted onto the low one by `extr`, for the prime `2^521 - 1`. The square takes
-//!   the products of different limbs once, doubles them by `extr` and adds the squares of the limbs:
-//!   90 cycles after the one before, against 103 by the product's kernel.
 //! - [`pseudo_add_4`] and its like fold a carry back as `f`; [`mont_add_4`] and its like compare
 //!   with the prime, and their subtractions take the difference or the difference plus the prime,
 //!   the second chain a step behind the first, by the borrow.
 
 use core::arch::asm;
 '''
-
-SAFETY = ["# Safety", "", "The limbs of the operands must be valid for reads and those of `r` for writes; `r` may be", "an operand."]
 
 def main():
     out = [HEAD]
@@ -572,14 +415,6 @@ def main():
         f"{A6}, {B6}", p384_mul()))
     out.append(registers("p384_sqr", ["`a^2 / 2^384` modulo P-384's prime, below it, for `a` below it."],
         A6, p384_sqr()))
-    out.append(rust("p521_mul", ["Sets the 9 limbs at `r` to `a b` modulo `2^521 - 1`, not reduced below it: the rows of the product,", "with each finished low limb written to `r`, whose limb `i` no later row reads, and the high", "half shifted onto the low one, as `2^576 = 2^55`.", ""] + SAFETY,
-        "r: *mut u64, a: *const u64, b: *const u64", p521_mul(),
-        ['in("x0") r', 'inout("x1") a => _', 'inout("x2") b => _'],
-        ['x3','x4','x5','x6','x7','x8','x9','x10','x11','x12','x13','x14','x15','x16','x17','x20','x21','x22','x23','x24']))
-    out.append(rust("p521_sqr", ["Sets the 9 limbs at `r` to `a^2` modulo `2^521 - 1`, not reduced below it: the products of", "different limbs once, with the finished low limbs waiting in `r`, then all of them doubled and", "the squares of the limbs added, and the high half shifted onto the low one.", ""] + SAFETY,
-        "r: *mut u64, a: *const u64", p521_sqr(),
-        ['in("x0") r', 'inout("x1") a => _'],
-        ['x2','x3','x4','x5','x6','x7','x8','x9','x10','x11','x12','x13','x14','x15','x16','x17','x20','x21','x22','x23','x24','x25','x26','x27','x28']))
     for n in (4, 6, 9):
         a, b = {4: (A4, B4), 6: (A6, B6), 9: ("a: &[u64; 9]", "b: &[u64; 9]")}[n]
         if n == 9:
