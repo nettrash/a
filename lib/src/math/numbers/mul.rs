@@ -72,6 +72,35 @@ mod kernels;
 #[path = "mul/portable.rs"]
 mod kernels;
 pub(super) mod limbs;
+
+/// The schoolbook kernels, for the products of fixed length of the curves' fields.
+pub(crate) mod basecase {
+    use super::kernels;
+
+    /// Sets the `2n` limbs at `r` to the product of the `n` limbs at `x` and at `y`.
+    ///
+    /// # Safety
+    ///
+    /// `n >= 1`; the limbs of `x` and `y` must be valid for reads and those of `r` for writes, and
+    /// `r` apart from both.
+    #[inline(always)]
+    pub(crate) unsafe fn mul(r: *mut u64, x: *const u64, y: *const u64, n: usize) {
+        // SAFETY: as the caller guarantees.
+        unsafe { kernels::mul_basecase(r, x, n, y, n) }
+    }
+
+    /// Sets the `2n` limbs at `r` to the square of the `n` limbs at `x`.
+    ///
+    /// # Safety
+    ///
+    /// `n >= 1`; the limbs of `x` must be valid for reads and those of `r` for writes, and apart
+    /// from them.
+    #[inline(always)]
+    pub(crate) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize) {
+        // SAFETY: as the caller guarantees.
+        unsafe { kernels::sqr_basecase(r, x, n) }
+    }
+}
 mod toom;
 
 pub(super) use kernels::mul_1_bytes;

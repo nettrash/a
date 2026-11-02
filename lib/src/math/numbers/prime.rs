@@ -202,7 +202,7 @@ fn symbol(d: i64, n_mod_a: u64, n_mod_4: u64) -> i32 {
 /// The Jacobi symbol `(x/a)` for an odd `a`, by the binary method: the factors of two of `x` taken
 /// out (each turns the sign over when `a` is 3 or 5 modulo 8), then the larger of the two odd
 /// numbers less the smaller, swapped by reciprocity (which turns it over when both are 3 modulo 4).
-fn jacobi(mut x: u64, mut a: u64) -> i32 {
+pub(super) fn jacobi(mut x: u64, mut a: u64) -> i32 {
     debug_assert!(a & 1 == 1);
     let mut t = 1;
     if x >= a {
