@@ -6,6 +6,36 @@ use super::svd::svd;
 use super::{Matrix, Scalar};
 use crate::math::complex::Float;
 
+/// The power of two `k` by which the finite elements `data` are scaled, `2^k·A`, as LAPACK's
+/// drivers scale, when the largest of them is so small or so large that products of elements
+/// could underflow or overflow, outside `[√MIN/ε, ε/√MIN]`; 0 inside it, which the largest part
+/// decides alone unless it is near an end. A complex element can have finite parts and an
+/// absolute value that overflows: its largest part, within a factor √2, stands for it then.
+pub(crate) fn range_exponent<T: Scalar>(data: &[T]) -> i32 {
+    let zero = T::Real::ZERO;
+    let small = T::Real::MIN_POSITIVE.sqrt() / T::Real::EPSILON;
+    let big = data
+        .iter()
+        .fold(zero, |s, x| s.max(x.re().abs().max(x.im().abs())));
+    if big >= small && big * T::Real::TWO.sqrt() <= T::Real::ONE / small {
+        return 0;
+    }
+    let max = data.iter().fold(zero, |s, x| s.max(x.abs()));
+    let log2 = |x: T::Real| x.ln().to_f64() / core::f64::consts::LN_2;
+    let top = if max.is_finite() {
+        log2(max)
+    } else {
+        log2(big) + 0.5
+    };
+    if max > zero && max < small {
+        (log2(small) - top).ceil() as i32
+    } else if max > T::Real::ONE / small {
+        (-log2(small) - top).floor() as i32
+    } else {
+        0
+    }
+}
+
 /// A matrix norm, for [`Matrix::norm`] and [`Matrix::cond`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Norm {

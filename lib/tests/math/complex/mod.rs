@@ -77,6 +77,36 @@ fn extreme_magnitudes() {
 }
 
 #[test]
+fn the_top_and_the_bottom_of_the_range() {
+    // Quotients whose sums would overflow, of either operand, and both.
+    let top = c(1e308, 1e308);
+    assert_eq!(top / top, Complex::ONE);
+    assert_eq!(top / c(1.0, 1.0), c(1e308, 0.0));
+    assert_eq!(c(1.0, 1.0) / top, c(1e-308, 0.0));
+    let max = c(f64::MAX, -f64::MAX);
+    assert_eq!(max / max, Complex::ONE);
+    // Its reciprocal is subnormal, a few bits short.
+    near(top.recip() * top, Complex::ONE, 1e-14);
+    // A zero divisor and non-finite operands as before.
+    assert!((top / Complex::ZERO).re.is_infinite());
+    assert!((Complex::ZERO / Complex::<f64>::ZERO).re.is_nan());
+    assert_eq!(c(1.0, 0.0) / c(f64::INFINITY, 0.0), Complex::ZERO);
+    // Logarithms whose magnitude overflows, or is subnormal: mpmath at 40 digits.
+    let ln = c(f64::MAX, f64::MAX).ln();
+    assert!((ln.re - 710.129_286_483_663_9).abs() <= 1e-13, "{ln}");
+    assert!((ln.im - core::f64::consts::FRAC_PI_4).abs() <= 1e-15);
+    let ln = c(3e-320, 4e-320).ln();
+    assert!((ln.re + 735.217_802_978_539_8).abs() <= 1e-12, "{ln}");
+    let ln32 = Complex::new(f32::MAX, f32::MAX).ln();
+    assert!((ln32.re - 89.069_41).abs() <= 1e-5, "{ln32}");
+    // Zero, infinities and NaNs as before.
+    assert_eq!(Complex::<f64>::ZERO.ln().re, f64::NEG_INFINITY);
+    assert_eq!(c(f64::INFINITY, f64::NAN).ln().re, f64::INFINITY);
+    assert_eq!(c(f64::NAN, f64::INFINITY).ln().re, f64::INFINITY);
+    assert!(c(f64::NAN, 1.0).ln().re.is_nan());
+}
+
+#[test]
 fn square_roots() {
     assert_eq!(c(3.0, 4.0).sqrt(), c(2.0, 1.0));
     assert_eq!(c(-4.0, 0.0).sqrt(), c(0.0, 2.0));

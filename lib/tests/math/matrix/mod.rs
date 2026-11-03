@@ -2,6 +2,7 @@ mod basic;
 mod common;
 mod eigen;
 mod exact;
+mod extremes;
 mod factor;
 mod factor_paths;
 mod functions;

@@ -16,8 +16,16 @@ pub(crate) fn norm2<T: Scalar>(x: &[T]) -> T::Real {
     }
     let r = T::Real::ONE / scale;
     let mut s = T::Real::ZERO;
-    for v in x {
-        s += v.scale(r).abs2();
+    if r.is_finite() {
+        for v in x {
+            s += v.scale(r).abs2();
+        }
+    } else {
+        // A subnormal scale, whose reciprocal overflows: a division for each part.
+        for v in x {
+            let (a, b) = (v.re() / scale, v.im() / scale);
+            s += a * a + b * b;
+        }
     }
     s.sqrt() * scale
 }
@@ -30,16 +38,39 @@ pub(crate) fn reflector<T: Scalar>(alpha: T, x: &mut [T]) -> (T, T) {
     if xnorm == T::Real::ZERO && alpha.im() == T::Real::ZERO {
         return (T::zero(), alpha);
     }
-    let norm = alpha.abs().hypot(xnorm);
+    reflection(alpha, alpha.abs().hypot(xnorm), x)
+}
+
+/// The rest of [`reflector`] once the norm of `(alpha, x)` is known, which every reflector here
+/// shares: `β = ∓norm`, `τ` and `x / (alpha - β)`, as LAPACK's `larfg`, but without overflowing
+/// where the norm is near the largest float. `τ = 1 - alpha/β` rather than `(β - alpha)/β`,
+/// whose difference adds two magnitudes (`alpha/β` is not positive, so nothing cancels); and
+/// `alpha - β` halved when it overflows, or each element divided when `1/(alpha - β)` would.
+pub(crate) fn reflection<T: Scalar>(alpha: T, norm: T::Real, x: &mut [T]) -> (T, T) {
     let beta = if alpha.re() >= T::Real::ZERO {
         -norm
     } else {
         norm
     };
-    let tau = T::from_parts((beta - alpha.re()) / beta, -alpha.im() / beta);
-    let r = T::one() / (alpha - T::from_real(beta));
-    for v in x.iter_mut() {
-        *v *= r;
+    let tau = T::from_parts(T::Real::ONE - alpha.re() / beta, -alpha.im() / beta);
+    let d = alpha - T::from_real(beta);
+    if !d.is_finite() {
+        let half = alpha.scale(T::Real::HALF) - T::from_real(beta * T::Real::HALF);
+        let r = T::one() / half;
+        for v in x.iter_mut() {
+            *v = (*v * r).scale(T::Real::HALF);
+        }
+    } else {
+        let r = T::one() / d;
+        if r.is_finite() {
+            for v in x.iter_mut() {
+                *v *= r;
+            }
+        } else {
+            for v in x.iter_mut() {
+                *v /= d;
+            }
+        }
     }
     (tau, T::from_real(beta))
 }

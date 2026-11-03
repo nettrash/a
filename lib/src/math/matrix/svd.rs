@@ -11,6 +11,7 @@ mod qr;
 mod secular;
 mod small;
 
+use super::properties::range_exponent;
 use super::{Matrix, Scalar};
 use crate::math::complex::Float;
 use bidiagonal::{apply_adjoint_right, reduce, triangularize};
@@ -99,16 +100,7 @@ pub(crate) fn svd<T: Scalar>(
     let swap = |uv: Option<(Matrix<T>, Matrix<T>)>| {
         if wide { uv.map(|(u, v)| (v, u)) } else { uv }
     };
-    // The largest part, within a factor √2 of the largest absolute value, which would cost a
-    // square root for each complex element; and whether any element is not finite.
-    let zero = T::Real::ZERO;
-    let mut big = zero;
-    let mut bad = false;
-    for &x in &a.data {
-        big = big.max(x.re().abs().max(x.im().abs()));
-        bad |= !x.is_finite();
-    }
-    if bad {
+    if a.data.iter().any(|x| !x.is_finite()) {
         let nan = T::from_parts(T::Real::NAN, T::Real::NAN);
         let uv = want_uv.then(|| {
             (
@@ -119,22 +111,8 @@ pub(crate) fn svd<T: Scalar>(
         return (vec![T::Real::NAN; cols], swap(uv));
     }
     // Scaled by a power of two when the largest element is so small or so large that products
-    // of elements could underflow or overflow, as LAPACK's drivers do; the largest absolute value
-    // itself decides near the ends of the range.
-    let small = T::Real::MIN_POSITIVE.sqrt() / T::Real::EPSILON;
-    let k = if big >= small && big * T::Real::TWO.sqrt() <= T::Real::ONE / small {
-        0
-    } else {
-        let max = a.data.iter().fold(zero, |s, x| s.max(x.abs()));
-        let log2 = |x: T::Real| x.ln().to_f64() / core::f64::consts::LN_2;
-        if max > zero && max < small {
-            log2(small / max).ceil() as i32
-        } else if max > T::Real::ONE / small {
-            log2(T::Real::ONE / (small * max)).floor() as i32
-        } else {
-            0
-        }
-    };
+    // of elements could underflow or overflow, as LAPACK's drivers do.
+    let k = range_exponent(&a.data);
     let mut x = if wide {
         adjoint(&a.data, m, n).data
     } else {

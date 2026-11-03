@@ -137,7 +137,18 @@ impl<T: Scalar> Matrix<T> {
             }
         }
         let theta = if single { PADE_SINGLE[2].1 } else { PADE[4].1 };
-        let s = (norm / theta).log2().ceil().max(0.0) as i32;
+        // A norm that overflows the elements' type, of finite elements, is at most `n` times the
+        // largest part times √2: its logarithm from that keeps the squarings few, where `∞` would
+        // make them `i32::MAX`.
+        let log2 = if norm.is_finite() {
+            (norm / theta).log2()
+        } else {
+            let big = self.data.iter().fold(0.0f64, |s, x| {
+                s.max(x.re().abs().to_f64().max(x.im().abs().to_f64()))
+            });
+            (n as f64).log2() + big.log2() + 0.5 - theta.log2()
+        };
+        let s = log2.ceil().max(0.0) as i32;
         let scaled = self.map(|&x| x.scale(T::Real::from_f64(0.5f64.powi(s))));
         let mut x = pade(&scaled, PADE[top].0);
         for _ in 0..s {

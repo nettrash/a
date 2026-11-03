@@ -4,7 +4,8 @@
 //! small-bulge multishift QR algorithm with aggressive early deflation, most of its work in
 //! products of blocks.
 
-use super::householder::reflector;
+use super::householder::{reflection, reflector};
+use super::properties::range_exponent;
 use super::{Matrix, Scalar};
 use crate::math::complex::{Complex, Float};
 
@@ -116,6 +117,16 @@ pub(crate) fn schur<T: Scalar>(
         return (all.clone(), want_q.then_some(all), w);
     }
     let mut h = a.clone();
+    // Scaled by a power of two when the largest element is so small or so large that the
+    // reduction or the QR algorithm could underflow or overflow, as LAPACK's `geev`: `T` and the
+    // eigenvalues scaled back, exactly, and `Q` the same.
+    let k = range_exponent(&h.data);
+    if k != 0 {
+        let up = T::Real::TWO.powi(k);
+        for x in &mut h.data {
+            *x = x.scale(up);
+        }
+    }
     let mut q = hessenberg(&mut h, want_q);
     let mut w = vec![Complex::new(T::Real::ZERO, T::Real::ZERO); n];
     let z = q.as_mut().map(|q| q.data.as_mut_slice());
@@ -128,6 +139,15 @@ pub(crate) fn schur<T: Scalar>(
             for i in from..n {
                 h.data[i + j * n] = T::zero();
             }
+        }
+    }
+    if k != 0 {
+        let down = T::Real::TWO.powi(-k);
+        for x in &mut h.data {
+            *x = x.scale(down);
+        }
+        for w in &mut w {
+            *w = Complex::new(w.re * down, w.im * down);
         }
     }
     (h, q, w)
@@ -438,11 +458,7 @@ fn real_reflector<R: Float>(alpha: R, x: &mut [R]) -> (R, R) {
             return (R::ZERO, alpha);
         }
         let beta = -(alpha * alpha + squares).sqrt().copysign(alpha);
-        let r = R::ONE / (alpha - beta);
-        for v in x.iter_mut() {
-            *v *= r;
-        }
-        return ((beta - alpha) / beta, beta);
+        return (real_reflection(alpha, beta, x), beta);
     }
     let mut scale = R::ZERO;
     for v in x.iter() {
@@ -458,12 +474,32 @@ fn real_reflector<R: Float>(alpha: R, x: &mut [R]) -> (R, R) {
     }
     let xnorm = s.sqrt() * scale;
     let beta = -alpha.hypot(xnorm).copysign(alpha);
-    let tau = (beta - alpha) / beta;
-    let r = R::ONE / (alpha - beta);
-    for v in x.iter_mut() {
-        *v *= r;
+    (real_reflection(alpha, beta, x), beta)
+}
+
+/// `τ`, with `x` scaled to the rest of `v`, of the real reflection taking `(alpha, x)` to
+/// `(β, 0)`: [`reflection`](super::householder::reflection) for real numbers, without its
+/// overflows near the largest float.
+fn real_reflection<R: Float>(alpha: R, beta: R, x: &mut [R]) -> R {
+    let d = alpha - beta;
+    if !d.is_finite() {
+        let r = R::ONE / (alpha * R::HALF - beta * R::HALF);
+        for v in x.iter_mut() {
+            *v = *v * r * R::HALF;
+        }
+    } else {
+        let r = R::ONE / d;
+        if r.is_finite() {
+            for v in x.iter_mut() {
+                *v *= r;
+            }
+        } else {
+            for v in x.iter_mut() {
+                *v /= d;
+            }
+        }
     }
-    (tau, beta)
+    R::ONE - alpha / beta
 }
 
 /// A real 2 × 2 block in standard form, its eigenvalues and the rotation to it.
@@ -612,14 +648,7 @@ fn short_reflector<C: Scalar>(alpha: C, x: &mut [C]) -> (C, C) {
     if squares == zero && alpha.im() == zero {
         return (C::zero(), alpha);
     }
-    let norm = (alpha.abs2() + squares).sqrt();
-    let beta = if alpha.re() >= zero { -norm } else { norm };
-    let tau = C::from_parts((beta - alpha.re()) / beta, -alpha.im() / beta);
-    let r = C::one() / (alpha - C::from_real(beta));
-    for v in x.iter_mut() {
-        *v *= r;
-    }
-    (tau, C::from_real(beta))
+    reflection(alpha, (alpha.abs2() + squares).sqrt(), x)
 }
 
 /// The QR algorithm with single implicit shifts on the complex upper Hessenberg `h`, as

@@ -129,16 +129,36 @@ impl<T: Float> Complex<T> {
 
     /// The principal natural logarithm, `ln |self| + i·arg(self)`, whose imaginary part is in
     /// `(-π, π]`. The logarithm of zero is `-∞`. Near the unit circle the real part is
-    /// `ln(1 + (|self|² - 1)) / 2`, so that it keeps its digits where `ln |self|` is small.
+    /// `ln(1 + (|self|² - 1)) / 2`, so that it keeps its digits where `ln |self|` is small; where
+    /// `|self|` overflows, or is subnormal, it is `ln(big) + ln(1 + (small/big)²) / 2` of the
+    /// larger and the smaller part, so that `ln(MAX + MAX·i)` is finite.
     pub fn ln(self) -> Self {
         let (a, b) = (self.re.abs(), self.im.abs());
         let (big, small) = if a >= b { (a, b) } else { (b, a) };
         let re = if big > T::HALF && big < T::TWO {
             ((big - T::ONE) * (big + T::ONE) + small * small).ln_1p() * T::HALF
         } else {
-            self.abs().ln()
+            let m = self.abs();
+            if m.is_finite() && m >= T::MIN_POSITIVE {
+                m.ln()
+            } else {
+                Self::ln_of_extreme(m, big, small)
+            }
         };
         Complex::new(re, self.arg())
+    }
+
+    /// `ln |z|` from its absolute value `m` and its larger and smaller part, where `m` overflows
+    /// or is subnormal: `ln(big) + ln(1 + (small/big)²) / 2`. Zero, infinities and NaNs as
+    /// `ln m` gives them.
+    #[cold]
+    #[inline(never)]
+    fn ln_of_extreme(m: T, big: T, small: T) -> T {
+        if big == T::ZERO || !big.is_finite() || !small.is_finite() {
+            return m.ln();
+        }
+        let r = small / big;
+        big.ln() + (r * r).ln_1p() * T::HALF
     }
 
     /// The principal square root, whose real part is not negative, by Kahan's method, which

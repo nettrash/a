@@ -3,7 +3,7 @@
 //! columns at a time, in sums of lanes that the compiler keeps in vectors.
 
 use super::super::Scalar;
-use super::super::householder::norm2;
+use super::super::householder::{norm2, reflection};
 use crate::math::complex::Float;
 
 /// Whether the target fuses multiply-adds in hardware; elsewhere `mul_add` is a library call.
@@ -387,15 +387,5 @@ pub(super) fn reflector<T: Scalar>(alpha: T, x: &mut [T]) -> (T, T) {
         }
         alpha.abs().hypot(xnorm)
     };
-    let beta = if alpha.re() >= T::Real::ZERO {
-        -norm
-    } else {
-        norm
-    };
-    let tau = T::from_parts((beta - alpha.re()) / beta, -alpha.im() / beta);
-    let r = T::one() / (alpha - T::from_real(beta));
-    for v in x.iter_mut() {
-        *v *= r;
-    }
-    (tau, T::from_real(beta))
+    reflection(alpha, norm, x)
 }

@@ -7,7 +7,7 @@
 
 use super::super::Scalar;
 use super::super::blas::{Op, gemm};
-use super::super::householder::{Block, norm2};
+use super::super::householder::{Block, norm2, reflection};
 use crate::math::complex::Float;
 
 /// The width of the panels of the reduction.
@@ -319,18 +319,7 @@ pub(super) fn reflector<T: Scalar>(alpha: T, x: &mut [T]) -> (T, T) {
     if xnorm == T::Real::ZERO && alpha.im() == T::Real::ZERO {
         return (T::zero(), alpha);
     }
-    let norm = alpha.abs().hypot(xnorm);
-    let beta = if alpha.re() >= T::Real::ZERO {
-        -norm
-    } else {
-        norm
-    };
-    let tau = T::from_parts((beta - alpha.re()) / beta, -alpha.im() / beta);
-    let r = T::one() / (alpha - T::from_real(beta));
-    for v in x.iter_mut() {
-        *v *= r;
-    }
-    (tau, T::from_real(beta))
+    reflection(alpha, alpha.abs().hypot(xnorm), x)
 }
 
 /// The 2-norm of `x`: the root of the sum of the squares in eight sums, or [`norm2`]'s scaled

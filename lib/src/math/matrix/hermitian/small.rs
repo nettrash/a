@@ -131,6 +131,11 @@ fn lower<T: Scalar>(a: &Matrix<T>) -> Option<(Vec<T>, T::Real)> {
             norm = norm.max(x.abs());
         }
     }
+    // A complex element with finite parts whose absolute value overflows: its largest part
+    // stands for it, within the factor √2 that the range has room for.
+    if !norm.is_finite() {
+        norm = big;
+    }
     let scale = if norm > zero && norm < rmin {
         rmin / norm
     } else if norm > rmax {

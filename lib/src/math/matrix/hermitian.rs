@@ -4,7 +4,7 @@
 
 use super::blas::{Op, gemm};
 use super::element::sealed::Scalar as _;
-use super::householder::{Block, reflector};
+use super::householder::{Block, reflection, reflector};
 use super::tridiagonal;
 use super::{Matrix, Scalar};
 use crate::math::complex::Float;
@@ -48,13 +48,19 @@ pub(crate) fn hermitian<T: Scalar>(
     // The lower triangle, scaled into a range where the reduction neither overflows nor
     // underflows, as LAPACK's `heevd`.
     let mut h = vec![T::zero(); n * n];
-    let mut norm = T::Real::ZERO;
+    let (mut norm, mut big) = (T::Real::ZERO, T::Real::ZERO);
     for j in 0..n {
         for i in j..n {
             let x = a.data[i + j * n];
             h[i + j * n] = x;
             norm = norm.max(x.abs());
+            big = big.max(x.re().abs().max(x.im().abs()));
         }
+    }
+    // A complex element with finite parts whose absolute value overflows: its largest part
+    // stands for it, within the factor √2 that the range below has room for.
+    if !norm.is_finite() {
+        norm = big;
     }
     let eps = T::Real::EPSILON * T::Real::HALF;
     let rmin = (T::Real::MIN_POSITIVE / eps).sqrt();
@@ -315,19 +321,7 @@ fn reflect<T: Scalar>(alpha: T, x: &mut [T]) -> (T, T) {
     if !safe {
         return reflector(alpha, x);
     }
-    // LAPACK's `larfg` from here, as `reflector`.
-    let norm = alpha.abs().hypot(ssq.sqrt());
-    let beta = if alpha.re() >= T::Real::ZERO {
-        -norm
-    } else {
-        norm
-    };
-    let tau = T::from_parts((beta - alpha.re()) / beta, -alpha.im() / beta);
-    let r = T::one() / (alpha - T::from_real(beta));
-    for v in x.iter_mut() {
-        *v *= r;
-    }
-    (tau, T::from_real(beta))
+    reflection(alpha, alpha.abs().hypot(ssq.sqrt()), x)
 }
 
 /// Whether the target fuses multiply-adds in hardware; elsewhere `mul_add` is a library call.
