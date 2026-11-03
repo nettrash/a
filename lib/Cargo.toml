@@ -1,13 +1,13 @@
 [package]
 name = "nettrash-a"
-version = "0.0.28"
+version = "0.0.29"
 edition = "2024"
-description = "Algorithms in pure Rust with no dependencies: 24 sorting algorithms; arbitrary-precision integers with Karatsuba, Toom-Cook and NTT multiplication, Newton division, GCD, roots, primes and modular square roots; elliptic curves over prime fields with secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 (not constant-time)."
+description = "Algorithms in pure Rust with no dependencies: 24 sorting algorithms; arbitrary-precision integers with Karatsuba, Toom-Cook and NTT multiplication, Newton division, GCD, roots, primes and modular square roots; elliptic curves over prime fields with secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 (not constant-time); complex numbers; matrices with LU, QR, Cholesky, SVD, Schur and eigendecompositions, exp, sqrt and log."
 license = "MIT"
 repository = "https://github.com/nettrash/a"
 readme = "../README.md"
-keywords = ["algorithms"]
-categories = ["algorithms"]
+keywords = ["algorithms", "sorting", "bignum", "elliptic-curve", "matrix"]
+categories = ["algorithms", "mathematics", "science"]
 rust-version = "1.88"
 
 [lib]

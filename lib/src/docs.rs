@@ -124,3 +124,9 @@ struct MathQuadratic;
 
 #[doc = include_str!("../docs/math/ec.md")]
 struct MathEc;
+
+#[doc = include_str!("../docs/math/complex.md")]
+struct MathComplex;
+
+#[doc = include_str!("../docs/math/matrix.md")]
+struct MathMatrix;
