@@ -86,6 +86,22 @@ These sort by integer or float keys without comparing elements. `k` is the numbe
 
 Sleep sort is a joke: a thread per element sleeps in proportion to its value, the result is not always sorted, and `sleep` returns whether it is.
 
+### Against the standard library
+
+Measured on an Apple M4 Max with new input for every sort; each page has the other inputs, sizes and element types:
+
+| Sort | Against | Speed |
+| --- | --- | --- |
+| [`sort`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/default.md) | `slice::sort` | 1.3–3 times faster on 8–64 random integers, 1.03–1.06 times slower from 100 to 100,000 and as fast beyond; 1.7 times faster on a million random strings |
+| [`merge`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/merge.md) | `slice::sort` | 1.6–2.4 times faster on up to 64 random integers, 1.08–1.23 times slower from 1000; 3–6 times slower with few distinct keys |
+| [`tim`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/tim.md) | `slice::sort` | 1.2–1.45 times slower on random integers from 1000, 1.5–3.7 times faster on nearly sorted input |
+| [`quick`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/quick.md) | `slice::sort_unstable` | 1.1–1.2 times slower on random integers from 100 |
+| [`intro`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/intro.md) | `slice::sort_unstable` | 1.45–1.75 times slower on random integers |
+| [`radix`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/radix.md) | `slice::sort_unstable` | 1.8–5 times faster on random `u32`s from 1000, up to 2.3 times on random `u64`s |
+| [`counting`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/counting.md) | `slice::sort_unstable` | 3.2–10 times faster on random `u32`s and `u64`s with about as many distinct keys as elements, from 100 |
+| [`bucket`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/bucket.md) | `slice::sort_unstable` | 1.3–3 times faster on random integers and 1.7–3.7 times on uniform floats, from 100 |
+| [`pigeonhole`](https://github.com/nettrash/a/blob/HEAD/lib/docs/sorting/pigeonhole.md) | `slice::sort_unstable` | 1.15–2.2 times faster on random `u32` keys in a range of about `n`, from 1000 |
+
 ## Math
 
 ### Integers of any size
@@ -110,17 +126,67 @@ Sleep sort is a joke: a thread per element sleeps in proportion to its value, th
 | [Primes](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/prime.md) | `is_probable_prime` by Baillie–PSW, exact below 2⁶⁴, and `next_prime` |
 | [Squares modulo a prime](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quadratic.md) | `jacobi`, and `sqrt_mod` by Tonelli and Shanks's method |
 
+Measured on an Apple M4 Max in cycles per call, over random operands of the length given, little-endian, against GMP 6.3 and num-bigint 0.4; each page has the conditions, more sizes and the other operations. GMP is faster on some short operands; "–" is not measured:
+
+| Operation | Size | `a` | GMP | num-bigint |
+| --- | --- | ---: | ---: | ---: |
+| `a + b` | 64 B | 25 | 37 | – |
+| | 4 KiB | 469 | 585 | – |
+| `a * b` | 64 B | 109 | 107 | 217 |
+| | 1 KiB | 9,545 | 11,261 | 29,665 |
+| | 64 KiB | 1.12 M | 2.85 M | 17.1 M |
+| | 1 MiB | 24.5 M | 86.3 M | 1,058 M |
+| `a / b` | 64 B / 32 B | 197 | 174 | 738 |
+| | 1 KiB / 512 B | 4,401 | 5,148 | 22,811 |
+| | 64 KiB / 32 KiB | 1.30 M | 2.82 M | 15.0 M |
+| `isqrt` | 64 B | 426 | 335 | 2,798 |
+| | 1 KiB | 4,770 | 4,615 | 101,731 |
+| | 64 KiB | 1.46 M | 2.31 M | 136 M |
+| `gcd` | 64 B | 5,138 | 6,853 | 26,954 |
+| | 1 KiB | 117,118 | 163,209 | 1.15 M |
+| | 64 KiB | 55.5 M | 64.4 M | 4,013 M |
+| `pow_mod`, the exponent as long as the modulus | 64 B | 119,000 | 128,779 | 271,225 |
+| | 256 B | 4.30 M | 5.13 M | 9.09 M |
+| | 1 KiB | 233 M | 239 M | 683 M |
+| `to_str_radix(10)` | 128 B | 983 | 2,453 | 4,417 |
+| | 8 KiB | 504,112 | 607,962 | 2.33 M |
+| | 64 KiB | 7.29 M | 12.6 M | 50.3 M |
+| `is_probable_prime` of a prime | 256 bits | 68,457 | 159,951 | – |
+| | 2048 bits | 14.9 M | 20.9 M | – |
+
 ### Elliptic curves
 
 | Page | Contents |
 | --- | --- |
 | [Elliptic curves](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/ec.md) | `a::math::ec`: short Weierstrass, Montgomery and twisted Edwards curves over prime fields of any length; `+`, `-`, `*`, compression, `multi_mul`, prepared points and maps between the forms; secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 ready made |
 
+Measured on an Apple M4 Max in cycles, against OpenSSL 3.6 and curve25519-dalek 4.1; `k·P` multiplies a point, `k·G` the generator, by a table where the library has one. OpenSSL's and dalek's products of a point are constant-time, which costs them time this crate doesn't spend:
+
+| Curve | Against | `k·P` | theirs | `k·G` | theirs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| secp256k1 | OpenSSL | 40,100 | 555,000 | 7,250 | 559,000 |
+| P-256 | OpenSSL | 82,600 | 90,900 | 10,600 | 14,300 |
+| P-384 | OpenSSL | 311,000 | 548,000 | 40,200 | 267,000 |
+| P-521 | OpenSSL | 358,000 | 496,000 | 52,500 | 269,000 |
+| Ed25519 | dalek | 45,300 | 72,000 | 5,350 | 22,100 |
+| Curve25519, X25519 | dalek | 55,400 | 78,500 | | |
+
 ### Complex numbers
 
 | Page | Contents |
 | --- | --- |
 | [Complex numbers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/complex.md) | `a::math::complex`: `Complex<f32>` and `Complex<f64>`, their arithmetic, `abs`, `arg`, `exp`, `ln`, `sqrt` and powers, with C99's branch cuts; division and square roots that don't overflow before their results do |
+
+Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation over 1,024 independent ones, against num-complex 0.4.6, whose division by `|b|²` as it is overflows from `|b|` of about 10¹⁵⁴:
+
+| Operation | `Complex` | num-complex |
+| --- | ---: | ---: |
+| `a * b` | 0.39 | 0.39 |
+| `a / b` | 1.10 | 0.80 |
+| `sqrt` | 4.05 | 8.67 |
+| `exp` | 4.98 | 5.21 |
+| `ln` | 7.25 | 7.12 |
+| `powc` | 14.78 | 14.59 |
 
 ### Matrices
 
