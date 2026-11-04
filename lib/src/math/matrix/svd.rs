@@ -93,6 +93,25 @@ pub(crate) fn svd<T: Scalar>(
     a: &Matrix<T>,
     want_uv: bool,
 ) -> (Vec<T::Real>, Option<(Matrix<T>, Matrix<T>)>) {
+    let (mut s, uv, k) = svd_scaled(a, want_uv);
+    if k != 0 {
+        let down = T::Real::TWO.powi(-k);
+        for x in &mut s {
+            *x *= down;
+        }
+    }
+    (s, uv)
+}
+
+/// [`svd`] with the singular values of `2^k·a` and `k`, a power of two that brings the largest
+/// element into the range where products of elements neither overflow nor underflow: for what
+/// depends only on the singular values' ratios (ranks, null spaces, condition numbers), which
+/// stay finite where `a`'s own singular values would overflow or underflow.
+#[allow(clippy::type_complexity)]
+pub(crate) fn svd_scaled<T: Scalar>(
+    a: &Matrix<T>,
+    want_uv: bool,
+) -> (Vec<T::Real>, Option<(Matrix<T>, Matrix<T>)>, i32) {
     let (m, n) = a.shape();
     // A wide matrix by its conjugate transpose, `A* = V·Σ·U*`.
     let wide = m < n;
@@ -108,7 +127,7 @@ pub(crate) fn svd<T: Scalar>(
                 Matrix::from_fn(cols, cols, |_, _| nan),
             )
         });
-        return (vec![T::Real::NAN; cols], swap(uv));
+        return (vec![T::Real::NAN; cols], swap(uv), 0);
     }
     // Scaled by a power of two when the largest element is so small or so large that products
     // of elements could underflow or overflow, as LAPACK's drivers do.
@@ -118,20 +137,14 @@ pub(crate) fn svd<T: Scalar>(
     } else {
         a.data.clone()
     };
-    if k == 0 {
-        let (s, uv) = decompose(x, rows, cols, want_uv);
-        return (s, swap(uv));
+    if k != 0 {
+        let up = T::Real::TWO.powi(k);
+        for x in &mut x {
+            *x = x.scale(up);
+        }
     }
-    let up = T::Real::TWO.powi(k);
-    for x in &mut x {
-        *x = x.scale(up);
-    }
-    let (mut s, uv) = decompose(x, rows, cols, want_uv);
-    let down = T::Real::TWO.powi(-k);
-    for x in &mut s {
-        *x *= down;
-    }
-    (s, swap(uv))
+    let (s, uv) = decompose(x, rows, cols, want_uv);
+    (s, swap(uv), k)
 }
 
 /// [`svd`] of the `m × n` column-major `a`, `m ≥ n`, its elements finite and of a moderate size.

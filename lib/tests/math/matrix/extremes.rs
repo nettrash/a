@@ -148,3 +148,97 @@ fn exp_of_an_overflowing_norm<T: Num>() {
 fn exponentials_of_norms_that_overflow() {
     each_type!(exp_of_an_overflowing_norm);
 }
+
+#[test]
+fn schur_blocks_whose_products_overflow() {
+    // The rotation that turns the real Schur form's block into a complex triangle squared its
+    // elements, `-1e400` here: the square root and the logarithm of a rotation by `1e200`.
+    let a = Matrix::from_rows(&[[0.0, -1e200], [1e200, 0.0]]);
+    let r = a.sqrt().unwrap();
+    assert!(r.as_slice().iter().all(|x| x.is_finite()), "{r:?}");
+    let h = 1e100 * core::f64::consts::FRAC_1_SQRT_2;
+    let want = Matrix::from_rows(&[[h, -h], [h, h]]);
+    assert!((&r - &want).norm(Norm::Max) <= 1e-14 * h, "{r:?}");
+    let l = a.log().unwrap();
+    assert!(l.as_slice().iter().all(|x| x.is_finite()), "{l:?}");
+    let ln = 460.517_018_598_809_16; // mpmath, ln 1e200
+    let want = Matrix::from_rows(&[
+        [ln, -core::f64::consts::FRAC_PI_2],
+        [core::f64::consts::FRAC_PI_2, ln],
+    ]);
+    assert!((&l - &want).norm(Norm::Max) <= 1e-12, "{l:?}");
+}
+
+#[test]
+#[should_panic(expected = "more elements than a vector can hold")]
+fn zeros_too_large_to_hold() {
+    let _ = Matrix::<f64>::zeros(1 << (usize::BITS - 1), 2);
+}
+
+#[test]
+#[should_panic(expected = "more elements than a vector can hold")]
+fn from_fn_too_large_to_hold() {
+    let _ = Matrix::from_fn(usize::MAX, 2, |_, _| 0.0);
+}
+
+#[test]
+fn ranks_and_condition_numbers_beyond_the_range() {
+    // One element whose absolute value overflows: its singular value does too, but its rank,
+    // null space and condition number are those of any nonzero 1 × 1 matrix.
+    let m = Matrix::from_rows(&[[Complex::new(f64::MAX, f64::MAX)]]);
+    assert_eq!(m.rank(), 1);
+    assert_eq!(m.null_space().shape(), (1, 0));
+    assert_eq!(m.cond(Norm::Two), 1.0);
+    // The nuclear norm's sums overflow, or their reciprocals do, while the ratio is 4.
+    for x in [1e308f64, 1e-310] {
+        let d = Matrix::from_diagonal(&[x, x]);
+        assert!((d.cond(Norm::Nuclear) - 4.0).abs() <= 1e-15, "{x}");
+        assert!((d.cond(Norm::Two) - 1.0).abs() <= 1e-15, "{x}");
+    }
+}
+
+#[test]
+fn norms_carry_nans() {
+    let nan = f64::NAN;
+    for a in [
+        Matrix::from_rows(&[[nan]]),
+        Matrix::from_rows(&[[nan, 0.0], [0.0, 0.0]]),
+        Matrix::from_rows(&[[nan, 1.0], [2.0, 3.0]]),
+    ] {
+        for norm in [
+            Norm::One,
+            Norm::Infinity,
+            Norm::Max,
+            Norm::Frobenius,
+            Norm::Two,
+            Norm::Nuclear,
+        ] {
+            assert!(a.norm(norm).is_nan(), "{norm:?} of {a:?}");
+        }
+        assert!(a.cond(Norm::Two).is_nan(), "{a:?}");
+        assert!(a.cond(Norm::Nuclear).is_nan(), "{a:?}");
+    }
+    let c = Matrix::from_rows(&[[Complex::new(0.0, nan)], [Complex::ZERO]]);
+    assert!(c.norm(Norm::Frobenius).is_nan());
+}
+
+fn subnormal_reflection_of<T: Num>() {
+    // `(u, u)` for the smallest subnormal `u` of the type: its norm rounds to `u`, which made
+    // `τ = 2` and a `Q` of norm √2.
+    let u = if T::EPS > 1e-10 {
+        f64::from(f32::from_bits(1))
+    } else {
+        f64::from_bits(1)
+    };
+    let a = Matrix::from_rows(&[[T::real(u)], [T::real(u)]]);
+    let qr = a.qr();
+    assert_orthonormal(&qr.q(), 4.0);
+    assert_orthonormal(&qr.q_full(), 4.0);
+    let r = qr.r()[(0, 0)].c64().abs();
+    assert!(r > 0.0 && r <= 2.0 * u, "{r:e}");
+}
+
+#[test]
+fn reflections_of_subnormal_columns() {
+    each_type!(subnormal_reflection_of);
+}

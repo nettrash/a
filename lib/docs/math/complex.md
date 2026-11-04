@@ -37,7 +37,7 @@ assert!(big.abs().is_finite());
 
 The method:
 
-- A quotient is Smith's: the larger part `p` of the divisor divides the smaller `q`, `r = q/p`, and `(a + b·r)/(p + q·r)` and `(b − a·r)/(p + q·r)`, with the parts of the dividend in the order that the case asks, so that nothing overflows where the quotient doesn't. Which part is the larger is chosen by selects, not a branch, which random divisors would mispredict half the time, and so is `r = 0` for a zero divisor, which leaves the parts divided by zero, as floats are. The sums are at most twice the largest part, so all four parts are halved first when one of them is at least half the largest float, which leaves the quotient as it was: `(1e308 + 1e308·i) / (1e308 + 1e308·i)` is 1, not a NaN from `∞ / ∞`. With no branch at all, a quotient took 1.4 ns, against 1.6 with a branch for the zero divisor; the halving costs 0.3 ns of it.
+- A quotient is Smith's: the larger part `p` of the divisor divides the smaller `q`, `r = q/p`, and `(a + b·r)/(p + q·r)` and `(b − a·r)/(p + q·r)`, with the parts of the dividend in the order that the case asks, so that nothing overflows where the quotient doesn't. Which part is the larger is chosen by selects, not a branch, which random divisors would mispredict half the time, and so is `r = 0` for a zero divisor, which leaves the parts divided by zero, as floats are. At the ends of the range, as LAPACK's `ladiv` (Baudin and Smith), all four parts are scaled by one power of two, which leaves the quotient as it was: halved when one of them is at least half the largest float, as the sums are at most twice the largest part, so that `(1e308 + 1e308·i) / (1e308 + 1e308·i)` is 1, not a NaN from `∞ / ∞`; and scaled up by `8/ε²` when the parts of either operand are all below `4·MIN/ε`, so that `(u + u·i) / (u + 2u·i)` for the smallest subnormal `u` is `0.6 − 0.2i`. Where `r` itself falls below the normal range, the products with it are taken as `(y·q)/p`, so that `1e300 / (1e100 + 1e−250·i)` keeps its imaginary part `−1e−150`. All of it took a quotient from 1.1 ns to 2.0; separate factors for the two operands took 2.3.
 - `abs` is `hypot`. `sqrt` is Kahan's: `t = √((|re| + |z|)/2)`, and the root `t + i·im/(2t)` for `re ≥ 0`, `|im|/(2t) ± i·t` otherwise, which cancels nothing, with the operand scaled by a power of 4 when its parts are near the subnormals or near overflow, and C99's values for infinities and NaNs.
 - `ln` takes its real part as `ln(1 + (|z|² − 1))/2` near the unit circle, `(|z| − 1)(|z| + 1) + small²` with the larger part `|z|` of the two, so that `ln |1 + 10⁻¹⁰i| = 5·10⁻²¹` keeps its digits where `ln |z|` would round to 0; `ln |z|` elsewhere, but `ln(big) + ln(1 + (small/big)²)/2` where `|z|` overflows or is subnormal, so that `ln(MAX + MAX·i)` is finite.
 - `exp` keeps a real number real, with the sign of its zero imaginary part; `powi` multiplies by repeated squaring, of the reciprocal for a negative power; `powf` and `powc` are `exp(w·ln z)`.
@@ -46,17 +46,17 @@ Measured on an Apple M4 Max for `Complex<f64>`, over 1,024 independent operation
 
 | Operation | `Complex` | num-complex |
 | --- | --- | --- |
-| `a * b` | 0.42 | 0.40 |
-| `a / b` | 1.41 | 0.80 |
-| `abs` | 1.18 | 1.21 |
-| `sqrt` | 4.19 | 8.84 |
-| `exp` | 5.00 | 5.27 |
-| `ln` | 7.38 | 7.21 |
-| `powc` | 14.93 | 14.94 |
+| `a * b` | 0.43 | 0.44 |
+| `a / b` | 1.99 | 0.88 |
+| `abs` | 1.22 | 1.23 |
+| `sqrt` | 4.41 | 9.12 |
+| `exp` | 5.15 | 5.46 |
+| `ln` | 7.54 | 7.40 |
+| `powc` | 15.75 | 15.48 |
 
-- num-complex divides by `|b|²` as it is, so that its quotients overflow from `|b|` of about 10¹⁵⁴ and lose their digits below 10⁻¹⁵⁴, where Smith's method with the halving keeps them, at about 0.6 ns a quotient.
+- num-complex divides by `|b|²` as it is, so that its quotients overflow from `|b|` of about 10¹⁵⁴ and lose their digits below 10⁻¹⁵⁴, where Smith's method with its scaling keeps them, at about 1.1 ns a quotient.
 - `sqrt` takes half the time: a `hypot`, a square root and a division, where num-complex goes through the polar form, a `hypot`, an `atan2`, a square root, a sine and a cosine.
-- `ln` takes 2 % longer for the digits it keeps near the unit circle, and `powc` as long.
+- `ln` takes 2 % longer for the digits it keeps near the unit circle, and `powc` through it as much.
 
 ## Efficiency
 

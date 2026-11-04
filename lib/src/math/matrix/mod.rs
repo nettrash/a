@@ -55,6 +55,18 @@ pub struct Matrix<T> {
     data: Vec<T>,
 }
 
+/// The number of elements of a `rows × cols` matrix, which a release build would otherwise let
+/// wrap around and leave a matrix of nonempty dimensions with no elements.
+///
+/// # Panics
+///
+/// Panics if it overflows `usize`.
+#[track_caller]
+fn size(rows: usize, cols: usize) -> usize {
+    rows.checked_mul(cols)
+        .expect("the matrix has more elements than a vector can hold")
+}
+
 impl<T> Matrix<T> {
     /// The matrix of `rows × cols` elements given column after column.
     ///
@@ -83,8 +95,13 @@ impl<T> Matrix<T> {
 
     /// The matrix whose element in row `i` and column `j` is `f(i, j)`, computed column after
     /// column.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `rows · cols` overflows `usize`.
+    #[track_caller]
     pub fn from_fn(rows: usize, cols: usize, mut f: impl FnMut(usize, usize) -> T) -> Self {
-        let mut data = Vec::with_capacity(rows * cols);
+        let mut data = Vec::with_capacity(size(rows, cols));
         for j in 0..cols {
             // A column at a time, from a range whose length is known, so that the vector is not
             // checked for room at each element.
@@ -269,13 +286,18 @@ impl<T: Clone> Matrix<T> {
 
 impl<T: Element> Matrix<T> {
     /// The `rows × cols` matrix of zeros.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `rows · cols` overflows `usize`.
+    #[track_caller]
     pub fn zeros(rows: usize, cols: usize) -> Self {
         // Filled at once, rather than element by element: for floats the allocator's zeroed
         // pages, which took 1.4 µs for `256 × 256` against 69 by `from_fn`.
         Matrix {
             rows,
             cols,
-            data: vec![T::zero(); rows * cols],
+            data: vec![T::zero(); size(rows, cols)],
         }
     }
 

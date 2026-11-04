@@ -2,7 +2,7 @@
 
 use super::householder::norm2;
 use super::schur::hessenberg;
-use super::svd::svd;
+use super::svd::{svd, svd_scaled};
 use super::{Matrix, Scalar};
 use crate::math::complex::Float;
 
@@ -33,6 +33,16 @@ pub(crate) fn range_exponent<T: Scalar>(data: &[T]) -> i32 {
         (-log2(small) - top).floor() as i32
     } else {
         0
+    }
+}
+
+/// The larger of `m` and `x`, or a NaN when either is one: `Float::max` ignores NaNs, which
+/// would let a norm of a matrix holding one be finite.
+fn max_nan<R: Float>(m: R, x: R) -> R {
+    if m.is_nan() || x.is_nan() {
+        R::NAN
+    } else {
+        m.max(x)
     }
 }
 
@@ -75,7 +85,7 @@ impl<T: Scalar> Matrix<T> {
         match norm {
             Norm::One => (0..n)
                 .map(|j| self.column(j).iter().map(|x| x.abs()).sum::<T::Real>())
-                .fold(zero, T::Real::max),
+                .fold(zero, max_nan),
             Norm::Infinity => {
                 let mut rows = vec![zero; m];
                 for j in 0..n {
@@ -83,10 +93,10 @@ impl<T: Scalar> Matrix<T> {
                         *r += x.abs();
                     }
                 }
-                rows.into_iter().fold(zero, T::Real::max)
+                rows.into_iter().fold(zero, max_nan)
             }
             Norm::Frobenius => norm2(&self.data),
-            Norm::Max => self.data.iter().map(|x| x.abs()).fold(zero, T::Real::max),
+            Norm::Max => self.data.iter().map(|x| x.abs()).fold(zero, max_nan),
             Norm::Two => svd(self, false).0.first().copied().unwrap_or(zero),
             Norm::Nuclear => svd(self, false).0.into_iter().sum(),
         }
@@ -104,9 +114,12 @@ impl<T: Scalar> Matrix<T> {
     pub fn cond(&self, norm: Norm) -> T::Real {
         let zero = T::Real::ZERO;
         match norm {
+            // From the singular values of the matrix scaled into range, whose ratios are the
+            // same, so that neither overflows where the matrix's own would.
             Norm::Two => {
-                let s = svd(self, false).0;
+                let s = svd_scaled(self, false).0;
                 match (s.first(), s.last()) {
+                    (Some(&max), Some(&min)) if max.is_nan() || min.is_nan() => T::Real::NAN,
                     (Some(&max), Some(&min)) if min > zero => max / min,
                     (Some(_), Some(_)) => T::Real::INFINITY,
                     _ => zero,
@@ -114,12 +127,14 @@ impl<T: Scalar> Matrix<T> {
             }
             Norm::Nuclear => {
                 assert!(self.is_square(), "the matrix is not square");
-                let s = svd(self, false).0;
+                let s = svd_scaled(self, false).0;
                 if s.last().is_some_and(|&x| x == zero) {
                     return T::Real::INFINITY;
                 }
-                let sum: T::Real = s.iter().copied().sum();
-                let inv: T::Real = s.iter().map(|&x| T::Real::ONE / x).sum();
+                // `(Σσ/σ₁)·(Σσ₁/σ)`, each sum at most `n` times its largest term.
+                let top = s.first().copied().unwrap_or(T::Real::ONE);
+                let sum: T::Real = s.iter().map(|&x| x / top).sum();
+                let inv: T::Real = s.iter().map(|&x| top / x).sum();
                 sum * inv
             }
             _ => {
@@ -135,7 +150,7 @@ impl<T: Scalar> Matrix<T> {
     /// The rank: the number of singular values above `max(m, n)·ε·σ₁`, `ε` the unit roundoff
     /// of the type and `σ₁` the largest singular value, as NumPy's `matrix_rank`.
     pub fn rank(&self) -> usize {
-        let s = svd(self, false).0;
+        let s = svd_scaled(self, false).0;
         let tol = self.rank_tolerance(&s);
         s.iter().filter(|&&x| x > tol).count()
     }
@@ -151,7 +166,7 @@ impl<T: Scalar> Matrix<T> {
         } else {
             self.clone()
         };
-        let (s, uv) = svd(&a, true);
+        let (s, uv, _) = svd_scaled(&a, true);
         let v = uv.map(|(_, v)| v).unwrap_or_default();
         let tol = self.rank_tolerance(&s);
         let rank = s.iter().filter(|&&x| x > tol).count();

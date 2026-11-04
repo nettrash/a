@@ -474,6 +474,17 @@ fn real_reflector<R: Float>(alpha: R, x: &mut [R]) -> (R, R) {
     }
     let xnorm = s.sqrt() * scale;
     let beta = -alpha.hypot(xnorm).copysign(alpha);
+    // A norm below `MIN/ε` has lost digits to underflow: scaled up by a power of two and taken
+    // again, as `reflection` does.
+    let small = R::MIN_POSITIVE / R::EPSILON;
+    if beta.abs() < small {
+        let up = R::ONE / small;
+        for v in x.iter_mut() {
+            *v *= up;
+        }
+        let (tau, beta) = real_reflector(alpha * up, x);
+        return (tau, beta * small);
+    }
     (real_reflection(alpha, beta, x), beta)
 }
 

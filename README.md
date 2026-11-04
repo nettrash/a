@@ -181,12 +181,12 @@ Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation ove
 
 | Operation | `Complex` | num-complex |
 | --- | ---: | ---: |
-| `a * b` | 0.42 | 0.40 |
-| `a / b` | 1.41 | 0.80 |
-| `sqrt` | 4.19 | 8.84 |
-| `exp` | 5.00 | 5.27 |
-| `ln` | 7.38 | 7.21 |
-| `powc` | 14.93 | 14.94 |
+| `a * b` | 0.43 | 0.44 |
+| `a / b` | 1.99 | 0.88 |
+| `sqrt` | 4.41 | 9.12 |
+| `exp` | 5.15 | 5.46 |
+| `ln` | 7.54 | 7.40 |
+| `powc` | 15.75 | 15.48 |
 
 ### Matrices
 

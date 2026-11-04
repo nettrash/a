@@ -150,8 +150,15 @@ pub(crate) fn real_to_complex_schur<C: Scalar>(t: &mut [C], q: &mut [C], n: usiz
         if sub == C::zero() {
             continue;
         }
-        // The block's eigenvalue with a positive imaginary part, less `t[m, m]`.
+        // The block's eigenvalue with a positive imaginary part, less `t[m, m]`, from the block
+        // divided by its largest part: the rotation depends only on the ratio of `mu` to `c`,
+        // and the products of the block's own elements could overflow or underflow, as those of
+        // `[[0, -1e200], [1e200, 0]]` do.
         let (a, b, c, d) = (t[at(m - 1, m - 1)], t[at(m - 1, m)], sub, t[at(m, m)]);
+        let part = |x: C| x.re().abs().max(x.im().abs());
+        let s = part(a).max(part(b)).max(part(c)).max(part(d));
+        let down = |x: C| C::from_parts(x.re() / s, x.im() / s);
+        let (a, b, c, d) = (down(a), down(b), down(c), down(d));
         let half = (a - d).scale(C::Real::HALF);
         let disc = (half * half + b * c).sqrt();
         let mu = half + disc;

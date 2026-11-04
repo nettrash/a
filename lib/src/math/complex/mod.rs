@@ -124,6 +124,12 @@ impl<T: Float> Complex<T> {
             return Complex::new(r, self.im);
         }
         let (sin, cos) = self.im.sin_cos();
+        if r.is_infinite() && self.re.is_finite() {
+            // `e^re` overflows where `e^re·cos` may not, as for `exp(710 + i·π/4)`: the
+            // trigonometric factor between two halves of the exponential.
+            let h = (self.re * T::HALF).exp();
+            return Complex::new(h * cos * h, h * sin * h);
+        }
         Complex::new(r * cos, r * sin)
     }
 

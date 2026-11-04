@@ -54,30 +54,48 @@ impl<T: Float> Complex<T> {
     /// nothing overflows where the quotient doesn't. The two cases differ only in which parts
     /// play which role and in a sign, chosen by selects rather than a branch, which random
     /// operands would mispredict half the time. A zero `b` takes `r = 0`, which leaves `a.re / 0`
-    /// and `a.im / 0`, infinities or NaNs as for floats, by a select too. The sums are at most
-    /// twice the largest part, so all four parts are halved first when one of them is at least
-    /// half the largest float, which leaves the quotient as it was: `(1e308 + 1e308·i) /
-    /// (1e308 + 1e308·i)` is 1, not a NaN from `∞ / ∞`. A part that halving makes inexact is
-    /// subnormal, beside one near the largest float, so the quotient underflows or overflows
-    /// anyway. With no branch at all a quotient took 1.4 ns on an Apple M4 Max, against 1.6 with
-    /// a branch for the zero divisor; four comparisons rather than a maximum of the parts saved
-    /// 0.2 of it.
+    /// and `a.im / 0`, infinities or NaNs as for floats, by a select too.
+    ///
+    /// At the ends of the range, as LAPACK's `ladiv` (Baudin and Smith), all four parts are
+    /// scaled by one power of two, which leaves the quotient as it was: halved when one of them
+    /// is at least half the largest float, as the sums are at most twice the largest part, so
+    /// that `(1e308 + 1e308·i) / (1e308 + 1e308·i)` is 1, not a NaN from `∞ / ∞`; and scaled
+    /// up by `8/ε²` when the parts of either operand are all below `4·MIN/ε`, so that Smith's
+    /// products keep their digits and `(u + u·i) / (u + 2u·i)` for the smallest subnormal `u`
+    /// is `0.6 - 0.2i`. Where that makes the other operand overflow or vanish, the quotient
+    /// overflows or underflows anyway. Where `r` itself falls below the normal range, the
+    /// products with it are taken as `(y·q)/p`, so that `1e300 / (1e100 + 1e-250·i)` keeps its
+    /// imaginary part `-1e-150`. All of it took a quotient from 1.1 ns to 2.0 on an Apple M4
+    /// Max; separate factors for the two operands took 2.3, and the rare cases out of line in a
+    /// function of their own 4.1, its call alone keeping the loop from overlapping quotients.
     #[inline]
     fn over(a: Self, b: Self) -> Self {
+        let zero = T::ZERO;
+        let (aa, ab, ba, bb) = (a.re.abs(), a.im.abs(), b.re.abs(), b.im.abs());
         let limit = T::MAX * T::HALF;
-        let big = (a.re.abs() >= limit)
-            | (a.im.abs() >= limit)
-            | (b.re.abs() >= limit)
-            | (b.im.abs() >= limit);
-        let s = if big { T::HALF } else { T::ONE };
+        let tiny = T::MIN_POSITIVE * T::from_f64(4.0) / T::EPSILON;
+        let big = (aa >= limit) | (ab >= limit) | (ba >= limit) | (bb >= limit);
+        let small = ((aa <= tiny) & (ab <= tiny)) | ((ba <= tiny) & (bb <= tiny));
+        let s = if big {
+            T::HALF
+        } else if small {
+            T::from_f64(8.0) / (T::EPSILON * T::EPSILON)
+        } else {
+            T::ONE
+        };
         let (ar, ai, br, bi) = (a.re * s, a.im * s, b.re * s, b.im * s);
         let swap = br.abs() < bi.abs();
         let (p, q) = if swap { (bi, br) } else { (br, bi) };
         let (x, y) = if swap { (ai, ar) } else { (ar, ai) };
-        let r = if p == T::ZERO { T::ZERO } else { q / p };
+        let r = if p == zero { zero } else { q / p };
         let d = p + q * r;
-        let im = (y - x * r) / d;
-        Complex::new((x + y * r) / d, if swap { -im } else { im })
+        let (yr, xr) = if r.abs() < T::MIN_POSITIVE && q != zero && p != zero {
+            ((y * q) / p, (x * q) / p)
+        } else {
+            (y * r, x * r)
+        };
+        let im = (y - xr) / d;
+        Complex::new((x + yr) / d, if swap { -im } else { im })
     }
 
     #[inline]

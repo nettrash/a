@@ -12,6 +12,10 @@ pub(crate) fn norm2<T: Scalar>(x: &[T]) -> T::Real {
         scale = scale.max(v.re().abs()).max(v.im().abs());
     }
     if scale == T::Real::ZERO || !scale.is_finite() {
+        // `max` ignores NaNs, which the sum below would carry: zeros and NaNs alone are NaN.
+        if scale == T::Real::ZERO && x.iter().any(|v| v.re().is_nan() || v.im().is_nan()) {
+            return T::Real::NAN;
+        }
         return scale;
     }
     let r = T::Real::ONE / scale;
@@ -47,6 +51,20 @@ pub(crate) fn reflector<T: Scalar>(alpha: T, x: &mut [T]) -> (T, T) {
 /// whose difference adds two magnitudes (`alpha/β` is not positive, so nothing cancels); and
 /// `alpha - β` halved when it overflows, or each element divided when `1/(alpha - β)` would.
 pub(crate) fn reflection<T: Scalar>(alpha: T, norm: T::Real, x: &mut [T]) -> (T, T) {
+    // A norm below `MIN/ε` has lost digits to underflow, so that `(u, u)` for the smallest
+    // subnormal `u` would take `‖(u, u)‖ = u` and a reflection that is not unitary: `alpha` and
+    // `x` are scaled up by a power of two first and the norm computed again, as LAPACK's `larfg`
+    // does, and only `β` scaled back.
+    let small = T::Real::MIN_POSITIVE / T::Real::EPSILON;
+    if norm > T::Real::ZERO && norm < small {
+        let up = T::Real::ONE / small;
+        for v in x.iter_mut() {
+            *v = v.scale(up);
+        }
+        let alpha = alpha.scale(up);
+        let (tau, beta) = reflection(alpha, alpha.abs().hypot(norm2(x)), x);
+        return (tau, beta.scale(small));
+    }
     let beta = if alpha.re() >= T::Real::ZERO {
         -norm
     } else {

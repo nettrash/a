@@ -104,6 +104,24 @@ fn the_top_and_the_bottom_of_the_range() {
     assert_eq!(c(f64::INFINITY, f64::NAN).ln().re, f64::INFINITY);
     assert_eq!(c(f64::NAN, f64::INFINITY).ln().re, f64::INFINITY);
     assert!(c(f64::NAN, 1.0).ln().re.is_nan());
+    // An exponential whose `e^re` overflows but whose parts don't: mpmath at 40 digits.
+    let e = c(710.0, core::f64::consts::FRAC_PI_4).exp();
+    near(
+        e,
+        c(1.579_672_848_288_201_5e308, 1.579_672_848_288_201_5e308),
+        1e-15,
+    );
+    assert!(c(710.0, 0.0).exp().re.is_infinite());
+    // Quotients whose intermediate products underflow: of subnormal operands, and where
+    // `q/p` underflows.
+    let u = f64::from_bits(1);
+    near(c(u, u) / c(u, 2.0 * u), c(0.6, -0.2), 1e-15);
+    let q = c(1e300, 0.0) / c(1e100, 1e-250);
+    assert!(
+        (q.re - 1e200).abs() <= 1e185 && (q.im + 1e-150).abs() <= 1e-164,
+        "{q:?}"
+    );
+    near(c(3e-310, 4e-310) / c(1e-310, 0.0), c(3.0, 4.0), 1e-12);
 }
 
 #[test]
