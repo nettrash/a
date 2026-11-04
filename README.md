@@ -7,7 +7,7 @@
 
 Algorithms in pure Rust, with no dependencies:
 
-- **Sorting** (`a::sort`): 24 sorts by comparison and by key, a default one among them.
+- **Sorting** (`a::sort`): 23 sorting algorithms by comparison and by key, and a default sort.
 - **Integers of any size** (`a::math::numbers`): `Number`, with its arithmetic up to transforms for the longest products, roots, powers modulo a number, greatest common divisors, primes and text in any radix.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers.
@@ -16,7 +16,14 @@ Every algorithm has a page with its method, examples and measurements against th
 
 ## Usage
 
-Add the crate with `cargo add nettrash-a`; its library is named `a`:
+Add the crate with `cargo add nettrash-a`, or to `Cargo.toml`:
+
+```toml
+[dependencies]
+nettrash-a = "0.1"
+```
+
+Its library is named `a`:
 
 ```rust
 use a::math::matrix::Matrix;
@@ -223,6 +230,10 @@ Apple's Accelerate, which runs its products on the M4's matrix unit, is faster t
 ## Not constant-time
 
 Nothing here is written to take the same time whatever its operands: `pow_mod` and the elliptic curves in particular branch on the values of their exponents and scalars. Use them on public data, for verification and research, not on secret keys or scalars.
+
+## Changelog
+
+What each version added, changed and fixed is in [CHANGELOG.md](https://github.com/nettrash/a/blob/HEAD/CHANGELOG.md).
 
 ## License
 
