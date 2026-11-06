@@ -66,6 +66,7 @@ mod limbs;
 use super::add::{read_small, significant_len, small, write_small};
 use super::mul::limbs::mul;
 use super::mul::{Operand, Product, STACK_LIMBS, on_heap, on_stack, to_limbs};
+use super::scratch::{Scratch, need, scratch};
 use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 use core::ptr;
@@ -495,8 +496,8 @@ fn sign(nonzero: bool, negative: bool, order: ByteOrder) -> Number {
 /// Runs `f` on `need` limbs of working memory, on the stack up to [`STACK_LIMBS`], aligned to 16
 /// bytes.
 #[inline(always)]
-fn working<R>(need: usize, f: impl FnOnce(*mut u64) -> R) -> R {
-    let run = |s: *mut MaybeUninit<u64>| f(s.cast());
+fn working<R>(need: usize, f: impl FnOnce(Scratch) -> R) -> R {
+    let run = |s: *mut MaybeUninit<u64>| f(scratch!(s.cast(), need));
     if need <= STACK_LIMBS {
         on_stack(run)
     } else {
@@ -550,9 +551,9 @@ fn gcd_general(a: &Number, b: &Number) -> Number {
     working(need, |s| {
         // SAFETY: the working memory holds the limbs counted above; the operands are borrowed.
         unsafe {
-            let (pa, pb) = (s, s.add(nx + 1));
-            let r = pb.add(ny + 1);
-            let t = r.add(long + 2);
+            let (pa, s) = s.split(nx + 1);
+            let (pb, s) = s.split(ny + 1);
+            let (r, t) = s.split(long + 2);
             to_limbs(x, pa);
             to_limbs(y, pb);
             let (na, za) = strip(pa, nx);
@@ -597,9 +598,10 @@ unsafe fn gcd_limbs(
     na: usize,
     b: *mut u64,
     nb: usize,
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
 ) -> usize {
+    need!(t, avail);
     // SAFETY: as the caller guarantees.
     unsafe {
         if nb == 1 {
@@ -622,7 +624,8 @@ unsafe fn gcd_limbs(
             // division that needs more scratch take it from `with_scratch`.
             let qn = na - nb + 1;
             with_scratch(t, avail, qn + tdiv_itch(na, nb), |t| {
-                tdiv_qr(t, a, na, b, nb, t.add(qn));
+                let (q, w) = t.split(qn);
+                tdiv_qr(q, a, na, b, nb, w);
             });
             if normalized(a, nb) == 0 {
                 ptr::copy_nonoverlapping(b, g, nb);
@@ -747,32 +750,39 @@ fn cofactors(
         .max((np - nq + 1) + tdiv_itch(np, nq))
         .max(mul_bound(np, ualloc))
         .max(divexact_itch(np + ualloc + 1, nq));
-    let need = (np + 1)
-        + (nq + 1)
-        + 2 * ualloc
-        + nq
-        + (ualloc + 1)
-        + (np + ualloc + 1)
-        + (np + 2)
-        + scratch;
+    // The sum saturates: on 32-bit targets it passes `usize::MAX` for operands of 1.9 GB, a plan
+    // that cannot be met, which the allocation refuses, where a wrapped one would be met and
+    // overrun. Each part stays below the limit there.
+    let need = [
+        np + 1,
+        nq + 1,
+        2 * ualloc,
+        nq,
+        ualloc + 1,
+        np + ualloc + 1,
+        np + 2,
+        scratch,
+    ]
+    .into_iter()
+    .fold(0, usize::saturating_add);
     working(need, |s| {
         // SAFETY: the working memory holds the limbs counted above, in that order; the operands are
         // borrowed.
         unsafe {
-            let pa = s;
-            let pb = pa.add(np + 1);
-            let u0 = pb.add(nq + 1);
-            let u1 = u0.add(ualloc);
-            let g = u1.add(ualloc);
-            let c = g.add(nq);
-            let prod = c.add(ualloc + 1);
-            let v = prod.add(np + ualloc + 1);
-            let t = v.add(np + 2);
+            let (pa, s) = s.split(np + 1);
+            let (pb, s) = s.split(nq + 1);
+            let (u0, s) = s.split(ualloc);
+            let (u1, s) = s.split(ualloc);
+            let (g, s) = s.split(nq);
+            let (c, s) = s.split(ualloc + 1);
+            let (prod, s) = s.split(np + ualloc + 1);
+            let (v, t) = s.split(np + 2);
             to_limbs(p, pa);
             to_limbs(q, pb);
             if np > nq {
                 let qn = np - nq + 1;
-                tdiv_qr(t, pa, np, pb, nq, t.add(qn));
+                let (quotient, w) = t.split(qn);
+                tdiv_qr(quotient, pa, np, pb, nq, w);
                 if normalized(pa, nq) == 0 {
                     // `q` divides `p`: g = |q| = 0 |p| + 1 |q|.
                     let gq = limbs_number(pb, nq, false, order);
@@ -832,18 +842,21 @@ fn inverse_general(a: &Number, modulus: &Number) -> Option<Number> {
     let scratch = lehmer_ext_itch(nm)
         .max(ext_dc_itch(nm))
         .max((nx.max(nm) - nm + 1) + tdiv_itch(nx.max(nm), nm));
-    let need = (nx.max(nm) + 1) + (nm + 1) + 2 * ualloc + nm + (ualloc + 1) + scratch;
+    // The sum saturates, as in `cofactors`: on 32-bit targets it reaches `15 nm + 90` limbs for a
+    // modulus of `2^28` limbs, just over 15/16 of the limit.
+    let need = [nx.max(nm) + 1, nm + 1, 2 * ualloc, nm, ualloc + 1, scratch]
+        .into_iter()
+        .fold(0, usize::saturating_add);
     working(need, |s| {
         // SAFETY: the working memory holds the limbs counted above, in that order; the operands are
         // borrowed.
         unsafe {
-            let pa = s;
-            let pm = pa.add(nx.max(nm) + 1);
-            let u0 = pm.add(nm + 1);
-            let u1 = u0.add(ualloc);
-            let g = u1.add(ualloc);
-            let c = g.add(nm);
-            let t = c.add(ualloc + 1);
+            let (pa, s) = s.split(nx.max(nm) + 1);
+            let (pm, s) = s.split(nm + 1);
+            let (u0, s) = s.split(ualloc);
+            let (u1, s) = s.split(ualloc);
+            let (g, s) = s.split(nm);
+            let (c, t) = s.split(ualloc + 1);
             to_limbs(m, pm);
             if nm == 1 && *pm == 1 {
                 return Some(small_number(order, 0, false));
@@ -855,7 +868,8 @@ fn inverse_general(a: &Number, modulus: &Number) -> Option<Number> {
             let mut na = nx;
             if nx >= nm {
                 let qn = nx - nm + 1;
-                tdiv_qr(t, pa, nx, pm, nm, t.add(qn));
+                let (q, w) = t.split(qn);
+                tdiv_qr(q, pa, nx, pm, nm, w);
                 na = normalized(pa, nm);
                 if na == 0 {
                     return None;

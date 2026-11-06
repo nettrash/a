@@ -472,6 +472,27 @@ fn next_primes_across_powers_of_two() {
 }
 
 #[test]
+fn next_primes_plan_for_candidates_of_either_length() {
+    // Under Miri, which would take hours, not run.
+    if cfg!(miri) {
+        return;
+    }
+    // On aarch64 the test of a candidate of 437 limbs takes 803 limbs of working memory more than
+    // that of 438, whose low halves of the reduction take the transforms instead of Toom-Cook's
+    // methods. The search planned for candidates of one limb more than its start, so from a start
+    // of 437 limbs the last residues of the strong Lucas test lay past its working memory.
+    // 2^27967 + 20055 is the first prime above 2^27967 (GMP 6.3's `mpz_nextprime`): from just below
+    // it, the first candidate is the prime, tested once.
+    let mut state = 0x6A09E667_F3BCC908;
+    let x = stored_number(&mut state, &power_of_two_plus(27967, 20054));
+    let r = x.next_prime();
+    let p = power_of_two_plus(27967, 20055);
+    assert_result(&r, &expected(&p, false), x.byte_order, &|| {
+        "next_prime of 2^27967 + 20054".to_string()
+    });
+}
+
+#[test]
 fn next_primes_have_no_prime_before_them() {
     let mut state = 0x9216D5D9_8979FB1B;
     for bytes in [9, 16, 17, 32, size(64, 17), size(128, 17)] {

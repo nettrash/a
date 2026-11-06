@@ -33,6 +33,7 @@
 
 use super::super::div::limbs::{div_qr, div_qr_1, div_qr_2, invert_3by2, invert_limb, qr_itch};
 use super::super::mul::limbs::{add_1, cmp_n, mul, mul_itch, sqr, sqr_itch, sub_1, sub_n};
+use super::super::scratch::{Scratch, need};
 use super::{ROUGH_BITS, lshift, mul_1, rough_root, rshift};
 use core::cmp::Ordering;
 
@@ -110,19 +111,20 @@ struct Buffers {
 /// # Safety
 ///
 /// The limbs at `u` must be valid for reads, and the [`root_itch`]`(un, k)` at `w` for reads and
-/// writes, apart from them; the root is written in the first limbs of `w`, at `s = w`.
-pub(super) unsafe fn root(u: *const u64, un: usize, k: u32, w: *mut u64) -> usize {
+/// writes, apart from them; the root is written in the first limbs of `w`.
+pub(super) unsafe fn root(u: *const u64, un: usize, k: u32, w: Scratch) -> usize {
+    need!(w, root_itch(un, k));
     // SAFETY: as the caller guarantees: the root takes the first `sn` limbs of the working memory,
     // and each buffer `cap + 2` after them.
     unsafe {
         debug_assert!(k >= 3 && *u.add(un - 1) != 0);
         let ub = 64 * un as u64 - u64::from((*u.add(un - 1)).leading_zeros());
         let plan = Plan::of(ub, un, k);
-        // `root_itch` plans for `64 un` bits, at least `ub`: as long a root, and as many limbs.
-        debug_assert!(plan.sn + 8 * (plan.cap + 2) <= root_itch(un, k));
-        let s = w;
+        // `root_itch` plans for `64 un` bits, at least `ub`: as long a root, and as many limbs,
+        // which the carving checks.
         let stride = plan.cap + 2;
-        let base = w.add(plan.sn);
+        let (s, rest) = w.split(plan.sn);
+        let base = rest.take(8 * stride);
         let buffers = Buffers {
             stride,
             t: base,
@@ -576,12 +578,12 @@ unsafe fn shift_into(dst: *mut u64, x: *const u64, xn: usize, sh: i128) -> usize
     }
 }
 
-/// Makes `scratch` hold at least `n` limbs, and returns a pointer to them.
-fn scratch_of(scratch: &mut Vec<u64>, n: usize) -> *mut u64 {
+/// Makes `scratch` hold at least `n` limbs, and returns them as working memory.
+fn scratch_of(scratch: &mut Vec<u64>, n: usize) -> Scratch {
     if scratch.len() < n {
         scratch.resize(n, 0);
     }
-    scratch.as_mut_ptr()
+    Scratch::new(scratch.as_mut_ptr(), n)
 }
 
 /// Sets the limbs at `r` to the product of the `xn` limbs at `x` and the `yn` at `y`, not zero and

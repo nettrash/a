@@ -156,7 +156,11 @@ fn add_in_place(a: &mut Number, negative: bool, m: u128) {
         (i >= s - 1, c)
     };
     if carried {
-        // All ones up to the top: one byte more, 1.
+        // All ones up to the top: one byte more, 1. On 32-bit targets the vector grows by that
+        // byte alone: `insert` and `push` would double a full one of 1 GiB or more, past
+        // `isize::MAX`, and panic with "capacity overflow" for a sum that fits.
+        #[cfg(not(target_pointer_width = "64"))]
+        v.reserve_exact(1);
         if be {
             v.insert(0, 1);
         } else {

@@ -37,6 +37,7 @@ use super::super::div::limbs::{
 };
 use super::super::mul::limbs::{add_1, add_n, cmp_n, mul, sub_1, sub_n};
 use super::super::mul::{on_heap, on_stack};
+use super::super::scratch::{Scratch, need, scratch};
 use super::kernels::{addmul_1, extend_row, gcd_22, reduce_pair, small_q1, small_q2};
 use core::cmp::Ordering;
 use core::mem::MaybeUninit;
@@ -463,9 +464,10 @@ pub(super) unsafe fn tdiv_qr(
     nn: usize,
     d: *const u64,
     dn: usize,
-    t: *mut u64,
+    t: Scratch,
 ) {
     debug_assert!(nn >= dn && dn >= 1);
+    need!(t, tdiv_itch(nn, dn));
     // SAFETY: as the caller guarantees: the shifted dividend takes `nn + 1` limbs of the scratch,
     // after the shifted divisor of `dn` limbs and one to start it on 16 bytes for the longer ones.
     unsafe {
@@ -474,8 +476,9 @@ pub(super) unsafe fn tdiv_qr(
             1 => {
                 let d0 = *d << s;
                 let v = invert_limb(d0);
-                let top = lshift(t, n, nn, s);
-                *n = div_qr_1::<true>(q, t, nn, top, d0, v) >> s;
+                let u = t.take(nn);
+                let top = lshift(u, n, nn, s);
+                *n = div_qr_1::<true>(q, u, nn, top, d0, v) >> s;
             }
             2 => {
                 let (d1, d0) = (*d.add(1), *d);
@@ -485,8 +488,9 @@ pub(super) unsafe fn tdiv_qr(
                     ((d1 << s) | (d0 >> (64 - s)), d0 << s)
                 };
                 let v = invert_3by2(d1, d0);
-                *t.add(nn) = lshift(t, n, nn, s);
-                let (r1, r0) = div_qr_2(q, t, nn + 1, d1, d0, v);
+                let u = t.take(nn + 1);
+                *u.add(nn) = lshift(u, n, nn, s);
+                let (r1, r0) = div_qr_2(q, u, nn + 1, d1, d0, v);
                 *n = if s == 0 {
                     r0
                 } else {
@@ -495,12 +499,15 @@ pub(super) unsafe fn tdiv_qr(
                 *n.add(1) = r1 >> s;
             }
             _ => {
-                let dd = t.add((t.addr() / 8) & 1);
+                let t = t.add((t.ptr().addr() / 8) & 1);
+                let (dd, t) = t.split(dn);
                 lshift(dd, d, dn, s);
-                let u = dd.add(dn);
+                // The division's scratch, after the dividend, is formed once the shifts and the
+                // inverse are done: carved with it, it would hold a register through them.
+                let u = t.take(nn + 1);
                 *u.add(nn) = lshift(u, n, nn, s);
                 let v = invert_3by2(*dd.add(dn - 1), *dd.add(dn - 2));
-                let w = u.add(nn + 1);
+                let w = t.add(nn + 1);
                 // The limb above the dividend takes part only when the shift put bits in it, as in
                 // the division's own general path.
                 let wide = *u.add(nn) != 0;
@@ -517,22 +524,23 @@ pub(super) unsafe fn tdiv_qr(
     }
 }
 
-/// Runs `f` on `need` limbs of scratch: the `avail` limbs at `t` when they are enough, and
-/// otherwise a buffer on the stack or the heap, for the rare divisions that need more than a
-/// caller planned for.
+/// Runs `f` on `need` limbs of scratch: the first of the `avail` limbs at `t` when they are
+/// enough, and otherwise a buffer on the stack or the heap, for the rare divisions that need more
+/// than a caller planned for.
 ///
 /// # Safety
 ///
 /// The `avail` limbs at `t` must be valid for reads and writes.
 #[inline(always)]
 pub(super) unsafe fn with_scratch<R>(
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
     need: usize,
-    f: impl FnOnce(*mut u64) -> R,
+    f: impl FnOnce(Scratch) -> R,
 ) -> R {
+    need!(t, avail);
     if need <= avail {
-        f(t)
+        f(t.first(need))
     } else {
         more_scratch(need, f)
     }
@@ -541,8 +549,8 @@ pub(super) unsafe fn with_scratch<R>(
 /// The scratch of [`with_scratch`] when the caller's is not enough. Out of line and cold.
 #[cold]
 #[inline(never)]
-fn more_scratch<R>(need: usize, f: impl FnOnce(*mut u64) -> R) -> R {
-    let run = |s: *mut MaybeUninit<u64>| f(s.cast());
+fn more_scratch<R>(need: usize, f: impl FnOnce(Scratch) -> R) -> R {
+    let run = |s: *mut MaybeUninit<u64>| f(scratch!(s.cast(), need));
     if need <= super::super::mul::STACK_LIMBS {
         on_stack(run)
     } else {
@@ -579,31 +587,40 @@ const HENSEL_LIMIT: usize = 1 << 18;
 /// # Safety
 ///
 /// `nn >= dn >= 1`, the division exact; the limbs at `n` and `d` must be valid for reads, those at
-/// `q` for writes, and the `avail` limbs at `t`, at least [`divexact_itch`] of them, for reads and
-/// writes, all apart.
+/// `q` for writes, and the `avail` limbs at `t`, at least the `(nn + 1) + (dn + 1)` of the copies,
+/// for reads and writes, all apart. The ordinary division takes what more it needs from
+/// [`with_scratch`] when `avail` is less than [`divexact_itch`].
 pub(super) unsafe fn divexact(
     q: *mut u64,
     n: *const u64,
     nn: usize,
     d: *const u64,
     dn: usize,
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
 ) {
+    need!(t, avail);
+    need!(t, (nn + 1) + (dn + 1));
     let qn = nn - dn + 1;
-    let m = qn.min(dn);
+    // The limb products of Hensel's method, in 128 bits, as in `by_hensel` of the exact division:
+    // in a `usize` they overflow on 32-bit targets. Counted only for the long divisors.
+    let products = || {
+        let m = qn.min(dn) as u128;
+        qn as u128 * m - m * m / 2
+    };
     // SAFETY: as the caller guarantees: the copies take `nn + 1` and `dn + 1` limbs of the scratch,
     // and the ordinary division's scratch comes after them.
     unsafe {
-        let (nc, dc) = (t, t.add(nn + 1));
-        if dn >= DC_DIV && qn * m - m * m / 2 >= HENSEL_LIMIT {
+        let (nc, rest) = t.split(nn + 1);
+        if dn >= DC_DIV && products() >= HENSEL_LIMIT as u128 {
             ptr::copy_nonoverlapping(n, nc, nn);
             let room = avail.saturating_sub(nn + 1 + dn + 1);
-            with_scratch(dc, room, tdiv_itch(nn, dn), |w| {
+            with_scratch(rest, room, tdiv_itch(nn, dn), |w| {
                 tdiv_qr(q, nc, nn, d, dn, w)
             });
             return;
         }
+        let dc = rest.take(dn + 1);
         let mut skip = 0;
         while *d.add(skip) == 0 {
             skip += 1;
@@ -650,9 +667,10 @@ pub(super) unsafe fn subdiv(
     a: &mut *mut u64,
     b: &mut *mut u64,
     n: usize,
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
 ) -> Step {
+    need!(t, avail);
     // SAFETY: as the caller guarantees.
     unsafe {
         let mut an = normalized(*a, n);
@@ -674,8 +692,10 @@ pub(super) unsafe fn subdiv(
         }
         let (a, b) = (*a, *b);
         let need = (bn - an + 1) + tdiv_itch(bn, an);
+        // The quotient first, then the division's scratch, checked to follow it, formed at the
+        // call: formed before, it would be held across the operands' loads.
         with_scratch(t, avail, need, |t| {
-            tdiv_qr(t, b, bn, a, an, t.add(bn - an + 1))
+            tdiv_qr(t.ptr(), b, bn, a, an, t.add(bn - an + 1))
         });
         if normalized(b, an) == 0 {
             return Step::Gcd(a, an);
@@ -727,9 +747,10 @@ pub(super) unsafe fn gcd_lehmer(
     mut a: *mut u64,
     mut b: *mut u64,
     mut n: usize,
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
 ) -> usize {
+    need!(t, avail);
     // SAFETY: as the caller guarantees; the numbers keep at least `n` limbs, of which the top ones
     // are not both zero.
     unsafe {
@@ -776,7 +797,8 @@ pub(super) unsafe fn gcd_lehmer(
 /// # Safety
 ///
 /// `n >= 1`; the limbs must be valid for reads, and the `n` limbs at `t` for writes.
-pub(super) unsafe fn rem_1(a: *const u64, n: usize, d: u64, t: *mut u64) -> u64 {
+pub(super) unsafe fn rem_1(a: *const u64, n: usize, d: u64, t: Scratch) -> u64 {
+    need!(t, n);
     // SAFETY: as the caller guarantees.
     unsafe {
         if n == 1 {
@@ -785,6 +807,7 @@ pub(super) unsafe fn rem_1(a: *const u64, n: usize, d: u64, t: *mut u64) -> u64 
         let s = d.leading_zeros();
         let d0 = d << s;
         let v = invert_limb(d0);
+        let t = t.take(n);
         let top = lshift(t, a, n, s);
         div_qr_1::<false>(t, t, n, top, d0, v) >> s
     }
@@ -870,7 +893,8 @@ impl Row {
     ///
     /// The row's limbs must be valid for reads and writes up to the length the sum takes and one
     /// more, and zero above the row's length; the [`add_times_itch`] limbs at `t` for writes.
-    unsafe fn add_times(&mut self, to_u0: bool, q: *const u64, qn: usize, t: *mut u64) {
+    unsafe fn add_times(&mut self, to_u0: bool, q: *const u64, qn: usize, t: Scratch) {
+        need!(t, add_times_itch(self.un, qn));
         let (to, from) = if to_u0 {
             (self.u0, self.u1.cast_const())
         } else {
@@ -900,7 +924,8 @@ impl Row {
                 ((from, fnorm), (q, qn))
             };
             let mut pn = fnorm + qn;
-            mul(t, long.0, long.1, short.0, short.1, t.add(pn));
+            let (t, w) = t.split(pn);
+            mul(t, long.0, long.1, short.0, short.1, w);
             pn -= usize::from(*t.add(pn - 1) == 0);
             if pn >= un {
                 let c = add_to(t, t, pn, to, un);
@@ -996,16 +1021,19 @@ pub(super) enum StepExt {
 /// # Safety
 ///
 /// The `n` limbs at `a` and `b` must be valid for reads and writes and apart; the row's for reads
-/// and writes, with room for `n + 1` limbs each; and the `avail` limbs at `t` for reads and writes,
-/// apart from all of them.
+/// and writes, with room for `n + 1` limbs each; and the `avail` limbs at `t`, at least `n`, for
+/// the quotient, for reads and writes, apart from all of them. The division's scratch comes from
+/// [`with_scratch`] when what is left is not enough.
 pub(super) unsafe fn subdiv_ext(
     a: *mut u64,
     b: *mut u64,
     n: usize,
     row: &mut Row,
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
 ) -> StepExt {
+    need!(t, avail);
+    need!(t, n);
     // SAFETY: as the caller guarantees.
     unsafe {
         let (mut pa, mut pb) = (a, b);
@@ -1053,7 +1081,7 @@ pub(super) unsafe fn subdiv_ext(
             if order == Ordering::Greater {
                 // `b - a` is still the larger: its remainder modulo `a`, the quotient added in.
                 let qn = bn - an + 1;
-                let (q, w) = (t, t.add(qn));
+                let (q, w) = t.split(qn);
                 let room = avail.saturating_sub(qn);
                 with_scratch(w, room, tdiv_itch(bn, an), |w| {
                     tdiv_qr(q, pb, bn, pa, an, w)
@@ -1122,7 +1150,8 @@ pub(super) fn lehmer_ext_itch(n: usize) -> usize {
 ///
 /// The `n` limbs at `a` and `b` must be valid for reads and writes; the row's for reads and writes,
 /// with room for `n + 1` limbs each, zero above its length; the `n` limbs at `g` and `n + 3` at `c`
-/// for writes; and the `avail` limbs at `t` for reads and writes, all apart.
+/// for writes; and the `avail` limbs at `t`, at least those that [`subdiv_ext`] takes, for reads
+/// and writes, all apart.
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn gcdext_lehmer(
     g: *mut u64,
@@ -1131,9 +1160,10 @@ pub(super) unsafe fn gcdext_lehmer(
     b: *mut u64,
     mut n: usize,
     row: &mut Row,
-    t: *mut u64,
+    t: Scratch,
     avail: usize,
 ) -> (usize, usize, bool) {
+    need!(t, avail);
     // SAFETY: as the caller guarantees; the numbers keep at least `n` limbs, of which the top ones
     // are not both zero.
     unsafe {

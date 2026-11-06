@@ -4,6 +4,7 @@
 use super::super::mul::limbs::add_1;
 use super::super::mul::{Operand, Product, STACK_LIMBS, on_heap, on_stack, to_limbs};
 use super::super::pow::montgomery::even;
+use super::super::scratch::{Scratch, need, scratch};
 use super::super::{ByteOrder, Number};
 use super::bpsw::{Bits, reciprocal, rem_by};
 use super::tables::{GROUP, GROUPS, PRIMES};
@@ -32,18 +33,25 @@ pub(super) fn next_prime(x: &Number) -> Number {
     }
     let nn = n.significant.div_ceil(8);
     // The candidate, from `x + 1` made odd, with room for two limbs more, as it may grow by one,
-    // and the test's memory.
-    let need = even(nn + 2) + prime_itch(nn + 1);
+    // and the test's memory for a candidate of either length: the plan is not monotone, a shorter
+    // candidate can need more (on aarch64, 437 limbs 803 more than 438, whose low halves of the
+    // reduction take the transforms instead of Toom-Cook's methods).
+    // The sum saturates, as in `is_probable_prime`: on 32-bit targets it passes `usize::MAX` for
+    // numbers of 1.5 GB.
+    let need = even(nn + 2).saturating_add(prime_itch(nn).max(prime_itch(nn + 1)));
     let compute = |s: *mut MaybeUninit<u64>| {
-        let s = s.cast::<u64>();
+        let s = scratch!(s.cast(), need);
         // SAFETY: the working memory holds the limbs counted.
         unsafe {
-            to_limbs(n, s);
-            *s.add(nn) = 0;
-            *s.add(nn + 1) = 0;
-            add_1(s, nn + 1, if *s & 1 == 1 { 2 } else { 1 });
-            let len = if *s.add(nn) != 0 { nn + 1 } else { nn };
-            search(s, len, s.add(even(nn + 2)), order)
+            // Read in before the rest is formed, which is formed at the call: formed here, it
+            // would be held across the read.
+            to_limbs(n, s.take(even(nn + 2)));
+            let c = s.take(even(nn + 2));
+            *c.add(nn) = 0;
+            *c.add(nn + 1) = 0;
+            add_1(c, nn + 1, if *c & 1 == 1 { 2 } else { 1 });
+            let len = if *c.add(nn) != 0 { nn + 1 } else { nn };
+            search(c, len, s.add(even(nn + 2)), order)
         }
     };
     if need <= STACK_LIMBS {
@@ -153,8 +161,9 @@ fn primes_beyond_tables(limit: u64) -> Vec<u32> {
 /// # Safety
 ///
 /// The limbs at `start` must be valid for reads and writes, with two more above them, zero, and `s`
-/// for [`prime_itch`]`(nn + 1)` limbs.
-unsafe fn search(start: *mut u64, nn: usize, s: *mut u64, order: ByteOrder) -> Number {
+/// for the [`prime_itch`] of each length the candidates take, `nn` and, once they grow, `nn + 1`.
+unsafe fn search(start: *mut u64, nn: usize, s: Scratch, order: ByteOrder) -> Number {
+    need!(s, prime_itch(nn));
     // SAFETY: as the caller guarantees.
     unsafe {
         let top = *start.add(nn - 1);

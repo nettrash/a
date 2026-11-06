@@ -232,6 +232,31 @@ fn square_roots_of_long_values_are_exact() {
 }
 
 #[test]
+fn square_roots_plan_for_roots_of_either_length() {
+    // Under Miri, which would take hours, not run.
+    if cfg!(miri) {
+        return;
+    }
+    // A root alone may take a limb more than the root with its remainder, and the working memory
+    // of the shorter root can be the larger, as the division of its halves may take another
+    // method: on aarch64, a root of 759 limbs takes 496 limbs more than one of 760. The plan was
+    // made for the longer root, so the square roots of these magnitudes wrote past their working
+    // memory, whatever the shift of the top limb.
+    let mut state = 0x452821E6_38D01377;
+    for limbs in [1517, 1518, 2877, 2878, 3069, 3070] {
+        for top in [u64::MAX, 0x0123_4567] {
+            let mut x = random_magnitude(&mut state, 8 * limbs);
+            x[8 * limbs - 8..].copy_from_slice(&top.to_le_bytes());
+            let order = ORDERS[limbs % 2];
+            let a = number(&x, false, order);
+            let (s, r) = a.isqrt_rem();
+            assert_sqrt_rem(&s, &r, &x, order);
+            assert!(same(&a.isqrt(), &s), "isqrt of {}", hex(&x));
+        }
+    }
+}
+
+#[test]
 fn square_roots_of_every_top_limb_shift() {
     // The top limb's leading zeros set the shift of the magnitude, `2c` bits, and whether the bits
     // shifted out of a root alone spare its last square, for an even and an odd number of limbs.

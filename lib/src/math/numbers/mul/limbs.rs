@@ -27,6 +27,7 @@
 
 #[cfg(target_endian = "little")]
 pub(in super::super) use super::super::add::{add_limbs as add_n, sub_limbs as sub_n};
+use super::super::scratch::{Scratch, need};
 use super::fft::{self, FFT_MUL, FFT_MUL_UNBALANCED, FFT_SQR};
 use super::kernels::{mul_basecase, sqr_basecase};
 use super::toom;
@@ -174,9 +175,10 @@ pub(in super::super) unsafe fn mul(
     nx: usize,
     y: *const u64,
     ny: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     debug_assert!(nx >= ny && ny >= 1);
+    need!(s, mul_itch(nx, ny));
     // SAFETY: forwarded.
     unsafe {
         match method(nx, ny) {
@@ -197,8 +199,9 @@ pub(in super::super) unsafe fn mul(
 ///
 /// `n >= 1`; the limbs of `x` must be valid for reads, those of `r` for writes, and the
 /// [`sqr_itch`]`(n)` limbs at `s` for reads and writes, all apart from each other.
-pub(in super::super) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
+pub(in super::super) unsafe fn sqr(r: *mut u64, x: *const u64, n: usize, s: Scratch) {
     debug_assert!(n >= 1);
+    need!(s, sqr_itch(n));
     // SAFETY: forwarded.
     unsafe {
         match sqr_method(n) {
@@ -238,7 +241,7 @@ fn pieces(nx: usize, ny: usize) -> (usize, usize, usize) {
 ///
 /// As for [`mul`], with `nx, ny >= 1` in either order, and the scratch that [`mul_itch`] gives for
 /// the longer one first.
-unsafe fn mul_any(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: *mut u64) {
+unsafe fn mul_any(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: Scratch) {
     // SAFETY: forwarded.
     unsafe {
         if nx >= ny {
@@ -255,7 +258,8 @@ unsafe fn mul_any(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usiz
 /// # Safety
 ///
 /// As for [`mul`], with `ny <= nx.div_ceil(2)`.
-unsafe fn mul_pieces(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: *mut u64) {
+unsafe fn mul_pieces(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: Scratch) {
+    need!(s, mul_itch(nx, ny));
     let (p, full, last) = pieces(nx, ny);
     // SAFETY: every piece lies in `x`, every product of a piece but the first in the scratch, and
     // every position of `r` written is below `nx + ny`; the scratch holds the product of the
@@ -263,7 +267,7 @@ unsafe fn mul_pieces(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: u
     unsafe {
         mul_any(r, x, p, y, ny, s);
         let longest = if full > 0 { p.max(last) } else { last };
-        let (t, rest) = (s, s.add(longest + ny));
+        let (t, rest) = s.split(longest + ny);
         let mut done = p;
         for i in 0..=full {
             let len = if i < full { p } else { last };
@@ -289,10 +293,11 @@ unsafe fn mul_pieces(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: u
 /// # Safety
 ///
 /// As for [`mul`], with `ny > nx.div_ceil(2)`.
-unsafe fn karatsuba(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: *mut u64) {
+unsafe fn karatsuba(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: usize, s: Scratch) {
     let n = nx.div_ceil(2);
     let (sx, ty) = (nx - n, ny - n);
     debug_assert!(0 < ty && ty <= sx && sx <= n);
+    need!(s, mul_itch(nx, ny));
     // SAFETY: `x0`, `x1`, `y0` and `y1` lie in their operands; `2n + sx + ty = nx + ny` limbs of
     // `r` are written; the scratch holds the `2n` limbs of the product of the differences, then
     // the scratch of the products of halves.
@@ -300,11 +305,11 @@ unsafe fn karatsuba(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: us
         let (x1, y1) = (x.add(n), y.add(n));
         let negative_x = abs_diff(r, x, n, x1, sx);
         let negative_y = abs_diff(r.add(n), y, n, y1, ty);
-        let rest = s.add(2 * n);
-        mul(s, r, n, r.add(n), n, rest);
+        let (d, rest) = s.split(2 * n);
+        mul(d, r, n, r.add(n), n, rest);
         mul(r.add(2 * n), x1, sx, y1, ty, rest);
         mul(r, x, n, y, n, rest);
-        middle(r, n, nx + ny, s, negative_x == negative_y);
+        middle(r, n, nx + ny, d, negative_x == negative_y);
     }
 }
 
@@ -313,18 +318,19 @@ unsafe fn karatsuba(r: *mut u64, x: *const u64, nx: usize, y: *const u64, ny: us
 /// # Safety
 ///
 /// As for [`sqr`], with `n >= 2`.
-unsafe fn karatsuba_sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
+unsafe fn karatsuba_sqr(r: *mut u64, x: *const u64, n: usize, s: Scratch) {
     let h = n.div_ceil(2);
     let sx = n - h;
+    need!(s, sqr_itch(n));
     // SAFETY: as in `karatsuba`, with both operands `x`.
     unsafe {
         let x1 = x.add(h);
         abs_diff(r, x, h, x1, sx);
-        let rest = s.add(2 * h);
-        sqr(s, r, h, rest);
+        let (d, rest) = s.split(2 * h);
+        sqr(d, r, h, rest);
         sqr(r.add(2 * h), x1, sx, rest);
         sqr(r, x, h, rest);
-        middle(r, h, 2 * n, s, true);
+        middle(r, h, 2 * n, d, true);
     }
 }
 

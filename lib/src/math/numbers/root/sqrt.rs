@@ -28,6 +28,7 @@ use super::super::div::limbs::{
     div_2by1, div_qr, div_qr_1, div_qr_2, invert_3by2, invert_limb, qr_itch,
 };
 use super::super::mul::limbs::{add_1, add_n, sqr, sqr_itch, sub_1, sub_n};
+use super::super::scratch::{Scratch, need};
 use super::{addmul_1, lshift, rshift};
 
 /// `2^64` as an `f64`.
@@ -217,15 +218,9 @@ fn corrected(a: u128, mut s: u64) -> (u64, u128) {
 ///
 /// The top `dn` limbs at `n` must be below `2d`; the limbs at `n` must be valid for reads and
 /// writes, those at `d` for reads, those at `q` for writes and the [`qr_itch`]`(nn, dn)` at `t`
-/// for reads and writes, all apart.
-unsafe fn divide(
-    q: *mut u64,
-    n: *mut u64,
-    nn: usize,
-    d: *const u64,
-    dn: usize,
-    t: *mut u64,
-) -> u64 {
+/// for reads and writes, all apart: none for a divisor of one or two limbs.
+unsafe fn divide(q: *mut u64, n: *mut u64, nn: usize, d: *const u64, dn: usize, t: Scratch) -> u64 {
+    need!(t, qr_itch(nn, dn));
     // SAFETY: as the caller guarantees.
     unsafe {
         match dn {
@@ -299,8 +294,9 @@ pub(super) unsafe fn dc_sqrtrem(
     a: *mut u64,
     n: usize,
     approx: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> u64 {
+    need!(t, dc_itch(n));
     // SAFETY: every range lies in the `2n` limbs at `a`, the `n` at `s` and the scratch: the root
     // of the top half writes the top `h` limbs of `s` and reads the top `2h` of `a`; the division
     // reads limbs `l..l + n` of `a`, writes its remainder to limbs `l..l + h` and its quotient to
@@ -332,14 +328,15 @@ pub(super) unsafe fn dc_sqrtrem(
         }
         // Step 2: `Q = (R' b + A1) / S'`, of `l` limbs and `q` above them, at most 2; the remainder
         // by `S'` in limbs `l..l + h`.
-        q += divide(t, a.add(l), n, s.add(l), h, t.add(l));
-        let odd = *t & 1;
+        let (quotient, rest) = t.split(l);
+        q += divide(quotient, a.add(l), n, s.add(l), h, rest);
+        let odd = *quotient & 1;
         // `q`, the low limbs of `S = S' b + Q / 2`: the quotient shifted right by one bit, the
         // bit above its limbs at the top.
         for i in 0..l - 1 {
-            *s.add(i) = (*t.add(i) >> 1) | (*t.add(i + 1) << 63);
+            *s.add(i) = (*quotient.add(i) >> 1) | (*quotient.add(i + 1) << 63);
         }
-        *s.add(l - 1) = (*t.add(l - 1) >> 1) | ((q & 1) << 63);
+        *s.add(l - 1) = (*quotient.add(l - 1) >> 1) | ((q & 1) << 63);
         if *s & approx != 0 {
             return 1;
         }
@@ -354,8 +351,9 @@ pub(super) unsafe fn dc_sqrtrem(
         }
         // Step 3: `R = u b + A0 - q^2`, where `q^2 = b^2` when `q` is `b`, and its low `l` limbs
         // are then zero.
-        sqr(t, s, l, t.add(2 * l));
-        let borrow = q + u64::from(sub_n(a, a, t, 2 * l));
+        let (square, rest) = t.split(2 * l);
+        sqr(square, s, l, rest);
+        let borrow = q + u64::from(sub_n(a, a, square, 2 * l));
         c -= if l == h {
             borrow as i64
         } else {
@@ -376,9 +374,11 @@ pub(super) unsafe fn dc_sqrtrem(
 /// The limbs of working memory that [`sqrtrem`] needs for a magnitude of `an` limbs: the magnitude
 /// shifted, a limb above it, and the scratch of [`dc_sqrtrem`].
 pub(super) fn sqrtrem_itch(an: usize) -> usize {
-    // A root alone may take a limb more (see `sqrtrem`).
-    let tn = an.div_ceil(2) + 1;
-    2 * tn + 1 + dc_itch(tn)
+    // The root takes `an.div_ceil(2)` limbs, or a limb more for a root alone (see `sqrtrem`). The
+    // plan covers both, as `dc_itch` is not monotone: a shorter root can divide by a method that
+    // needs more (on aarch64, 759 limbs 496 more than 760).
+    let tn = an.div_ceil(2);
+    (2 * tn + 1 + dc_itch(tn)).max(2 * (tn + 1) + 1 + dc_itch(tn + 1))
 }
 
 /// From this many limbs of root, a root alone whose bits shifted out would be too few to spare the
@@ -411,10 +411,11 @@ pub(super) unsafe fn sqrtrem<const REM: bool>(
     r: *mut u64,
     a: *const u64,
     an: usize,
-    w: *mut u64,
+    w: Scratch,
 ) -> usize {
     debug_assert!(an >= 3);
-    // SAFETY: as the caller guarantees: the shifted magnitude takes the `2tn + 1` limbs at `w`,
+    need!(w, sqrtrem_itch(an));
+    // SAFETY: as the caller guarantees: the shifted magnitude takes the `2n + 1` limbs at `w`,
     // the scratch of `dc_sqrtrem` the rest.
     unsafe {
         let c = (*a.add(an - 1)).leading_zeros() / 2;
@@ -428,7 +429,7 @@ pub(super) unsafe fn sqrtrem<const REM: bool>(
             odd
         };
         let n = (an + low) / 2;
-        let (x, t) = (w, w.add(2 * n + 1));
+        let (x, t) = w.split(2 * n + 1);
         core::ptr::write_bytes(x, 0, low);
         lshift(x.add(low), a, an, 2 * c);
         let k = c + 32 * low as u32;

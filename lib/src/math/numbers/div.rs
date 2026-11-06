@@ -36,7 +36,7 @@
 
 // The kernel of the schoolbook method under the name `kernels`, chosen as those of the addition
 // are: assembly on 64-bit little-endian aarch64 where the system allows unaligned accesses and on
-// x86_64, and portable Rust elsewhere and under Miri.
+// 64-bit x86_64, and portable Rust elsewhere (x32 too) and under Miri.
 mod exact;
 #[cfg(all(
     target_arch = "aarch64",
@@ -56,7 +56,7 @@ mod exact;
 ))]
 #[path = "div/aarch64.rs"]
 mod kernels;
-#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(miri)))]
 #[path = "div/x86_64.rs"]
 mod kernels;
 #[cfg(not(any(
@@ -76,7 +76,7 @@ mod kernels;
         ),
         not(miri)
     ),
-    all(target_arch = "x86_64", not(miri))
+    all(target_arch = "x86_64", target_pointer_width = "64", not(miri))
 )))]
 #[path = "div/portable.rs"]
 mod kernels;
@@ -94,6 +94,7 @@ use super::mul::limbs::{add_1, sub_n};
 use super::mul::{
     Operand, Product, STACK_LIMBS, WIDE, Wide, on_heap, on_stack, put_wide, read_wide,
 };
+use super::scratch::{Scratch, need, scratch};
 use super::sub::Negated;
 use super::{ByteOrder, Number};
 use core::cmp::Ordering::Less;
@@ -1595,8 +1596,9 @@ unsafe fn divide<const EUCLIDEAN: bool, R>(
     // The divisor, normalized, and a limb to start it on 16 bytes, then what `compute_by` needs.
     let need = ny + 1 + working_memory(nx, ny, want);
     let compute = |s: *mut MaybeUninit<u64>| {
+        let s = scratch!(s.cast(), need);
         // SAFETY: the working memory holds `need` limbs; the rest as the caller guarantees.
-        unsafe { compute::<EUCLIDEAN, R>(s.cast(), x, y, negative_x, negative_y, want, place) }
+        unsafe { compute::<EUCLIDEAN, R>(s, x, y, negative_x, negative_y, want, place) }
     };
     if need <= STACK_LIMBS {
         on_stack(compute)
@@ -1733,7 +1735,7 @@ pub(super) unsafe fn normalize(y: Operand, d: *mut u64) -> Normal {
 /// As for [`divide`], with `s` valid for the limbs that `divide` counts.
 #[inline(always)]
 unsafe fn compute<const EUCLIDEAN: bool, R>(
-    s: *mut u64,
+    s: Scratch,
     x: Operand,
     y: Operand,
     negative_x: bool,
@@ -1749,12 +1751,14 @@ unsafe fn compute<const EUCLIDEAN: bool, R>(
         // The divisor starts on 16 bytes, which the kernel reads in pairs of limbs for every limb
         // of the quotient: at 8 bytes off, a division of 72 limbs by 36 took 4100 cycles instead of
         // 2760 on an Apple M4 Max, whenever the stack put it there.
-        let d = s.add((s.addr() / 8) & 1);
+        // The rest is formed after the alignment, as the alignment is scheduled first then.
+        let d = s.take(ny + 1);
+        let d = d.add((d.addr() / 8) & 1);
         let w = s.add(ny + 1);
         if want == Want::Quotient && ny >= 3 && from_top(nx + 1, ny) {
             let k = nx + 1 - ny;
-            let (u, q) = (w, w.add(nx + 1));
-            let t = q.add(k + 1);
+            let (u, rest) = w.split(nx + 1);
+            let (q, t) = rest.split(k + 1);
             let shift = normalizing_shift(y);
             quotient_from_top(x, Top::Operand(y, d), ny, shift, u, q, t);
             let quotient = result(q, k, (negative_x && x.significant != 0) != negative_y);
@@ -1774,7 +1778,7 @@ unsafe fn compute<const EUCLIDEAN: bool, R>(
 /// As for [`divide`], with `s` valid for the [`working_memory`] limbs of `x` and `y`.
 #[inline(always)]
 pub(super) unsafe fn compute_by<const EUCLIDEAN: bool, R>(
-    s: *mut u64,
+    s: Scratch,
     x: Operand,
     y: Normal,
     negative_x: bool,
@@ -1787,12 +1791,12 @@ pub(super) unsafe fn compute_by<const EUCLIDEAN: bool, R>(
     let nx = lx.max(ny);
     let qn = nx - ny + 1;
     let negative_x = negative_x && x.significant != 0;
+    need!(s, working_memory(nx, ny, want));
     // SAFETY: the working memory holds the `nx + 1` limbs of the dividend, the `qn + 1` of the
     // quotient and the scratch, which every step stays inside.
     unsafe {
-        let u = s;
-        let q = u.add(nx + 1);
-        let t = q.add(qn + 1);
+        let (u, rest) = s.split(nx + 1);
+        let (q, t) = rest.split(qn + 1);
         if want == Want::Quotient && ny >= 3 && from_top(nx + 1, ny) {
             quotient_from_top(x, Top::Normal(d), ny, shift, u, q, t);
             let quotient = result(q, qn, negative_x != negative_y);
@@ -1904,7 +1908,7 @@ unsafe fn exactly_after_all(
     nn: usize,
     x: Operand,
     y: Normal,
-    t: *mut u64,
+    t: Scratch,
 ) -> bool {
     // SAFETY: as the caller guarantees: the limbs are those `compute_by` read, of which the
     // division takes `nn`.
@@ -1941,18 +1945,23 @@ unsafe fn quotient_from_top(
     shift: u32,
     u: *mut u64,
     q: *mut u64,
-    t: *mut u64,
+    t: Scratch,
 ) {
     let lx = x.significant.div_ceil(8);
     let nx = lx.max(ny);
     let k = nx + 1 - ny;
+    need!(
+        t,
+        ((2 * k + 2) + 1 + 2 * (k + 1) + top_itch(k)).max(check_itch(nx + 1, ny))
+    );
     // SAFETY: the copies of the top limbs, their quotient and the scratch of their division lie in
     // the scratch at `t`, as `working_memory` counts it, and so does the check's.
     unsafe {
-        let w = t;
-        let dt = w.add(2 * k + 2);
-        let dt = dt.add((dt.addr() / 8) & 1);
-        let h = dt.add(k + 1);
+        let (w, rest) = t.split(2 * k + 2);
+        let (dt, rest) = rest.add((rest.ptr().addr() / 8) & 1).split(k + 1);
+        // The quotient's limbs, and the division's scratch after them, which is formed at the call:
+        // carved here, it would hold a register through the shifts.
+        let h = rest.take(k + 1);
         let top: *const u64 = match y {
             Top::Operand(y, _) => {
                 shifted_limbs(y, ny - (k + 1), ny, shift, dt);
@@ -1962,7 +1971,7 @@ unsafe fn quotient_from_top(
         };
         shifted_limbs(x, nx + 1 - (2 * k + 2), nx + 1, shift, w);
         let v = invert_3by2(*top.add(k), *top.add(k - 1));
-        let found = div_q_top(h, w, k, top, v, h.add(k + 1));
+        let found = div_q_top(h, w, k, top, v, rest.add(k + 1));
         debug_assert!(
             found != Found::AllOnes,
             "the dividend's top limb is below the divisor's"

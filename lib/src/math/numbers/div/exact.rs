@@ -26,10 +26,11 @@ const HENSEL_LIMIT: usize = 1 << 18;
 /// Hensel's method: below the divisors that divide and conquer divides, always, as both methods
 /// are quadratic there and Hensel's does half the work; beyond, up to [`HENSEL_LIMIT`] limb
 /// products: `qn m - m^2 / 2` for `m = min(qn, dn)`, as the divisor's limbs above the quotient's
-/// are never needed.
+/// are never needed. The count is taken in 128 bits, which hold it for any lengths: in a `usize` it
+/// overflows on 32-bit targets from `qn m = 2^32`, quotients and divisors of 512 KiB.
 fn by_hensel(qn: usize, dn: usize) -> bool {
-    let m = qn.min(dn);
-    dn < DC_DIV || qn * m - m * m / 2 < HENSEL_LIMIT
+    let (q, m) = (qn as u128, qn.min(dn) as u128);
+    dn < DC_DIV || q * m - m * m / 2 < HENSEL_LIMIT as u128
 }
 
 impl Number {
@@ -166,10 +167,12 @@ unsafe fn hensel<R>(
     let (lx, ny) = (x.significant.div_ceil(8), y.significant.div_ceil(8));
     let qn = lx - ny + 1;
     // SAFETY: as the caller guarantees.
-    let zeros = unsafe { trailing_zeros(y) };
-    let (skip, bits) = (zeros / 64, (zeros % 64) as u32);
-    // The divisor's limbs after the shift, of which the quotient's `qn` are needed.
-    let dn = (8 * y.significant - zeros).div_ceil(64).min(qn);
+    let (skip, bits) = unsafe { trailing_zeros(y) };
+    // The divisor's limbs after the shift, of which the quotient's `qn` are needed: of its
+    // `8 ny - pad` bytes, `ceil((64 (ny - skip) - 8 pad - bits) / 64)`, in limbs, as the bits would
+    // not fit in a `usize` on 32-bit targets for divisors of 512 MiB.
+    let pad = 8 * ny - y.significant;
+    let dn = ((ny - skip) - (8 * pad + bits as usize) / 64).min(qn);
     let need = 1 + (qn + 1) + (dn + 1) + qn;
     let compute = |s: *mut MaybeUninit<u64>| {
         let s: *mut u64 = s.cast();
@@ -223,18 +226,20 @@ fn multiple(a: &Number, b: &Number) -> bool {
     unsafe { divide::<TRUNCATED, _>(x, y, false, false, Want::Remainder, |_, r| r.r.is_null()) }
 }
 
-/// The number of zero bits at the low end of the magnitude of the operand `x`, not zero.
+/// The zero bits at the low end of the magnitude of the operand `x`, not zero: its zero limbs there,
+/// and the zero bits of the next. They are counted apart, as their sum would not fit in a `usize`
+/// on 32-bit targets for operands of 512 MiB; in that order they compare as it would.
 ///
 /// # Safety
 ///
 /// The operand's vector must be valid for reads, and its magnitude not zero.
-unsafe fn trailing_zeros(x: Operand) -> usize {
+unsafe fn trailing_zeros(x: Operand) -> (usize, u32) {
     let mut i = 0;
     loop {
         // SAFETY: the magnitude is not zero, so a limb that is not zero comes before its end.
         let l = unsafe { super::limb(x, i) };
         if l != 0 {
-            return 64 * i + l.trailing_zeros() as usize;
+            return (i, l.trailing_zeros());
         }
         i += 1;
     }

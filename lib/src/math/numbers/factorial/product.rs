@@ -10,6 +10,7 @@
 
 use super::super::mul::limbs::{mul, mul_itch, sqr, sqr_itch};
 use super::super::root::mul_1;
+use super::super::scratch::{Scratch, need};
 use super::Limbs;
 
 /// Up to this many limbs, a product is accumulated one limb at a time; above, it is split in two
@@ -71,17 +72,20 @@ pub(super) fn product(f: &[u64]) -> Limbs {
     let mut r: Limbs = Vec::with_capacity(n + 1);
     let mut scratch = Vec::new();
     // The halves of `product_into` take `m` limbs and those of the larger half after them, at most
-    // `m + ceil(m / 2) + ceil(ceil(m / 2) / 2) + ...`, below `2m` and a limb for each level.
+    // `m + ceil(m / 2) + ceil(ceil(m / 2) / 2) + ...`, below `2m` and a limb for each level: at
+    // least [`halves_itch`]`(n)`.
     let halves = 2 * n + 64;
     // SAFETY: the vector holds the product's `n` limbs, all written before the length is set to
     // those it has, and the halves' buffer the limbs of `product_into`.
     unsafe {
         let len = if halves <= LOCAL {
             let mut local = [0u64; LOCAL];
-            product_into(f, r.as_mut_ptr(), local.as_mut_ptr(), &mut scratch)
+            let w = Scratch::new(local.as_mut_ptr(), halves);
+            product_into(f, r.as_mut_ptr(), w, &mut scratch)
         } else {
             let mut h = Vec::<u64>::with_capacity(halves);
-            product_into(f, r.as_mut_ptr(), h.as_mut_ptr(), &mut scratch)
+            let w = Scratch::new(h.as_mut_ptr(), halves);
+            product_into(f, r.as_mut_ptr(), w, &mut scratch)
         };
         r.set_len(len);
     }
@@ -91,6 +95,16 @@ pub(super) fn product(f: &[u64]) -> Limbs {
 /// The limbs of the products of halves up to which they are kept on the stack.
 const LOCAL: usize = 128;
 
+/// The limbs of working memory that [`product_into`] needs for `n` limbs: the products of the two
+/// halves, then those of the larger half, below `2n + log2(n)`.
+pub(super) fn halves_itch(n: usize) -> usize {
+    if n <= SEQUENTIAL {
+        0
+    } else {
+        n + halves_itch(n - n / 2)
+    }
+}
+
 /// Sets the limbs at `out` to the product of the `n` limbs `f`, none zero, and returns its number
 /// of limbs, at most `n`: one limb at a time up to [`SEQUENTIAL`] limbs, and otherwise the
 /// products of the two halves, computed the same way into the first `n` limbs at `halves`, with
@@ -98,15 +112,16 @@ const LOCAL: usize = 128;
 ///
 /// # Safety
 ///
-/// The limbs at `out` must be valid for writing `n`, and those at `halves` for writing
-/// `2n + log2(n)`, apart.
+/// The limbs at `out` must be valid for writing `n`, and the [`halves_itch`]`(n)` at `halves`
+/// for writing, apart.
 pub(super) unsafe fn product_into(
     f: &[u64],
     out: *mut u64,
-    halves: *mut u64,
+    halves: Scratch,
     scratch: &mut Vec<u64>,
 ) -> usize {
     let n = f.len();
+    need!(halves, halves_itch(n));
     // SAFETY: as the caller guarantees: a product of limbs, none zero, takes at most as many
     // limbs as its factors; the halves take `n` limbs at `halves`, and theirs those of the larger
     // half after them.
@@ -124,8 +139,8 @@ pub(super) unsafe fn product_into(
             return len;
         }
         let h = n / 2;
-        let (a, b) = (halves, halves.add(h));
-        let rest = halves.add(n);
+        let (a, rest) = halves.split(n);
+        let b = a.add(h);
         let an = product_into(&f[..h], a, rest, scratch);
         let bn = product_into(&f[h..], b, rest, scratch);
         let ((x, xn), (y, yn)) = if an >= bn {
@@ -137,7 +152,7 @@ pub(super) unsafe fn product_into(
         if scratch.len() < itch {
             scratch.resize(itch, 0);
         }
-        mul(out, x, xn, y, yn, scratch.as_mut_ptr());
+        mul(out, x, xn, y, yn, Scratch::new(scratch.as_mut_ptr(), itch));
         xn + yn - usize::from(*out.add(xn + yn - 1) == 0)
     }
 }
@@ -147,7 +162,8 @@ pub(super) fn times(x: &[u64], y: &[u64]) -> Limbs {
     let (a, b) = if x.len() >= y.len() { (x, y) } else { (y, x) };
     // A limb to spare, for a shift.
     let mut r = Vec::with_capacity(a.len() + b.len() + 1);
-    let mut s = vec![0u64; mul_itch(a.len(), b.len())];
+    let itch = mul_itch(a.len(), b.len());
+    let mut s = vec![0u64; itch];
     // SAFETY: the vectors hold the operands, the product, all of whose limbs are written before
     // the length is set, and the scratch, all apart; `a` is the longer operand.
     unsafe {
@@ -157,7 +173,7 @@ pub(super) fn times(x: &[u64], y: &[u64]) -> Limbs {
             a.len(),
             b.as_ptr(),
             b.len(),
-            s.as_mut_ptr(),
+            Scratch::new(s.as_mut_ptr(), itch),
         );
         r.set_len(a.len() + b.len());
     }
@@ -170,11 +186,17 @@ pub(super) fn times(x: &[u64], y: &[u64]) -> Limbs {
 /// `x^2`, for a magnitude that is not zero.
 pub(super) fn squared(x: &[u64]) -> Limbs {
     let mut r = Vec::with_capacity(2 * x.len() + 1);
-    let mut s = vec![0u64; sqr_itch(x.len())];
+    let itch = sqr_itch(x.len());
+    let mut s = vec![0u64; itch];
     // SAFETY: the vectors hold the operand, the square, all of whose limbs are written before the
     // length is set, and the scratch, all apart.
     unsafe {
-        sqr(r.as_mut_ptr(), x.as_ptr(), x.len(), s.as_mut_ptr());
+        sqr(
+            r.as_mut_ptr(),
+            x.as_ptr(),
+            x.len(),
+            Scratch::new(s.as_mut_ptr(), itch),
+        );
         r.set_len(2 * x.len());
     }
     if r.last() == Some(&0) {

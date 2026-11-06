@@ -129,8 +129,7 @@ impl Number {
         check_radix(radix);
         let x = Operand::of(self);
         let sign = usize::from(self.negative && x.significant != 0);
-        let mut out =
-            Vec::<u8>::with_capacity(digits_bound(x.significant, radix).saturating_add(sign));
+        let mut out = Vec::<u8>::with_capacity(text_bound(x, radix).saturating_add(sign));
         // SAFETY: the vector has room for the sign and the digits, which are all written before
         // the length is set; they are ASCII, so the string is UTF-8. `self` is borrowed while it
         // is read.
@@ -211,16 +210,105 @@ fn error(kind: NumberErrorKind) -> ParseNumberError {
 // Writing
 
 /// The most digits that a magnitude of `bytes` significant bytes has in `radix`, at least one:
-/// `log_radix(2)` digits a bit, rounded up, and one more. Computed in 64 bits, so that it does not
-/// wrap on 32-bit targets, and `usize::MAX` when it does not fit, which no vector can hold.
+/// `log_radix(2)` digits a bit, rounded up, and one more. Computed in 128 bits, so that it does not
+/// wrap for any length, and `usize::MAX` when it does not fit, which no vector can hold.
 fn digits_bound(bytes: usize, radix: u32) -> usize {
-    let bits = 8 * bytes as u64;
+    let bits = 8 * bytes as u128;
     let digits = if radix == 10 {
         // log10(2) < 1234 / 4096.
         ((bits * 1234) >> 12) + 1
     } else {
-        // At least `floor(log2(radix))` bits a digit.
-        bits / u64::from(31 - radix.leading_zeros()) + 1
+        // At least `d = floor(log2(radix))` bits a digit: `floor(8 bytes / d)` is `8q + floor(8r / d)`
+        // for `bytes = qd + r`, which keeps the division in a `usize`, where a 128-bit one is a
+        // call.
+        let d = (31 - radix.leading_zeros()) as usize;
+        let (q, r) = (bytes / d, bytes % d);
+        8 * q as u128 + (8 * r / d) as u128 + 1
+    };
+    usize::try_from(digits).unwrap_or(usize::MAX)
+}
+
+/// [`digits_bound`] for the operand `x`, but on 32-bit targets `close_bound` past [`STACK_TEXT`]:
+/// there `digits_bound`, which counts 8 bits a byte and, but in decimal, `floor(log2(radix))` bits
+/// a digit, reserves up to 58% too much of a 4 GiB address space, and passes `isize::MAX` for text
+/// that a vector holds, from 256 MiB in binary and in radix 3.
+#[inline(always)]
+fn text_bound(x: Operand, radix: u32) -> usize {
+    let bound = digits_bound(x.significant, radix);
+    #[cfg(target_pointer_width = "32")]
+    if bound > STACK_TEXT {
+        // SAFETY: the operand's vector is valid for reads, and its magnitude is not zero.
+        return unsafe { close_bound(x, radix) };
+    }
+    bound
+}
+
+/// `ceil(2^40 / log2(radix))`, more than `2^40 log_radix(2)` by less than one: 0 for the radices
+/// that are powers of two, whose digits are counted exactly.
+#[cfg(target_pointer_width = "32")]
+const LOG_INVERSES: [u64; 37] = [
+    0,
+    0,
+    0,
+    693714600362,
+    0,
+    473533883413,
+    425349159793,
+    391653944123,
+    0,
+    346857300181,
+    330985980542,
+    317830137718,
+    306701012230,
+    297129993062,
+    288786217804,
+    281428824501,
+    0,
+    268996115801,
+    263676595478,
+    258834837529,
+    254403035784,
+    250326085741,
+    246558692185,
+    243063240530,
+    239808205106,
+    236766941707,
+    233916759646,
+    231238200121,
+    228714468893,
+    226330985832,
+    224075023960,
+    221935417753,
+    0,
+    217967034645,
+    216121800215,
+    214359711513,
+    212674579897,
+];
+
+/// The most digits that the magnitude of the operand `x`, not zero, has in `radix`, from its exact
+/// bits: exactly in a radix that is a power of two, and otherwise at most two too many, as the bits
+/// of a vector of a 32-bit target, below `2^34`, times [`LOG_INVERSES`] are less than `2^-6` too
+/// many.
+///
+/// # Safety
+///
+/// The operand's vector must be valid for reads.
+#[cfg(target_pointer_width = "32")]
+unsafe fn close_bound(x: Operand, radix: u32) -> usize {
+    // SAFETY: as the caller guarantees.
+    let bytes = unsafe { significant(x) };
+    let top = if x.big_endian {
+        bytes[0]
+    } else {
+        bytes[bytes.len() - 1]
+    };
+    let bits = 8 * (bytes.len() as u64 - 1) + u64::from(8 - top.leading_zeros());
+    let digits = if radix.is_power_of_two() {
+        bits.div_ceil(u64::from(radix.trailing_zeros()))
+    } else {
+        // `floor(bits log_radix(2)) + 1` digits at most, for a magnitude below `2^bits`.
+        ((u128::from(bits) * u128::from(LOG_INVERSES[radix as usize])) >> 40) as u64 + 1
     };
     usize::try_from(digits).unwrap_or(usize::MAX)
 }
@@ -231,7 +319,7 @@ fn digits_bound(bytes: usize, radix: u32) -> usize {
 /// # Safety
 ///
 /// The operand's vector must be valid for reads, and `dst` for writing
-/// [`digits_bound`]`(x.significant, radix)` bytes.
+/// [`text_bound`]`(x, radix)` bytes, as many as the digits.
 unsafe fn write_magnitude(x: Operand, radix: u32, dst: *mut u8) -> usize {
     // SAFETY: as the caller guarantees.
     unsafe {
@@ -1721,7 +1809,7 @@ fn format(
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     let x = Operand::of(n);
-    let bound = digits_bound(x.significant, radix);
+    let bound = text_bound(x, radix);
     let non_negative = !n.negative || x.significant == 0;
     let mut stack = [MaybeUninit::<u8>::uninit(); STACK_TEXT];
     let mut heap = Vec::new();

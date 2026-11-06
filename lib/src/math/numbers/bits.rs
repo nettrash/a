@@ -2371,7 +2371,14 @@ fn trim<const BE: bool>(v: &mut Vec<u8>, l: usize) {
 #[track_caller]
 fn grow<const BE: bool>(v: &mut Vec<u8>, len: usize) {
     let (n, more) = (v.len(), len - v.len());
-    if v.try_reserve(more).is_err() {
+    // On 32-bit targets `try_reserve` refuses to grow a full vector of 1 GiB or more, which it
+    // would double past `isize::MAX`, though the length asked for fits: the vector then grows by
+    // exactly what is needed.
+    #[cfg(not(target_pointer_width = "64"))]
+    let reserved = v.try_reserve(more).is_ok() || v.try_reserve_exact(more).is_ok();
+    #[cfg(target_pointer_width = "64")]
+    let reserved = v.try_reserve(more).is_ok();
+    if !reserved {
         too_long(len);
     }
     // SAFETY: the vector has room for `len` bytes; big-endian its `n` bytes move up by `more`,

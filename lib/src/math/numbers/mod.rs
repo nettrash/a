@@ -74,6 +74,7 @@ mod prime;
 mod quadratic;
 mod radix;
 mod root;
+mod scratch;
 mod shift;
 mod sign;
 mod sub;

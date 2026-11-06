@@ -111,10 +111,22 @@ impl Number {
     }
 }
 
+/// The largest `n` whose `n!` fits `isize::MAX` bytes on 32-bit targets: `618,821,160!` has
+/// 17,179,869,156 bits, and `618,821,161!` 17,179,869,186, against the 17,179,869,176 of
+/// `2^31 - 1` bytes.
+#[cfg(target_pointer_width = "32")]
+const LONGEST: u64 = 618_821_160;
+
 /// `n!` for `n` above 34: the odd part shifted left by `n - popcount(n)` bits; on the stack below
 /// [`odd::SWING`].
 #[inline(never)]
 fn long_factorial(n: u64, order: ByteOrder) -> Number {
+    // On 32-bit targets, `n!` passes `isize::MAX` bytes from `n = LONGEST + 1`: refused at once,
+    // rather than after minutes of sieving and products.
+    #[cfg(target_pointer_width = "32")]
+    if n > LONGEST {
+        panic!("capacity overflow");
+    }
     let shift = n - u64::from(n.count_ones());
     if n < odd::SWING {
         let mut x = [0u64; odd::SMALL_LIMBS + 1];

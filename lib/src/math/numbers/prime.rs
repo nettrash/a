@@ -18,6 +18,7 @@ mod tables;
 use super::add::{SMALL, read_small};
 use super::mul::{Operand, STACK_LIMBS, on_heap, on_stack, to_limbs};
 use super::pow::montgomery::{Mont1, Mont2, MontN, even};
+use super::scratch::{Scratch, first, need, scratch};
 use super::{ByteOrder, Number};
 use bpsw::{Bits, LimbField, bpsw, bpsw_limbs, bpsw_limbs_itch, reciprocal, rem_by};
 use core::mem::MaybeUninit;
@@ -62,18 +63,22 @@ impl Number {
             return false;
         }
         let nn = n.significant.div_ceil(8);
+        // Saturated, as `bpsw_limbs_itch` is: on 32-bit targets the sum passes `usize::MAX` for
+        // numbers of 1.5 GB.
+        let need = even(nn).saturating_add(prime_itch(nn));
         let compute = |s: *mut MaybeUninit<u64>| {
-            let s = s.cast::<u64>();
+            let s = scratch!(s.cast(), need);
             // SAFETY: the working memory holds the limbs of `n` and what the test needs.
             unsafe {
-                to_limbs(n, s);
+                // Read in before the rest is formed, which would otherwise be held across the read.
+                to_limbs(n, s.take(even(nn)));
+                let (x, s) = s.split(even(nn));
                 if nn == 1 {
-                    return is_prime_u64(*s);
+                    return is_prime_u64(*x);
                 }
-                *s & 1 == 1 && is_prime_odd(s, nn, s.add(even(nn)))
+                *x & 1 == 1 && is_prime_odd(x, nn, s)
             }
         };
-        let need = even(nn) + prime_itch(nn);
         if need <= STACK_LIMBS {
             on_stack(compute)
         } else {
@@ -243,7 +248,7 @@ fn prime_itch(nn: usize) -> usize {
 /// Whether the odd number of two limbs `n`, at least `2^64`, is a probable prime.
 fn is_prime_limbs_small(n: &[u64; 2]) -> bool {
     // SAFETY: two limbs need no working memory.
-    unsafe { is_prime_odd(n.as_ptr(), 2, core::ptr::null_mut()) }
+    unsafe { is_prime_odd(n.as_ptr(), 2, Scratch::none()) }
 }
 
 /// The remainders of the `nn` limbs at `n` by four groups' `d`s at once, four independent chains a
@@ -303,7 +308,8 @@ unsafe fn has_factor_in(n: *const u64, nn: usize, groups: &[Group]) -> bool {
 ///
 /// The limbs must be valid for reads, the top one not zero, and `s` for the working memory,
 /// starting on 16 bytes.
-unsafe fn is_prime_odd(n: *const u64, nn: usize, s: *mut u64) -> bool {
+unsafe fn is_prime_odd(n: *const u64, nn: usize, s: Scratch) -> bool {
+    need!(s, prime_itch(nn));
     // SAFETY: as the caller guarantees.
     unsafe {
         let bits = Bits {
@@ -324,7 +330,8 @@ unsafe fn is_prime_odd(n: *const u64, nn: usize, s: *mut u64) -> bool {
 /// # Safety
 ///
 /// As for [`is_prime_odd`].
-unsafe fn probable_prime_odd(n: *const u64, nn: usize, bits: Bits, s: *mut u64) -> bool {
+unsafe fn probable_prime_odd(n: *const u64, nn: usize, bits: Bits, s: Scratch) -> bool {
+    need!(s, prime_itch(nn));
     let select = || {
         // SAFETY: as the caller guarantees.
         unsafe { selfridge(n, nn) }
@@ -339,7 +346,10 @@ unsafe fn probable_prime_odd(n: *const u64, nn: usize, bits: Bits, s: *mut u64) 
             6 => bpsw(&MontN::<6>::new(limbs(n)), bits, select),
             7 => bpsw(&MontN::<7>::new(limbs(n)), bits, select),
             _ => {
-                let f = LimbField::new(n, nn, s);
+                // The field's plan is counted again for the rest, which is formed only after the
+                // field: held across its setup, it would cost a register in the Hensel inverse's
+                // loop for every limb.
+                let f = LimbField::new(n, nn, first!(s, LimbField::itch(nn)));
                 bpsw_limbs(&f, bits, s.add(LimbField::itch(nn)), select)
             }
         }

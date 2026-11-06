@@ -35,9 +35,11 @@ const PATTERN: [u64; PERIOD] = {
 impl Sieve {
     /// The odd primes up to `limit`.
     pub(super) fn new(limit: u64) -> Sieve {
-        // Bits `0..=(limit - 1) / 2`, for the odd numbers up to `limit`.
-        let bits = usize::try_from(limit / 2 + 1).expect("capacity overflow");
-        let words = bits.div_ceil(64);
+        // Bits `0..=(limit - 1) / 2`, for the odd numbers up to `limit`, counted in 64 bits: on
+        // 32-bit targets, from the limit `2^33 - 2`, their number does not fit a `usize`, though
+        // their words do up to a limit of about `2^35`, and the bit indices below are `u64`s too.
+        let n = limit / 2 + 1;
+        let words = usize::try_from(n.div_ceil(64)).expect("capacity overflow");
         let mut composite = Vec::with_capacity(words);
         for w in 0..words {
             composite.push(PATTERN[w % PERIOD]);
@@ -48,23 +50,23 @@ impl Sieve {
         while p.saturating_mul(p) <= limit {
             let i = (p / 2) as usize;
             if composite[i / 64] >> (i % 64) & 1 == 0 {
-                let step = p as usize;
-                let mut j = (p * p / 2) as usize;
+                let step = p;
+                let mut j = p * p / 2;
                 if step < 64 {
                     // Several multiples to a word: the word's bits gathered in a register.
-                    while j < bits {
+                    while j < n {
                         let w = j / 64;
-                        let end = (64 * w + 64).min(bits);
+                        let end = (64 * w + 64).min(n);
                         let mut m = 0u64;
                         while j < end {
                             m |= 1 << (j % 64);
                             j += step;
                         }
-                        composite[w] |= m;
+                        composite[w as usize] |= m;
                     }
                 } else {
-                    while j < bits {
-                        composite[j / 64] |= 1 << (j % 64);
+                    while j < n {
+                        composite[(j / 64) as usize] |= 1 << (j % 64);
                         j += step;
                     }
                 }
@@ -83,12 +85,14 @@ impl Sieve {
             return;
         }
         // The bits of the odd numbers from `lo` to `hi`: `lo / 2` holds the first odd number not
-        // below `lo` (`lo - 1` would be even), and `(hi - 1) / 2` the last not above `hi`.
-        let (first, last) = ((lo / 2) as usize, (hi.max(1) - 1) as usize / 2);
+        // below `lo` (`lo - 1` would be even), and `(hi - 1) / 2` the last not above `hi`, in 64
+        // bits, as on 32-bit targets they need not fit a `usize`; their words do, as `hi` is at
+        // most the limit.
+        let (first, last) = (lo / 2, (hi.max(1) - 1) / 2);
         if first > last {
             return;
         }
-        let (w0, w1) = (first / 64, last / 64);
+        let (w0, w1) = ((first / 64) as usize, (last / 64) as usize);
         for w in w0..=w1 {
             let mut bits = !self.composite[w];
             if w == w0 {
@@ -98,8 +102,8 @@ impl Sieve {
                 bits &= u64::MAX >> (63 - last % 64);
             }
             while bits != 0 {
-                let i = 64 * w + bits.trailing_zeros() as usize;
-                f(2 * i as u64 + 1);
+                let i = 64 * w as u64 + u64::from(bits.trailing_zeros());
+                f(2 * i + 1);
                 bits &= bits - 1;
             }
         }

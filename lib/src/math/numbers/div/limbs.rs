@@ -20,6 +20,7 @@
 //! divisions to Newton's method (see [`newton`](super::newton)).
 
 use super::super::mul::limbs::{add_1, add_n, cmp_n, mul, mul_itch, sub_1, sub_n};
+use super::super::scratch::{Scratch, need};
 use super::kernels::submul_1;
 use super::newton::{mu, mu_div_q, mu_div_qr};
 use core::cmp::Ordering;
@@ -399,8 +400,9 @@ pub(in super::super) unsafe fn div_qr(
     d: *const u64,
     dn: usize,
     v: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> bool {
+    need!(t, qr_itch(nn, dn));
     // SAFETY: as the caller guarantees.
     unsafe {
         if mu(nn, dn) {
@@ -426,7 +428,7 @@ pub(super) unsafe fn div_qr_classic(
     d: *const u64,
     dn: usize,
     v: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> bool {
     // SAFETY: as the caller guarantees.
     unsafe {
@@ -612,8 +614,9 @@ pub(super) unsafe fn div_q(
     d: *const u64,
     dn: usize,
     v: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> Option<bool> {
+    need!(t, q_itch(nn, dn));
     let m = shrink_m(nn, dn);
     // SAFETY: as the caller guarantees.
     unsafe {
@@ -714,8 +717,9 @@ pub(super) unsafe fn div_q_top(
     k: usize,
     dt: *const u64,
     v: u64,
-    s: *mut u64,
+    s: Scratch,
 ) -> Found {
+    need!(s, top_itch(k));
     // SAFETY: as the caller guarantees.
     unsafe {
         let top = w.add(k + 1);
@@ -732,7 +736,7 @@ pub(super) unsafe fn div_q_top(
             let high = if mu(2 * k + 2, k + 1) {
                 mu_div_q(h, w, 2 * k + 2, dt, k + 1)
             } else if k + 1 < DC_DIV_Q {
-                let (c, s) = (s, s.add(2 * k + 2));
+                let (c, s) = s.split(2 * k + 2);
                 core::ptr::copy_nonoverlapping(w, c, 2 * k + 2);
                 match div_q(h, c, 2 * k + 2, dt, k + 1, v, s) {
                     Some(qh) => qh,
@@ -796,16 +800,17 @@ pub(super) unsafe fn div_q_split(
     d: *const u64,
     dn: usize,
     v: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> bool {
     let l = split_low(nn, dn);
     debug_assert!(l > 0);
+    need!(t, split_itch(nn, dn, l));
     // SAFETY: as the caller guarantees: the upper division reads and writes the dividend's limbs
     // from `l`, the lower one copies of those below `l + dn`, and both stay in the scratch.
     unsafe {
         let qh = div_qr(q.add(l), n.add(l), nn - l, d, dn, v, t);
-        let (w, h) = (t, t.add(2 * l + 2));
-        let s = h.add(l + 1);
+        let (w, s) = t.split(2 * l + 2);
+        let (h, s) = s.split(l + 1);
         core::ptr::copy_nonoverlapping(n.add(dn - l - 2), w, 2 * l + 2);
         match div_q_top(h, w, l, d.add(dn - l - 1), v, s) {
             Found::AllOnes => core::ptr::write_bytes(q, 0xFF, l),
@@ -834,13 +839,15 @@ pub(super) unsafe fn check_q_top(
     nn: usize,
     d: *const u64,
     dn: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     let k = nn - dn;
+    need!(s, check_itch(nn, dn));
     // SAFETY: as the caller guarantees: the product of `nn` limbs at `s`, its scratch after it.
     unsafe {
-        mul(s, d, dn, q, k, s.add(nn));
-        if cmp_n(s, n, nn) == Ordering::Greater {
+        let (p, s) = s.split(nn);
+        mul(p, d, dn, q, k, s);
+        if cmp_n(p, n, nn) == Ordering::Greater {
             sub_1(q, k, 1);
         }
     }
@@ -896,9 +903,10 @@ pub(super) unsafe fn dc_div_qr(
     d: *const u64,
     dn: usize,
     v: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> bool {
     debug_assert!(dn >= 6 && nn >= dn + 3);
+    need!(t, dc_itch(nn, dn));
     let qn = nn - dn;
     // The first block: the top `first` limbs of the quotient, of a dividend of `dn + first` limbs.
     let first = if qn > dn { (qn - 1) % dn + 1 } else { qn };
@@ -921,12 +929,13 @@ pub(super) unsafe fn dc_div_qr(
             };
             if first < dn {
                 let low = dn - first;
+                let (p, s) = t.split(dn);
                 if first > low {
-                    mul(t, qf, first, d, low, t.add(dn));
+                    mul(p, qf, first, d, low, s);
                 } else {
-                    mul(t, d, low, qf, first, t.add(dn));
+                    mul(p, d, low, qf, first, s);
                 }
-                let mut borrow = u64::from(sub_n(nf, nf, t, dn));
+                let mut borrow = u64::from(sub_n(nf, nf, p, dn));
                 if qh {
                     borrow += u64::from(sub_n(nf.add(first), nf.add(first), d, low));
                 }
@@ -972,9 +981,10 @@ unsafe fn dc_div_qr_n(
     d: *const u64,
     n: usize,
     v: u64,
-    t: *mut u64,
+    t: Scratch,
 ) -> bool {
     let (lo, hi) = (n / 2, n - n / 2);
+    need!(t, n + dc_n_itch(n));
     // SAFETY: every range lies in the `2n` limbs of `u`, the `n` of `d`, the `n` of `q` and the
     // scratch at `t`.
     unsafe {
@@ -983,8 +993,9 @@ unsafe fn dc_div_qr_n(
         } else {
             dc_div_qr_n(q.add(lo), u.add(2 * lo), d.add(lo), hi, v, t)
         };
-        mul(t, q.add(lo), hi, d, lo, t.add(n));
-        let mut borrow = u64::from(sub_n(u.add(lo), u.add(lo), t, n));
+        let (p, s) = t.split(n);
+        mul(p, q.add(lo), hi, d, lo, s);
+        let mut borrow = u64::from(sub_n(u.add(lo), u.add(lo), p, n));
         if qh {
             borrow += u64::from(sub_n(u.add(n), u.add(n), d, lo));
         }
@@ -1000,8 +1011,8 @@ unsafe fn dc_div_qr_n(
         } else {
             dc_div_qr_n(q, u.add(hi), d.add(hi), lo, v, t)
         };
-        mul(t, d, hi, q, lo, t.add(n));
-        let mut borrow = u64::from(sub_n(u, u, t, n));
+        mul(p, d, hi, q, lo, s);
+        let mut borrow = u64::from(sub_n(u, u, p, n));
         if ql {
             borrow += u64::from(sub_n(u.add(lo), u.add(lo), d, hi));
         }

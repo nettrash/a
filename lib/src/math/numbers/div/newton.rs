@@ -39,6 +39,7 @@
 
 use super::super::mul::fft::{Cyclic, Transform, Twiddles, cyclic, mul_cyclic, transform};
 use super::super::mul::limbs::{add_1, add_n, cmp_n, mul, mul_itch, sub_1, sub_n};
+use super::super::scratch::Scratch;
 use super::limbs::{DC_DIV, dc_itch, div_qr_classic, invert_3by2};
 use core::cmp::Ordering;
 use core::ptr;
@@ -210,9 +211,10 @@ unsafe fn mul_mod(
                     (y.x, y.n, x, nx)
                 };
                 let pn = na + nb;
-                let mut t = Vec::<u64>::with_capacity(pn + mul_itch(na, nb));
-                let t = t.as_mut_ptr();
-                mul(t, a, na, b, nb, t.add(pn));
+                let need = pn + mul_itch(na, nb);
+                let mut t = Vec::<u64>::with_capacity(need);
+                let (t, s) = Scratch::new(t.as_mut_ptr(), need).split(pn);
+                mul(t, a, na, b, nb, s);
                 if pn <= mm {
                     ptr::copy_nonoverlapping(t, r, pn);
                     ptr::write_bytes(r.add(pn), 0, mm - pn);
@@ -318,12 +320,14 @@ fn step_modulus(n: usize) -> Modulus {
 /// As for [`invert`].
 unsafe fn invert_base(x: *mut u64, a: *const u64, n: usize) {
     let mut u = vec![u64::MAX; 2 * n];
-    let mut t = Vec::<u64>::with_capacity(if n >= DC_DIV { dc_itch(2 * n, n) } else { 0 });
+    let need = if n >= DC_DIV { dc_itch(2 * n, n) } else { 0 };
+    let mut t = Vec::<u64>::with_capacity(need);
     // SAFETY: the dividend's `2n` limbs, the quotient's `n` at `x` and the scratch of the
     // division, apart.
     unsafe {
         let v = invert_3by2(*a.add(n - 1), *a.add(n - 2));
-        let qh = div_qr_classic(x, u.as_mut_ptr(), 2 * n, a, n, v, t.as_mut_ptr());
+        let t = Scratch::new(t.as_mut_ptr(), need);
+        let qh = div_qr_classic(x, u.as_mut_ptr(), 2 * n, a, n, v, t);
         debug_assert!(qh, "the inverse is above B^n");
     }
 }
@@ -690,8 +694,10 @@ pub(in super::super) unsafe fn mu_div_prepared(
             };
             let qh = run(q.add(r), n.add(r), nn - r, d, dn, &blocks, rem || r > 0);
             if r > 0 {
-                let mut t = Vec::<u64>::with_capacity(dc_itch(dn + r, dn));
-                let high = div_qr_classic(q, n, dn + r, d, dn, v, t.as_mut_ptr());
+                let need = dc_itch(dn + r, dn);
+                let mut t = Vec::<u64>::with_capacity(need);
+                let t = Scratch::new(t.as_mut_ptr(), need);
+                let high = div_qr_classic(q, n, dn + r, d, dn, v, t);
                 debug_assert!(!high, "a partial remainder is below the divisor");
             }
             return qh;

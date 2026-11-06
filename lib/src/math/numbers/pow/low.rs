@@ -4,6 +4,7 @@
 //! [`super::montgomery`]).
 
 use super::super::mul::limbs::{add_n, mul, mul_itch};
+use super::super::scratch::{Scratch, need};
 use super::kernels::row;
 use super::window::{Registers, Ring};
 
@@ -50,8 +51,9 @@ pub(in super::super) unsafe fn mullo(
     x: *const u64,
     y: *const u64,
     n: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
+    need!(s, mullo_itch(n));
     // SAFETY: forwarded.
     unsafe {
         if n < MULLO_DC {
@@ -85,13 +87,14 @@ unsafe fn mullo_basecase(r: *mut u64, x: *const u64, y: *const u64, n: usize) {
 /// # Safety
 ///
 /// As for [`mullo`], with `n >= 2`.
-unsafe fn mullo_dc(r: *mut u64, x: *const u64, y: *const u64, n: usize, s: *mut u64) {
+unsafe fn mullo_dc(r: *mut u64, x: *const u64, y: *const u64, n: usize, s: Scratch) {
+    need!(s, mullo_itch(n));
     let low = split(n);
     let high = n - low;
     // SAFETY: as the caller guarantees: the whole product of `2 low >= n` limbs at `s`, the low
     // halves of `high` limbs at `s + n`, below `s + 2n`, and the scratch of both after `2n`.
     unsafe {
-        let rest = s.add(2 * n);
+        let (s, rest) = s.split(2 * n);
         mul(s, x, low, y, low, rest);
         core::ptr::copy_nonoverlapping(s, r, n);
         mullo(s.add(n), x.add(low), y, high, rest);
@@ -119,19 +122,23 @@ impl Ring for Low {
         self.n
     }
 
-    unsafe fn sqr(&self, r: *mut u64, a: *const u64, t: *mut u64) {
+    unsafe fn sqr(&self, r: *mut u64, a: *const u64, t: Scratch) {
+        need!(t, Low::itch(self.n));
         // SAFETY: the low half goes to the scratch, then over `r`.
         unsafe {
-            mullo(t, a, a, self.n, t.add(self.n));
-            core::ptr::copy_nonoverlapping(t, r, self.n);
+            let (p, t) = t.split(self.n);
+            mullo(p, a, a, self.n, t);
+            core::ptr::copy_nonoverlapping(p, r, self.n);
         }
     }
 
-    unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64, t: *mut u64) {
+    unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64, t: Scratch) {
+        need!(t, Low::itch(self.n));
         // SAFETY: as in `sqr`.
         unsafe {
-            mullo(t, a, b, self.n, t.add(self.n));
-            core::ptr::copy_nonoverlapping(t, r, self.n);
+            let (p, t) = t.split(self.n);
+            mullo(p, a, b, self.n, t);
+            core::ptr::copy_nonoverlapping(p, r, self.n);
         }
     }
 }

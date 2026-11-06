@@ -60,6 +60,7 @@ use super::div::by_zero;
 use super::div::limbs::{bdiv_q, binvert_limb, rshift};
 use super::mul::limbs::{add_1, add_n, mul, mul_itch, sqr, sqr_itch, sub_1, sub_n};
 use super::mul::{Operand, Product, STACK_LIMBS, on_heap, on_stack, to_limbs};
+use super::scratch::{Scratch, need, scratch};
 use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 use core::ptr;
@@ -114,7 +115,7 @@ impl Number {
             if o == 1 || u64::from(128 - o.leading_zeros()) * u64::from(exp) <= 512 {
                 return register_power(
                     [o as u64, (o >> 64) as u64],
-                    z as usize,
+                    u64::from(z),
                     exp,
                     negative,
                     order,
@@ -144,7 +145,9 @@ impl Number {
     ///
     /// When `modulus` is zero, with the message of `%`, and when `exp` is negative, with the message
     /// `negative exponent`: a negative power is a power of the inverse of `self` modulo `modulus`,
-    /// which has to be computed first, with `mod_inverse`, and raised to `-exp`.
+    /// which has to be computed first, with `mod_inverse`, and raised to `-exp`. On 32-bit targets
+    /// also for a modulus of about 2^29 bytes (512 MiB) or more, whose bits a `usize` does not
+    /// count, as a power too long to allocate.
     ///
     /// # Examples
     ///
@@ -208,7 +211,7 @@ fn small_pow_mod(b: u128, e: u128, m: u128) -> u128 {
         return 0;
     }
     let el = [e as u64, (e >> 64) as u64];
-    let ebits = 128 - e.leading_zeros() as usize;
+    let ebits = 128 - u64::from(e.leading_zeros());
     let z = m.trailing_zeros();
     let odd = m >> z;
     let bl = [b as u64, (b >> 64) as u64];
@@ -218,29 +221,23 @@ fn small_pow_mod(b: u128, e: u128, m: u128) -> u128 {
         0
     } else {
         let ol = [odd as u64, (odd >> 64) as u64];
-        let mut s = [0u64; 16];
-        // SAFETY: the dividend of at most 4 limbs by a divisor of 1 or 2 takes at most
-        // `rem_itch(4, 2)` = 14 limbs of scratch, which `s` holds; the divisor's alignment is a
-        // matter of speed for the long divisions only.
+        let mut buf = [0u64; 16];
+        // The dividend of at most 4 limbs by a divisor of 1 or 2 takes at most `rem_itch(4, 2)` = 14
+        // limbs of scratch, which the buffer holds, and which `rem` checks.
+        let s = Scratch::new(buf.as_mut_ptr(), 14);
+        // SAFETY: the scratch is that of the remainders; the divisor's alignment is a matter of
+        // speed for the long divisions only.
         unsafe {
             if ol[1] == 0 {
                 let ring = Mont1::new(ol[0]);
                 let mut x = 0;
-                rem(&mut x, bl.as_ptr(), bn, 1, ol.as_ptr(), 1, s.as_mut_ptr());
+                rem(&mut x, bl.as_ptr(), bn, 1, ol.as_ptr(), 1, s);
                 let y = power_in_registers(&ring, x, el.as_ptr(), ebits);
                 u128::from(ring.plain(y))
             } else {
                 let ring = Mont2::new(ol);
                 let mut x = [0; 2];
-                rem(
-                    x.as_mut_ptr(),
-                    bl.as_ptr(),
-                    bn,
-                    2,
-                    ol.as_ptr(),
-                    2,
-                    s.as_mut_ptr(),
-                );
+                rem(x.as_mut_ptr(), bl.as_ptr(), bn, 2, ol.as_ptr(), 2, s);
                 // SAFETY: the exponent's limbs hold its `ebits` bits.
                 let y = power_in_registers(&ring, x, el.as_ptr(), ebits);
                 let y = ring.plain(y);
@@ -325,13 +322,16 @@ fn small_number(order: ByteOrder, p: u128, negative: bool) -> Number {
 // Long powers
 
 /// The number of zero bits at the low end of the magnitude of the operand `x`, not zero, and its
-/// number of bits.
+/// number of bits: for a modulus, which is refused as too long past [`COUNTABLE`] bytes.
 ///
 /// # Safety
 ///
 /// The operand's vector must be valid for reads.
 unsafe fn zeros_and_bits(x: Operand) -> (usize, usize) {
     let l = x.significant;
+    if l > COUNTABLE {
+        too_long();
+    }
     // SAFETY: every byte read is one of the `l` significant ones: big-endian the last `l` of the
     // vector, little-endian the first `l`.
     unsafe {
@@ -351,14 +351,41 @@ unsafe fn zeros_and_bits(x: Operand) -> (usize, usize) {
     }
 }
 
+/// The number of zero bits at the low end of the magnitude of the operand `x`, not zero, and its
+/// number of bits, in 64 bits, as on 32-bit targets a `usize` does not count those of 512 MiB.
+///
+/// # Safety
+///
+/// The operand's vector must be valid for reads.
+unsafe fn long_zeros_and_bits(x: Operand) -> (u64, u64) {
+    let l = x.significant;
+    // SAFETY: every byte read is one of the `l` significant ones: big-endian the last `l` of the
+    // vector, little-endian the first `l`.
+    unsafe {
+        let byte = |i: usize| {
+            if x.big_endian {
+                *x.ptr.add(x.len - 1 - i)
+            } else {
+                *x.ptr.add(i)
+            }
+        };
+        let mut i = 0;
+        while byte(i) == 0 {
+            i += 1;
+        }
+        let zeros = 8 * i as u64 + u64::from(byte(i).trailing_zeros());
+        (zeros, 8 * l as u64 - u64::from(byte(l - 1).leading_zeros()))
+    }
+}
+
 /// The limbs of an odd power of `bits` bits by `exp`, a limb more for the shift that puts back the
 /// base's low zero bits.
 ///
 /// # Panics
 ///
 /// When it does not fit in memory.
-fn power_limbs(bits: usize, exp: u32) -> usize {
-    let limbs = (bits as u128 * u128::from(exp)).div_ceil(64) + 1;
+fn power_limbs(bits: u64, exp: u32) -> usize {
+    let limbs = (u128::from(bits) * u128::from(exp)).div_ceil(64) + 1;
     match usize::try_from(limbs) {
         Ok(limbs) if limbs <= isize::MAX as usize / 32 => limbs,
         _ => too_long(),
@@ -372,20 +399,27 @@ fn too_long() -> ! {
     panic!("the power is too long to allocate")
 }
 
+/// The most significant bytes whose bits a `usize` counts, with those of the whole limbs that hold
+/// them, `64 ceil(l / 8)`: `2^29 - 8` on 32-bit targets. [`Number::pow_mod`] refuses a longer
+/// modulus as too long, as its working memory, several times its length, could not be allocated
+/// anyway; the bits of the base of [`Number::pow`] and of the exponent are counted in 64 bits.
+const COUNTABLE: usize = (usize::MAX - 63) / 8;
+
 /// `x^exp` for the operand `x`, not zero, with the sign `negative`, in the byte order `order`.
 #[inline(never)]
 fn power_of(x: Operand, exp: u32, negative: bool, order: ByteOrder) -> Number {
     let xn = x.significant.div_ceil(8);
     // SAFETY: the operand's vector is valid for reads, and its magnitude not zero.
-    let (z, bits) = unsafe { zeros_and_bits(x) };
+    let (z, bits) = unsafe { long_zeros_and_bits(x) };
     let odd_bits = bits - z;
     // An odd part of 1 makes the power a shift, whatever the exponent: in registers too, rather
     // than in working memory sized for `exp` bits.
-    if odd_bits == 1 || odd_bits <= 128 && odd_bits as u64 * u64::from(exp) <= 512 {
+    if odd_bits == 1 || odd_bits <= 128 && odd_bits * u64::from(exp) <= 512 {
         // SAFETY: the operand's vector is valid for reads, and its odd part has at most 128 bits.
         return unsafe { short_power(x, z, exp, negative, order) };
     }
-    let on = odd_bits.div_ceil(64);
+    // The limbs of the odd part, which lie in those of the magnitude.
+    let on = odd_bits.div_ceil(64) as usize;
     let rn = power_limbs(odd_bits, exp);
     if rn > STACK_LIMBS {
         // A power too long for the memory fails here, before the scratch of its squares is counted,
@@ -416,8 +450,9 @@ fn power_of(x: Operand, exp: u32, negative: bool, order: ByteOrder) -> Number {
     // The operand, its odd part, two buffers for the power, and the scratch.
     let need = even(xn) + even(on) + 2 * even(rn + 1) + scratch;
     let compute = |s: *mut MaybeUninit<u64>| {
+        let s = scratch!(s.cast(), need);
         // SAFETY: the working memory holds `need` limbs, as the layout below takes them.
-        unsafe { power_in(s.cast(), x, xn, z, on, exp, rn, scratch, negative, order) }
+        unsafe { power_in(s, x, xn, z, on, exp, rn, scratch, negative, order) }
     };
     if need <= SHORT_LIMBS {
         let mut s = [PAIR; SHORT_LIMBS / 2];
@@ -463,9 +498,9 @@ fn on_heap_or_panic<R>(need: usize, f: impl FnOnce(*mut MaybeUninit<u64>) -> R) 
 ///
 /// The operand's vector must be valid for reads.
 #[inline(never)]
-unsafe fn short_power(x: Operand, z: usize, exp: u32, negative: bool, order: ByteOrder) -> Number {
+unsafe fn short_power(x: Operand, z: u64, exp: u32, negative: bool, order: ByteOrder) -> Number {
     // The odd part, shifted down from its limbs, which fits in two.
-    let (zl, zb) = (z / 64, (z % 64) as u32);
+    let (zl, zb) = ((z / 64) as usize, (z % 64) as u32);
     // SAFETY: as the caller guarantees.
     let l = |i: usize| unsafe { limb_at(x, zl + i) };
     let (l0, l1, l2) = (l(0), l(1), l(2));
@@ -483,14 +518,14 @@ unsafe fn short_power(x: Operand, z: usize, exp: u32, negative: bool, order: Byt
 /// `(o 2^z)^exp` for the odd `o` of two limbs, whose power has at most 512 bits: in registers, four
 /// limbs for a power of up to 256 bits and eight beyond, shifted by `z exp` bits as it is written.
 #[inline(never)]
-fn register_power(o: [u64; 2], z: usize, exp: u32, negative: bool, order: ByteOrder) -> Number {
+fn register_power(o: [u64; 2], z: u64, exp: u32, negative: bool, order: ByteOrder) -> Number {
     let bits = 128
         - if o[1] != 0 {
             o[1].leading_zeros()
         } else {
             64 + o[0].leading_zeros()
         };
-    let shift = z as u128 * u128::from(exp);
+    let shift = u128::from(z) * u128::from(exp);
     // SAFETY: the limbs hold the odd power, with a limb of room above it.
     unsafe {
         if bits == 1 || bits as u64 * u64::from(exp) <= 256 {
@@ -654,10 +689,10 @@ unsafe fn shifted_number(
 /// operand's vector is valid for reads, and its magnitude not zero.
 #[allow(clippy::too_many_arguments)]
 unsafe fn power_in(
-    s: *mut u64,
+    s: Scratch,
     x: Operand,
     xn: usize,
-    z: usize,
+    z: u64,
     on: usize,
     exp: u32,
     rn: usize,
@@ -665,17 +700,17 @@ unsafe fn power_in(
     negative: bool,
     order: ByteOrder,
 ) -> Number {
+    need!(s, even(xn) + even(on) + 2 * even(rn + 1) + room);
     // SAFETY: as the caller guarantees: every buffer lies in the working memory, apart, and every
     // length stays within its buffer, as `power_of` bounds them.
     unsafe {
-        let a = s;
-        let o = a.add(even(xn));
-        let p = o.add(even(on));
-        let q = p.add(even(rn + 1));
-        let t = q.add(even(rn + 1));
+        let (a, s) = s.split(even(xn));
+        let (o, s) = s.split(even(on));
+        let (p, s) = s.split(even(rn + 1));
+        let (q, t) = s.split(even(rn + 1));
         to_limbs(x, a);
         // The odd part.
-        let (zl, zb) = (z / 64, (z % 64) as u32);
+        let (zl, zb) = ((z / 64) as usize, (z % 64) as u32);
         if zb != 0 {
             rshift(a.add(zl), xn - zl, zb);
         }
@@ -708,19 +743,20 @@ unsafe fn power_in(
                 (r, w) = (w, r);
             }
         }
-        shifted_number(r, len, z as u128 * u128::from(exp), negative, order)
+        shifted_number(r, len, u128::from(z) * u128::from(exp), negative, order)
     }
 }
 
-/// Runs `f` on scratch of `need` limbs: the `room` limbs at `t` when they are enough, and otherwise a
-/// buffer of its own, on 16 bytes, freed on return.
+/// Runs `f` on scratch of `need` limbs: the first of the `room` limbs at `t` when they are enough,
+/// and otherwise a buffer of its own, on 16 bytes, freed on return.
 ///
 /// # Safety
 ///
 /// The `room` limbs at `t` must be valid for reads and writes.
-unsafe fn with_room<R>(t: *mut u64, room: usize, need: usize, f: impl FnOnce(*mut u64) -> R) -> R {
+unsafe fn with_room<R>(t: Scratch, room: usize, need: usize, f: impl FnOnce(Scratch) -> R) -> R {
+    need!(t, room);
     if need <= room {
-        f(t)
+        f(t.first(need))
     } else {
         more_room(need, f)
     }
@@ -729,9 +765,9 @@ unsafe fn with_room<R>(t: *mut u64, room: usize, need: usize, f: impl FnOnce(*mu
 /// The buffer of [`with_room`] when the planned scratch is not enough. Out of line and cold.
 #[cold]
 #[inline(never)]
-fn more_room<R>(need: usize, f: impl FnOnce(*mut u64) -> R) -> R {
+fn more_room<R>(need: usize, f: impl FnOnce(Scratch) -> R) -> R {
     let mut s = Vec::<Pair>::with_capacity(need.div_ceil(2));
-    f(s.as_mut_ptr().cast())
+    f(Scratch::new(s.as_mut_ptr().cast(), need))
 }
 
 // Powers modulo a number
@@ -780,12 +816,13 @@ fn pow_mod_of(b: Operand, negative_b: bool, e: Operand, m: Operand, order: ByteO
     // SAFETY: the modulus's vector is valid for reads, and its magnitude not zero.
     let shape = unsafe { Shape::of(m) };
     // The exponent's bits, for the window: an upper bound from its bytes, as the table is sized
-    // for it.
-    let ebits = 8 * e.significant;
+    // for it; in 64 bits, as on 32-bit targets a `usize` does not count those of 512 MiB.
+    let ebits = 8 * e.significant as u64;
     let need = pow_mod_itch(bn, en, ebits, shape);
     let compute = |s: *mut MaybeUninit<u64>| {
+        let s = scratch!(s.cast(), need);
         // SAFETY: the working memory holds `need` limbs.
-        unsafe { pow_mod_in(s.cast(), b, negative_b, e, m, shape, order) }
+        unsafe { pow_mod_in(s, b, negative_b, e, m, shape, order) }
     };
     if need <= STACK_LIMBS {
         on_stack(compute)
@@ -796,7 +833,7 @@ fn pow_mod_of(b: Operand, negative_b: bool, e: Operand, m: Operand, order: ByteO
 
 /// The limbs of working memory of [`pow_mod_in`] for a base of `bn` limbs, an exponent of `en`
 /// limbs and at most `ebits` bits, and a modulus of the shape `shape`.
-fn pow_mod_itch(bn: usize, en: usize, ebits: usize, shape: Shape) -> usize {
+fn pow_mod_itch(bn: usize, en: usize, ebits: u64, shape: Shape) -> usize {
     let Shape { mn, nodd, kn, .. } = shape;
     let inputs = even(bn) + even(en) + 3 * even(mn + 1);
     let mut work = rem_itch(bn, mn);
@@ -810,9 +847,12 @@ fn pow_mod_itch(bn: usize, en: usize, ebits: usize, shape: Shape) -> usize {
         let rest = powm_odd_itch(bn, ebits, nodd)
             .max(powlo_itch(ebits, kn))
             .max(products);
-        work = work.max(crt + rest);
+        work = work.max(crt.saturating_add(rest));
     }
-    inputs + work
+    // The sums saturate, as the tables of `powm_odd_itch` and `powlo_itch` do: on 32-bit targets
+    // they pass `usize::MAX` from moduli of 62 MiB with long exponents, plans that cannot be met,
+    // which the allocation refuses, where wrapped ones would be met and overrun.
+    inputs.saturating_add(work)
 }
 
 /// [`pow_mod_of`] in the working memory at `s`.
@@ -822,7 +862,7 @@ fn pow_mod_itch(bn: usize, en: usize, ebits: usize, shape: Shape) -> usize {
 /// The working memory holds [`pow_mod_itch`] limbs and starts on 16 bytes; the operands' vectors
 /// are valid for reads, the modulus is not zero, and `shape` is its shape.
 unsafe fn pow_mod_in(
-    s: *mut u64,
+    s: Scratch,
     b: Operand,
     negative_b: bool,
     e: Operand,
@@ -832,15 +872,15 @@ unsafe fn pow_mod_in(
 ) -> Number {
     let (bn, en) = (b.significant.div_ceil(8), e.significant.div_ceil(8));
     let Shape { mn, z, nodd, kn } = shape;
+    need!(s, pow_mod_itch(bn, en, 8 * e.significant as u64, shape));
     // SAFETY: every buffer lies in the working memory that `pow_mod_itch` counts, apart from the
     // others, and starts on 16 bytes.
     unsafe {
-        let bp = s;
-        let ep = bp.add(even(bn));
-        let mp = ep.add(even(en));
-        let odd = mp.add(even(mn + 1));
-        let r = odd.add(even(mn + 1));
-        let t = r.add(even(mn + 1));
+        let (bp, s) = s.split(even(bn));
+        let (ep, s) = s.split(even(en));
+        let (mp, s) = s.split(even(mn + 1));
+        let (odd, s) = s.split(even(mn + 1));
+        let (r, t) = s.split(even(mn + 1));
         to_limbs(m, mp);
         let one = mn == 1 && *mp == 1;
         if en == 0 {
@@ -852,7 +892,7 @@ unsafe fn pow_mod_in(
         }
         to_limbs(e, ep);
         to_limbs(b, bp);
-        let ebits = 64 * en - (*ep.add(en - 1)).leading_zeros() as usize;
+        let ebits = 64 * en as u64 - u64::from((*ep.add(en - 1)).leading_zeros());
         let mbits = 64 * mn - (*mp.add(mn - 1)).leading_zeros() as usize;
         if ebits == 1 {
             // `b^1`: the remainder alone.
@@ -870,12 +910,11 @@ unsafe fn pow_mod_in(
             if zb != 0 {
                 rshift(odd, mn - zl, zb);
             }
-            let r2 = t;
-            let inv = r2.add(even(kn));
-            let num = inv.add(even(kn));
-            let d = num.add(even(kn));
-            let y = d.add(even(kn));
-            let rest = y.add(even(nodd + kn + 1));
+            let (r2, s) = t.split(even(kn));
+            let (inv, s) = s.split(even(kn));
+            let (num, s) = s.split(even(kn));
+            let (d, s) = s.split(even(kn));
+            let (y, rest) = s.split(even(nodd + kn + 1));
             powm_odd(r, bp, bn, ep, ebits, odd, nodd, rest);
             powlo(r2, bp, bn, ep, en, ebits, z, rest);
             ptr::write_bytes(num, 0, kn);
@@ -951,12 +990,16 @@ unsafe fn number_of(r: *const u64, n: usize, order: ByteOrder) -> Number {
 
 /// The limbs of scratch space of [`powm_odd`] for a base of `bn` limbs, an exponent of at most
 /// `ebits` bits and a modulus of `n` limbs.
-fn powm_odd_itch(bn: usize, ebits: usize, n: usize) -> usize {
+fn powm_odd_itch(bn: usize, ebits: u64, n: usize) -> usize {
     if n <= 2 {
         rem_itch(bn + n, n)
     } else {
-        let table = (1 << (window(ebits) - 1)) * even(n);
-        Montgomery::new_itch(n) + table + Montgomery::itch(n).max(rem_itch(bn + n, n))
+        // The table and the sum saturate, as in `pow_mod_itch`: on 32-bit targets the 512 entries
+        // of the longest window alone pass `usize::MAX` from 2^23 limbs.
+        let table = even(n).saturating_mul(1 << (window(ebits) - 1));
+        Montgomery::new_itch(n)
+            .saturating_add(table)
+            .saturating_add(Montgomery::itch(n).max(rem_itch(bn + n, n)))
     }
 }
 
@@ -974,11 +1017,12 @@ unsafe fn powm_odd(
     b: *const u64,
     bn: usize,
     e: *const u64,
-    ebits: usize,
+    ebits: u64,
     m: *const u64,
     n: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
+    need!(s, powm_odd_itch(bn, ebits, n));
     // SAFETY: as the caller guarantees; the residue of the base goes to the first entry of the
     // table, and the working memory of the Montgomery arithmetic before it.
     unsafe {
@@ -1007,11 +1051,12 @@ unsafe fn powm_odd(
             6 => powm_registers::<6>(r, b, bn, e, ebits, m, s),
             7 => powm_registers::<7>(r, b, bn, e, ebits, m, s),
             _ => {
-                let ring = Montgomery::new(m, n, s);
-                let table = s.add(Montgomery::new_itch(n));
+                let keep = Montgomery::new_itch(n);
+                let ring = Montgomery::new(m, n, s.first(keep));
                 let stride = even(n);
-                let t = table.add((1 << (window(ebits) - 1)) * stride);
-                rem(table, b, bn, n, m, n, t);
+                let (s, size) = (s.add(keep), (1 << (window(ebits) - 1)) * stride);
+                let (table, t) = (s.first(size), s.add(size));
+                rem(table.ptr(), b, bn, n, m, n, t);
                 power(&ring, r, e, ebits, table, stride, t);
                 ring.plain(r, r, t);
             }
@@ -1030,9 +1075,9 @@ unsafe fn powm_registers<const N: usize>(
     b: *const u64,
     bn: usize,
     e: *const u64,
-    ebits: usize,
+    ebits: u64,
     m: *const u64,
-    s: *mut u64,
+    s: Scratch,
 ) {
     // SAFETY: as the caller guarantees.
     unsafe {
@@ -1049,8 +1094,11 @@ unsafe fn powm_registers<const N: usize>(
 
 /// The limbs of scratch space of [`powlo`] for an exponent of at most `ebits` bits and a modulus of
 /// `n` limbs.
-fn powlo_itch(ebits: usize, n: usize) -> usize {
-    (1 << (window(ebits) - 1)) * even(n) + Low::itch(n)
+fn powlo_itch(ebits: u64, n: usize) -> usize {
+    // Saturated, as `powm_odd_itch` is.
+    even(n)
+        .saturating_mul(1 << (window(ebits) - 1))
+        .saturating_add(Low::itch(n))
 }
 
 /// Sets the `z.div_ceil(64)` limbs at `r` to `b^e mod 2^z` for the `bn` limbs at `b`, not zero, the
@@ -1070,19 +1118,22 @@ unsafe fn powlo(
     bn: usize,
     e: *const u64,
     en: usize,
-    ebits: usize,
+    ebits: u64,
     z: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     let kn = z.div_ceil(64);
+    need!(s, powlo_itch(ebits, kn));
     // SAFETY: as the caller guarantees.
     unsafe {
-        let mut v = 0;
-        while *b.add(v / 64) == 0 {
-            v += 64;
+        // The base's zero bits at the low end, in 128 bits, as they need not fit in a `usize` on
+        // 32-bit targets, for a base of 512 MiB.
+        let mut i = 0;
+        while *b.add(i) == 0 {
+            i += 1;
         }
-        v += (*b.add(v / 64)).trailing_zeros() as usize;
-        if v > 0 && (en > 1 || u128::from(*e) * v as u128 >= z as u128) {
+        let v = 64 * i as u128 + u128::from((*b.add(i)).trailing_zeros());
+        if v > 0 && (en > 1 || u128::from(*e) * v >= z as u128) {
             ptr::write_bytes(r, 0, kn);
             return;
         }
@@ -1110,12 +1161,12 @@ unsafe fn powlo(
             8 => return low_registers::<8>(r, b, bn, e, ebits, z),
             _ => {}
         }
-        let table = s;
         let stride = even(kn);
-        let t = table.add((1 << (window(ebits) - 1)) * stride);
+        let size = (1 << (window(ebits) - 1)) * stride;
+        let (table, t) = (s.first(size), s.add(size));
         let have = bn.min(kn);
-        ptr::copy_nonoverlapping(b, table, have);
-        ptr::write_bytes(table.add(have), 0, kn - have);
+        ptr::copy_nonoverlapping(b, table.ptr(), have);
+        ptr::write_bytes(table.ptr().add(have), 0, kn - have);
         power(&Low { n: kn }, r, e, ebits, table, stride, t);
         if !z.is_multiple_of(64) {
             *r.add(kn - 1) &= (1 << (z % 64)) - 1;
@@ -1134,7 +1185,7 @@ unsafe fn low_registers<const N: usize>(
     b: *const u64,
     bn: usize,
     e: *const u64,
-    ebits: usize,
+    ebits: u64,
     z: usize,
 ) {
     let mut x = [0u64; N];

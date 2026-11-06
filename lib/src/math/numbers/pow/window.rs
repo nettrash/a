@@ -5,6 +5,8 @@
 //! The arithmetic is a [`Ring`] on limbs in memory, or a [`Registers`] on values in registers;
 //! the exponent is held as limbs, the least significant first.
 
+use super::super::scratch::{Scratch, need};
+
 /// The arithmetic of a ring of residues of `n` limbs in memory: Montgomery's modulo an odd
 /// number, or the low limbs of products modulo a power of two.
 pub(in super::super) trait Ring {
@@ -16,7 +18,7 @@ pub(in super::super) trait Ring {
     /// # Safety
     ///
     /// The limbs must be valid; `r` may be `a`; the scratch is that of the ring.
-    unsafe fn sqr(&self, r: *mut u64, a: *const u64, t: *mut u64);
+    unsafe fn sqr(&self, r: *mut u64, a: *const u64, t: Scratch);
 
     /// Sets the `n` limbs at `r` to the product of the `n` limbs at `a` and `b`, with the scratch
     /// at `t`.
@@ -24,7 +26,7 @@ pub(in super::super) trait Ring {
     /// # Safety
     ///
     /// The limbs must be valid; `r` may be `a` or `b`; the scratch is that of the ring.
-    unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64, t: *mut u64);
+    unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64, t: Scratch);
 }
 
 /// The arithmetic of a ring of residues held in registers.
@@ -42,8 +44,8 @@ pub(in super::super) trait Registers {
 /// The window size for an exponent of `bits` bits: the `k` that minimizes the products, about
 /// `2^(k - 1) + bits / (k + 1)`, GMP's table, never more than `bits`.
 #[inline]
-pub(super) fn window(bits: usize) -> u32 {
-    const LIMITS: [usize; 9] = [7, 25, 81, 241, 673, 1793, 4609, 11521, 28161];
+pub(super) fn window(bits: u64) -> u32 {
+    const LIMITS: [u64; 9] = [7, 25, 81, 241, 673, 1793, 4609, 11521, 28161];
     let mut k = 1;
     for limit in LIMITS {
         if bits > limit {
@@ -62,9 +64,9 @@ const MAX_REGISTER_WINDOW: u32 = 6;
 ///
 /// The limb holding the bit must be valid for reads.
 #[inline(always)]
-unsafe fn bit(e: *const u64, i: usize) -> bool {
+unsafe fn bit(e: *const u64, i: u64) -> bool {
     // SAFETY: as the caller guarantees.
-    unsafe { (*e.add((i - 1) / 64) >> ((i - 1) % 64)) & 1 != 0 }
+    unsafe { (*e.add(((i - 1) / 64) as usize) >> ((i - 1) % 64)) & 1 != 0 }
 }
 
 /// The `k` bits of the exponent `e` below bit `i` (counted from 1), or the `i` lowest ones when
@@ -74,8 +76,8 @@ unsafe fn bit(e: *const u64, i: usize) -> bool {
 ///
 /// `1 <= k <= 63`, and the limbs holding the bits valid for reads.
 #[inline(always)]
-pub(super) unsafe fn bits(e: *const u64, i: usize, k: u32) -> u64 {
-    let k = k as usize;
+pub(super) unsafe fn bits(e: *const u64, i: u64, k: u32) -> u64 {
+    let k = u64::from(k);
     // SAFETY: as the caller guarantees: limbs `(i - k) / 64` and the one above it, which holds
     // bit `i - 1` when the bits straddle two limbs.
     unsafe {
@@ -83,7 +85,7 @@ pub(super) unsafe fn bits(e: *const u64, i: usize, k: u32) -> u64 {
             return *e & ((1 << i) - 1);
         }
         let low = i - k;
-        let (l, s) = (low / 64, low % 64);
+        let (l, s) = ((low / 64) as usize, low % 64);
         let mut r = *e.add(l) >> s;
         if 64 - s < k {
             r |= *e.add(l + 1) << (64 - s);
@@ -94,8 +96,8 @@ pub(super) unsafe fn bits(e: *const u64, i: usize, k: u32) -> u64 {
 
 /// Sets the `n` limbs at `r` to `b^e` in `ring`, for the exponent of `ebits` bits at `e`, at least
 /// 1, and the residue `b` of `n` limbs at `table`, which is overwritten by the table of the
-/// window's odd powers, `2^(window(ebits) - 1)` residues of `stride` limbs each. `t` is the ring's
-/// scratch.
+/// window's odd powers, `2^(window(ebits) - 1)` residues of `stride` limbs each, which it checks it
+/// holds. `t` is the ring's scratch.
 ///
 /// # Safety
 ///
@@ -104,13 +106,15 @@ pub(super) unsafe fn power<R: Ring>(
     ring: &R,
     r: *mut u64,
     e: *const u64,
-    ebits: usize,
-    table: *mut u64,
+    ebits: u64,
+    table: Scratch,
     stride: usize,
-    t: *mut u64,
+    t: Scratch,
 ) {
     let n = ring.n();
     let k = window(ebits);
+    need!(table, (1 << (k - 1)) * stride);
+    let table = table.ptr();
     // SAFETY: as the caller guarantees: the table holds `2^(k - 1)` residues, the exponent its
     // `ebits` bits, and every bit read is at most bit `ebits`.
     unsafe {
@@ -122,10 +126,10 @@ pub(super) unsafe fn power<R: Ring>(
             }
         }
         // The top window: `k` bits, its top one set, without its low zeros.
-        let mut i = ebits - k as usize;
+        let mut i = ebits - u64::from(k);
         let w = bits(e, ebits, k);
         let zeros = w.trailing_zeros();
-        i += zeros as usize;
+        i += u64::from(zeros);
         core::ptr::copy_nonoverlapping(table.add((w >> zeros >> 1) as usize * stride), r, n);
         while i != 0 {
             if !bit(e, i) {
@@ -136,8 +140,9 @@ pub(super) unsafe fn power<R: Ring>(
             // The next window starts with this one: up to `k` bits, ending with a one.
             let w = bits(e, i, k);
             let zeros = w.trailing_zeros();
-            let len = k.min(i as u32) - zeros;
-            i -= len as usize;
+            // `k` or the `i` bits left, in 64 bits: `i as u32` would wrap past 2^32 bits.
+            let len = u64::from(k).min(i) - u64::from(zeros);
+            i -= len;
             for _ in 0..len {
                 ring.sqr(r, r, t);
             }
@@ -157,7 +162,7 @@ pub(super) unsafe fn power_in_registers<R: Registers>(
     ring: &R,
     b: R::V,
     e: *const u64,
-    ebits: usize,
+    ebits: u64,
 ) -> R::V {
     let k = window(ebits).min(MAX_REGISTER_WINDOW);
     let mut table = [b; 1 << (MAX_REGISTER_WINDOW - 1)];
@@ -169,10 +174,10 @@ pub(super) unsafe fn power_in_registers<R: Registers>(
     }
     // SAFETY: as the caller guarantees: every bit read is at most bit `ebits`.
     unsafe {
-        let mut i = ebits - k as usize;
+        let mut i = ebits - u64::from(k);
         let w = bits(e, ebits, k);
         let zeros = w.trailing_zeros();
-        i += zeros as usize;
+        i += u64::from(zeros);
         let mut r = table[(w >> zeros >> 1) as usize];
         while i != 0 {
             if !bit(e, i) {
@@ -182,8 +187,9 @@ pub(super) unsafe fn power_in_registers<R: Registers>(
             }
             let w = bits(e, i, k);
             let zeros = w.trailing_zeros();
-            let len = k.min(i as u32) - zeros;
-            i -= len as usize;
+            // `k` or the `i` bits left, in 64 bits: `i as u32` would wrap past 2^32 bits.
+            let len = u64::from(k).min(i) - u64::from(zeros);
+            i -= len;
             for _ in 0..len {
                 r = ring.sqr(r);
             }

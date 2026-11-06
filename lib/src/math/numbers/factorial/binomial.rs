@@ -18,6 +18,7 @@
 
 use super::super::div::limbs::{bdiv_q, binvert_limb};
 use super::super::root::quotient;
+use super::super::scratch::Scratch;
 use super::Limbs;
 use super::odd::{ODD_FACTORIALS, SMALL_LIMBS, SWING, odd_factorial, small_odd_factorial};
 use super::primes::{Remainders, Sieve};
@@ -213,10 +214,12 @@ fn small_by_division<R>(n: u64, k: u64, place: impl FnOnce(&mut [u64], usize) ->
     let mut scratch = Vec::new();
     let p = p.as_mut_ptr().cast::<u64>();
     // SAFETY: the first `nf` limbs of `f` are written; the arrays hold the product of the `nf`
-    // limbs, at most `nf`, with the limb to spare, and the halves of `product_into`.
+    // limbs, at most `nf`, with the limb to spare, and the halves of `product_into`, the
+    // `2 nf + 64` limbs that `product` plans too.
     let pn = unsafe {
         let f = core::slice::from_raw_parts(f.as_ptr().cast::<u64>(), nf);
-        product_into(f, p, halves.as_mut_ptr().cast(), &mut scratch)
+        let w = Scratch::new(halves.as_mut_ptr().cast(), 2 * nf + 64);
+        product_into(f, p, w, &mut scratch)
     };
     if k < ODD_FACTORIALS.len() as u64 {
         // SAFETY: the product's `pn` limbs are written, and the spare one is written here.
@@ -282,8 +285,10 @@ fn divide_by_limb(x: &mut [u64], d: u64) -> usize {
 fn exact_quotient(x: &mut Limbs, d: &[u64]) -> Limbs {
     let (xn, dn) = (x.len(), d.len());
     let qn = xn - dn + 1;
-    let m = qn.min(dn);
-    if qn * m - m * m / 2 >= HENSEL_LIMIT {
+    // The limb products of Hensel's method, in 128 bits: in a `usize` they overflow on 32-bit
+    // targets.
+    let (q, m) = (qn as u128, qn.min(dn) as u128);
+    if q * m - m * m / 2 >= HENSEL_LIMIT as u128 {
         return quotient(x, d);
     }
     // A limb to spare, for a shift.
@@ -310,7 +315,13 @@ fn exact_quotient(x: &mut Limbs, d: &[u64]) -> Limbs {
 /// The odd part of `C(n, k)` from its odd prime factors, for `k <= n / 2`.
 fn by_primes(n: u64, k: u64) -> Limbs {
     let sieve = Sieve::new(n);
-    let mut packer = Packer::new(n, (n / 64) as usize + 4);
+    // About `n / ln n` primes up to `n`, several to a limb; on 32-bit targets, at most `2^20`
+    // limbs to begin with, as from `n = 2^34 - 256` the `n / 64` would pass `isize::MAX` bytes
+    // where the sieve and the coefficient need not, and the vector grows as it must.
+    let room = n / 64 + 4;
+    #[cfg(target_pointer_width = "32")]
+    let room = room.min(1 << 20);
+    let mut packer = Packer::new(n, room as usize);
     let root = super::super::root::sqrt_rem_u128(u128::from(n)).0;
     // Up to `sqrt(n)`: `p` to the number of carries when `k` and `n - k` are added in base `p`,
     // digit by digit, at most `n` in all.

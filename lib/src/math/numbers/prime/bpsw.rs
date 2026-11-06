@@ -23,6 +23,7 @@ use super::super::div::limbs::{div_2by1, invert_limb};
 use super::super::mul::limbs::{add_n, cmp_n, sub_n};
 use super::super::pow::montgomery::{Mont1, Mont2, MontN, Montgomery, even, rem, rem_itch};
 use super::super::pow::window::{Registers, Ring};
+use super::super::scratch::{Scratch, need};
 use core::cmp::Ordering;
 use core::ptr;
 
@@ -173,10 +174,13 @@ fn half_mod<const N: usize>(a: [u64; N], m: &[u64; N]) -> [u64; N] {
 #[inline]
 fn residue_of<const N: usize>(c: u64, m: &[u64; N]) -> [u64; N] {
     let mut r = [0; N];
-    let mut s = [0u64; 64];
-    // SAFETY: the dividend `c B^N` of `N + 1 <= 8` limbs by a divisor of `N <= 7` takes
-    // `rem_itch(N + 1, N) <= 8 + 2 * 10` limbs of scratch, which `s` holds.
-    unsafe { rem(r.as_mut_ptr(), &c, 1, N, m.as_ptr(), N, s.as_mut_ptr()) };
+    let mut buf = [0u64; 64];
+    // The dividend `c B^N` of `N + 1 <= 8` limbs by a divisor of `N <= 7` takes
+    // `rem_itch(N + 1, N) <= 8 + 2 * 10` limbs of scratch, which the buffer holds, and which `rem`
+    // checks.
+    let s = Scratch::new(buf.as_mut_ptr(), 8 + 2 * 10);
+    // SAFETY: the scratch is that of the remainder.
+    unsafe { rem(r.as_mut_ptr(), &c, 1, N, m.as_ptr(), N, s) };
     r
 }
 
@@ -547,7 +551,7 @@ pub(super) struct LimbField {
     /// The Montgomery arithmetic.
     mont: Montgomery,
     /// The scratch of its products.
-    t: *mut u64,
+    t: Scratch,
 }
 
 impl LimbField {
@@ -563,10 +567,11 @@ impl LimbField {
     ///
     /// `nn >= 3`; the limbs of `n` and the [`LimbField::itch`] at `s` must stay valid while the
     /// field is used, `s` start on 16 bytes.
-    pub(super) unsafe fn new(n: *const u64, nn: usize, s: *mut u64) -> Self {
+    pub(super) unsafe fn new(n: *const u64, nn: usize, s: Scratch) -> Self {
+        need!(s, Self::itch(nn));
         // SAFETY: as the caller guarantees.
         unsafe {
-            let mont = Montgomery::new(n, nn, s);
+            let mont = Montgomery::new(n, nn, s.first(Montgomery::new_itch(nn)));
             LimbField {
                 mont,
                 t: s.add(Montgomery::new_itch(nn)),
@@ -744,7 +749,10 @@ unsafe fn equal(a: *const u64, b: *const u64, n: usize) -> bool {
 
 /// The limbs of working memory of [`bpsw_limbs`] besides the field's: ten residues.
 pub(super) fn bpsw_limbs_itch(nn: usize) -> usize {
-    LimbField::itch(nn) + 10 * even(nn)
+    // The sum saturates: on 32-bit targets it passes `usize::MAX` for numbers of about 1.6 GB, a
+    // plan that cannot be met, which the allocation refuses, where a wrapped one would be met and
+    // overrun. Each part stays below the limit there; the callers' sums saturate too.
+    LimbField::itch(nn).saturating_add(10 * even(nn))
 }
 
 /// [`bpsw`] for the limbs in memory: the field `f` and ten residues at `s`.
@@ -755,13 +763,15 @@ pub(super) fn bpsw_limbs_itch(nn: usize) -> usize {
 pub(super) unsafe fn bpsw_limbs(
     f: &LimbField,
     bits: Bits,
-    s: *mut u64,
+    s: Scratch,
     select: impl FnOnce() -> Option<i64>,
 ) -> bool {
     let nn = f.nn();
     let stride = even(nn);
+    need!(s, 10 * stride);
     // SAFETY: every residue lies in the working memory at `s`, apart from the others.
     unsafe {
+        let s = s.take(10 * stride);
         let slot = |i: usize| s.add(i * stride);
         let (one, minus_one, x) = (slot(0), slot(1), slot(2));
         // The strong test to base 2.

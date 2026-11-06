@@ -23,6 +23,7 @@ use super::super::div::limbs::{
     bdiv_q, binvert_limb, div_qr, div_qr_1, div_qr_2, invert_3by2, invert_limb, qr_itch, rshift,
 };
 use super::super::mul::limbs::{add_n, cmp_n, mul, mul_itch, sqr, sqr_itch, sub_n};
+use super::super::scratch::{Scratch, need};
 use super::kernels::redc;
 use super::low::{mullo, mullo_itch};
 use super::window::{Registers, Ring};
@@ -67,9 +68,10 @@ pub(in super::super) unsafe fn rem(
     k: usize,
     m: *const u64,
     n: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     let total = nu + k;
+    need!(s, rem_itch(total, n));
     // SAFETY: as the caller guarantees: the divisor's `n` limbs at `s`, the dividend's `total + 1`
     // after them, the quotient's `total + 1` after those and the division's scratch last.
     unsafe {
@@ -79,10 +81,9 @@ pub(in super::super) unsafe fn rem(
             return;
         }
         let shift = (*m.add(n - 1)).leading_zeros();
-        let d = s;
-        let x = d.add(even(n));
-        let q = x.add(even(total + 1));
-        let t = q.add(even(total + 1));
+        let (d, s) = s.split(even(n));
+        let (x, s) = s.split(even(total + 1));
+        let (q, t) = s.split(even(total + 1));
         lshift(d, m, n, shift);
         ptr::write_bytes(x, 0, k);
         *x.add(total) = lshift(x.add(k), u, nu, shift);
@@ -160,12 +161,19 @@ impl Montgomery {
 
     /// The limbs of scratch space that the products and squares need for a modulus of `n` limbs.
     pub(in super::super) fn itch(n: usize) -> usize {
-        let redc = if n >= REDC_N {
+        // The reduction's term first, so that it is computed first where this is inlined.
+        let redc = Self::redc_itch(n);
+        2 * n + mul_itch(n, n).max(sqr_itch(n)).max(redc)
+    }
+
+    /// The limbs of scratch space that [`Montgomery::redc`] needs for a modulus of `n` limbs: none
+    /// for the kernel's passes, and those of [`redc_n`] from [`REDC_N`] limbs.
+    fn redc_itch(n: usize) -> usize {
+        if n >= REDC_N {
             n + 2 * n + mullo_itch(n).max(mul_itch(n, n))
         } else {
             0
-        };
-        2 * n + mul_itch(n, n).max(sqr_itch(n)).max(redc)
+        }
     }
 
     /// The arithmetic modulo the `n` limbs at `m`, with `1/m mod R` computed in the
@@ -175,17 +183,19 @@ impl Montgomery {
     ///
     /// The limbs of `m` must stay valid while the arithmetic is used, `m` odd and `n >= 3`, and
     /// the working memory at `s` too.
-    pub(in super::super) unsafe fn new(m: *const u64, n: usize, s: *mut u64) -> Self {
+    pub(in super::super) unsafe fn new(m: *const u64, n: usize, s: Scratch) -> Self {
+        need!(s, Self::new_itch(n));
         // SAFETY: as the caller guarantees.
         unsafe {
             let v = binvert_limb(*m);
             let inv = if n >= REDC_N {
                 // `1/m mod B^n`, Hensel's quotient of 1 by `m`.
-                let one = s.add(even(n));
+                let (inv, one) = s.split(even(n));
+                let one = one.take(n);
                 ptr::write_bytes(one, 0, n);
                 *one = 1;
-                bdiv_q(s, one, n, m, n, v);
-                s.cast_const()
+                bdiv_q(inv, one, n, m, n, v);
+                inv.cast_const()
             } else {
                 ptr::null()
             };
@@ -209,10 +219,11 @@ impl Montgomery {
     ///
     /// # Safety
     ///
-    /// The limbs must be valid, `r` apart from `u`, and the scratch that of [`Montgomery::itch`]
-    /// past `2n` limbs.
+    /// The limbs must be valid, `r` apart from `u`, and the scratch at `t` hold the
+    /// [`Montgomery::redc_itch`] limbs, which that of [`Montgomery::itch`] past `2n` limbs does.
     #[inline(always)]
-    pub(in super::super) unsafe fn redc(&self, r: *mut u64, u: *mut u64, t: *mut u64) {
+    pub(in super::super) unsafe fn redc(&self, r: *mut u64, u: *mut u64, t: Scratch) {
+        need!(t, Self::redc_itch(self.n));
         // SAFETY: forwarded.
         unsafe {
             if self.inv.is_null() {
@@ -229,13 +240,15 @@ impl Montgomery {
     /// # Safety
     ///
     /// The limbs must be valid, `r` may be `a`, and the scratch that of [`Montgomery::itch`].
-    pub(in super::super) unsafe fn plain(&self, r: *mut u64, a: *const u64, t: *mut u64) {
+    pub(in super::super) unsafe fn plain(&self, r: *mut u64, a: *const u64, t: Scratch) {
         let n = self.n;
+        need!(t, Self::itch(n));
         // SAFETY: as the caller guarantees.
         unsafe {
-            ptr::copy_nonoverlapping(a, t, n);
-            ptr::write_bytes(t.add(n), 0, n);
-            self.redc(r, t, t.add(2 * n));
+            let (u, t) = t.split(2 * n);
+            ptr::copy_nonoverlapping(a, u, n);
+            ptr::write_bytes(u.add(n), 0, n);
+            self.redc(r, u, t);
             self.reduce(r);
         }
     }
@@ -264,22 +277,26 @@ impl Ring for Montgomery {
     }
 
     #[inline(always)]
-    unsafe fn sqr(&self, r: *mut u64, a: *const u64, t: *mut u64) {
+    unsafe fn sqr(&self, r: *mut u64, a: *const u64, t: Scratch) {
         let n = self.n;
+        need!(t, Self::itch(n));
         // SAFETY: the square goes to the scratch, then is reduced into `r`.
         unsafe {
-            sqr(t, a, n, t.add(2 * n));
-            self.redc(r, t, t.add(2 * n));
+            let (p, t) = t.split(2 * n);
+            sqr(p, a, n, t);
+            self.redc(r, p, t);
         }
     }
 
     #[inline(always)]
-    unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64, t: *mut u64) {
+    unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64, t: Scratch) {
         let n = self.n;
+        need!(t, Self::itch(n));
         // SAFETY: as in `sqr`.
         unsafe {
-            mul(t, a, n, b, n, t.add(2 * n));
-            self.redc(r, t, t.add(2 * n));
+            let (p, t) = t.split(2 * n);
+            mul(p, a, n, b, n, t);
+            self.redc(r, p, t);
         }
     }
 }
@@ -342,20 +359,13 @@ unsafe fn redc_1(r: *mut u64, u: *mut u64, m: *const u64, n: usize, minv: [u64; 
 ///
 /// The limbs must be valid, `r` apart from `u`, and the scratch at `t` hold
 /// `3n + max(mullo_itch(n), mul_itch(n, n))` limbs.
-unsafe fn redc_n(
-    r: *mut u64,
-    u: *const u64,
-    m: *const u64,
-    n: usize,
-    inv: *const u64,
-    t: *mut u64,
-) {
+unsafe fn redc_n(r: *mut u64, u: *const u64, m: *const u64, n: usize, inv: *const u64, t: Scratch) {
+    need!(t, 3 * n + mullo_itch(n).max(mul_itch(n, n)));
     // SAFETY: as the caller guarantees: the quotient's `n` limbs at `t`, the product's `2n` after
     // them, and the scratch of both after that.
     unsafe {
-        let q = t;
-        let p = t.add(n);
-        let rest = p.add(2 * n);
+        let (q, t) = t.split(n);
+        let (p, rest) = t.split(2 * n);
         mullo(q, u, inv, n, rest);
         mul(p, m, n, q, n, rest);
         if sub_n(r, u.add(n), p.add(n), n) {

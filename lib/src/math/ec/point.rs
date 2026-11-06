@@ -172,7 +172,8 @@ impl<'c, C: Curve> Prepared<'c, C> {
     pub fn mul(&self, k: &Number) -> Point<'c, C> {
         let scalar = limbs_of(k);
         let mut limbs = self.point.clone();
-        if k.bits() as usize <= self.table.bits {
+        // In 64 bits: on 32-bit targets `as usize` would cut the bits of a scalar of 512 MiB short.
+        if k.bits() <= self.table.bits as u64 {
             self.curve
                 .prepared_limbs(&mut limbs, &self.table, &scalar, k.is_negative());
         } else {
