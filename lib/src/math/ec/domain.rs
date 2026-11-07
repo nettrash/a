@@ -130,8 +130,10 @@ impl<C: Curve> Domain<C> {
     /// The multiples of the generator.
     fn table(&self) -> &Table {
         self.table.get_or_init(|| {
-            self.curve
-                .prepare_limbs(&self.generator, self.order.bits() as usize)
+            // On 32-bit targets an order of `2^32` bits or more does not fit a `usize`, nor its
+            // table the memory: `prepare` refuses `usize::MAX` bits.
+            let bits = usize::try_from(self.order.bits()).unwrap_or(usize::MAX);
+            self.curve.prepare_limbs(&self.generator, bits)
         })
     }
 }

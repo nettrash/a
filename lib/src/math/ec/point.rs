@@ -140,6 +140,10 @@ impl<'c, C: Curve> Point<'c, C> {
     /// [`Divisor`](crate::math::numbers::Divisor) is for divisions. Measured on an Apple M4 Max on
     /// P-256, building the table for 256 bits took the time of 30 products, and each product
     /// afterwards an eighth of the time of one of [`Mul`].
+    ///
+    /// # Panics
+    ///
+    /// When the table is too long to allocate.
     pub fn prepare(&self, bits: usize) -> Prepared<'c, C> {
         Prepared {
             curve: self.curve,

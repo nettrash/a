@@ -280,7 +280,7 @@ impl<F: Field> Mon<'_, F> {
         let mut x = [f.one(), x1.clone()];
         let mut z = [f.zero(), f.one()];
         for t in (0..bit_length(k)).rev() {
-            let p = ((k[t / 64] >> (t % 64)) & 1) as usize;
+            let p = ((k[(t / 64) as usize] >> (t % 64)) & 1) as usize;
             let q = 1 - p;
             let a = f.add(&x[p], &z[p]);
             let aa = f.sqr(&a);
