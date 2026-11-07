@@ -28,7 +28,7 @@ use core::cmp::Ordering;
 use core::ptr;
 
 /// The arithmetic of residues modulo an odd `n` held in registers, fully reduced.
-pub(super) trait Field: Registers {
+pub(in crate::math::numbers) trait Field: Registers {
     /// The residue of zero.
     fn zero(&self) -> Self::V;
 
@@ -547,7 +547,7 @@ pub(super) unsafe fn bpsw<F: Field>(
 /// The arithmetic of residues modulo an odd `n` of `nn` limbs in memory, fully reduced, below `n`:
 /// Montgomery's products and squares followed by one subtraction of `n` when they are not below
 /// it, which suffices as REDC of a product of two residues below `n` is below `2n`.
-pub(super) struct LimbField {
+pub(in crate::math::numbers) struct LimbField {
     /// The Montgomery arithmetic.
     mont: Montgomery,
     /// The scratch of its products.
@@ -557,7 +557,7 @@ pub(super) struct LimbField {
 impl LimbField {
     /// The limbs of working memory that a field of `nn` limbs needs, for `Montgomery::new` and the
     /// scratch.
-    pub(super) fn itch(nn: usize) -> usize {
+    pub(in crate::math::numbers) fn itch(nn: usize) -> usize {
         Montgomery::new_itch(nn) + Montgomery::itch(nn).max(rem_itch(nn + 1, nn))
     }
 
@@ -567,7 +567,7 @@ impl LimbField {
     ///
     /// `nn >= 3`; the limbs of `n` and the [`LimbField::itch`] at `s` must stay valid while the
     /// field is used, `s` start on 16 bytes.
-    pub(super) unsafe fn new(n: *const u64, nn: usize, s: Scratch) -> Self {
+    pub(in crate::math::numbers) unsafe fn new(n: *const u64, nn: usize, s: Scratch) -> Self {
         need!(s, Self::itch(nn));
         // SAFETY: as the caller guarantees.
         unsafe {
@@ -581,7 +581,7 @@ impl LimbField {
 
     /// The limbs of a residue.
     #[inline(always)]
-    fn nn(&self) -> usize {
+    pub(in crate::math::numbers) fn nn(&self) -> usize {
         self.mont.n
     }
 
@@ -591,7 +591,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a`.
     #[inline(always)]
-    pub(super) unsafe fn sqr(&self, r: *mut u64, a: *const u64) {
+    pub(in crate::math::numbers) unsafe fn sqr(&self, r: *mut u64, a: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             self.mont.sqr(r, a, self.t);
@@ -605,7 +605,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a` or `b`.
     #[inline(always)]
-    pub(super) unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64) {
+    pub(in crate::math::numbers) unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             self.mont.mul(r, a, b, self.t);
@@ -619,7 +619,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a` or `b`.
     #[inline(always)]
-    pub(super) unsafe fn add(&self, r: *mut u64, a: *const u64, b: *const u64) {
+    pub(in crate::math::numbers) unsafe fn add(&self, r: *mut u64, a: *const u64, b: *const u64) {
         let nn = self.nn();
         // SAFETY: as the caller guarantees.
         unsafe {
@@ -635,7 +635,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a` or `b`.
     #[inline(always)]
-    pub(super) unsafe fn sub(&self, r: *mut u64, a: *const u64, b: *const u64) {
+    pub(in crate::math::numbers) unsafe fn sub(&self, r: *mut u64, a: *const u64, b: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             if sub_n(r, a, b, self.nn()) {
@@ -650,7 +650,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a`.
     #[inline(always)]
-    unsafe fn neg(&self, r: *mut u64, a: *const u64) {
+    pub(in crate::math::numbers) unsafe fn neg(&self, r: *mut u64, a: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             if is_zero(a, self.nn()) {
@@ -666,7 +666,7 @@ impl LimbField {
     /// # Safety
     ///
     /// The residues must be valid; `r` may be `a`.
-    unsafe fn half(&self, r: *mut u64, a: *const u64) {
+    pub(in crate::math::numbers) unsafe fn half(&self, r: *mut u64, a: *const u64) {
         let nn = self.nn();
         // SAFETY: as the caller guarantees.
         unsafe {
@@ -692,7 +692,7 @@ impl LimbField {
     /// # Safety
     ///
     /// The residue must be valid.
-    unsafe fn residue(&self, r: *mut u64, c: u64) {
+    pub(in crate::math::numbers) unsafe fn residue(&self, r: *mut u64, c: u64) {
         // SAFETY: the scratch holds `rem_itch(nn + 1, nn)` limbs.
         unsafe { rem(r, &c, 1, self.nn(), self.mont.m, self.nn(), self.t) }
     }

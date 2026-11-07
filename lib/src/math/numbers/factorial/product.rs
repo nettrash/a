@@ -63,7 +63,7 @@ impl Packer {
 
 /// The product of the limbs `f`, none of them zero, as a magnitude, in a vector with room for a
 /// limb more.
-pub(super) fn product(f: &[u64]) -> Limbs {
+pub(in crate::math::numbers) fn product(f: &[u64]) -> Limbs {
     let n = f.len();
     if n == 0 {
         return vec![1];

@@ -12,7 +12,7 @@ use super::{is_prime_u64, prime_itch, probable_prime_odd};
 use core::mem::MaybeUninit;
 
 /// The largest prime below `2^64`.
-const LAST_PRIME_64: u64 = u64::MAX - 58;
+pub(super) const LAST_PRIME_64: u64 = u64::MAX - 58;
 
 /// The next probable prime above `x`, in the byte order of `x`.
 pub(super) fn next_prime(x: &Number) -> Number {
@@ -62,7 +62,7 @@ pub(super) fn next_prime(x: &Number) -> Number {
 }
 
 /// The non-negative number of the limbs `l`, the top one not zero, in the byte order `order`.
-fn number(l: &[u64], order: ByteOrder) -> Number {
+pub(super) fn number(l: &[u64], order: ByteOrder) -> Number {
     let top = l[l.len() - 1];
     let len = 8 * l.len() - top.leading_zeros() as usize / 8;
     let mut v = Vec::with_capacity(len);
@@ -117,19 +117,21 @@ fn next_u64(n: u64) -> u64 {
 /// The primes up to which the interval is sieved for a start of `bits` bits: GMP's estimate of where
 /// sieving more costs more than the tests it saves, `bits^2.5 / 124`, from 1000 to `2^24`, which it
 /// reaches at about 5000 bits; the sieve that finds them takes a byte for each odd number below.
-fn sieve_limit(bits: usize) -> u64 {
+pub(super) fn sieve_limit(bits: u64) -> u64 {
     let b = bits as f64;
     ((b * b * b.sqrt() / 124.0) as u64).clamp(1000, 1 << 24)
 }
 
-/// The odd numbers in an interval: GMP's, five per bit, about five times the average gap.
-fn interval(bits: usize) -> usize {
-    5 * bits
+/// The odd numbers in an interval: GMP's, five per bit, about five times the average gap, up to
+/// `2^24`, which it reaches at about 3.4 million bits, so that the flags fit in memory on any
+/// target.
+pub(super) fn interval(bits: u64) -> usize {
+    (5 * bits).min(1 << 24) as usize
 }
 
 /// The odd primes below `limit`, beyond those of the tables, by a sieve of Eratosthenes over the
 /// odd numbers.
-fn primes_beyond_tables(limit: u64) -> Vec<u32> {
+pub(super) fn primes_beyond_tables(limit: u64) -> Vec<u32> {
     let first = PRIMES[PRIMES.len() - 1].p + 2;
     if limit <= first {
         return Vec::new();
@@ -167,7 +169,7 @@ unsafe fn search(start: *mut u64, nn: usize, s: Scratch, order: ByteOrder) -> Nu
     // SAFETY: as the caller guarantees.
     unsafe {
         let top = *start.add(nn - 1);
-        let bits = 64 * nn - top.leading_zeros() as usize;
+        let bits = 64 * nn as u64 - u64::from(top.leading_zeros());
         let limit = sieve_limit(bits);
         let odds = interval(bits);
         let more = primes_beyond_tables(limit);

@@ -516,3 +516,124 @@ fn next_primes_have_no_prime_before_them() {
         }
     }
 }
+
+// The previous prime
+
+#[test]
+fn prev_primes_of_small_numbers_match_a_sieve() {
+    let limit = size(100_000, 600);
+    let prime = sieve(limit);
+    let mut state = 0x13198A2E_03707344;
+    // The largest prime below each `n`, 0 for none.
+    let mut prev = 0;
+    for (n, &p) in prime.iter().enumerate() {
+        let x = stored_number(&mut state, &(n as u64).to_le_bytes());
+        let before = x.clone();
+        let r = x.prev_prime();
+        assert!(same(&x, &before), "prev_prime of {n} leaves it as it was");
+        match r {
+            None => assert_eq!(prev, 0, "prev_prime of {n}"),
+            Some(r) => assert_result(&r, &expected_i128(prev as i128), x.byte_order, &|| {
+                format!("prev_prime of {n}")
+            }),
+        }
+        if p {
+            prev = n;
+        }
+    }
+    for order in ORDERS {
+        for x in zeros(order).into_iter().chain([
+            number(&[5], true, order),
+            number(&[0xFF; 40], true, order),
+            number(&[1], false, order),
+            number(&[2, 0, 0], false, order),
+        ]) {
+            assert!(x.prev_prime().is_none(), "prev_prime of {}", describe(&x));
+        }
+        assert_result(
+            &number(&[3, 0], false, order).prev_prime().expect("2"),
+            &expected_i128(2),
+            order,
+            &|| "prev_prime of 3".to_string(),
+        );
+    }
+}
+
+#[test]
+fn prev_primes_across_powers_of_two() {
+    let mut state = 0xA4093822_299F31D0;
+    // (from, previous prime): the largest primes below 2^64, 2^128, 2^256 and 2^512 and the first
+    // above, from just above each and from the first prime above (GMP 6.3's `mpz_prevprime`).
+    let mut cases = vec![
+        ((64, -58), (64, -59)),
+        ((64, 0), (64, -59)),
+        ((64, 1), (64, -59)),
+        ((64, 13), (64, -59)),
+        ((64, 14), (64, 13)),
+        ((64, 1000), (64, 997)),
+        ((128, -158), (128, -159)),
+        ((128, 0), (128, -159)),
+        ((128, 51), (128, -159)),
+        ((128, 52), (128, 51)),
+    ];
+    if !cfg!(miri) {
+        // Under Miri, which takes minutes for a test of 256 bits, not run.
+        cases.extend([
+            ((256, 0), (256, -189)),
+            ((256, 297), (256, -189)),
+            ((256, 298), (256, 297)),
+            ((512, 0), (512, -569)),
+        ]);
+    }
+    for ((k, c), (kp, cp)) in cases {
+        let x = stored_number(&mut state, &power_of_two_plus(k, c));
+        let r = x.prev_prime().expect("a prime below");
+        let p = power_of_two_plus(kp, cp);
+        assert_result(&r, &expected(&p, false), x.byte_order, &|| {
+            format!("prev_prime of 2^{k} + {c}")
+        });
+    }
+}
+
+#[test]
+fn prev_primes_have_no_prime_after_them() {
+    let mut state = 0x082EFA98_EC4E6C89;
+    let one = Number::new_from_u8(1, ByteOrder::LittleEndian);
+    let sizes: &[usize] = if cfg!(miri) {
+        &[2, 5, 8, 9, 17]
+    } else {
+        &[2, 5, 8, 9, 16, 17, 24, 64, 128]
+    };
+    for &bytes in sizes {
+        let x = number(
+            &random_magnitude(&mut state, bytes),
+            false,
+            ORDERS[below(&mut state, 2)],
+        );
+        let p = x.prev_prime().expect("a prime below");
+        assert!(p.is_probable_prime(), "prev_prime of {}", describe(&x));
+        assert!(
+            (&p - &x).is_negative(),
+            "prev_prime of {} is below it",
+            describe(&x)
+        );
+        // The next prime above the previous one is at least `x`.
+        let q = p.next_prime();
+        assert!(
+            !(&q - &x).is_negative(),
+            "next_prime(prev_prime({})) >= it",
+            describe(&x)
+        );
+        let mut y = &p + &one;
+        while (&y - &x).is_negative() {
+            assert!(
+                !y.is_probable_prime(),
+                "{} is prime, above prev_prime {} of {}",
+                describe(&y),
+                describe(&p),
+                describe(&x)
+            );
+            y = &y + &one;
+        }
+    }
+}

@@ -105,14 +105,14 @@ unsafe fn mullo_dc(r: *mut u64, x: *const u64, y: *const u64, n: usize, s: Scrat
 }
 
 /// The ring of residues modulo `B^n`, by the low halves of products.
-pub(super) struct Low {
+pub(in crate::math::numbers) struct Low {
     /// The limbs of a residue.
-    pub(super) n: usize,
+    pub(in crate::math::numbers) n: usize,
 }
 
 impl Low {
     /// The limbs of scratch space that the ring's operations need.
-    pub(super) fn itch(n: usize) -> usize {
+    pub(in crate::math::numbers) fn itch(n: usize) -> usize {
         n + mullo_itch(n)
     }
 }
@@ -144,7 +144,7 @@ impl Ring for Low {
 }
 
 /// The ring of residues modulo `B^2` in registers, by wrapping products of `u128`s.
-pub(super) struct Low2;
+pub(in crate::math::numbers) struct Low2;
 
 impl Registers for Low2 {
     type V = u128;
@@ -162,7 +162,7 @@ impl Registers for Low2 {
 
 /// The ring of residues modulo `B^N` in registers, for `N` from 3 to 8: the low `N` limbs of each
 /// product, a row of the product for each limb of one factor, cut at limb `N`, unrolled.
-pub(super) struct LowN<const N: usize>;
+pub(in crate::math::numbers) struct LowN<const N: usize>;
 
 impl<const N: usize> Registers for LowN<N> {
     type V = [u64; N];

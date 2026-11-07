@@ -1,5 +1,5 @@
-//! Primality of [`Number`]s: [`Number::is_probable_prime`], the Baillie–PSW test, and
-//! [`Number::next_prime`], the next probable prime.
+//! Primality of [`Number`]s: [`Number::is_probable_prime`], the Baillie–PSW test,
+//! [`Number::next_prime`], the next probable prime, and [`Number::prev_prime`], the previous one.
 //!
 //! A number is first divided by the small primes, in groups whose products fit in a limb: one pass
 //! of the long number for each group, four groups a pass, and a multiplication for each prime of a
@@ -9,11 +9,14 @@
 //! all in registers.
 //!
 //! The next prime is searched for in intervals of odd numbers, first sieved by the small primes, as
-//! GMP's `mpz_nextprime` does ([`next`]).
+//! GMP's `mpz_nextprime` does ([`next`]), and the previous one likewise downwards ([`prev`]).
 
-mod bpsw;
+pub(super) mod bpsw;
 mod next;
-mod tables;
+mod prev;
+pub(super) mod tables;
+
+pub(in crate::math::numbers) use prev::is_prime_sieved_u64;
 
 use super::add::{SMALL, read_small};
 use super::mul::{Operand, STACK_LIMBS, on_heap, on_stack, to_limbs};
@@ -105,6 +108,29 @@ impl Number {
     pub fn next_prime(&self) -> Number {
         next::next_prime(self)
     }
+
+    /// Returns the largest probable prime below `self`, in the byte order of `self`, in one new
+    /// vector of exactly its length, or `None` when there is none: for `self` at most 2, negative
+    /// numbers included.
+    ///
+    /// "Probable prime" is that of [`is_probable_prime`](Self::is_probable_prime): exact below
+    /// `2^64`, and with no known exception above. The odd numbers below `self` are sieved by the
+    /// small primes in intervals, and those left are tested in order, the largest first, as
+    /// [`next_prime`](Self::next_prime) does upwards.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::{ByteOrder, Number};
+    ///
+    /// let p = Number::new_from_u32(1_000_000_000, ByteOrder::BigEndian).prev_prime();
+    /// assert_eq!(p.map(|p| p.value), Some(999_999_937u32.to_be_bytes().to_vec()));
+    /// assert_eq!(Number::new_from_u8(3, ByteOrder::LittleEndian).prev_prime().map(|p| p.value), Some(vec![2]));
+    /// assert!(Number::new_from_i32(2, ByteOrder::BigEndian).prev_prime().is_none());
+    /// ```
+    pub fn prev_prime(&self) -> Option<Number> {
+        prev::prev_prime(self)
+    }
 }
 
 // Below 2^64
@@ -125,7 +151,7 @@ const TRIAL_64_END: usize = {
 };
 
 /// Whether `n` is a probable prime, exactly as it is below `2^64`.
-fn is_prime_u64(n: u64) -> bool {
+pub(super) fn is_prime_u64(n: u64) -> bool {
     if n < 4 {
         return n >= 2;
     }

@@ -7,7 +7,7 @@
 
 /// The odd numbers up to a limit, one bit each, set for those that are not prime: bit `i` of the
 /// words is the number `2i + 1`.
-pub(super) struct Sieve {
+pub(in crate::math::numbers) struct Sieve {
     /// The bits, 64 to a word, the lowest first.
     composite: Vec<u64>,
     /// The largest number the sieve tells about.
@@ -34,7 +34,7 @@ const PATTERN: [u64; PERIOD] = {
 
 impl Sieve {
     /// The odd primes up to `limit`.
-    pub(super) fn new(limit: u64) -> Sieve {
+    pub(in crate::math::numbers) fn new(limit: u64) -> Sieve {
         // Bits `0..=(limit - 1) / 2`, for the odd numbers up to `limit`, counted in 64 bits: on
         // 32-bit targets, from the limit `2^33 - 2`, their number does not fit a `usize`, though
         // their words do up to a limit of about `2^35`, and the bit indices below are `u64`s too.
@@ -79,7 +79,7 @@ impl Sieve {
     /// Calls `f` with each odd prime from `lo` to `hi`, in increasing order, for `hi` not above
     /// the limit.
     #[inline(always)]
-    pub(super) fn each(&self, lo: u64, hi: u64, mut f: impl FnMut(u64)) {
+    pub(in crate::math::numbers) fn each(&self, lo: u64, hi: u64, mut f: impl FnMut(u64)) {
         debug_assert!(hi <= self.limit);
         if lo > hi {
             return;

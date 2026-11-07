@@ -2,11 +2,12 @@
 
 # Primes
 
-[Numbers](numbers.md) tell whether they are prime with `a.is_probable_prime()`, by the Baillie–PSW test, and give the next prime above them with `a.next_prime()`.
+[Numbers](numbers.md) tell whether they are prime with `a.is_probable_prime()`, by the Baillie–PSW test, give the next prime above them with `a.next_prime()`, and the previous one below them with `a.prev_prime()`. The primes of a range of `u64`s, their number and the n-th prime are on [their own page](sieve.md).
 
 - `is_probable_prime` is `false` for every number below 2, negative numbers included (GMP's `mpz_probab_prime_p` takes the absolute value of a negative number; this does not), `true` for every prime, and `false` for every composite number it finds a factor of or that fails the test.
 - It is exact below `2^64`: Feitsma and Galway's list of all the base-2 Fermat pseudoprimes below `2^64` (2009), which Gilchrist checked, has no number that passes both halves of the test. Above, no composite number is known that passes it, though such numbers are believed to exist: it is a probable-prime test, the one GMP 6.2 and later run for `mpz_probab_prime_p(n, 24)`.
 - `next_prime` gives the smallest probable prime above `a`, in the byte order of `a`, in one new vector of exactly its length: 2 for everything below 2, negative numbers included. It is exact below `2^64`, as the test is.
+- `prev_prime` gives the largest probable prime below `a`, in the byte order of `a`, in one new vector of exactly its length, or `None` when there is none: for everything up to 2, negative numbers included. It is exact below `2^64`, as the test is; GMP 6.3's `mpz_prevprime` returns 0 for the same inputs.
 - Each magnitude is read in its own byte order, and zero bytes above its most significant non-zero byte are ignored; an empty vector is zero, and a magnitude of zero is zero whatever `negative` says. The number is left as it was.
 
 ## Baillie–PSW
@@ -22,6 +23,10 @@ The test is Baillie and Wagstaff's (1980) after Pomerance, Selfridge and Wagstaf
 ## Next prime
 
 The odd numbers above `a` are sieved in intervals by the small primes, and those left are tested in order, after GMP's `mpz_nextprime`: the start's remainders by the products of the primes give where each prime's odd multiples fall in the interval, those are crossed out, and the numbers left take the test without its trial division. The primes go up to GMP's estimate of where sieving more costs more than the tests it saves, `bits^2.5 / 124` (at least 1000 and at most `2^24`; 270,000 for 1024 bits), the table's below 8192 and a sieve of Eratosthenes beyond; an interval holds five odd numbers a bit, about fourteen times the average gap between primes, so that a second interval is rare. Below the last prime below `2^64`, the search steps through the numbers prime to 30 with the test of numbers below `2^64`.
+
+## Previous prime
+
+The same search, downwards, as GMP 6.3's `mpz_prevprime`: the odd numbers below `a` are sieved in intervals by the small primes, with the next prime's limits and lengths, the start's remainders by the products of the primes giving where each prime's odd multiples fall below it, and those left are tested from the largest down, without the test's trial division. A candidate can be one limb shorter than the start, never two, as a prime comes long before (at the latest `2^64 + 13`, the first prime above `2^64`), so the test's working memory is planned for both lengths. From `2^64 + 13` down, the search steps down through the numbers prime to 30 with the test of numbers below `2^64`.
 
 ## Measured
 
@@ -51,9 +56,23 @@ Measured on an Apple M4 Max with other work running on the machine (interleaved 
 
 From 3.0 to 1.15 times faster than GMP: the test's own speed, and the sieve's remainders four products at a time. The times vary with the gaps to the next primes, which the operands share between the contenders; at 512 bits the two byte orders differed by 10 % from run to run.
 
+`prev_prime` against GMP's `mpz_prevprime` into a result allocated before, and PARI/GP 2.19's `precprime` (in `gp`, the best of three loops of calls, its interpreter's cost included, at 3.89 GHz), in cycles per call, from random numbers of the bits given:
+
+| Bits | LE | BE | GMP | PARI/GP |
+| --- | --- | --- | --- | --- |
+| 32 | 2279 | 2276 | 7843 | 3100 |
+| 64 | 6886 | 6882 | 20,248 | 14,800 |
+| 128 | 46,574 | 46,377 | 139,990 | 223,000 |
+| 256 | 274,441 | 274,222 | 570,191 | 1.33 M |
+| 512 | 2.78 M | 2.78 M | 3.36 M | 9.7 M |
+| 1024 | 18.5 M | 18.5 M | 23.4 M | 109 M |
+| 2048 | 302 M | 300 M | 350 M | 1.76 G |
+
+From 3.4 to 1.16 times faster than GMP, as `next_prime` is: the test's speed and the sieve's remainders four products at a time.
+
 ## Examples
 
-Rust usage: primes, pseudoprimes and the next prime:
+Rust usage: primes, pseudoprimes, the next prime and the previous one:
 
 ```rust
 use a::math::numbers::{ByteOrder, Number};
@@ -81,11 +100,20 @@ fn main() {
   expected[8] = 13;
   assert_eq!(p.value, expected);
   assert_eq!(Number::new_from_i32(-100, ByteOrder::BigEndian).next_prime().value, vec![2]);
+
+  // The largest prime below 2^64 is 2^64 - 59, the one below 2^64 + 13 too; there is none below 2.
+  let mut above = vec![0u8; 9];
+  above[0] = 1;
+  above[8] = 13;
+  let q = Number::new(above, ByteOrder::BigEndian).prev_prime().expect("a prime below");
+  assert_eq!(q.value, (u64::MAX - 58).to_be_bytes());
+  assert!(Number::new_from_u8(2, ByteOrder::LittleEndian).prev_prime().is_none());
+  assert!(Number::new_from_i32(-7, ByteOrder::BigEndian).prev_prime().is_none());
 }
 ```
 
 ## Efficiency
 
-- Time complexity: trial division in `O(n·t)` for `n` limbs and `t` products of primes; the test in about `b` squares for the strong test and `2b` to `3b` for the Lucas test, for `b` bits, each `O(n²)` below 100 limbs and about 2.7 products of `n` limbs beyond; the next prime about `g / ln(P)` tests and one remainder by each product of primes per interval, for a gap `g` to it and primes up to `P`, whatever the byte order
-- Space complexity: the number's limbs and ten residues, on the stack up to 8 KiB, one temporary buffer on the heap beyond, and one more for each product of 360 limbs or more, which the [multiplication](mul.md) computes by transforms; the next prime the interval's flags and the primes beyond the table; tables of the 1027 odd primes below 8192 and of their products, computed at compile time
+- Time complexity: trial division in `O(n·t)` for `n` limbs and `t` products of primes; the test in about `b` squares for the strong test and `2b` to `3b` for the Lucas test, for `b` bits, each `O(n²)` below 100 limbs and about 2.7 products of `n` limbs beyond; the next and the previous prime about `g / ln(P)` tests and one remainder by each product of primes per interval, for a gap `g` to it and primes up to `P`, whatever the byte order
+- Space complexity: the number's limbs and ten residues, on the stack up to 8 KiB, one temporary buffer on the heap beyond, and one more for each product of 360 limbs or more, which the [multiplication](mul.md) computes by transforms; the next and the previous prime the interval's flags and the primes beyond the table; tables of the 1027 odd primes below 8192 and of their products, computed at compile time
 - Soundness: the bytes beyond a vector's length, which may be uninitialised, are never read, and every byte of a result is written before the vector's length is set; the number is left as it was

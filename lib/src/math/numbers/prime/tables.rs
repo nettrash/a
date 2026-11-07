@@ -3,10 +3,10 @@
 //! a limb, by which a long number is reduced in one pass each.
 
 /// The odd primes in the tables are those below this.
-pub(super) const LIMIT: usize = 1 << 13;
+pub(in crate::math::numbers) const LIMIT: usize = 1 << 13;
 
 /// The number of odd primes below [`LIMIT`].
-pub(super) const COUNT: usize = count();
+pub(in crate::math::numbers) const COUNT: usize = count();
 
 /// The odd primes below `LIMIT`, by a sieve of Eratosthenes over the odd numbers.
 const fn sieve() -> [bool; LIMIT / 2] {
@@ -46,19 +46,19 @@ const fn count() -> usize {
 /// `inv` modulo `B = 2^64` and `max = floor((B - 1) / p)`, as the multiples of `p` are exactly the
 /// limbs that the multiplication by `inv` maps to `0..=max`.
 #[derive(Clone, Copy)]
-pub(super) struct Prime {
+pub(in crate::math::numbers) struct Prime {
     /// The prime.
-    pub(super) p: u64,
+    pub(in crate::math::numbers) p: u64,
     /// Its inverse modulo `B`.
-    pub(super) inv: u64,
+    pub(in crate::math::numbers) inv: u64,
     /// `floor((B - 1) / p)`.
-    pub(super) max: u64,
+    pub(in crate::math::numbers) max: u64,
 }
 
 impl Prime {
     /// Whether the prime divides `x`.
     #[inline(always)]
-    pub(super) fn divides(&self, x: u64) -> bool {
+    pub(in crate::math::numbers) fn divides(&self, x: u64) -> bool {
         x.wrapping_mul(self.inv) <= self.max
     }
 }
@@ -75,7 +75,7 @@ const fn binvert(d: u64) -> u64 {
 }
 
 /// The odd primes below `LIMIT`, in order.
-pub(super) static PRIMES: [Prime; COUNT] = primes();
+pub(in crate::math::numbers) static PRIMES: [Prime; COUNT] = primes();
 
 /// The odd primes below `LIMIT`, in order, computed.
 const fn primes() -> [Prime; COUNT] {
@@ -104,20 +104,20 @@ const fn primes() -> [Prime; COUNT] {
 /// A run of consecutive primes of [`PRIMES`] whose product fits in a limb: a number is reduced
 /// modulo the product once, and the remainder tells divisibility by each of them.
 #[derive(Clone, Copy)]
-pub(super) struct Group {
+pub(in crate::math::numbers) struct Group {
     /// The index of the first prime of the run in `PRIMES`.
-    pub(super) first: u16,
+    pub(in crate::math::numbers) first: u16,
     /// The index past its last prime.
-    pub(super) end: u16,
+    pub(in crate::math::numbers) end: u16,
     /// The product of its primes, shifted left so that its top bit is set: a remainder by it is
     /// one by the product too, up to a multiple of the product.
-    pub(super) d: u64,
+    pub(in crate::math::numbers) d: u64,
     /// The reciprocal of `d` for the division of two limbs by it, `floor((B^2 - 1) / d) - B`.
-    pub(super) v: u64,
+    pub(in crate::math::numbers) v: u64,
 }
 
 /// The number of groups.
-pub(super) const GROUPS: usize = {
+pub(in crate::math::numbers) const GROUPS: usize = {
     let primes = primes();
     let (mut g, mut i) = (0, 0);
     while i < COUNT {
@@ -135,7 +135,7 @@ pub(super) const GROUPS: usize = {
 };
 
 /// The runs of consecutive primes whose products fit in a limb, the longest that do, in order.
-pub(super) static GROUP: [Group; GROUPS] = groups();
+pub(in crate::math::numbers) static GROUP: [Group; GROUPS] = groups();
 
 /// The runs of consecutive primes whose products fit in a limb, computed.
 const fn groups() -> [Group; GROUPS] {
@@ -170,7 +170,7 @@ const fn groups() -> [Group; GROUPS] {
 }
 
 /// The index in [`GROUP`] past the last group whose primes are all below `bound`.
-pub(super) fn groups_below(bound: u64) -> usize {
+pub(in crate::math::numbers) fn groups_below(bound: u64) -> usize {
     let mut g = 0;
     while g < GROUPS && PRIMES[GROUP[g].end as usize - 1].p < bound {
         g += 1;
