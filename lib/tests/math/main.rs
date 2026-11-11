@@ -3,3 +3,4 @@ mod complex;
 mod ec;
 mod matrix;
 mod numbers;
+mod rational;

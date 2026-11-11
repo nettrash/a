@@ -21,19 +21,19 @@ use core::hash::{Hash, Hasher};
 /// The significant bytes of a number's magnitude, without the zero bytes above them, in the
 /// number's byte order, and its sign, never negative for zero.
 #[derive(Clone, Copy)]
-pub(super) struct Magnitude<'a> {
+pub(crate) struct Magnitude<'a> {
     /// The significant bytes: the last ones of the vector big-endian, the first little-endian.
-    pub(super) bytes: &'a [u8],
+    pub(crate) bytes: &'a [u8],
     /// Whether the bytes are big-endian.
-    pub(super) big_endian: bool,
+    pub(crate) big_endian: bool,
     /// Whether the number is below zero.
-    pub(super) negative: bool,
+    pub(crate) negative: bool,
 }
 
 impl<'a> Magnitude<'a> {
     /// The magnitude and sign of `n`.
     #[inline(always)]
-    pub(super) fn of(n: &'a Number) -> Self {
+    pub(crate) fn of(n: &'a Number) -> Self {
         let v = n.value.as_slice();
         let (bytes, big_endian) = if n.byte_order == ByteOrder::BigEndian {
             (&v[v.len() - significant_len::<true>(v)..], true)
@@ -49,7 +49,7 @@ impl<'a> Magnitude<'a> {
 
     /// The magnitude, which must have at most 16 bytes, as a `u128`.
     #[inline(always)]
-    pub(super) fn small(self) -> u128 {
+    pub(crate) fn small(self) -> u128 {
         debug_assert!(self.bytes.len() <= 16);
         let order = if self.big_endian {
             ByteOrder::BigEndian

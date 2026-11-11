@@ -119,6 +119,7 @@ mod sieve;
 mod sign;
 mod sub;
 
+pub(crate) use cmp::Magnitude;
 pub(crate) use mul::basecase;
 pub(crate) use pow::montgomery::{redc_inverse, redc_limbs};
 

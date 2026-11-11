@@ -13,8 +13,12 @@
 //!   in either byte order; they add with `+` and `+=`, subtract with `-` and `-=`, multiply
 //!   with `*` and `*=`, divide with `/`, `/=`, `%` and `%=`, shift with `<<`, `>>`, `<<=` and
 //!   `>>=`, and are written and read as text in any radix from 2 to 36.
+//! * [`rational`]: rational numbers in lowest terms over [`numbers`], their arithmetic with `+`,
+//!   `-`, `*` and `/`, with numbers and primitive integers too, comparisons, rounding, and their
+//!   conversions from and to integers, text and floats.
 
 pub mod complex;
 pub mod ec;
 pub mod matrix;
 pub mod numbers;
+pub mod rational;
