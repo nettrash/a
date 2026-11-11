@@ -158,7 +158,7 @@ pub(super) unsafe fn product_into(
 }
 
 /// `x y`, for magnitudes that are not zero.
-pub(super) fn times(x: &[u64], y: &[u64]) -> Limbs {
+pub(crate) fn times(x: &[u64], y: &[u64]) -> Limbs {
     let (a, b) = if x.len() >= y.len() { (x, y) } else { (y, x) };
     // A limb to spare, for a shift.
     let mut r = Vec::with_capacity(a.len() + b.len() + 1);

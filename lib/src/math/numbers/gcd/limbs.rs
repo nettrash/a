@@ -168,7 +168,30 @@ fn plus_times(c: Column, q: u64, d: Column) -> Column {
 /// steps alternating by a branch on whether the quotient is 1 and quotients from a division, and
 /// 820 for GMP 6.3's `mpn_hgcd2`, whose matrices are the same.
 pub(super) fn hgcd2(ah: u64, al: u64, bh: u64, bl: u64) -> Option<Matrix1> {
-    hgcd2_steps::<false>(ah, al, bh, bl).map(|(m, _)| m)
+    hgcd2_steps::<false, ()>(ah, al, bh, bl, &mut ()).map(|(m, _)| m)
+}
+
+/// What a reduction tells of the steps it takes, for the continued fractions, which need Euclid's
+/// quotients and not only their matrix: each step is `a - q b` when `col` is 1 and `b - q a` when
+/// it is 0 (the column of the matrix that gains `q` times the other), in the order taken. A step
+/// that is not taken in full is followed by the rest of its quotient on the same column. The greatest
+/// common divisors take `()`, which keeps nothing and costs nothing.
+pub(super) trait Steps {
+    /// A step of a quotient of one limb, not zero.
+    fn step(&mut self, col: usize, q: u64);
+    /// A step of the quotient of the `qn` limbs at `q`, the top one not zero.
+    ///
+    /// # Safety
+    ///
+    /// The limbs must be valid for reads.
+    unsafe fn step_limbs(&mut self, col: usize, q: *const u64, qn: usize);
+}
+
+impl Steps for () {
+    #[inline(always)]
+    fn step(&mut self, _: usize, _: u64) {}
+    #[inline(always)]
+    unsafe fn step_limbs(&mut self, _: usize, _: *const u64, _: usize) {}
 }
 
 /// From this many steps of one call of [`hgcd2_steps`] on, the next call takes quotients of 1
@@ -188,11 +211,12 @@ pub(super) const ONES_STEPS: u32 = 64;
 /// the conditional subtractions alone and 123,000 for GMP 6.3's `mpz_gcdext`, and their greatest
 /// common divisor 88,000 against 114,000 and 104,000; random numbers took as long as before.
 #[inline(always)]
-pub(super) fn hgcd2_steps<const ONES: bool>(
+pub(super) fn hgcd2_steps<const ONES: bool, S: Steps>(
     ah: u64,
     al: u64,
     bh: u64,
     bl: u64,
+    record: &mut S,
 ) -> Option<(Matrix1, u32)> {
     if ah < LIMIT_2 || bh < LIMIT_2 {
         return None;
@@ -212,8 +236,10 @@ pub(super) fn hgcd2_steps<const ONES: bool>(
     }
     let (q, r) = divmod2::<ONES>(first, r1);
     if high(r) < LIMIT_2 {
+        record.step(usize::from(r0_is_a), q);
         return Some((matrix1(c0, plus_times(c1, q, c0), r0_is_a), 1));
     }
+    record.step(usize::from(r0_is_a), q + 1);
     (c0, c1) = (plus_times(c1, q + 1, c0), c0);
     (r0, r1) = (r1, r);
     r0_is_a = !r0_is_a;
@@ -221,8 +247,12 @@ pub(super) fn hgcd2_steps<const ONES: bool>(
     while high(r0) >= 1 << 32 {
         let (q, r) = divmod2::<ONES>(r0, r1);
         if high(r) < LIMIT_2 {
+            if q > 1 {
+                record.step(usize::from(r0_is_a), q - 1);
+            }
             return Some((matrix1(c0, plus_times(c1, q - 1, c0), r0_is_a), steps + 1));
         }
+        record.step(usize::from(r0_is_a), q);
         (c0, c1) = (plus_times(c1, q, c0), c0);
         (r0, r1) = (r1, r);
         r0_is_a = !r0_is_a;
@@ -232,8 +262,12 @@ pub(super) fn hgcd2_steps<const ONES: bool>(
     loop {
         let (q, r) = divmod1::<ONES>(s0, s1);
         if r < LIMIT_1 {
+            if q > 1 {
+                record.step(usize::from(r0_is_a), q - 1);
+            }
             return Some((matrix1(c0, plus_times(c1, q - 1, c0), r0_is_a), steps + 1));
         }
+        record.step(usize::from(r0_is_a), q);
         (c0, c1) = (plus_times(c1, q, c0), c0);
         (s0, s1) = (s1, r);
         r0_is_a = !r0_is_a;
@@ -245,10 +279,23 @@ pub(super) fn hgcd2_steps<const ONES: bool>(
 /// that the last call took at least [`ONES_STEPS`] steps, and `ones` set for the next call.
 #[inline(always)]
 pub(super) fn hgcd2_hinted(ah: u64, al: u64, bh: u64, bl: u64, ones: &mut bool) -> Option<Matrix1> {
+    hgcd2_hinted_with(ah, al, bh, bl, ones, &mut ())
+}
+
+/// [`hgcd2_hinted`], telling `record` of the steps of the matrix.
+#[inline(always)]
+pub(super) fn hgcd2_hinted_with<S: Steps>(
+    ah: u64,
+    al: u64,
+    bh: u64,
+    bl: u64,
+    ones: &mut bool,
+    record: &mut S,
+) -> Option<Matrix1> {
     let found = if *ones {
-        hgcd2_steps::<true>(ah, al, bh, bl)
+        hgcd2_steps::<true, S>(ah, al, bh, bl, record)
     } else {
-        hgcd2_steps::<false>(ah, al, bh, bl)
+        hgcd2_steps::<false, S>(ah, al, bh, bl, record)
     };
     found.map(|(m, steps)| {
         *ones = steps >= ONES_STEPS;
@@ -893,7 +940,7 @@ impl Row {
     ///
     /// The row's limbs must be valid for reads and writes up to the length the sum takes and one
     /// more, and zero above the row's length; the [`add_times_itch`] limbs at `t` for writes.
-    unsafe fn add_times(&mut self, to_u0: bool, q: *const u64, qn: usize, t: Scratch) {
+    pub(super) unsafe fn add_times(&mut self, to_u0: bool, q: *const u64, qn: usize, t: Scratch) {
         need!(t, add_times_itch(self.un, qn));
         let (to, from) = if to_u0 {
             (self.u0, self.u1.cast_const())

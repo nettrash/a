@@ -542,7 +542,7 @@ pub(super) const LN2_LIMBS: [u64; 256] = [
 ];
 
 /// The fraction of `π`, [`PI_LIMBS`] without its integer part.
-pub(super) const PI_TABLE: &[u64] = PI_LIMBS.split_last().expect("not empty").1;
+pub(crate) const PI_TABLE: &[u64] = PI_LIMBS.split_last().expect("not empty").1;
 
 /// The bits of [`PI_LIMBS`] below the point.
 const PI_BITS: u64 = 16384;
@@ -580,7 +580,7 @@ static PI_CACHE: std::sync::Mutex<Option<(u64, Number)>> = std::sync::Mutex::new
 /// `floor(π 2^f)` less at most 4: from the table up to 16,384 bits, by Chudnovsky's series beyond,
 /// kept in [`PI_CACHE`] and cut from there for shorter precisions (`floor(x 2^-d)` of a value within
 /// 4 below is within `1 + 4 2^-d <= 3` below for `d >= 1`).
-pub(super) fn pi(f: u64) -> Number {
+pub(crate) fn pi(f: u64) -> Number {
     if f <= PI_BITS {
         return of_limbs(&PI_LIMBS) >> shift_count(PI_BITS - f);
     }

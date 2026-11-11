@@ -105,6 +105,7 @@ mod gcd;
 mod iter;
 mod modular;
 mod mul;
+pub(crate) mod nat;
 mod number;
 mod pow;
 mod prim;
@@ -120,8 +121,14 @@ mod sign;
 mod sub;
 
 pub(crate) use cmp::Magnitude;
+pub(crate) use div::{divide_2by1, reciprocal};
+pub(crate) use factorial::product::times;
+pub(crate) use gcd::fraction;
+pub(crate) use gcd::{Bound, common_prefix, partial, quotients};
 pub(crate) use mul::basecase;
 pub(crate) use pow::montgomery::{redc_inverse, redc_limbs};
+pub(crate) use prime::is_prime_u64;
+pub(crate) use sequences::{PI_TABLE, pi};
 
 pub use byte_order::ByteOrder;
 pub use convert::TryFromNumberError;

@@ -24,6 +24,8 @@
 // The kernels under the name `kernels`, chosen as those of the multiplication are: assembly on
 // 64-bit little-endian aarch64 where the system allows unaligned accesses, and portable Rust
 // elsewhere and under Miri.
+mod euclid;
+pub(crate) mod fraction;
 mod hgcd;
 #[cfg(all(
     target_arch = "aarch64",
@@ -62,6 +64,8 @@ mod kernels;
 #[path = "gcd/portable.rs"]
 mod kernels;
 mod limbs;
+
+pub(crate) use euclid::{Bound, common_prefix, partial, quotients};
 
 use super::add::{read_small, significant_len, small, write_small};
 use super::mul::limbs::mul;

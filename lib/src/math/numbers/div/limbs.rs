@@ -58,7 +58,7 @@ const RECIPROCALS: [u16; 256] = {
 /// The reciprocal of the normalized limb `d`, `floor((B^2 - 1) / d) - B`: a table lookup on its top
 /// nine bits and three Newton steps, Algorithm 2 of Möller and Granlund, with no division.
 #[inline]
-pub(in super::super) fn invert_limb(d: u64) -> u64 {
+pub(crate) fn invert_limb(d: u64) -> u64 {
     debug_assert!(d >> 63 == 1);
     let d0 = d & 1;
     let d9 = d >> 55;
@@ -107,7 +107,7 @@ pub(in super::super) fn invert_3by2(d1: u64, d0: u64) -> u64 {
 ///
 /// `u1 < d`, so that the quotient is one limb.
 #[inline(always)]
-pub(in super::super) fn div_2by1(u1: u64, u0: u64, d: u64, v: u64) -> (u64, u64) {
+pub(crate) fn div_2by1(u1: u64, u0: u64, d: u64, v: u64) -> (u64, u64) {
     debug_assert!(u1 < d);
     let p =
         (u128::from(v) * u128::from(u1)).wrapping_add((u128::from(u1 + 1) << 64) | u128::from(u0));

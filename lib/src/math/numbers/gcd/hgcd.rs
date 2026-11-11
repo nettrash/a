@@ -26,7 +26,7 @@ use super::super::mul::limbs::{add_n, cmp_n, mul};
 use super::super::scratch::{Scratch, need};
 use super::kernels::{addmul_1, extend_row, reduce_pair};
 use super::limbs::{
-    Row, Step, StepExt, add_to, divexact, divexact_itch, gcdext_lehmer, hgcd2_hinted,
+    Row, Step, StepExt, Steps, add_to, divexact, divexact_itch, gcdext_lehmer, hgcd2_hinted_with,
     lehmer_ext_itch, mul_bound, normalized, sub_from, subdiv, subdiv_ext, tdiv_itch, tdiv_qr,
     top_limbs, with_scratch,
 };
@@ -323,8 +323,10 @@ pub(super) fn adjust_itch(p: usize, mn: usize) -> usize {
 /// The `n` limbs at `a` and `b` must be valid for reads and writes, with a limb to spare, and the
 /// `avail` limbs at `t`, at least `n`, for the quotient, and what the matrix's update takes, for
 /// reads and writes, apart from them and from the matrix, whose entries must have room for the
-/// steps. The division's scratch comes from [`with_scratch`] when what is left is not enough.
-unsafe fn subdiv_hgcd(
+/// steps. The division's scratch comes from [`with_scratch`] when what is left is not enough. The
+/// steps are told to `record`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn subdiv_hgcd<S: Steps>(
     a: *mut u64,
     b: *mut u64,
     n: usize,
@@ -332,6 +334,7 @@ unsafe fn subdiv_hgcd(
     m: &mut Matrix,
     t: Scratch,
     avail: usize,
+    record: &mut S,
 ) -> usize {
     need!(t, avail);
     need!(t, n);
@@ -372,6 +375,7 @@ unsafe fn subdiv_hgcd(
             bn.cmp(&an)
         };
         m.update(&1, 1, col, t);
+        record.step(col, 1);
         if order == Ordering::Equal {
             // The numbers are equal now: a step was taken, and no other can be.
             return an;
@@ -406,6 +410,7 @@ unsafe fn subdiv_hgcd(
         let qn = normalized(q, qn);
         if qn > 0 {
             with_scratch(w, room, update_itch(m.n, qn), |w| m.update(q, qn, col, w));
+            record.step_limbs(col, q, qn);
         }
         size
     }
@@ -427,7 +432,8 @@ fn step_itch(n: usize) -> usize {
 /// # Safety
 ///
 /// As for [`subdiv_hgcd`].
-unsafe fn hgcd_step(
+#[allow(clippy::too_many_arguments)]
+unsafe fn hgcd_step<S: Steps>(
     n: usize,
     a: *mut u64,
     b: *mut u64,
@@ -435,6 +441,7 @@ unsafe fn hgcd_step(
     m: &mut Matrix,
     t: Scratch,
     avail: usize,
+    record: &mut S,
 ) -> usize {
     need!(t, avail);
     // SAFETY: as the caller guarantees.
@@ -449,13 +456,14 @@ unsafe fn hgcd_step(
         } else {
             Some(top_limbs(a, b, n))
         };
-        if let Some(m1) = top.and_then(|(ah, al, bh, bl)| hgcd2_hinted(ah, al, bh, bl, &mut m.ones))
+        if let Some(m1) =
+            top.and_then(|(ah, al, bh, bl)| hgcd2_hinted_with(ah, al, bh, bl, &mut m.ones, record))
         {
             m.mul_1(m1);
             reduce_pair(a, b, n, m1);
             return n - usize::from(*a.add(n - 1) | *b.add(n - 1) == 0);
         }
-        subdiv_hgcd(a, b, n, s, m, t, avail)
+        subdiv_hgcd(a, b, n, s, m, t, avail, record)
     }
 }
 
@@ -488,12 +496,23 @@ pub(super) fn hgcd_itch(n: usize) -> usize {
 ///
 /// The `n` limbs at `a` and `b` must be valid for reads and writes, with a limb to spare, and the
 /// [`hgcd_itch`]`(n)` limbs at `t`, apart from them and from the matrix.
-pub(super) unsafe fn hgcd(
+pub(super) unsafe fn hgcd(a: *mut u64, b: *mut u64, n: usize, m: &mut Matrix, t: Scratch) -> usize {
+    // SAFETY: forwarded.
+    unsafe { hgcd_with(a, b, n, m, t, &mut ()) }
+}
+
+/// [`hgcd`], telling `record` of its steps, in the order taken.
+///
+/// # Safety
+///
+/// As for [`hgcd`].
+pub(super) unsafe fn hgcd_with<S: Steps>(
     a: *mut u64,
     b: *mut u64,
     mut n: usize,
     m: &mut Matrix,
     t: Scratch,
+    record: &mut S,
 ) -> usize {
     let s = n / 2 + 1;
     if n <= s {
@@ -511,13 +530,13 @@ pub(super) unsafe fn hgcd(
             let n2 = 3 * n / 4 + 1;
             // The top half first, its matrix the result's, applied to the low half.
             let p = n / 2;
-            let nn = hgcd(a.add(p), b.add(p), n - p, m, t);
+            let nn = hgcd_with(a.add(p), b.add(p), n - p, m, t, record);
             if nn > 0 {
                 n = m.adjust(p + nn, a, b, p, t);
                 success = true;
             }
             while n > n2 {
-                let nn = hgcd_step(n, a, b, s, m, t, avail);
+                let nn = hgcd_step(n, a, b, s, m, t, avail, record);
                 if nn == 0 {
                     return if success { n } else { 0 };
                 }
@@ -529,7 +548,7 @@ pub(super) unsafe fn hgcd(
                 let p = 2 * s - n + 1;
                 let mut m1 = Matrix::new(n - p, t.take(matrix_itch(n - p)));
                 let w = t.add(matrix_itch(n - p));
-                let nn = hgcd(a.add(p), b.add(p), n - p, &mut m1, w);
+                let nn = hgcd_with(a.add(p), b.add(p), n - p, &mut m1, w, record);
                 if nn > 0 {
                     n = m1.adjust(p + nn, a, b, p, w);
                     m.mul(&m1, w);
@@ -538,7 +557,7 @@ pub(super) unsafe fn hgcd(
             }
         }
         loop {
-            let nn = hgcd_step(n, a, b, s, m, t, avail);
+            let nn = hgcd_step(n, a, b, s, m, t, avail, record);
             if nn == 0 {
                 return if success { n } else { 0 };
             }
@@ -612,7 +631,7 @@ pub(super) fn gcdext_dc_itch(n: usize) -> usize {
 
 /// The limbs of scratch space that [`row_times`] needs for a row of `un` limbs and a matrix of
 /// `mn`.
-fn row_itch(un: usize, mn: usize) -> usize {
+pub(super) fn row_itch(un: usize, mn: usize) -> usize {
     2 * (un + mn + 1) + mul_any_itch(un, mn)
 }
 
@@ -622,7 +641,7 @@ fn row_itch(un: usize, mn: usize) -> usize {
 ///
 /// The row's entries must have room for `un + m.n + 1` limbs, zero above its length, and the
 /// [`row_itch`] limbs at `t` must be valid for reads and writes.
-unsafe fn row_times(row: &mut Row, m: &Matrix, t: Scratch) {
+pub(super) unsafe fn row_times(row: &mut Row, m: &Matrix, t: Scratch) {
     let (un, mn) = (row.un, m.n);
     need!(t, row_itch(un, mn));
     let len = un + mn;

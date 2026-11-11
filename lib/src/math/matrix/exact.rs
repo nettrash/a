@@ -1,14 +1,18 @@
 //! Exact algorithms on matrices of numbers: determinants, ranks, characteristic polynomials,
 //! adjugates, inverses and null spaces, without fractions.
 
-use super::Matrix;
+use super::{Matrix, rational};
 use crate::math::numbers::Number;
 
 impl Matrix<Number> {
     /// The determinant, exactly, by Bareiss's fraction-free elimination: each step's elements
     /// are minors of the matrix, `(a_ij·a_kk - a_ik·a_kj) / p` with the previous pivot `p`
-    /// dividing exactly, so the numbers grow no longer than the determinant. About `n³`
-    /// products. The determinant of the `0 × 0` matrix is 1.
+    /// dividing exactly, so the numbers grow no longer than the determinant. About `n³/3`
+    /// steps, each two products and an exact division, in registers while the minors fit in
+    /// 63 bits; from 28 rows (22 with an element past 63 bits) by Dixon's lifting and residues
+    /// modulo primes (see [`Matrix::<Rational>::det`](Matrix::<crate::math::rational::Rational>::det)).
+    /// The determinant of the `0 × 0` matrix is 1, and the result is in the byte order of the
+    /// top left element.
     ///
     /// # Panics
     ///
@@ -26,22 +30,12 @@ impl Matrix<Number> {
     #[track_caller]
     pub fn det(&self) -> Number {
         assert!(self.is_square(), "the matrix is not square");
-        let n = self.rows();
-        let mut m = self.clone();
-        let (rank, swaps) = bareiss(&mut m);
-        if rank < n {
-            return Number::default();
-        }
-        if n == 0 {
-            return Number::from(1u8);
-        }
-        let d = m[(n - 1, n - 1)].clone();
-        if swaps % 2 == 1 { -d } else { d }
+        rational::det_of_integers(self)
     }
 
     /// The rank, exactly: the number of pivots of Bareiss's fraction-free elimination.
     pub fn rank(&self) -> usize {
-        bareiss(&mut self.clone()).0
+        rational::rank_of_integers(self)
     }
 
     /// The coefficients of the characteristic polynomial `det(x·I - A)`, from `xⁿ` down,
@@ -139,7 +133,11 @@ impl Matrix<Number> {
     }
 
     /// The inverse as the adjugate and the determinant, `A⁻¹ = adj(A) / det(A)`, exactly, or
-    /// `None` when the determinant is zero.
+    /// `None` when the determinant is zero: Bareiss's elimination of `[A | I]` and the
+    /// fraction-free back substitution of [`solve`](Matrix::<Number>::solve), whose integers
+    /// `D·A⁻¹`, `D = ±det(A)` the last pivot, are the adjugate up to the sign of the row swaps.
+    /// [`inverse_rational`](Matrix::<Number>::inverse_rational) gives `A⁻¹` as rationals. The
+    /// results are in the byte order of the top left element.
     ///
     /// # Panics
     ///
@@ -158,17 +156,15 @@ impl Matrix<Number> {
     /// ```
     #[track_caller]
     pub fn inverse(&self) -> Option<(Matrix<Number>, Number)> {
-        let det = self.det();
-        if det.is_zero() {
-            return None;
-        }
-        Some((self.adjugate(), det))
+        assert!(self.is_square(), "the matrix is not square");
+        rational::inverse_of_integers(self)
     }
 
     /// A basis of the null space `{x : A·x = 0}` over the rationals, as the columns of an
     /// `n × (n - rank)` matrix of integers: one vector for each column without a pivot in the
-    /// fraction-free echelon form, its free coordinate positive and its elements without a
-    /// common factor.
+    /// fraction-free echelon form, its free coordinate positive, the other free coordinates 0
+    /// and its elements without a common factor, from a fraction-free back substitution; in the
+    /// byte order of the top left element.
     ///
     /// # Examples
     ///
@@ -182,92 +178,6 @@ impl Matrix<Number> {
     /// assert!((&a * &null).as_slice().iter().all(|x| x.is_zero()));
     /// ```
     pub fn null_space(&self) -> Matrix<Number> {
-        let n = self.cols();
-        let mut e = self.clone();
-        let (rank, _) = bareiss(&mut e);
-        // The pivot columns of the echelon form.
-        let mut pivots = Vec::with_capacity(rank);
-        let mut row = 0;
-        for c in 0..n {
-            if row < rank && !e[(row, c)].is_zero() {
-                pivots.push(c);
-                row += 1;
-            }
-        }
-        let free: Vec<usize> = (0..n).filter(|c| !pivots.contains(c)).collect();
-        let mut basis = Matrix::<Number>::zeros(n, free.len());
-        for (b, &f) in free.iter().enumerate() {
-            // `y`, a multiple of the solution with `x_f = 1` and the other free coordinates 0.
-            let mut y = vec![Number::default(); n];
-            y[f] = Number::from(1u8);
-            for i in (0..rank).rev() {
-                let mut s = Number::default();
-                for c in i..n {
-                    if c != pivots[i] && !y[c].is_zero() && !e[(i, c)].is_zero() {
-                        s -= &e[(i, c)] * &y[c];
-                    }
-                }
-                let pivot = &e[(i, pivots[i])];
-                let g = s.gcd(pivot);
-                if !g.is_zero() {
-                    let scale = pivot.div_exact(&g).abs();
-                    if scale != 1 {
-                        for x in &mut y {
-                            *x *= &scale;
-                        }
-                        s *= &scale;
-                    }
-                }
-                y[pivots[i]] = s.div_exact(pivot);
-            }
-            let g = y.iter().fold(Number::default(), |g, x| g.gcd(x));
-            for (i, x) in y.into_iter().enumerate() {
-                basis[(i, b)] = if g > 1 { x.div_exact(&g) } else { x };
-            }
-            if basis[(f, b)].is_negative() {
-                for i in 0..n {
-                    basis[(i, b)] = -&basis[(i, b)];
-                }
-            }
-        }
-        basis
+        rational::null_space_of_integers(self)
     }
-}
-
-/// Bareiss's fraction-free elimination of `m` to an echelon form in place, the pivot of each
-/// row the first non-zero element at or below it in the next column that has one: the rank,
-/// and the number of row swaps.
-fn bareiss(m: &mut Matrix<Number>) -> (usize, usize) {
-    let (rows, cols) = m.shape();
-    let mut previous = Number::from(1u8);
-    let mut r = 0;
-    let mut swaps = 0;
-    for c in 0..cols {
-        if r == rows {
-            break;
-        }
-        let Some(p) = (r..rows).find(|&i| !m[(i, c)].is_zero()) else {
-            continue;
-        };
-        if p != r {
-            m.swap_rows(p, r);
-            swaps += 1;
-        }
-        let pivot = m[(r, c)].clone();
-        for i in r + 1..rows {
-            let below = m[(i, c)].clone();
-            for j in c + 1..cols {
-                let x = &(&m[(i, j)] * &pivot) - &(&below * &m[(r, j)]);
-                m[(i, j)] = if previous == 1 {
-                    x
-                } else {
-                    x.div_exact(&previous)
-                };
-            }
-            m[(i, c)] = Number::default();
-        }
-        previous = pivot;
-        r += 1;
-    }
-    (r, swaps)
 }

@@ -9,10 +9,11 @@ Algorithms in pure Rust, with no dependencies:
 
 - **Sorting** (`a::sort`): 23 sorting algorithms by comparison and by key, and a default sort.
 - **Integers of any size** (`a::math::numbers`): `Number`, with its arithmetic up to transforms for the longest products, roots, powers modulo a number, greatest common divisors, primes and text in any radix; prime sieves and counting, factorisation up to the quadratic sieve, arithmetic functions, modular arithmetic and discrete logarithms, and integer sequences.
+- **Rational numbers** (`a::math::rational`): `Rational`, in lowest terms, with its arithmetic, conversions to and from floats and text, continued fractions, best approximations, rational reconstruction, and the Bernoulli and harmonic numbers.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
-- **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers.
+- **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers and rationals.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, PARI, FLINT, primesieve, GMP-ECM, OpenSSL, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, PARI, FLINT, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
 
 ## Usage
 
@@ -192,6 +193,44 @@ Number theory, measured on an Apple M4 Max on one thread (the references too), a
 | `primorial` | n = 10⁶ | 13.3 M | FLINT 20.1 M |
 | `partitions` | n = 10⁶ | 138 µs | FLINT 196 µs (244 µs with its caches cleared) |
 
+### Rational numbers
+
+| Page | Contents |
+| --- | --- |
+| [Rational numbers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/rational.md) | `a::math::rational::Rational`, a fraction of numbers in lowest terms with a positive denominator: `+`, `-`, `*` and `/` reduced by Knuth's two gcds, with numbers and primitive integers on either side; comparisons bounded from the top bits; `floor`, `ceil`, `round`, `pow`; `Sum` and `Product` in a balanced tree; exact conversions from floats and correctly rounded ones to them, text in any radix and decimals with exponents; continued fractions and convergents, the best approximation with a bounded denominator, the simplest rational in an interval and rational reconstruction, on the half gcd; the Bernoulli numbers by the zeta function and Harvey's residues modulo primes, and the harmonic numbers by binary splitting; and the exact determinants, solutions and inverses of [matrices](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) of rationals, by Bareiss's elimination and Dixon's p-adic lifting |
+
+Measured on an Apple M4 Max on one thread, in cycles per call unless a time is given, over random parts of the limbs (64 bits) given, against the fastest of GMP 6.3 (`mpq_t`), FLINT 3.6 (`fmpq`), PARI 2.19, malachite-q 0.14 and num-rational 0.4 that has the function; the page has the conditions, more sizes and the other operations. For parts below 2¹⁶ FLINT is faster, 3.8 times for `+`, and malachite-q and GMP too, as FLINT and malachite-q keep small parts in a word and GMP writes into a variable that has room, where a `Rational` allocates two vectors ([#27](https://github.com/nettrash/a/issues/27)); so is GMP at one limb for `+`, by 4 %, and so are FLINT's continued fractions from 16 to 256 limbs, its products of matrices of small entries and its determinants of small matrices.
+
+| Operation | Size | `a` | Fastest reference |
+| --- | --- | ---: | --- |
+| `&a + &b` | 1 limb | 341 | GMP 327 |
+| | 16 limbs | 12,028 | malachite 14,878 |
+| | 1024 limbs | 2.98 M | GMP 4.15 M |
+| `&a * &b` | 1 limb | 502 | GMP 514 |
+| | 1024 limbs | 5.44 M | GMP 7.14 M |
+| `a += &b` | 2 limbs | 679 | FLINT 840 |
+| `a.cmp(&b)` | 1024 limbs | 39 | num-rational 16,099 |
+| `Rational::new` | 64 limbs | 51,889 | malachite 61,367 |
+| `H_n` by `Iterator::sum` | n = 10⁵ | 1,259 a term | FLINT 1,502 (the same tree) |
+| `to_f64`, correctly rounded | 4096 bits | 13.1 ns | GMP 51.9 ns (truncated) |
+| `"p/q".parse::<Rational>()` | 10⁶ digits | 53.6 ms | FLINT 83.8 ms (with `fmpq_canonicalise`) |
+| `to_string` | 10⁶ digits | 14.5 ms | FLINT 18.4 ms |
+| `continued_fraction` | 64 limbs | 174,333 | FLINT 118,048 |
+| | 1024 limbs | 4.62 M | FLINT 5.10 M |
+| `limit_denominator`, a bound of half the length | 1024 limbs | 2.57 M | malachite 23.2 ms |
+| `reconstruct` | 1024 limbs | 1.22 M | PARI 1.76 M |
+| | 100,000 limbs | 107 ms | PARI 195 ms |
+| `Rational::bernoulli` | n = 10⁴ | 3.21 ms | FLINT 4.90 ms |
+| | n = 10⁶ | 7.51 s | FLINT 12.3 s |
+| `Rational::bernoulli_numbers` | up to 10⁴ | 384 ms | FLINT 513 ms |
+| `Rational::harmonic` | n = 10⁶ | 79.1 ms | malachite 257 ms |
+| `Matrix<Rational>::det`, integers in −99..=99 | 4 × 4 | 0.19 µs | FLINT 0.13 µs |
+| `Matrix<Rational>::det`, fractions of parts ≤ 99 | 128 × 128 | 73.1 ms | FLINT 106 ms |
+| `Matrix<Rational>::solve`, fractions of parts ≤ 99, one column | 64 × 64 | 6.89 ms | FLINT 8.38 ms |
+| `Matrix<Rational>::inverse`, 64-bit parts | 16 × 16 | 34.7 ms | FLINT 44.1 ms (Bareiss; its default 80.3 ms) |
+| `Matrix<Rational>::inverse`, integers in −99..=99 | 128 × 128 | 169 ms | PARI 96 ms |
+| `&a * &b`, `Matrix<Rational>`, fractions of parts ≤ 99 | 32 × 32 | 807 µs | FLINT 302 µs |
+
 ### Elliptic curves
 
 | Page | Contents |
@@ -228,7 +267,7 @@ Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation ove
 
 ### Matrices
 
-[`a::math::matrix::Matrix<T>`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) is a dense matrix of any size, column after column, of `f32`, `f64`, `Complex<f32>`, `Complex<f64>` or `Number`. The algorithms are LAPACK's, arranged so that most of their work is products of blocks, and the products run on NEON kernels; real matrices stay in real arithmetic. Costs are for `n × n` matrices.
+[`a::math::matrix::Matrix<T>`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) is a dense matrix of any size, column after column, of `f32`, `f64`, `Complex<f32>`, `Complex<f64>`, `Number` or `Rational`. The algorithms are LAPACK's, arranged so that most of their work is products of blocks, and the products run on NEON kernels; real matrices stay in real arithmetic. Costs are for `n × n` matrices.
 
 | Operations | Functions | Method | Cost |
 | --- | --- | --- | --- |
@@ -240,7 +279,7 @@ Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation ove
 | Hermitian eigenvalues | `hermitian_eigen`, `hermitian_eigenvalues` | a blocked reduction to tridiagonal form, then divide and conquer | 4.7n³, the values 4n³/3 |
 | Eigenvalues | `schur`, `eigen`, `eigenvalues`, `characteristic_polynomial` | a blocked reduction to Hessenberg form, then the multishift QR algorithm with aggressive early deflation | about 25n³, the values 10n³ |
 | Functions | `exp`, `sqrt`, `log` | scaling and squaring with Padé approximants; the Schur method; inverse scaling and squaring | `exp` a few products, `sqrt` and `log` a Schur decomposition |
-| Exactly, on `Number` | `det`, `rank`, `characteristic_polynomial`, `adjugate`, `inverse`, `null_space` | Bareiss's elimination and Berkowitz's method, without fractions | n³ to 3n⁴/2 products of numbers |
+| Exactly, on `Number` and `Rational` | `det`, `rank`, `solve`, `inverse`, `inverse_rational`, `null_space`, `characteristic_polynomial`, `adjugate`, the product of rationals | Bareiss's elimination on the rows cleared of their denominators, then one division per element; Dixon's p-adic lifting for large systems and determinants; Berkowitz's method for the polynomial | n³/3 products of numbers as long as the minors, or Dixon's O(n³) operations on words; 3n⁴/2 for the polynomial |
 
 In `f64` on one core of an Apple M4 Max, each of the twelve operations [measured](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#measurements) was at least as fast as faer's and nalgebra's at every size from 8 × 8 to 1024 × 1024; at 1024 × 1024, in milliseconds:
 

@@ -4,7 +4,7 @@
 
 use super::small::{self, Small};
 use super::{Rational, is_one};
-use crate::math::numbers::Number;
+use crate::math::numbers::{ByteOrder, Magnitude, Number, fraction};
 use core::cmp::Ordering;
 
 impl Rational {
@@ -27,7 +27,17 @@ impl Rational {
             let q = u128::from(q) + u128::from(x.negative && r != 0);
             return small::number(self.byte_order(), x.negative, q);
         }
-        self.num.div_floor(&self.den)
+        if let Some((negative, n, d)) = self.wide() {
+            let q = n / d + u128::from(negative);
+            return small::number(self.byte_order(), negative, q);
+        }
+        // The remainder of a fraction in lowest terms over a denominator above 1 is not zero, so
+        // the floor of a negative number is its truncation less one.
+        let mut q = &self.num / &self.den;
+        if self.num.is_negative() {
+            q -= 1u8;
+        }
+        q
     }
 
     /// The smallest integer at least the number, `⌈x⌉`, in its byte order.
@@ -49,7 +59,15 @@ impl Rational {
             let q = u128::from(q) + u128::from(!x.negative && r != 0);
             return small::number(self.byte_order(), x.negative, q);
         }
-        -(-&self.num).div_floor(&self.den)
+        if let Some((negative, n, d)) = self.wide() {
+            let q = n / d + u128::from(!negative);
+            return small::number(self.byte_order(), negative, q);
+        }
+        let mut q = &self.num / &self.den;
+        if !self.num.is_negative() {
+            q += 1u8;
+        }
+        q
     }
 
     /// The integer toward zero from the number, in its byte order: `⌊x⌋` for `x ≥ 0` and `⌈x⌉`
@@ -68,6 +86,9 @@ impl Rational {
         }
         if let Some(x) = Small::of(self) {
             return small::number(self.byte_order(), x.negative, u128::from(x.num / x.den));
+        }
+        if let Some((negative, n, d)) = self.wide() {
+            return small::number(self.byte_order(), negative, n / d);
         }
         &self.num / &self.den
     }
@@ -146,16 +167,56 @@ impl Rational {
                 u128::from(q) + u128::from(up),
             );
         }
+        if let Some((negative, n, d)) = self.wide() {
+            let (q, r) = (n / d, n % d);
+            // `2r` against `d`, as `r` against `d - r`, which cannot overflow.
+            let up = match r.cmp(&(d - r)) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => !even || q & 1 == 1,
+            };
+            return small::number(self.byte_order(), negative, q + u128::from(up));
+        }
+        if self.den.value.len() <= 8 * fraction::NEAREST_LIMBS {
+            return fraction::nearest(&self.num, &self.den, even, self.byte_order());
+        }
+        // The quotient and the remainder, of the sign of the numerator, and `2|r|` against `d`
+        // with the remainder doubled in its own vector.
         let negative = self.num.is_negative();
-        let (mut q, r) = self.num.abs().div_rem(&self.den);
-        let up = match (&r + &r).cmp(&self.den) {
+        let (mut q, mut r) = self.num.div_rem(&self.den);
+        r.negative = false;
+        r <<= 1;
+        let up = match r.cmp(&self.den) {
             Ordering::Greater => true,
             Ordering::Less => false,
             Ordering::Equal => !even || q.bit(0),
         };
         if up {
-            q += 1u8;
+            if negative {
+                q -= 1u8;
+            } else {
+                q += 1u8;
+            }
         }
-        if negative { -q } else { q }
+        q
+    }
+
+    /// The sign, the magnitude of the numerator and the denominator, when both parts have at most
+    /// 16 bytes.
+    #[inline(always)]
+    fn wide(&self) -> Option<(bool, u128, u128)> {
+        if self.num.value.len() > 16 || self.den.value.len() > 16 {
+            return None;
+        }
+        let read = |n: &Number| {
+            Magnitude {
+                bytes: &n.value,
+                big_endian: n.byte_order == ByteOrder::BigEndian,
+                negative: false,
+            }
+            .small()
+        };
+        let n = read(&self.num);
+        Some((self.num.negative && n != 0, n, read(&self.den)))
     }
 }

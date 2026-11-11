@@ -20,6 +20,8 @@ mod partitions;
 mod primorial;
 mod small;
 
+pub(crate) use partitions::{PI_TABLE, pi};
+
 use super::{ByteOrder, Number};
 
 impl Number {

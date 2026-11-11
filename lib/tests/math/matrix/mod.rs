@@ -10,5 +10,6 @@ mod hermitian;
 mod nonsymmetric;
 mod product;
 mod qr_paths;
+mod rational;
 mod svd;
 mod svd_paths;
