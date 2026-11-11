@@ -11,63 +11,92 @@
 use super::int::Int;
 use super::ring::{Ring, with_odd};
 use super::root::jacobi_of_word;
+use super::word::Odd;
 
 /// Beyond this many factors of two in `p - 1`, Cipolla's method takes fewer products than Tonelli
 /// and Shanks's, whose loop takes up to `s^2 / 2` of them.
 const CIPOLLA: u32 = 24;
 
 /// A square root of the residue `u`, not zero, modulo the odd prime `p` (of the limbs `pl`), in
-/// the ring `r` modulo `p`, or `None` when `u` is not a square.
+/// the ring `r` modulo `p`, or `None` when `u` is not a square: [`sqrt_prime_limbs`] on its limbs.
 pub(in super::super) fn sqrt_prime<R: Ring, I: Int>(r: &R, u: &R::V, p: &I) -> Option<R::V> {
-    let one = I::small(1);
     let pl = p.limbs();
-    let p0 = pl.as_slice()[0];
-    let root = if p0 & 3 == 3 {
-        // `u^((p + 1) / 4)`.
-        let e = p.add(&one).div_exact(&I::small(4));
-        r.pow(u, e.limbs().as_slice())
-    } else {
-        let p1 = p.sub(&one);
-        let s = trailing_zeros(&p1);
-        if s > CIPOLLA {
-            cipolla(r, u, p)?
-        } else {
-            tonelli_shanks(r, u, p, s)?
+    sqrt_prime_limbs(r, u, pl.as_slice())
+}
+
+/// A square root of the residue `u`, not zero, modulo the odd prime of the limbs `p` (without zeros
+/// at the top), in the ring `r` modulo it, or `None` when `u` is not a square, with its exponents
+/// in limbs: `u^((p + 1) / 4)` for `p = 3 (mod 4)`; Atkin's `u v (i - 1)` for `p = 5 (mod 8)`, `v =
+/// (2u)^((p - 5) / 8)` and `i = 2u v^2`, one power too; Tonelli and Shanks's method for `p = 1 (mod
+/// 8)`, its powers of `u` and of a non-square side by side ([`Ring::pow_pair`]), or Cipolla's when
+/// `p - 1` has more than [`CIPOLLA`] factors of two.
+pub(in super::super) fn sqrt_prime_limbs<R: Ring>(r: &R, u: &R::V, p: &[u64]) -> Option<R::V> {
+    let mut e = p.to_vec();
+    let root = match p[0] & 7 {
+        3 | 7 => {
+            add_small(&mut e, 1);
+            shift_right(&mut e, 2);
+            r.pow(u, &e)
+        }
+        5 => {
+            shift_right(&mut e, 3);
+            let u2 = r.add(u, u);
+            let v = r.pow(&u2, &e);
+            let i = r.mul(&u2, &r.sqr(&v));
+            r.mul(&r.mul(u, &v), &r.sub(&i, &r.one()))
+        }
+        _ => {
+            // `p - 1 = q 2^s`: `p` is odd, so `p - 1` is `p` with its low bit cleared.
+            e[0] &= !1;
+            let s = trailing_zeros_limbs(&e);
+            if s > CIPOLLA {
+                cipolla(r, u, p)?
+            } else {
+                shift_right(&mut e, s);
+                tonelli_shanks(r, u, p, &e, s)?
+            }
         }
     };
     (r.sqr(&root) == *u).then_some(root)
 }
 
-/// The smaller square root of `a`, below the odd prime `p` of a word and not zero, or `None` when
-/// `a` is not a square: [`sqrt_prime`] in a register, for the moduli that are a prime.
-pub(in super::super) fn sqrt_prime_word(a: u64, p: u64) -> Option<u64> {
-    let f = super::word::Odd::new(p);
-    let u = f.to(a);
-    let root = if p & 3 == 3 {
-        f.power(u, (p >> 2) + 1)
-    } else {
-        let s = (p - 1).trailing_zeros();
-        if s > CIPOLLA {
-            let r = super::word::Odd::new(p);
-            return cipolla(&r, &u, &p).and_then(|x| {
-                let x = r.from(x);
-                (super::word::mul_mod(x, x, p) == a).then(|| x.min(p - x))
-            });
+/// `x += k` on limbs, which have room for the carry.
+fn add_small(x: &mut Vec<u64>, k: u64) {
+    let mut carry = k;
+    for l in x.iter_mut() {
+        let (s, c) = l.overflowing_add(carry);
+        *l = s;
+        carry = u64::from(c);
+        if carry == 0 {
+            return;
         }
-        tonelli_shanks(&f, &u, &p, s)?
-    };
-    if f.square(root) != u {
-        return None;
     }
-    let x = f.from(root);
-    Some(x.min(p - x))
+    if carry != 0 {
+        x.push(carry);
+    }
 }
 
-/// The number of zero bits at the low end of the non-zero `x`.
-fn trailing_zeros<I: Int>(x: &I) -> u32 {
-    let l = x.limbs();
+/// `x >>= s` on limbs, the zeros left at the top dropped.
+fn shift_right(x: &mut Vec<u64>, s: u32) {
+    let (whole, bits) = ((s / 64) as usize, s % 64);
+    if whole > 0 {
+        x.drain(..whole.min(x.len()));
+    }
+    if bits > 0 {
+        for i in 0..x.len() {
+            let hi = x.get(i + 1).map_or(0, |&h| h << (64 - bits));
+            x[i] = (x[i] >> bits) | hi;
+        }
+    }
+    while x.last() == Some(&0) {
+        x.pop();
+    }
+}
+
+/// The zero bits at the low end of limbs, not all zero.
+fn trailing_zeros_limbs(x: &[u64]) -> u32 {
     let mut z = 0;
-    for &w in l.as_slice() {
+    for &w in x {
         if w != 0 {
             return z + w.trailing_zeros();
         }
@@ -76,22 +105,120 @@ fn trailing_zeros<I: Int>(x: &I) -> u32 {
     z
 }
 
+/// The smaller square root of `a`, below the odd prime `p` of a word and not zero, or `None` when
+/// `a` is not a square: [`sqrt_prime`] in a register, for the moduli that are a prime.
+///
+/// For `p = 3 (mod 4)` the root is `a^((p + 1) / 4)`; for `p = 5 (mod 8)` Atkin's (1992), from one
+/// power too: with `v = (2a)^((p - 5) / 8)` and `i = 2a v^2`, a square root of −1 when `a` is a
+/// square, `a v (i - 1)`; for `p = 1 (mod 8)` Tonelli and Shanks's method, whose two powers, of `a`
+/// and of a non-square, are taken side by side ([`Odd::powers`]).
+pub(in super::super) fn sqrt_prime_word(a: u64, p: u64) -> Option<u64> {
+    let f = Odd::new(p);
+    let u = f.to(a);
+    let root = match p & 7 {
+        3 | 7 => f.power(u, (p >> 2) + 1),
+        5 => {
+            let u2 = f.plus(u, u);
+            let v = f.power(u2, p >> 3);
+            let i = f.times(u2, f.square(v));
+            f.times(f.times(u, v), f.minus(i, f.unit()))
+        }
+        _ => {
+            if (p - 1).trailing_zeros() > CIPOLLA {
+                return cipolla(&f, &u, &[p]).and_then(|x| {
+                    let x = f.from(x);
+                    (super::word::mul_mod(x, x, p) == a).then(|| x.min(p - x))
+                });
+            }
+            tonelli_word(&f, u, p)?
+        }
+    };
+    if f.square(root) != u {
+        return None;
+    }
+    let x = f.from(root);
+    Some(x.min(p - x))
+}
+
+/// The odd primes below 64, each with the residues modulo it that are squares as bits (0 counted
+/// among them).
+const SMALL_SQUARES: [(u64, u64); 17] = {
+    let primes = [
+        3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61,
+    ];
+    let mut t = [(0, 0); 17];
+    let mut i = 0;
+    while i < 17 {
+        let z = primes[i];
+        let mut mask = 0u64;
+        let mut x = 0;
+        while x < z {
+            mask |= 1 << (x * x % z);
+            x += 1;
+        }
+        t[i] = (z, mask);
+        i += 1;
+    }
+    t
+};
+
+/// The smallest prime that is not a square modulo the prime `p = 1 (mod 8)`: by reciprocity, `(z /
+/// p) = (p / z)` for the odd primes `z`, which needs only `p mod z` and the squares modulo `z`;
+/// past 61 by the Jacobi symbol of the odd numbers, which is −1 for a non-square.
+fn non_square_word(p: u64) -> u64 {
+    for &(z, squares) in &SMALL_SQUARES {
+        if (squares >> (p % z)) & 1 == 0 {
+            return z;
+        }
+    }
+    let mut z = 67;
+    while super::jacobi::jacobi_word(z, p) != -1 {
+        z += 2;
+    }
+    z
+}
+
+/// Tonelli and Shanks's method in a register, for the prime `p = 1 (mod 8)`, `p - 1 = q 2^s`:
+/// `u^((q - 1) / 2)` and `c = z^q` for the non-square `z` together, then the steps of
+/// [`tonelli_shanks`].
+fn tonelli_word(f: &Odd, u: u64, p: u64) -> Option<u64> {
+    let s = (p - 1).trailing_zeros();
+    let q = (p - 1) >> s;
+    let z = f.to(non_square_word(p));
+    let [y, mut c] = f.powers([u, z], [q >> 1, q]);
+    let one = f.unit();
+    let mut x = f.times(u, y);
+    let mut b = f.times(x, y);
+    let mut m = s;
+    while b != one {
+        // The order of `b`, `2^t`.
+        let mut t = 0;
+        let mut b2 = b;
+        while b2 != one {
+            b2 = f.square(b2);
+            t += 1;
+            if t == m {
+                return None;
+            }
+        }
+        let mut g = c;
+        for _ in 0..m - t - 1 {
+            g = f.square(g);
+        }
+        x = f.times(x, g);
+        c = f.square(g);
+        b = f.times(b, c);
+        m = t;
+    }
+    Some(x)
+}
+
 /// `x / 2^s`.
 fn shifted<I: Int>(x: &I, s: u32) -> I {
     let l = x.limbs();
-    let l = l.as_slice();
-    let (whole, bits) = ((s / 64) as usize, s % 64);
-    let mut out = vec![0u64; l.len().saturating_sub(whole)];
-    for i in 0..out.len() {
-        let lo = l[i + whole] >> bits;
-        let hi = if bits == 0 {
-            0
-        } else {
-            l.get(i + whole + 1).map_or(0, |&h| h << (64 - bits))
-        };
-        out[i] = lo | hi;
-    }
-    I::of_limbs(&out)
+    let mut v = l.as_slice().to_vec();
+    shift_right(&mut v, s);
+    I::of_limbs(&v)
 }
 
 /// The first word above 1 that is not a square modulo the odd prime `p`.
@@ -103,21 +230,21 @@ fn non_square(pl: &[u64]) -> u64 {
     z
 }
 
-/// Tonelli and Shanks's method for `p - 1 = q 2^s`, `s >= 1`: `x = u^((q + 1) / 2)` has
-/// `x^2 = u b` for `b = u^q`, of order dividing `2^s`, and each step multiplies `x` and `b` by
-/// powers of `c = z^q`, `z` not a square, of order `2^s`, until `b` is 1.
-fn tonelli_shanks<R: Ring, I: Int>(r: &R, u: &R::V, p: &I, s: u32) -> Option<R::V> {
-    let pl = p.limbs();
-    let q = shifted(&p.sub(&I::small(1)), s);
-    let half = shifted(&q.sub(&I::small(1)), 1);
-    let y = r.pow(u, half.limbs().as_slice());
+/// Tonelli and Shanks's method for `p - 1 = q 2^s`, `s >= 1`, `q` given as limbs: `x = u^((q + 1) /
+/// 2)` has `x^2 = u b` for `b = u^q`, of order dividing `2^s`, and each step multiplies `x` and `b`
+/// by powers of `c = z^q`, `z` not a square, of order `2^s`, until `b` is 1. The powers of `u` and
+/// of `z` to `(q - 1) / 2` are taken side by side, and `c = z (z^((q - 1) / 2))^2`.
+fn tonelli_shanks<R: Ring>(r: &R, u: &R::V, p: &[u64], q: &[u64], s: u32) -> Option<R::V> {
+    let mut half = q.to_vec();
+    shift_right(&mut half, 1);
+    let zr = r.residue(&[non_square(p)]);
+    let (y, zh) = r.pow_pair(u, &zr, &half);
     let mut x = r.mul(u, &y);
     let mut b = r.mul(&x, &y);
     if r.is_one(&b) {
         return Some(x);
     }
-    let z = non_square(pl.as_slice());
-    let mut c = r.pow(&r.residue(&[z]), q.limbs().as_slice());
+    let mut c = r.mul(&zr, &r.sqr(&zh));
     let mut m = s;
     while !r.is_one(&b) {
         // The order of `b`, `2^t`.
@@ -145,8 +272,7 @@ fn tonelli_shanks<R: Ring, I: Int>(r: &R, u: &R::V, p: &I, s: u32) -> Option<R::
 /// Cipolla's method (1903): with `w = t^2 - u` not a square, `(t + ω)^((p + 1) / 2)` in the field
 /// of `a + b ω`, `ω^2 = w`, is a square root of `u`. About four and a half powers, whatever the
 /// factors of two of `p - 1`.
-fn cipolla<R: Ring, I: Int>(r: &R, u: &R::V, p: &I) -> Option<R::V> {
-    let pl = p.limbs();
+fn cipolla<R: Ring>(r: &R, u: &R::V, pl: &[u64]) -> Option<R::V> {
     let mut t = 1u64;
     let (tr, w) = loop {
         let tr = r.residue(&[t]);
@@ -154,8 +280,8 @@ fn cipolla<R: Ring, I: Int>(r: &R, u: &R::V, p: &I) -> Option<R::V> {
         let plain = r.plain(&w);
         let symbol = match plain.as_slice() {
             [] => 0,
-            [x] => jacobi_of_word(*x, pl.as_slice()),
-            _ => jacobi_limbs(&plain, pl.as_slice()),
+            [x] => jacobi_of_word(*x, pl),
+            _ => jacobi_limbs(&plain, pl),
         };
         if symbol == -1 {
             break (tr, w);
@@ -166,10 +292,9 @@ fn cipolla<R: Ring, I: Int>(r: &R, u: &R::V, p: &I) -> Option<R::V> {
             return None;
         }
     };
-    let e = p.add(&I::small(1));
-    let e = shifted(&e, 1);
-    let el = e.limbs();
-    let el = el.as_slice();
+    let mut el = pl.to_vec();
+    add_small(&mut el, 1);
+    shift_right(&mut el, 1);
     let bits = 64 * (el.len() - 1) as u32 + 64 - el[el.len() - 1].leading_zeros();
     // `(a, b)` for `a + b ω`, from the top bit.
     let (mut a, mut b) = (tr.clone(), r.one());
@@ -386,4 +511,210 @@ pub(in super::super) fn smallest_sum<I: Int>(parts: &[(I, Vec<I>)], c: &[I], d: 
         }
     }
     min.unwrap_or_else(|| I::small(0))
+}
+
+// Words
+
+/// The roots modulo one prime power `p^e` of a word modulus: the numbers below `p^e` congruent
+/// modulo `d` to one of the first `n` of `b`, which are increasing.
+#[derive(Clone, Copy, Default)]
+pub(in super::super) struct Part {
+    /// The modulus of the roots, `p^(e - v/2)` for `p^v` dividing the number.
+    pub(in super::super) d: u64,
+    /// The roots modulo `d`.
+    pub(in super::super) b: [u64; 4],
+    /// How many there are.
+    pub(in super::super) n: usize,
+}
+
+/// [`roots_prime_power`] in words, for `a < p^e < 2^64`: no vector, and the root modulo an odd
+/// prime by [`sqrt_prime_word`].
+pub(in super::super) fn part_word(a: u64, p: u64, e: u32) -> Option<Part> {
+    if a == 0 {
+        let mut b = [0; 4];
+        b[0] = 0;
+        return Some(Part {
+            d: p.pow(e.div_ceil(2)),
+            b,
+            n: 1,
+        });
+    }
+    let (u, v) = if p == 2 {
+        let v = a.trailing_zeros();
+        (a >> v, v)
+    } else {
+        let (mut u, mut v) = (a, 0);
+        while u % p == 0 {
+            u /= p;
+            v += 1;
+        }
+        (u, v)
+    };
+    if v % 2 == 1 {
+        return None;
+    }
+    let f = e - v;
+    let h = v / 2;
+    let mut ys = [0u64; 4];
+    let n = if p == 2 {
+        match f {
+            1 => {
+                ys[0] = 1;
+                1
+            }
+            2 => {
+                if u & 3 != 1 {
+                    return None;
+                }
+                ys[..2].copy_from_slice(&[1, 3]);
+                2
+            }
+            _ => {
+                if u & 7 != 1 {
+                    return None;
+                }
+                // A bit at a time, as `roots_two` takes it in a word.
+                let mut x = 1u64;
+                for k in 3..f {
+                    let mask = u64::MAX >> (63 - k);
+                    if x.wrapping_mul(x).wrapping_sub(u) & mask != 0 {
+                        x += 1 << (k - 1);
+                    }
+                }
+                let m = 1u64 << f;
+                let half = m >> 1;
+                let neg = (m - x) & (m - 1);
+                ys = [x, neg, (x + half) & (m - 1), (neg + half) & (m - 1)];
+                4
+            }
+        }
+    } else {
+        let x = sqrt_prime_word(u % p, p)?;
+        let x = lift_odd::<u64>(&x, &u, &p, f);
+        ys[..2].copy_from_slice(&[x, p.pow(f) - x]);
+        2
+    };
+    let ph = p.pow(h);
+    let mut b = [0u64; 4];
+    for (o, &y) in b.iter_mut().zip(&ys[..n]) {
+        *o = y * ph;
+    }
+    // Sorted, without repeats (a few at most).
+    let b4 = &mut b[..n];
+    b4.sort_unstable();
+    let mut k = 0;
+    for i in 0..n {
+        if i == 0 || b4[i] != b4[k - 1] {
+            b4[k] = b4[i];
+            k += 1;
+        }
+    }
+    Some(Part {
+        d: p.pow(e - h),
+        b,
+        n: k,
+    })
+}
+
+/// The parts of `a` modulo `prod p^e` for the word factorisation `f`, into `out`: their number, or
+/// `None` when `a` is not a square modulo one of them.
+pub(in super::super) fn parts_word(
+    a: u64,
+    f: &[(u64, u32)],
+    out: &mut [Part; 15],
+) -> Option<usize> {
+    for (o, &(p, e)) in out.iter_mut().zip(f) {
+        let pe = p.pow(e);
+        *o = part_word(a % pe, p, e)?;
+    }
+    Some(f.len())
+}
+
+/// The product `D` of the parts' moduli and the terms `b c_i mod D` of each part's roots, `c_i` the
+/// Chinese remainder theorem's coefficient of the part (see [`coefficients`]), in place of its
+/// roots.
+pub(in super::super) fn terms_word(parts: &mut [Part]) -> u64 {
+    let d = parts.iter().fold(1u64, |acc, p| acc * p.d);
+    for p in parts.iter_mut() {
+        let rest = d / p.d;
+        let inv = super::word::inverse(rest % p.d, p.d).unwrap_or(0);
+        let c = super::word::mul_mod(rest, inv, d);
+        for b in &mut p.b[..p.n] {
+            *b = super::word::mul_mod(*b, c, d);
+        }
+    }
+    d
+}
+
+/// `x + t mod d` for `x, t < d`, without passing `d`, which may be near the top of a word.
+#[inline(always)]
+fn add_mod(x: u64, t: u64, d: u64) -> u64 {
+    let room = d - t;
+    if x >= room { x - room } else { x + t }
+}
+
+/// The number of choices of one root a part, saturated.
+pub(in super::super) fn choices(parts: &[Part]) -> u128 {
+    parts
+        .iter()
+        .fold(1u128, |c, p| c.saturating_mul(p.n as u128))
+}
+
+/// Calls `f` with every sum of one term of each part modulo `d`, depth first.
+#[inline]
+pub(in super::super) fn each_sum(parts: &[Part], d: u64, f: &mut impl FnMut(u64)) {
+    fn go(parts: &[Part], d: u64, s: u64, f: &mut impl FnMut(u64)) {
+        match parts {
+            [] => f(s),
+            [p, rest @ ..] => {
+                for &t in &p.b[..p.n] {
+                    go(rest, d, add_mod(s, t, d), f);
+                }
+            }
+        }
+    }
+    go(parts, d, 0, f);
+}
+
+/// The smallest root of `a` modulo the word `m = prod p^e`, for its factorisation `f`, or `None`:
+/// every sum of the terms when there are few choices, and by meeting in the middle beyond 4096 of
+/// them ([`smallest_sum`]).
+pub(in super::super) fn smallest_word(a: u64, f: &[(u64, u32)]) -> Option<u64> {
+    let mut parts = [Part::default(); 15];
+    let k = parts_word(a, f, &mut parts)?;
+    let parts = &mut parts[..k];
+    let d = terms_word(parts);
+    if choices(parts) <= 1 << 12 {
+        let mut min = u64::MAX;
+        each_sum(parts, d, &mut |s| min = min.min(s));
+        return Some(if min == u64::MAX { 0 } else { min });
+    }
+    // The terms are the roots times their coefficients already: coefficients of 1.
+    let generic: Vec<(u64, Vec<u64>)> = parts.iter().map(|p| (p.d, p.b[..p.n].to_vec())).collect();
+    let ones = vec![1u64; generic.len()];
+    Some(smallest_sum(&generic, &ones, &d))
+}
+
+/// Every root of `a` modulo the word `m = prod p^e`, increasing, for its factorisation `f`.
+pub(in super::super) fn all_word(a: u64, f: &[(u64, u32)], m: u64) -> Vec<u64> {
+    let mut parts = [Part::default(); 15];
+    let Some(k) = parts_word(a, f, &mut parts) else {
+        return Vec::new();
+    };
+    let parts = &mut parts[..k];
+    let d = terms_word(parts);
+    // The roots below `d`, and their copies a multiple of `d` higher, up to `m`: counted saturated,
+    // as on 32-bit targets they may pass `usize::MAX`, which fails to allocate, as it must.
+    let below = usize::try_from(choices(parts)).unwrap_or(usize::MAX);
+    let copies = usize::try_from(m / d).unwrap_or(usize::MAX);
+    let mut xs = Vec::with_capacity(below.saturating_mul(copies));
+    each_sum(parts, d, &mut |s| xs.push(s));
+    xs.sort_unstable();
+    for c in 1..copies {
+        let base = c as u64 * d;
+        for i in 0..below {
+            xs.push(base + xs[i]);
+        }
+    }
+    xs
 }

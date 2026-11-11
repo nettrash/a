@@ -113,11 +113,151 @@ pub(in super::super) trait Ring {
         r.unwrap_or_else(|| self.one())
     }
 
+    /// `a` and `b` to the one power of the limbs `e`: [`pow`](Self::pow) for each, or side by side
+    /// where the ring can overlap them.
+    fn pow_pair(&self, a: &Self::V, b: &Self::V, e: &[u64]) -> (Self::V, Self::V) {
+        (self.pow(a, e), self.pow(b, e))
+    }
+
     /// `a` to the power of the word `e`.
     #[inline]
     fn pow_u64(&self, a: &Self::V, e: u64) -> Self::V {
         self.pow(a, &[e])
     }
+
+    /// A word of the residue whose low bits look random over the residues, for the walks of
+    /// Pollard's rho, which choose their steps and their distinguished points by them, and for the
+    /// table of baby steps: by default the key through splitmix64's finaliser, a bijection of the
+    /// words each of whose bits depends on every bit of the key, as the low bits of a plain residue
+    /// need not look random (modulo `2^k n` those of a group of odd order are all 1 modulo `2^k`,
+    /// and a product alone leaves the low `k` bits of its result fixed). The residues in
+    /// Montgomery's form are scrambled already, and take their key; those by divisions mix all
+    /// their limbs so.
+    #[inline(always)]
+    fn walk_key(&self, a: &Self::V) -> u64 {
+        let z = self.key(a);
+        let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
+/// `a` to the power of the limbs `e` by [`Ring::pow`]'s sliding window, its odd powers in an array
+/// on the stack, for residues in registers.
+#[inline]
+fn pow_window<R: Ring>(r: &R, a: &R::V, e: &[u64]) -> R::V
+where
+    R::V: Copy,
+{
+    let top = e.iter().rposition(|&l| l != 0);
+    let Some(top) = top else {
+        return r.one();
+    };
+    let bits = 64 * top as u64 + 64 - u64::from(e[top].leading_zeros());
+    if bits == 1 {
+        return *a;
+    }
+    // The window capped at 5 bits, for 16 odd powers: the exponents of the rings in registers are
+    // rarely longer than 673 bits, past which GMP's table would take 6.
+    let k = window(bits).min(5);
+    let mut table = [*a; 16];
+    if k > 1 {
+        let a2 = r.sqr(a);
+        for i in 1..1usize << (k - 1) {
+            table[i] = r.mul(&table[i - 1], &a2);
+        }
+    }
+    let bit = |i: u64| (e[(i / 64) as usize] >> (i % 64)) & 1 == 1;
+    let mut i = bits as i64 - 1;
+    let mut x: Option<R::V> = None;
+    while i >= 0 {
+        if !bit(i as u64) {
+            if let Some(v) = x.as_mut() {
+                *v = r.sqr(v);
+            }
+            i -= 1;
+            continue;
+        }
+        let mut lo = (i - i64::from(k) + 1).max(0);
+        while !bit(lo as u64) {
+            lo += 1;
+        }
+        let mut w = 0usize;
+        for j in (lo..=i).rev() {
+            w = (w << 1) | usize::from(bit(j as u64));
+        }
+        x = Some(match x {
+            None => table[w >> 1],
+            Some(mut v) => {
+                for _ in 0..i - lo + 1 {
+                    v = r.sqr(&v);
+                }
+                r.mul(&v, &table[w >> 1])
+            }
+        });
+        i = lo - 1;
+    }
+    x.unwrap_or_else(|| r.one())
+}
+
+/// `a` and `b` to the one power of the limbs `e`, by [`pow_window`]'s steps for both side by side:
+/// the same windows, so one walk over the exponent, and two chains of products that the processor
+/// overlaps.
+#[inline]
+fn pow_window_pair<R: Ring>(r: &R, a: &R::V, b: &R::V, e: &[u64]) -> (R::V, R::V)
+where
+    R::V: Copy,
+{
+    let top = e.iter().rposition(|&l| l != 0);
+    let Some(top) = top else {
+        return (r.one(), r.one());
+    };
+    let bits = 64 * top as u64 + 64 - u64::from(e[top].leading_zeros());
+    if bits == 1 {
+        return (*a, *b);
+    }
+    let k = window(bits).min(5);
+    let (mut ta, mut tb) = ([*a; 16], [*b; 16]);
+    if k > 1 {
+        let (a2, b2) = (r.sqr(a), r.sqr(b));
+        for i in 1..1usize << (k - 1) {
+            ta[i] = r.mul(&ta[i - 1], &a2);
+            tb[i] = r.mul(&tb[i - 1], &b2);
+        }
+    }
+    let bit = |i: u64| (e[(i / 64) as usize] >> (i % 64)) & 1 == 1;
+    let mut i = bits as i64 - 1;
+    let mut x: Option<(R::V, R::V)> = None;
+    while i >= 0 {
+        if !bit(i as u64) {
+            if let Some((u, v)) = x.as_mut() {
+                *u = r.sqr(u);
+                *v = r.sqr(v);
+            }
+            i -= 1;
+            continue;
+        }
+        let mut lo = (i - i64::from(k) + 1).max(0);
+        while !bit(lo as u64) {
+            lo += 1;
+        }
+        let mut w = 0usize;
+        for j in (lo..=i).rev() {
+            w = (w << 1) | usize::from(bit(j as u64));
+        }
+        x = Some(match x {
+            None => (ta[w >> 1], tb[w >> 1]),
+            Some((mut u, mut v)) => {
+                for _ in 0..i - lo + 1 {
+                    u = r.sqr(&u);
+                    v = r.sqr(&v);
+                }
+                (r.mul(&u, &ta[w >> 1]), r.mul(&v, &tb[w >> 1]))
+            }
+        });
+        i = lo - 1;
+    }
+    x.unwrap_or_else(|| (r.one(), r.one()))
 }
 
 /// The window size for an exponent of `bits` bits, GMP's table, as the powers take it.
@@ -183,6 +323,18 @@ impl Ring for Odd {
     }
 
     #[inline]
+    fn pow_pair(&self, a: &u64, b: &u64, e: &[u64]) -> (u64, u64) {
+        match e {
+            [] => (Odd::unit(self), Odd::unit(self)),
+            [e] => {
+                let [x, y] = Odd::powers(self, [*a, *b], [*e, *e]);
+                (x, y)
+            }
+            _ => (self.pow(a, e), self.pow(b, e)),
+        }
+    }
+
+    #[inline]
     fn pow(&self, a: &u64, e: &[u64]) -> u64 {
         match e {
             [] => Odd::unit(self),
@@ -200,6 +352,11 @@ impl Ring for Odd {
             }
         }
     }
+
+    #[inline(always)]
+    fn walk_key(&self, a: &u64) -> u64 {
+        self.key(a)
+    }
 }
 
 /// The residue `x B^N mod m` of the limbs `x`, any number of them, for the odd `N`-limb `m` whose
@@ -211,6 +368,15 @@ fn residue_of<const N: usize>(x: &[u64], m: &[u64; N]) -> [u64; N] {
         return r;
     }
     let need = rem_itch(nx + N, N);
+    // On the stack for the residues of numbers of a few limbs, the common case.
+    const STACK: usize = 32;
+    if need <= 2 * STACK {
+        let mut buf = [0u128; STACK];
+        let s = Scratch::new(buf.as_mut_ptr().cast(), 2 * STACK);
+        // SAFETY: as below, the scratch on the stack.
+        unsafe { rem(r.as_mut_ptr(), x.as_ptr(), nx, N, m.as_ptr(), N, s) };
+        return r;
+    }
     let mut buf = vec![0u128; need.div_ceil(2) + 1];
     let s = Scratch::new(buf.as_mut_ptr().cast(), 2 * buf.len());
     // SAFETY: the scratch holds the remainder's plan and starts on 16 bytes; `m` has `N` limbs,
@@ -328,9 +494,24 @@ impl Ring for Two {
         trimmed(&self.ring.plain(*a))
     }
 
+    #[inline]
+    fn pow(&self, a: &[u64; 2], e: &[u64]) -> [u64; 2] {
+        pow_window(self, a, e)
+    }
+
+    #[inline]
+    fn pow_pair(&self, a: &[u64; 2], b: &[u64; 2], e: &[u64]) -> ([u64; 2], [u64; 2]) {
+        pow_window_pair(self, a, b, e)
+    }
+
     #[inline(always)]
     fn key(&self, a: &[u64; 2]) -> u64 {
         a[0] ^ a[1].rotate_left(29)
+    }
+
+    #[inline(always)]
+    fn walk_key(&self, a: &[u64; 2]) -> u64 {
+        self.key(a)
     }
 }
 
@@ -393,9 +574,24 @@ impl<const N: usize> Ring for Many<N> {
         trimmed(&self.ring.plain(*a))
     }
 
+    #[inline]
+    fn pow(&self, a: &[u64; N], e: &[u64]) -> [u64; N] {
+        pow_window(self, a, e)
+    }
+
+    #[inline]
+    fn pow_pair(&self, a: &[u64; N], b: &[u64; N], e: &[u64]) -> ([u64; N], [u64; N]) {
+        pow_window_pair(self, a, b, e)
+    }
+
     #[inline(always)]
     fn key(&self, a: &[u64; N]) -> u64 {
         a[0] ^ a[1].rotate_left(29)
+    }
+
+    #[inline(always)]
+    fn walk_key(&self, a: &[u64; N]) -> u64 {
+        self.key(a)
     }
 }
 
@@ -547,6 +743,11 @@ impl Ring for Long {
         let x = from_limbs(&self.plain(a), ByteOrder::LittleEndian);
         let e = from_limbs(e, ByteOrder::LittleEndian);
         self.residue(&limbs_of(&x.pow_mod(&e, &self.modulus)))
+    }
+
+    #[inline(always)]
+    fn walk_key(&self, a: &Vec<u64>) -> u64 {
+        self.key(a)
     }
 }
 
@@ -721,6 +922,26 @@ impl Ring for Plain {
     fn is_one(&self, a: &Number) -> bool {
         a.value == [1] && self.modulus != 1u8
     }
+
+    /// Every limb of the residue mixed, each through splitmix64's finaliser, not the low one
+    /// alone: modulo `2^k n` the residues of odd order are 1 modulo `2^k`, so that their low `k`
+    /// bits are fixed and from `k = 64` their low limbs are all 1, and the walks of rho and the
+    /// table of baby steps keyed by them saw a few elements or one (rho never met a distinguished
+    /// point from `k = 33` on, and the table was one chain).
+    fn walk_key(&self, a: &Number) -> u64 {
+        // The residues are little-endian in the shortest form; the top zeros are skipped anyway.
+        let n = a.value.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+        let mut h = 0u64;
+        for c in a.value[..n].chunks(8) {
+            let mut b = [0u8; 8];
+            b[..c.len()].copy_from_slice(c);
+            let z = h ^ u64::from_le_bytes(b);
+            let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            h = z ^ (z >> 31);
+        }
+        h
+    }
 }
 
 // Limbs of numbers
@@ -732,19 +953,47 @@ pub(in super::super) fn magnitude_128(x: &Number) -> Option<u128> {
     if n > 16 {
         return None;
     }
-    let bytes = if x.byte_order == ByteOrder::BigEndian {
-        &x.value[x.value.len() - n..]
-    } else {
-        &x.value[..n]
+    let v = &x.value;
+    let eight = |i: usize| {
+        let mut b = [0; 8];
+        b.copy_from_slice(&v[i..i + 8]);
+        b
     };
-    let mut b = [0u8; 16];
-    if x.byte_order == ByteOrder::BigEndian {
-        b[16 - n..].copy_from_slice(bytes);
-        Some(u128::from_be_bytes(b))
+    // From 8 bytes on, the low eight and the eight that end at the top, shifted down to the bytes
+    // above the low ones; below, one byte at a time (a copy of a varying length would be a call).
+    let shift = 8 * (16 - n as u32);
+    let (lo, hi) = if x.byte_order == ByteOrder::BigEndian {
+        let end = v.len();
+        if n >= 8 {
+            let lo = u64::from_be_bytes(eight(end - 8));
+            let hi = if n > 8 {
+                u64::from_be_bytes(eight(end - n)) >> shift
+            } else {
+                0
+            };
+            (lo, hi)
+        } else {
+            let lo = v[end - n..]
+                .iter()
+                .fold(0u64, |t, &b| (t << 8) | u64::from(b));
+            (lo, 0)
+        }
+    } else if n >= 8 {
+        let lo = u64::from_le_bytes(eight(0));
+        let hi = if n > 8 {
+            u64::from_le_bytes(eight(n - 8)) >> shift
+        } else {
+            0
+        };
+        (lo, hi)
     } else {
-        b[..n].copy_from_slice(bytes);
-        Some(u128::from_le_bytes(b))
-    }
+        let lo = v[..n]
+            .iter()
+            .rev()
+            .fold(0u64, |t, &b| (t << 8) | u64::from(b));
+        (lo, 0)
+    };
+    Some(u128::from(lo) | (u128::from(hi) << 64))
 }
 
 /// The magnitude of `x` when it fits in a word.
@@ -780,6 +1029,56 @@ pub(in super::super) fn limbs_of(x: &Number) -> Vec<u64> {
     l
 }
 
+/// Reads the magnitude of `x` into `out`, the least significant limb first, and returns the number
+/// of its limbs, without zeros at the top: `x.significant().div_ceil(8)`, which `out` must hold,
+/// and which are all written.
+#[inline]
+pub(in super::super) fn read_limbs(x: &Number, out: &mut [core::mem::MaybeUninit<u64>]) -> usize {
+    let n = x.significant();
+    let (full, rem) = (n / 8, n % 8);
+    let v = &x.value;
+    // The bytes above the whole limbs: from 8 bytes on, the eight that end at the top, shifted down
+    // to them (a copy of a varying length would be a call); below, one at a time.
+    let shift = 8 * (8 - rem as u32);
+    if x.byte_order == ByteOrder::LittleEndian {
+        let limb = |i: usize| {
+            let mut b = [0; 8];
+            b.copy_from_slice(&v[i..i + 8]);
+            u64::from_le_bytes(b)
+        };
+        for (i, o) in out[..full].iter_mut().enumerate() {
+            o.write(limb(8 * i));
+        }
+        if rem > 0 {
+            let top = if n >= 8 {
+                limb(n - 8) >> shift
+            } else {
+                v[..n].iter().rev().fold(0, |t, &b| (t << 8) | u64::from(b))
+            };
+            out[full].write(top);
+        }
+    } else {
+        let end = v.len();
+        let limb = |i: usize| {
+            let mut b = [0; 8];
+            b.copy_from_slice(&v[i - 8..i]);
+            u64::from_be_bytes(b)
+        };
+        for (i, o) in out[..full].iter_mut().enumerate() {
+            o.write(limb(end - 8 * i));
+        }
+        if rem > 0 {
+            let top = if n >= 8 {
+                limb(end - n + 8) >> shift
+            } else {
+                v[end - n..].iter().fold(0, |t, &b| (t << 8) | u64::from(b))
+            };
+            out[full].write(top);
+        }
+    }
+    n.div_ceil(8)
+}
+
 /// The non-negative number of the limbs `x`, the least significant first, in the byte order
 /// `order`, in the shortest form.
 pub(in super::super) fn from_limbs(x: &[u64], order: ByteOrder) -> Number {
@@ -790,13 +1089,53 @@ pub(in super::super) fn from_limbs(x: &[u64], order: ByteOrder) -> Number {
     let top = x[n - 1];
     let top_bytes = 8 - top.leading_zeros() as usize / 8;
     let len = 8 * (n - 1) + top_bytes;
-    let mut v = Vec::with_capacity(len);
-    for &l in &x[..n - 1] {
-        v.extend_from_slice(&l.to_le_bytes());
-    }
-    v.extend_from_slice(&top.to_le_bytes()[..top_bytes]);
-    if order == ByteOrder::BigEndian {
-        v.reverse();
+    // Each limb to its eight bytes, in a vector of exactly the length, not zeroed first; the top
+    // limb's bytes as the eight that end at the top, over the limb below (one at a time for a
+    // number of one limb), as a copy of a varying length would be a call.
+    let mut v: Vec<u8> = Vec::with_capacity(len);
+    let dst = v.as_mut_ptr();
+    let k = 8 * top_bytes as u32;
+    // The eight bytes that end at the top: the top limb's above the limb below's highest.
+    let last = if n >= 2 && top_bytes < 8 {
+        (top << (64 - k)) | (x[n - 2] >> k)
+    } else {
+        top
+    };
+    // SAFETY: the vector holds `len` bytes, and each of them is written before the length is set:
+    // the `n - 1` whole limbs at `8 i` (big-endian at `len - 8 i - 8`), then the top limb's bytes,
+    // in the eight at `len - 8` (at 0), which agree with those below where they overlap, or one at
+    // a time when there is no limb below.
+    unsafe {
+        if order == ByteOrder::LittleEndian {
+            for (i, &l) in x[..n - 1].iter().enumerate() {
+                dst.add(8 * i)
+                    .cast::<[u8; 8]>()
+                    .write_unaligned(l.to_le_bytes());
+            }
+            if n >= 2 || top_bytes == 8 {
+                dst.add(len - 8)
+                    .cast::<[u8; 8]>()
+                    .write_unaligned(last.to_le_bytes());
+            } else {
+                for j in 0..top_bytes {
+                    *dst.add(j) = (top >> (8 * j)) as u8;
+                }
+            }
+        } else {
+            for (i, &l) in x[..n - 1].iter().enumerate() {
+                dst.add(len - 8 * i - 8)
+                    .cast::<[u8; 8]>()
+                    .write_unaligned(l.to_be_bytes());
+            }
+            if n >= 2 || top_bytes == 8 {
+                dst.cast::<[u8; 8]>().write_unaligned(last.to_be_bytes());
+            } else {
+                for j in 0..top_bytes {
+                    *dst.add(top_bytes - 1 - j) = (top >> (8 * j)) as u8;
+                }
+            }
+        }
+        v.set_len(len);
     }
     Number {
         value: v,

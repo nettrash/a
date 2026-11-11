@@ -1,7 +1,81 @@
 //! The tables the counting methods share: the primes up to a limit, `π(n)` by a bit for each
-//! number prime to 30, and the least prime factors and Möbius values of the numbers prime to 2310.
+//! number prime to 30, and the least prime factors and Möbius values of the numbers prime to 2310;
+//! below [`SMALL`], the primes and `π` from tables computed at compile time.
 
 use super::super::segments::each_prime;
+
+/// The numbers below which the primes and `π` come from [`SMALL_PRIMES`] and [`SMALL_PI`].
+pub(in crate::math::numbers::sieve) const SMALL: u64 = 1 << 16;
+
+/// The number of primes below [`SMALL`].
+const SMALL_COUNT: usize = 6542;
+
+/// Whether each number below [`SMALL`] is composite, by a sieve of Eratosthenes at compile time.
+const fn small_composite() -> [bool; SMALL as usize] {
+    let mut composite = [false; SMALL as usize];
+    composite[0] = true;
+    composite[1] = true;
+    let mut i = 2;
+    while i * i < SMALL as usize {
+        if !composite[i] {
+            let mut j = i * i;
+            while j < SMALL as usize {
+                composite[j] = true;
+                j += i;
+            }
+        }
+        i += 1;
+    }
+    composite
+}
+
+/// The primes below [`SMALL`] as [`primes_to`] gives them: a 0 before them, so that
+/// `SMALL_PRIMES[i]` is the `i`-th prime, and the first prime above, 65,537, after.
+pub(in crate::math::numbers) static SMALL_PRIMES: [u32; SMALL_COUNT + 2] = {
+    let composite = small_composite();
+    let mut t = [0u32; SMALL_COUNT + 2];
+    let (mut n, mut i) = (2, 1);
+    while n < SMALL as usize {
+        if !composite[n] {
+            t[i] = n as u32;
+            i += 1;
+        }
+        n += 1;
+    }
+    assert!(i == SMALL_COUNT + 1);
+    t[i] = 65_537;
+    t
+};
+
+/// `π` below [`SMALL`] in the blocks of [`PiTable`]: for each 240 numbers, the primes before them
+/// (2, 3 and 5 included) and a bit for each of their numbers prime to 30, set for the primes.
+pub(super) static SMALL_PI: [(u64, u64); (SMALL / 240 + 1) as usize] = {
+    let composite = small_composite();
+    let mut t = [(0u64, 0u64); (SMALL / 240 + 1) as usize];
+    let mut n = 7;
+    while n < SMALL as usize {
+        if !composite[n] {
+            t[n / 240].1 |= 1 << BIT_OF[n % 240];
+        }
+        n += 1;
+    }
+    let mut count = 3;
+    let mut k = 0;
+    while k < t.len() {
+        t[k].0 = count;
+        count += t[k].1.count_ones() as u64;
+        k += 1;
+    }
+    t
+};
+
+/// The primes up to `limit`, below [`SMALL`], and the one after, as [`primes_to`] gives them, from
+/// [`SMALL_PRIMES`].
+pub(super) fn small_primes_to(limit: u64) -> &'static [u32] {
+    debug_assert!(limit < SMALL);
+    let n = PiTable::small().pi(limit) as usize;
+    &SMALL_PRIMES[..n + 2]
+}
 
 /// The primes up to `limit` and the one after, with a 0 before them: `p[1] = 2`, `p[2] = 3`, and
 /// so on, so that `p[i]` is the `i`-th prime; from the sieve's batches.
@@ -72,15 +146,32 @@ pub(super) static BIT_OF: [u8; 240] = {
 };
 
 /// `π(n)` for `n` up to a limit: for each block of 240 numbers, the primes before it and a bit for
-/// each of its numbers prime to 30, set for the primes.
-pub(super) struct PiTable {
-    blocks: Vec<(u64, u64)>,
+/// each of its numbers prime to 30, set for the primes; the blocks are [`SMALL_PI`] or those of
+/// [`PiTable::blocks`].
+#[derive(Clone, Copy)]
+pub(super) struct PiTable<'a> {
+    blocks: &'a [(u64, u64)],
 }
 
-impl PiTable {
-    /// The table up to `limit` at least, from the primes `p` of [`primes_to`], which go beyond.
+impl PiTable<'static> {
+    /// The table below [`SMALL`].
+    #[inline(always)]
+    pub(super) fn small() -> Self {
+        PiTable { blocks: &SMALL_PI }
+    }
+}
+
+impl<'a> PiTable<'a> {
+    /// The table of the blocks `blocks`, from [`PiTable::blocks`].
+    #[inline(always)]
+    pub(super) fn of(blocks: &'a [(u64, u64)]) -> Self {
+        PiTable { blocks }
+    }
+
+    /// The blocks of the table up to `limit` at least, from the primes `p` of [`primes_to`], which
+    /// go beyond.
     #[inline(never)]
-    pub(super) fn new(limit: u64, p: &[u32]) -> Self {
+    pub(super) fn blocks(limit: u64, p: &[u32]) -> Vec<(u64, u64)> {
         let n = (limit / 240 + 1) as usize;
         let mut blocks = vec![(0u64, 0u64); n];
         for &q in &p[4..] {
@@ -97,7 +188,13 @@ impl PiTable {
             b.0 = count;
             count += u64::from(b.1.count_ones());
         }
-        PiTable { blocks }
+        blocks
+    }
+
+    /// The table's blocks of 240 numbers.
+    #[inline(always)]
+    pub(super) fn blocks_len(&self) -> usize {
+        self.blocks.len()
     }
 
     /// `π(x)`, for `x` up to the table's limit.
@@ -107,6 +204,39 @@ impl PiTable {
             return [0, 0, 1, 2, 2, 3][x as usize];
         }
         self.pi_from_6(x)
+    }
+
+    /// `Σ π(n / q)` for the primes `q` of `qs`, whose quotients are from 6 up to the table's limit:
+    /// two at a time, the divisor known to be nonzero, the block's index kept to the last block (so
+    /// that the look-up needs no check), the two words' bits counted together.
+    #[inline(always)]
+    pub(super) fn sum_quotients(&self, n: u64, qs: &[u32]) -> u64 {
+        let last = self.blocks.len() - 1;
+        let block = |v: u64| {
+            // SAFETY: the index is at most the last block's.
+            unsafe { *self.blocks.get_unchecked(((v / 240) as usize).min(last)) }
+        };
+        let quotient = |q: u32| {
+            n / core::num::NonZeroU64::from(core::num::NonZeroU32::new(q).expect("a prime"))
+        };
+        let (pairs, rest) = qs.as_chunks::<2>();
+        let (mut counts, mut bits) = (0u64, 0u64);
+        for &[q0, q1] in pairs {
+            let (v0, v1) = (quotient(q0), quotient(q1));
+            let ((c0, b0), (c1, b1)) = (block(v0), block(v1));
+            let w0 = b0 & UP_TO[(v0 % 240) as usize];
+            let w1 = b1 & UP_TO[(v1 % 240) as usize];
+            counts = counts.wrapping_add(c0).wrapping_add(c1);
+            // One count of the two words, in a vector.
+            bits += u64::from((u128::from(w0) | u128::from(w1) << 64).count_ones());
+        }
+        for &q in rest {
+            let v = quotient(q);
+            let (c, b) = block(v);
+            counts = counts.wrapping_add(c);
+            bits += u64::from((b & UP_TO[(v % 240) as usize]).count_ones());
+        }
+        counts.wrapping_add(bits)
     }
 
     /// `π(x)`, for `x` from 6 up to the table's limit.

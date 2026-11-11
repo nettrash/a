@@ -16,12 +16,18 @@
 //!   one square and one product a bit instead ([`strong_lucas`]): measured on an Apple M4 Max, primes
 //!   of 256 bits took 11 % less time with it, of 512 bits 13 % and of 1024 bits 9 %.
 //!
-//! The residues are in registers up to seven limbs ([`Field`]) and in limbs in memory beyond
-//! ([`LimbField`]), always fully reduced, below `n`, so that equal residues are equal limbs.
+//! The residues are in registers up to seven limbs ([`Field`]), and eight where the target has the
+//! kernels of Montgomery's products in registers ([`REGISTER_KERNELS`]: eight limbs reach
+//! [`bpsw_limbs`], which takes the registers' path for them there), and in limbs in memory beyond
+//! ([`LimbField`]), always fully reduced, below `n`, so that equal residues are equal limbs. Their
+//! products and squares are the [powers](super::super::pow)' Montgomery kernels: in registers, and
+//! from eight to sixteen limbs with the operands in memory, on aarch64.
 
 use super::super::div::limbs::{div_2by1, invert_limb};
 use super::super::mul::limbs::{add_n, cmp_n, sub_n};
-use super::super::pow::montgomery::{Mont1, Mont2, MontN, Montgomery, even, rem, rem_itch};
+use super::super::pow::montgomery::{
+    Mont1, Mont2, MontN, Montgomery, REGISTER_KERNELS, even, rem, rem_itch,
+};
 use super::super::pow::window::{Registers, Ring};
 use super::super::scratch::{Scratch, need};
 use core::cmp::Ordering;
@@ -175,9 +181,9 @@ fn half_mod<const N: usize>(a: [u64; N], m: &[u64; N]) -> [u64; N] {
 fn residue_of<const N: usize>(c: u64, m: &[u64; N]) -> [u64; N] {
     let mut r = [0; N];
     let mut buf = [0u64; 64];
-    // The dividend `c B^N` of `N + 1 <= 8` limbs by a divisor of `N <= 7` takes
-    // `rem_itch(N + 1, N) <= 8 + 2 * 10` limbs of scratch, which the buffer holds, and which `rem`
-    // checks.
+    // The dividend `c B^N` of `N + 1 <= 9` limbs by a divisor of `N <= 8` (eight from
+    // `bpsw_limbs`) takes `rem_itch(N + 1, N) <= 8 + 2 * 10` limbs of scratch, which the buffer
+    // holds, and which `rem` checks.
     let s = Scratch::new(buf.as_mut_ptr(), 8 + 2 * 10);
     // SAFETY: the scratch is that of the remainder.
     unsafe { rem(r.as_mut_ptr(), &c, 1, N, m.as_ptr(), N, s) };
@@ -767,6 +773,18 @@ pub(super) unsafe fn bpsw_limbs(
     select: impl FnOnce() -> Option<i64>,
 ) -> bool {
     let nn = f.nn();
+    if REGISTER_KERNELS && nn == 8 {
+        // Eight limbs in registers where the target has the kernels of Montgomery's products:
+        // measured on an Apple M4 Max, primes of 512 bits took 212,000 cycles so against 414,000 in
+        // limbs. Without the kernels (`REGISTER_KERNELS`) the Rust rows took 1.03 to 1.04 times as
+        // long as the limbs (primes, composites and random odd numbers of 512 bits, the next and the
+        // previous prime from random ones), so eight limbs stay in memory there.
+        let mut m = [0; 8];
+        // SAFETY: `bits.n` holds the eight limbs of `n`.
+        unsafe { ptr::copy_nonoverlapping(bits.n, m.as_mut_ptr(), 8) };
+        // SAFETY: forwarded.
+        return unsafe { bpsw(&MontN::<8>::new(m), bits, select) };
+    }
     let stride = even(nn);
     need!(s, 10 * stride);
     // SAFETY: every residue lies in the working memory at `s`, apart from the others.

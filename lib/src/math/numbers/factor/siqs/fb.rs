@@ -11,7 +11,7 @@
 
 use super::super::super::factorial::primes::Sieve;
 use super::super::super::prime::jacobi;
-use super::arith::{fastmod_constant, inverse_64, rem_1, sqrt_mod};
+use super::arith::{inverse_64, mul_mod, pow_mod, rem_1, sqrt_mod};
 
 /// The multipliers tried: the square-free numbers below 100, as msieve and yafu take.
 const MULTIPLIERS: [u32; 61] = [
@@ -59,6 +59,12 @@ pub(super) fn multiplier(n: &[u64]) -> u32 {
     // Primes to about eight times the bits: the score is a sum over them, whose terms fall off
     // as 1/p, and for small numbers the choice matters less than the time it takes.
     let bound = (8 * u64::from(super::sieve::bits_of(n))).clamp(300, SCORE_PRIMES_TO);
+    // The squares modulo each odd prime of the multipliers, a bit each: by reciprocity
+    // (q/p) = (p/q), less when p and q are both 3 modulo 4, and (p/q) is the bit of p mod q.
+    let squares: [u128; SMALL.len()] = core::array::from_fn(|b| {
+        let q = u128::from(SMALL[b]);
+        (1..q).fold(0, |m, x| m | 1 << (x * x % q))
+    });
     let sieve = Sieve::new(bound);
     sieve.each(3, bound, |p| {
         let p = p as u32;
@@ -66,31 +72,28 @@ pub(super) fn multiplier(n: &[u64]) -> u32 {
         let np = jacobi(u64::from(rem_1(n, p)), u64::from(p));
         let (mut minus, mut zero) = (0u32, 0u32);
         for (b, &q) in SMALL.iter().enumerate() {
-            let t = if q == 2 {
+            let negative = if q == 2 {
                 // (2/p) = 1 for p ≡ ±1 (mod 8).
-                if matches!(p & 7, 1 | 7) { 1 } else { -1 }
+                !matches!(p & 7, 1 | 7)
+            } else if q == p {
+                zero |= 1 << b;
+                false
             } else {
-                jacobi(u64::from(q % p), u64::from(p))
+                (squares[b] >> (p % q) & 1 == 0) ^ (p & q & 3 == 3)
             };
-            match t {
-                -1 => minus |= 1 << b,
-                0 => zero |= 1 << b,
-                _ => {}
-            }
+            minus |= u32::from(negative) << b;
         }
+        // (kN/p) = 1 when the primes of k with (q/p) = −1 are as many, modulo 2, as (N/p) asks
+        // (none when p divides N).
+        let odd = match np {
+            1 => 0,
+            -1 => 1,
+            _ => 2,
+        };
         for (s, &m) in scores.iter_mut().zip(masks.iter()) {
-            if m & zero != 0 {
-                *s += contribution;
-            } else if np
-                * if (m & minus).count_ones() & 1 == 1 {
-                    -1
-                } else {
-                    1
-                }
-                == 1
-            {
-                *s += 2.0 * contribution;
-            }
+            let one = u32::from(m & zero != 0);
+            let two = u32::from((m & minus).count_ones() & 1 == odd) & (1 - one);
+            *s += contribution * f64::from(one + 2 * two);
         }
     });
     let mut best = 0;
@@ -110,8 +113,6 @@ pub(super) struct FactorBase {
     pub(super) sqrt: Vec<u32>,
     /// The inverse of each odd prime modulo `2^64` (1 for 2).
     pub(super) inv64: Vec<u64>,
-    /// Lemire's constant for remainders by each prime.
-    pub(super) fastmod: Vec<u64>,
     /// The index after the last prime that divides the multiplier (1 when it is 1 or 2).
     pub(super) k_end: usize,
 }
@@ -124,9 +125,9 @@ pub(super) enum Built {
     Factor(u32),
 }
 
-/// The factor base of `size` primes for `kN` (limbs `kn`) and the odd `n` (limbs `n`), or a prime of
-/// the base that divides `n`.
-pub(super) fn build(n: &[u64], kn: &[u64], size: usize) -> Built {
+/// The factor base of `size` primes for `kN`, the multiplier `k` and the odd `n` (limbs), or a prime
+/// of the base that divides `n`.
+pub(super) fn build(n: &[u64], k: u32, size: usize) -> Built {
     let size = size.max(8);
     // The primes modulo which kN is a square are about half of all: sieve to about the size of
     // the `2·size`-th prime, more if it is not enough.
@@ -139,13 +140,11 @@ pub(super) fn build(n: &[u64], kn: &[u64], size: usize) -> Built {
             prime: Vec::with_capacity(size),
             sqrt: Vec::with_capacity(size),
             inv64: Vec::with_capacity(size),
-            fastmod: Vec::with_capacity(size),
             k_end: 1,
         };
         fb.prime.push(2);
-        fb.sqrt.push((kn[0] & 1) as u32);
+        fb.sqrt.push(k & 1);
         fb.inv64.push(1);
-        fb.fastmod.push(fastmod_constant(2));
         let mut found = None;
         let sieve = Sieve::new(limit);
         sieve.each(3, limit, |p| {
@@ -153,14 +152,22 @@ pub(super) fn build(n: &[u64], kn: &[u64], size: usize) -> Built {
                 return;
             }
             let p = p as u32;
-            if rem_1(n, p) == 0 {
+            let rn = rem_1(n, p);
+            if rn == 0 {
                 found = Some(p);
                 return;
             }
-            let r = rem_1(kn, p);
+            let r = mul_mod(k % p, rn, p);
             let t = if r == 0 {
                 fb.k_end = fb.prime.len() + 1;
                 0
+            } else if p & 3 == 3 {
+                // The root, if any, is r^((p + 1)/4), and its square tells whether it is one.
+                let t = pow_mod(r, (p + 1) / 4, p);
+                if mul_mod(t, t, p) != r {
+                    return;
+                }
+                t
             } else if jacobi(u64::from(r), u64::from(p)) == 1 {
                 sqrt_mod(r, p)
             } else {
@@ -169,7 +176,6 @@ pub(super) fn build(n: &[u64], kn: &[u64], size: usize) -> Built {
             fb.prime.push(p);
             fb.sqrt.push(t);
             fb.inv64.push(inverse_64(u64::from(p)));
-            fb.fastmod.push(fastmod_constant(p));
         });
         if let Some(p) = found {
             return Built::Factor(p);

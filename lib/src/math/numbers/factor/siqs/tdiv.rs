@@ -1,12 +1,13 @@
 //! The trial division of the candidates: the value `g(x)` of the polynomial at a byte that reached
 //! the threshold, divided by the primes of the factor base that divide it, found without dividing:
-//! the tiny primes and those of `A` by an exact-division test, the medium primes by comparing
-//! `x mod p` with their roots, and the large primes by looking up the candidate's position in its
-//! block's buckets. What is left is 1 (a full relation), a prime below the large-prime bound (a
+//! those of `A` by an exact-division test, the others below [`BLOCK`] by comparing `x mod p` with
+//! their roots, eight at a time in vector registers, and the large primes by looking up the
+//! candidate's position in its block's buckets. What is left is 1 (a full relation), a prime below the large-prime bound (a
 //! partial relation), or, with two large primes, a composite below their bound that splits into two
 //! such primes.
 
-use super::arith::{div_exact_1, divides, fastmod, rho_64, sprp2};
+use super::arith::{div_exact_1, divides, rho_64, sprp2};
+use super::kernels::root_hits;
 use super::relations::Relation;
 use super::sieve::{BLOCK, LANES, Siqs, bucket};
 use super::wide::MAX_LIMBS;
@@ -71,56 +72,22 @@ impl Siqs<'_> {
                 first = false;
             }
         };
-        // The primes up to 256 by the test of exact division.
-        let split = self.root_test;
-        for j in 1..split {
-            take(j, &mut v, &mut len);
-        }
+        // The primes of A by the test of exact division, the others below BLOCK by their roots,
+        // sixteen at a time: `off mod p` from `⌊off·⌊2^16/p⌋/2^16⌋`, which is the quotient or one
+        // less, so that the remainder modulo 2^16 is that of a root or of a root plus p when p
+        // divides (and rarely otherwise: the division tells).
         for &j in &poly.a_idx {
             take(j as usize, &mut v, &mut len);
         }
-        // The medium primes, sixteen at a time: `off mod p` from `⌊off·⌊2^16/p⌋/2^16⌋`, which is the
-        // quotient or one less, so that the remainder modulo 2^16 is that of a root or of a root
-        // plus p when p divides (and rarely otherwise: the division tells).
-        let (lo, hi) = (split, self.med_end);
-        let o = off as u16;
-        let n = hi - lo;
-        let (ps, ms) = (&self.p16[lo..hi], &self.m16[lo..hi]);
-        let (rb1, rb2) = (&self.rb1[lo..hi], &self.rb2[lo..hi]);
-        let rem = |o: u16, p: u16, m: u16| {
-            o.wrapping_sub((((u32::from(o) * u32::from(m)) >> 16) as u16).wrapping_mul(p))
-        };
-        for c in 0..n / 16 {
-            let range = 16 * c..16 * c + 16;
-            let p: &[u16; 16] = ps[range.clone()].try_into().expect("16");
-            let m: &[u16; 16] = ms[range.clone()].try_into().expect("16");
-            let r1: &[u16; 16] = rb1[range.clone()].try_into().expect("16");
-            let r2: &[u16; 16] = rb2[range].try_into().expect("16");
-            let mut hit = 0u16;
-            for k in 0..16 {
-                let x = rem(o, p[k], m[k]);
-                let (d1, d2) = (x.wrapping_sub(r1[k]), x.wrapping_sub(r2[k]));
-                hit |= u16::from(d1 == 0)
-                    | u16::from(d1 == p[k])
-                    | u16::from(d2 == 0)
-                    | u16::from(d2 == p[k]);
-            }
-            if hit != 0 {
-                for k in 0..16 {
-                    let x = rem(o, p[k], m[k]);
-                    let (d1, d2) = (x.wrapping_sub(r1[k]), x.wrapping_sub(r2[k]));
-                    if d1 == 0 || d1 == p[k] || d2 == 0 || d2 == p[k] {
-                        take(lo + 16 * c + k, &mut v, &mut len);
-                    }
-                }
-            }
-        }
-        for j in lo + 16 * (n / 16)..hi {
-            let r = fastmod(i, fb.fastmod[j], fb.prime[j]);
-            if r == poly.root1[j] || r == poly.root2[j] {
-                take(j, &mut v, &mut len);
-            }
-        }
+        let (lo, hi) = (1, self.med_end);
+        root_hits(
+            off as u16,
+            &self.p16[lo..hi],
+            &self.m16[lo..hi],
+            &self.rb1[lo..hi],
+            &self.rb2[lo..hi],
+            |k| take(lo + k, &mut v, &mut len),
+        );
         // What the large primes added to the byte tells the size of their product: a cofactor
         // that would stay too large spares the search of the buckets.
         let large = i64::from(byte.wrapping_sub(self.init)) - i64::from(found.get());

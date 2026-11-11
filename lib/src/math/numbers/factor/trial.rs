@@ -1,13 +1,15 @@
 //! Trial division: the primes up to a bound that divide a number, with their exponents.
 //!
 //! The odd primes below 8192 come from the primality test's tables: a long number is reduced
-//! modulo products of consecutive primes that fit in a limb, four products a pass in independent
-//! chains, and each prime of a product is tested on the remainder by one multiplication, as
-//! `x p^(-1) mod 2^64 <= (2^64 - 1) / p` exactly when `p` divides `x`. A prime found is divided
-//! out by Hensel's exact division. Once the number fits in a limb, each prime is tested on it
-//! directly, the quotient by `p` of a multiple of `p` being `x p^(-1) mod 2^64`, until the prime's
-//! square passes the number, which is then 1 or prime. Primes beyond the tables come from a
-//! segmented sieve, in products that fit in a limb for a long number.
+//! modulo products of consecutive primes that fit in a limb, eight products a pass in independent
+//! chains, and the primes of a product are tested on its remainder together, each by one
+//! multiplication, as `x p^(-1) mod 2^64 <= (2^64 - 1) / p` exactly when `p` divides `x`; only a
+//! product with a prime that divides is gone over a prime at a time. A prime found is divided out
+//! by Hensel's exact division. Once the number fits in a limb, the primes are tested on it
+//! directly, eight at a time while they are within the bound and their squares below it, the
+//! quotient by `p` of a multiple of `p` being `x p^(-1) mod 2^64`, until the prime's square passes
+//! the number, which is then 1 or prime. Primes beyond the tables come from a segmented sieve, in
+//! products that fit in a limb for a long number.
 
 use super::super::div::limbs::{div_2by1, invert_limb};
 use super::super::prime::tables::{COUNT, GROUP, GROUPS, Group, PRIMES};
@@ -36,25 +38,23 @@ pub(super) fn trial_limbs(mut x: Vec<u64>, bound: u64) -> (Vec<(u64, u32)>, Vec<
         let rest = trial_u64(x[0], 0, bound, &mut out);
         return (out, vec![rest]);
     }
-    // Groups of the tables, four at a time, while the number is longer than a limb.
+    // Groups of the tables, eight at a time in independent chains, while the number is longer than
+    // a limb; a group's primes are tested on its remainder together, and gone over one at a time
+    // only when one of them divides it.
     let mut g = 0;
     while g < GROUPS && x.len() > 1 {
         if PRIMES[GROUP[g].first as usize].p > bound {
             return (out, x);
         }
-        let take = (GROUPS - g).min(4);
-        let rems: [u64; 4] = if take == 4 {
-            rem_by_4(&x, &GROUP[g..g + 4])
-        } else {
-            let mut r = [0; 4];
-            for (k, grp) in GROUP[g..g + take].iter().enumerate() {
-                r[k] = rem_by(&x, grp.d, grp.v);
-            }
-            r
-        };
+        let take = (GROUPS - g).min(8);
+        let rems = rem_by_8(&x, &GROUP[g..g + take]);
         for k in 0..take {
             let grp = GROUP[g + k];
-            for p in &PRIMES[grp.first as usize..grp.end as usize] {
+            let primes = &PRIMES[grp.first as usize..grp.end as usize];
+            if !primes.iter().fold(false, |hit, p| hit | p.divides(rems[k])) {
+                continue;
+            }
+            for p in primes {
                 if p.p > bound {
                     return (out, x);
                 }
@@ -261,7 +261,34 @@ fn rem_by_n(x: &[u64], d: &[u64], v: &[u64]) -> [u64; 4] {
 /// pushes the primes up to `bound` that divide `x` and returns what is left, which is 1 when it is
 /// a prime up to `bound` (pushed too).
 pub(super) fn trial_u64(mut x: u64, start: usize, bound: u64, out: &mut Vec<(u64, u32)>) -> u64 {
-    for p in &PRIMES[start..] {
+    // Eight primes at a time while all are within the bound and their squares below `x`: their
+    // tests are independent, and only a block that holds a divisor is gone over again.
+    let mut i = start;
+    while i + 8 <= COUNT {
+        let last = PRIMES[i + 7].p;
+        if last > bound || last * last > x {
+            break;
+        }
+        let block = &PRIMES[i..i + 8];
+        let mut hit = false;
+        for p in block {
+            hit |= p.divides(x);
+        }
+        if hit {
+            for p in block {
+                if p.divides(x) {
+                    let mut e = 0;
+                    while p.divides(x) {
+                        x = x.wrapping_mul(p.inv);
+                        e += 1;
+                    }
+                    out.push((p.p, e));
+                }
+            }
+        }
+        i += 8;
+    }
+    for p in &PRIMES[i..] {
         if p.p > bound || x == 1 {
             return x;
         }
@@ -379,13 +406,28 @@ pub(super) fn rem_by(x: &[u64], d: u64, v: u64) -> u64 {
     r
 }
 
-/// The remainders of the limbs `x` by four groups' `d`s at once, four independent chains a limb.
+/// The remainders of the limbs `x`, at least two, by up to eight groups' `d`s at once, in
+/// independent chains: for two limbs a division each, the high limb, below `2d` as `d` is
+/// normalized, reduced first by a subtraction.
 #[inline]
-fn rem_by_4(x: &[u64], g: &[Group]) -> [u64; 4] {
-    let mut r = [0u64; 4];
-    for &l in x.iter().rev() {
-        for k in 0..4 {
-            r[k] = div_2by1(r[k], l, g[k].d, g[k].v).1;
+fn rem_by_8(x: &[u64], g: &[Group]) -> [u64; 8] {
+    let mut r = [0u64; 8];
+    if x.len() == 2 {
+        for (rk, grp) in r.iter_mut().zip(g) {
+            let h = if x[1] >= grp.d { x[1] - grp.d } else { x[1] };
+            *rk = div_2by1(h, x[0], grp.d, grp.v).1;
+        }
+        return r;
+    }
+    if g.len() == 8 {
+        for &l in x.iter().rev() {
+            for k in 0..8 {
+                r[k] = div_2by1(r[k], l, g[k].d, g[k].v).1;
+            }
+        }
+    } else {
+        for (rk, grp) in r.iter_mut().zip(g) {
+            *rk = rem_by(x, grp.d, grp.v);
         }
     }
     r

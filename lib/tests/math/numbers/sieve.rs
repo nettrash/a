@@ -183,6 +183,46 @@ const NTH: [(u64, u64); 30] = [
     (50044185380, 1345560779177),
 ];
 
+/// `(x, π(x))` at the edges of the parts of `prime_pi` (primecount 8.8): `x / y` across `2^16`, where
+/// `P2` takes the table of `π` or the sieve (near `6.24 10^7`), `sqrt(x)` across `2^16`, where the
+/// easy leaves above `y` take the table or the parts of a sieve (around `2^32`), `y` across `2^16`,
+/// where the primes and `π` up to `y` come from the tables computed at compile time or are built
+/// (from 970,004,999,699), and the table of `π` up to `y` past two parts of 4096 blocks, where the
+/// easy leaves' look-ups go by parts (from 2,217,750,588,877,312; `2 10^15` is still below).
+const PI_EDGES: [(u64, u64); 27] = [
+    (60000000, 3562115),
+    (60000001, 3562115),
+    (61500000, 3645798),
+    (61500001, 3645798),
+    (62000000, 3673600),
+    (62000001, 3673600),
+    (62400000, 3695916),
+    (62400001, 3695916),
+    (62500000, 3701487),
+    (62500001, 3701488),
+    (63000000, 3729306),
+    (63000001, 3729306),
+    (65000000, 3840554),
+    (65000001, 3840554),
+    (4294967293, 203280221),
+    (4294967294, 203280221),
+    (4294967295, 203280221),
+    (4294967296, 203280221),
+    (4294967297, 203280221),
+    (4294967298, 203280221),
+    (4294967299, 203280221),
+    (4294968296, 203280277),
+    (4294966296, 203280185),
+    (4295067296, 203284704),
+    (970004999698, 36521758887),
+    (970004999699, 36521758887),
+    (2250000000000000, 65561985883654),
+];
+
+/// `(n, p_n)` far enough below `π(2^64 - 1)` that the window down from `2^64 - 1` spans several
+/// segments of the sieve and the prime is not in the last (primecount 8.8).
+const NTH_TOP: [(u64, u64); 1] = [(425656284032217743, 18446744073576408977)];
+
 /// `π(2^64 - 1)`, and the largest primes below `2^64`, largest first (primesieve 12.16).
 const PI_MAX: u64 = 425_656_284_035_217_743;
 const TOP: [u64; 4] = [
@@ -272,6 +312,25 @@ fn primes_near_2_64_match_the_test() {
     assert_eq!(primes(u64::MAX - 57..).next(), None);
     assert_eq!(primes(u64::MAX..).next(), None);
     assert_eq!(primes(u64::MAX..=u64::MAX).count(), 0);
+}
+
+#[test]
+fn primes_around_2_32_match_a_sieve_of_the_range() {
+    // The sieving primes of a range up to `2^32` come from the table of the primes below `2^16`,
+    // above from a sieve of their own.
+    let w = size(30_000, 200) as u64;
+    for (a, b) in [
+        ((1 << 32) - w, (1 << 32) - 1),
+        ((1 << 32) - w, (1 << 32) + w),
+    ] {
+        let got: Vec<u64> = primes(a..=b).collect();
+        assert_eq!(got, primes_between(a, b), "primes({a}..={b})");
+        assert_eq!(
+            primes(a..=b).count(),
+            got.len(),
+            "primes({a}..={b}).count()"
+        );
+    }
 }
 
 #[test]
@@ -405,6 +464,18 @@ fn prime_pi_matches_known_values() {
 }
 
 #[test]
+fn prime_pi_at_the_edges_of_its_parts() {
+    // Under Miri the edges near `2^16` and `2^32` only.
+    let n = if cfg!(miri) { 4 } else { PI_EDGES.len() };
+    for &(x, want) in PI_EDGES.iter().take(n) {
+        assert_eq!(prime_pi(x), want, "pi({x})");
+    }
+    if cfg!(miri) {
+        assert_eq!(prime_pi(PI_EDGES[16].0), PI_EDGES[16].1);
+    }
+}
+
+#[test]
 fn prime_pi_agrees_with_the_sieve_on_ranges() {
     // `π(b) - π(a - 1)` against the primes of `[a, b]`, for `a` and `b` through Deléglise and
     // Rivat's method.
@@ -454,6 +525,17 @@ fn nth_prime_matches_known_values() {
     for &(n, want) in NTH.iter().take(size(30, 6)) {
         assert_eq!(nth_prime(n), want, "nth_prime({n})");
         assert_eq!(prime_pi(want), n, "pi(nth_prime({n}))");
+    }
+}
+
+#[test]
+fn nth_prime_far_below_the_last_reads_an_earlier_segment() {
+    // Under Miri, which would take hours, not run.
+    if cfg!(miri) {
+        return;
+    }
+    for &(n, p) in &NTH_TOP {
+        assert_eq!(nth_prime(n), p, "nth_prime({n})");
     }
 }
 

@@ -102,7 +102,7 @@ fn primes_to(n: usize) -> Vec<u64> {
 
 /// PARI/GP 2.19's values: the sequence, the index, the number of decimal digits, and the residues
 /// modulo `2^61 - 1` and `10^9 + 7`.
-const PARI: [(&str, u64, usize, u64, u64); 38] = [
+const PARI: [(&str, u64, usize, u64, u64); 45] = [
     ("p", 417, 20, 541220193622112949, 415915619),
     ("p", 418, 20, 1723438945096382051, 614653520),
     ("p", 500, 22, 1239552388271125880, 168879716),
@@ -116,6 +116,13 @@ const PARI: [(&str, u64, usize, u64, u64); 38] = [
     ("p", 1000000, 1108, 2012848153370158893, 419139981),
     ("p", 2718281, 1830, 2532322902668178, 85178066),
     ("p", 20000001, 4974, 2215371483203106882, 44842207),
+    ("p", 50000, 244, 963579800221074173, 114250830),
+    ("p", 300000, 604, 1630289115215865705, 603921742),
+    ("p", 4194304, 2275, 615466680897208651, 946599722),
+    ("p", 5000000, 2484, 731864266969120841, 357810492),
+    ("p", 9999991, 3515, 112881049935096315, 869871632),
+    ("p", 16000000, 4448, 1407734014693210539, 411394365),
+    ("p", 18000017, 4719, 1649721869502576009, 763089424),
     ("F", 187, 39, 133805124077074378, 619822561),
     ("F", 188, 39, 2134925130038214014, 180664866),
     ("F", 372, 78, 357376282709179754, 687587382),
@@ -241,6 +248,35 @@ fn fibonacci_and_lucas_numbers_satisfy_their_identities() {
 }
 
 #[test]
+fn fibonacci_and_lucas_numbers_across_the_kernels() {
+    // `F_(n+2) = F_(n+1) + F_n` and `L_n = F_(n-1) + F_(n+1)` for every `n` of windows where the
+    // doubling's operands cross its kernels' bounds: the products of the last step from the
+    // schoolbook kernel of equal lengths to the dispatch (20 limbs, about `n = 3700`), its linear
+    // steps from one loop to the addition's kernels (32 limbs, `n = 5900`), and the squares from the
+    // schoolbook kernel to Karatsuba's method (48 limbs, `n = 17,700`).
+    let windows: &[(u64, u64)] = if cfg!(miri) {
+        &[(372, 380), (746, 750)]
+    } else {
+        &[(3600, 3760), (5850, 5950), (17_600, 17_760)]
+    };
+    for &(lo, hi) in windows {
+        for n in lo..hi {
+            let order = ORDERS[(n % 2) as usize];
+            let (f0, f1, f2) = (
+                Number::fibonacci(n - 1, order),
+                Number::fibonacci(n, order),
+                Number::fibonacci(n + 1, order),
+            );
+            assert_eq!(&f0 + &f1, f2, "F_{} = F_{} + F_{}", n + 1, n, n - 1);
+            let l = Number::lucas(n, ORDERS[((n + 1) % 2) as usize]);
+            assert_eq!(l, &f0 + &f2, "L_{n} = F_{} + F_{}", n - 1, n + 1);
+            assert_shortest(&f1, &|| format!("F_{n}"));
+            assert_shortest(&l, &|| format!("L_{n}"));
+        }
+    }
+}
+
+#[test]
 fn fibonacci_numbers_agree_with_the_lucas_sequences_modulo_primes() {
     // `F_n mod p` from the long number and from the sequence modulo `p`, for long indices.
     let p = Number::new_from_u64((1 << 61) - 1, ByteOrder::LittleEndian);
@@ -321,6 +357,74 @@ fn lucas_sequences_follow_their_recurrence() {
                 assert_shortest(&v, &|| format!("V_{n}({p}, {q})"));
             }
         }
+    }
+}
+
+#[test]
+fn lucas_sequences_on_limbs_match_the_recurrence() {
+    // The doubling on limbs (`|P|, |Q| < 2^30`): its first steps in `i128`s and then on limbs, with
+    // the exact division by an odd `P`, an even one and `P = ±1`, `Q = ±1` and a long `Q^k`; at the
+    // bound and just past it (on numbers); and `(±3, 1)`, the even Fibonacci and Lucas numbers.
+    let b = (1i64 << 30) - 1;
+    let cases = [
+        (2, -1),
+        (5, 3),
+        (-7, 11),
+        (1, 1),
+        (1, 5),
+        (-1, 7),
+        (6, -1),
+        (-2, 3),
+        (12, 35),
+        (3, -2),
+        (3, 1),
+        (-3, 1),
+        (b, -b),
+        (-b, b),
+        (b, 1),
+        (1, b),
+        (b, b - 1),
+        (-b, -1),
+        (b + 1, 5),
+        (7, -(b + 1)),
+    ];
+    let top = size(300, 24) as u64;
+    for (i, &(pi, qi)) in cases.iter().enumerate() {
+        if cfg!(miri) && i % 4 != 0 {
+            continue;
+        }
+        let order = ORDERS[i % 2];
+        let p = Number::new_from_i64(pi, order);
+        let q = Number::new_from_i64(qi, ORDERS[(i + 1) % 2]);
+        let step = if cfg!(miri) { 7 } else { 1 + (i as u64 % 3) };
+        for n in (0..=top).step_by(step as usize) {
+            let (u, v) = Number::lucas_sequence(&p, &q, n);
+            let (eu, ev) = recurrence(&p, &q, n);
+            assert!(u.byte_order == order && v.byte_order == order);
+            assert_eq!(u, eu, "U_{n}({pi}, {qi})");
+            assert_eq!(v, ev, "V_{n}({pi}, {qi})");
+            assert_shortest(&u, &|| format!("U_{n}({pi}, {qi})"));
+            assert_shortest(&v, &|| format!("V_{n}({pi}, {qi})"));
+        }
+    }
+    // `U_n(3, 1) = F_(2n)` and `V_n(3, 1) = L_(2n)` for long indices, and the signs for `P = -3`.
+    let o = ByteOrder::LittleEndian;
+    for n in [size(1001, 30) as u64, size(20_000, 31) as u64] {
+        let (u, v) =
+            Number::lucas_sequence(&Number::new_from_i32(3, o), &Number::new_from_i32(1, o), n);
+        assert_eq!(
+            (u, v),
+            (Number::fibonacci(2 * n, o), Number::lucas(2 * n, o))
+        );
+        let (u, v) =
+            Number::lucas_sequence(&Number::new_from_i32(-3, o), &Number::new_from_i32(1, o), n);
+        let s = |x: Number, odd: bool| if odd { -x } else { x };
+        assert_eq!(
+            u,
+            s(Number::fibonacci(2 * n, o), n % 2 == 0),
+            "U_{n}(-3, 1)"
+        );
+        assert_eq!(v, s(Number::lucas(2 * n, o), n % 2 == 1), "V_{n}(-3, 1)");
     }
 }
 
@@ -695,4 +799,61 @@ fn partitions_match_pari() {
             }
         }
     }
+}
+
+#[test]
+fn partitions_with_terms_on_every_kind_of_arithmetic() {
+    // Under Miri too, which `partitions_match_pari` leaves at `p(417)`: `p(10000)` takes terms of 9
+    // to 16 limbs in fixed point, whose arrays have their length at run time and whose products
+    // are the schoolbook kernel's; `p(100000)` terms of 17 to 23 limbs too; and `p(300000)` its
+    // first terms in floating point on numbers, the roots of `e^C` and the cosines there.
+    for &(name, n, digits, r1, r2) in &PARI {
+        if name == "p" && matches!(n, 10_000 | 100_000 | 300_000) {
+            let orders = if cfg!(miri) {
+                &ORDERS[..1]
+            } else {
+                &ORDERS[..]
+            };
+            for &order in orders {
+                let x = Number::partitions(n, order);
+                assert!(x.byte_order == order && !x.negative);
+                assert_pari(&x, "p", n, digits, r1, r2);
+            }
+        }
+    }
+}
+
+#[test]
+fn partitions_with_long_roots_of_the_first_exponential() {
+    // `p(27 10^9)`, FLINT 3.6's values (PARI/GP 2.19's `numbpart` is wrong from about `10^9`: its
+    // `p(10^9 + 9)` is 2 modulo 5, against Ramanujan's `p(5j + 4) = 0 mod 5`). Its terms on numbers
+    // take `e^(C/k)` as a root of the first term's `e^C` by Newton's method, whose steps reach their
+    // precision from half of it only less the bits of their quadratic constant, `(k + 1) / 2`, and
+    // from a start right to about `50 - log2` of the root's bits. At `k = 17` and 35,771 bits the
+    // first step began beyond what its start held; the shortfall doubled at each step, the bound of
+    // the root's error took `2^62` units, and no precision the series raised made it fall: a panic.
+    // Seconds in a debug build, too many for Miri.
+    if cfg!(miri) {
+        return;
+    }
+    let n = 27_000_000_000;
+    let x = Number::partitions(n, ByteOrder::BigEndian);
+    assert!(x.byte_order == ByteOrder::BigEndian && !x.negative);
+    assert_pari(&x, "p", n, 183_040, 1_166_658_825_432_246_829, 616_663_200);
+}
+
+#[test]
+#[ignore = "seconds in a release build, minutes in a debug one: run it with `cargo test --release \
+            --test math -- --ignored numbers::sequences`"]
+fn partitions_with_triple_angles_next_to_a_third() {
+    // `p(2866516426971)`, FLINT 3.6's values. Its term of `k = 3^7` takes `cos(4373π/13122)`, at
+    // 2863 bits and more, by the half-angle formula from `cos(2188π/6561)`, and that by the
+    // triple-angle one: the root of `4c^3 - 3c = cos(2188π/2187)` next to `c = 1/2`, where
+    // `12c^2 - 3` vanishes (the angle is `π/3 + π/6561`). Without guard bits for that conditioning,
+    // Newton's steps fell short by a shortfall that doubled at each step, the cosine's bound took
+    // `10^51` units and more at every precision the series raised, and the series failed its
+    // bound: a panic.
+    let n = 2_866_516_426_971;
+    let x = Number::partitions(n, ByteOrder::LittleEndian);
+    assert_pari(&x, "p", n, 1_886_092, 39_496_238_739_699_319, 559_809_273);
 }

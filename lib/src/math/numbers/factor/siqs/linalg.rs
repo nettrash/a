@@ -2,11 +2,12 @@
 //! relations (sets of relations) and whose rows are −1 and the primes of the factor base, a bit set
 //! where the prime divides the product to an odd power.
 //!
+//! - Gaussian elimination on the dense rows, by the method of the four Russians, up to
+//!   [`GAUSS_MAX`] columns, and should Lanczos fail on matrices not much larger.
 //! - Montgomery's block Lanczos method (1995), on 64 vectors at once in the bits of a word: the
 //!   iteration on the symmetric `BᵀB`, with Montgomery's choice of the subspace of each step, then
 //!   the vectors of the null space of `B` among the combinations of the solution and the last
 //!   iterate, by Gaussian elimination on their images. The arrangement follows msieve's.
-//! - Gaussian elimination for small matrices, and should Lanczos fail.
 
 use super::poly::Random;
 
@@ -55,6 +56,11 @@ impl Matrix {
     }
 }
 
+/// The most columns of the matrices solved by Gaussian elimination rather than block Lanczos:
+/// measured on an Apple M4 Max, elimination took 8 ms for 3800 columns against 10 for Lanczos,
+/// and 60 ms for 7200 against 36.
+pub(super) const GAUSS_MAX: usize = 5000;
+
 /// Vectors of the null space of `m`: bit `t` of word `c` is the coefficient of column `c` in vector
 /// `t`; the words of zero vectors are cleared. Empty when none is found.
 pub(super) fn null_space(m: &Matrix, seed: u64) -> Vec<u64> {
@@ -62,7 +68,8 @@ pub(super) fn null_space(m: &Matrix, seed: u64) -> Vec<u64> {
     if n == 0 {
         return Vec::new();
     }
-    if n <= 400 {
+    let gauss_max = GAUSS_MAX;
+    if n <= gauss_max {
         return gauss(m);
     }
     let mut random = Random::new(seed);
@@ -424,47 +431,170 @@ fn clean(m: &Matrix, out: Vec<u64>) -> Vec<u64> {
     out.into_iter().map(|o| o & keep).collect()
 }
 
-/// Gaussian elimination on the columns, each with the identity beside it: up to 64 combinations of
-/// columns that sum to zero.
+/// Up to 64 combinations of columns that sum to zero, by Gaussian elimination on the dense rows:
+/// the columns taken eight at a time by the method of the four Russians (Arlazarov, Dinic,
+/// Kronrod and Faradžev 1970; Albrecht and Bard's M4RI), up to eight pivot rows for them, made to
+/// have one pivot bit each, then each other row reduced by one table look-up of the sums of the
+/// pivots for its eight bits rather than by up to eight sums after tests the branch predictor
+/// misses; then the combinations, 64 at once in the bits of words, by substitution from the last
+/// pivot row up, each with one free column set.
 fn gauss(m: &Matrix) -> Vec<u64> {
     let n = m.cols();
-    let rw = m.rows.div_ceil(64).max(1);
-    let cw = n.div_ceil(64);
-    let width = rw + cw;
-    let mut a = vec![0u64; n * width];
+    let rows = m.rows;
+    let width = n.div_ceil(64).max(1);
+    let mut a = vec![0u64; rows * width];
     for c in 0..n {
         for &r in m.col(c) {
-            a[c * width + r as usize / 64] ^= 1 << (r % 64);
+            a[r as usize * width + c / 64] ^= 1 << (c % 64);
         }
-        a[c * width + rw + c / 64] |= 1 << (c % 64);
     }
+    let mut table = vec![0u64; 256 * width];
+    let mut pivot_col = Vec::with_capacity(rows);
     let mut rank = 0;
-    for r in 0..m.rows {
-        let (wd, bit) = (r / 64, 1u64 << (r % 64));
-        let Some(p) = (rank..n).find(|&i| a[i * width + wd] & bit != 0) else {
-            continue;
-        };
-        if p != rank {
-            for k in 0..width {
-                a.swap(p * width + k, rank * width + k);
+    let mut c0 = 0;
+    while c0 < n && rank < rows {
+        // The window of columns [c0, c0 + kw), within word `wd`: the rows from `rank` on are zero
+        // in the columns before it. The tables have 2^kw sums, about half the rows left.
+        let (wd, sh) = (c0 / 64, c0 % 64);
+        let left = rows - rank;
+        let kw = ((usize::BITS - left.leading_zeros()) as usize)
+            .saturating_sub(1)
+            .clamp(1, 8)
+            .min(64 - sh);
+        let mask = (1u32 << kw) - 1;
+        let bits = |a: &[u64], i: usize| (a[i * width + wd] >> sh) as u32 & mask;
+        let mut k = 0;
+        let mut pivot_bit = [0u32; 8];
+        let mut pivot_bits = [0u32; 8];
+        let mut i = rank;
+        while i < rows && k < kw {
+            let mut w = bits(&a, i);
+            if w != 0 {
+                let mut used = 0u32;
+                for j in 0..k {
+                    if w >> pivot_bit[j] & 1 == 1 {
+                        w ^= pivot_bits[j];
+                        used |= 1 << j;
+                    }
+                }
+                if w != 0 {
+                    for j in 0..k {
+                        if used >> j & 1 == 1 {
+                            xor_rows(&mut a, i, rank + j, wd, width);
+                        }
+                    }
+                    swap_rows(&mut a, i, rank + k, width);
+                    pivot_bit[k] = w.trailing_zeros();
+                    pivot_bits[k] = w;
+                    k += 1;
+                }
             }
+            i += 1;
         }
-        for i in rank + 1..n {
-            if a[i * width + wd] & bit != 0 {
-                for k in wd..width {
-                    a[i * width + k] ^= a[rank * width + k];
+        // Each pivot without the pivot bits of the others, the later ones cleared first.
+        for j in (0..k).rev() {
+            for l in 0..j {
+                if pivot_bits[l] >> pivot_bit[j] & 1 == 1 {
+                    pivot_bits[l] ^= pivot_bits[j];
+                    xor_rows(&mut a, rank + l, rank + j, wd, width);
                 }
             }
         }
-        rank += 1;
-    }
-    let mut out = vec![0u64; n];
-    for (t, i) in (rank..n).take(64).enumerate() {
-        for c in 0..n {
-            if a[i * width + rw + c / 64] >> (c % 64) & 1 == 1 {
-                out[c] |= 1 << t;
+        // The rows below the pivots, each reduced by the sum of the pivots its bits take.
+        let span = width - wd;
+        if rank + k < rows && k > 0 {
+            for s in 1..1usize << k {
+                let low = s & (s - 1);
+                let j = s.trailing_zeros() as usize;
+                let (lo, hi) = table.split_at_mut(s * width);
+                let (dst, prev) = (&mut hi[..span], &lo[low * width..low * width + span]);
+                let pivot = &a[(rank + j) * width + wd..(rank + j + 1) * width];
+                for (x, (&y, &z)) in dst.iter_mut().zip(prev.iter().zip(pivot)) {
+                    *x = y ^ z;
+                }
+            }
+            // The sum each value of the window's bits takes: the pivots of its set pivot bits.
+            let mut choice = [0u8; 256];
+            let mut of_bit = [0u8; 8];
+            for j in 0..k {
+                of_bit[pivot_bit[j] as usize] = 1 << j;
+            }
+            for w in 1..1usize << kw {
+                choice[w] = choice[w & (w - 1)] | of_bit[w.trailing_zeros() as usize];
+            }
+            for i in rank + k..rows {
+                let s = choice[bits(&a, i) as usize] as usize;
+                let (row, sum) = (
+                    &mut a[i * width + wd..(i + 1) * width],
+                    &table[s * width..s * width + span],
+                );
+                for (x, &y) in row.iter_mut().zip(sum) {
+                    *x ^= y;
+                }
             }
         }
+        for &b in &pivot_bit[..k] {
+            pivot_col.push(c0 + b as usize);
+        }
+        rank += k;
+        c0 += kw;
+    }
+    // The free columns, the first 64 of them each set in one combination; then each pivot
+    // column, from the last pivot row up, the sum of the other columns of its row.
+    let mut is_pivot = vec![false; n];
+    for &c in &pivot_col {
+        is_pivot[c] = true;
+    }
+    let mut out = vec![0u64; n];
+    let mut t = 0;
+    for (c, o) in out.iter_mut().enumerate() {
+        if !is_pivot[c] && t < 64 {
+            *o = 1 << t;
+            t += 1;
+        }
+    }
+    for i in (0..rank).rev() {
+        let pc = pivot_col[i];
+        let mut acc = 0u64;
+        for (wi, &word) in a[i * width..(i + 1) * width].iter().enumerate() {
+            let mut x = word;
+            if wi == pc / 64 {
+                x &= !(1 << (pc % 64));
+            }
+            while x != 0 {
+                acc ^= out[64 * wi + x.trailing_zeros() as usize];
+                x &= x - 1;
+            }
+        }
+        out[pc] = acc;
     }
     clean(m, out)
+}
+
+/// Adds the words `from..width` of row `src` of `a` to row `dst`.
+fn xor_rows(a: &mut [u64], dst: usize, src: usize, from: usize, width: usize) {
+    let (d, s) = if dst < src {
+        let (lo, hi) = a.split_at_mut(src * width);
+        (
+            &mut lo[dst * width + from..(dst + 1) * width],
+            &hi[from..width],
+        )
+    } else {
+        let (lo, hi) = a.split_at_mut(dst * width);
+        (
+            &mut hi[from..width],
+            &lo[src * width + from..(src + 1) * width],
+        )
+    };
+    for (x, &y) in d.iter_mut().zip(s) {
+        *x ^= y;
+    }
+}
+
+/// Swaps rows `i` and `j` of `a`.
+fn swap_rows(a: &mut [u64], i: usize, j: usize, width: usize) {
+    if i != j {
+        let (lo, hi) = a.split_at_mut(i.max(j) * width);
+        lo[i.min(j) * width..(i.min(j) + 1) * width].swap_with_slice(&mut hi[..width]);
+    }
 }

@@ -3,7 +3,9 @@
 
 use super::modular::int::{Int, in_order};
 use super::modular::ring::{magnitude_64, magnitude_128};
-use super::modular::sqrt::{coefficients, roots_prime_power, smallest_sum, sqrt_prime_word, sums};
+use super::modular::sqrt::{
+    all_word, coefficients, roots_prime_power, smallest_sum, smallest_word, sqrt_prime_word, sums,
+};
 use super::modular::{jacobi, long_factors, positive, word, word_residue};
 use super::{ByteOrder, Factorization, Number};
 
@@ -45,6 +47,31 @@ impl Number {
             }
             return jacobi::jacobi_128(r, m);
         }
+        let k = n.significant().div_ceil(8);
+        if k <= STACK {
+            // On the stack: `self` itself when it is below `n`, less `n` when it is below `2 n`
+            // (most numbers of the length of `n`), and its remainder otherwise.
+            let mut y = [0u64; STACK];
+            let mut x = [0u64; STACK];
+            read_into(n, &mut y[..k]);
+            let (x, y) = (&mut x[..k], &mut y[..k]);
+            let fits = !self.negative && self.significant() <= 8 * k;
+            if fits {
+                read_into(self, x);
+            }
+            let mut ok = fits && below_limbs(x, y);
+            if fits && !ok {
+                sub_limbs(x, y);
+                ok = below_limbs(x, y);
+            }
+            if !ok {
+                x.fill(0);
+                let r = self.rem_euclid(n);
+                let kr = r.significant().div_ceil(8);
+                read_into(&r, &mut x[..kr]);
+            }
+            return jacobi::jacobi_in(x, y);
+        }
         let nl = limbs(n);
         // `self` itself when it is already below `n`, its remainder otherwise.
         let mut a = Vec::new();
@@ -65,8 +92,9 @@ impl Number {
     /// 1 every number is 0. In the byte order of `self`.
     ///
     /// `m` is factored (see [`Number::factor`]; [`Factorization::sqrt_mod`] takes a known
-    /// factorisation and skips that): modulo an odd prime the root is by Tonelli and Shanks's
-    /// method, or Cipolla's when `p - 1` has more than 24 factors of two; it is lifted to the
+    /// factorisation and skips that): modulo an odd prime the root is one power for `p = 3 (mod
+    /// 4)`, Atkin's one power for `p = 5 (mod 8)`, and otherwise Tonelli and Shanks's method, or
+    /// Cipolla's when `p - 1` has more than 24 factors of two; it is lifted to the
     /// prime's powers by Hensel's lifting, Newton's steps `x - (x^2 - a)/(2x)` that double the
     /// power each; modulo powers of two by the 2-adic steps; and the roots modulo the prime powers
     /// are joined by the Chinese remainder theorem, as [`sqrt_mod_all`](Self::sqrt_mod_all)
@@ -205,8 +233,8 @@ impl Number {
         let order = self.byte_order;
         if let Some(w) = magnitude_64(m) {
             let a = word_residue(self, w);
-            let f: Vec<(u64, u32)> = word::factor(w).iter().collect();
-            return all_roots(&a, &f, &w)
+            let f = word::factor(w);
+            return all_word(a, f.as_slice(), w)
                 .into_iter()
                 .map(|r| Number::new_from_u64(r, order))
                 .collect();
@@ -260,8 +288,8 @@ impl Number {
         }
         let order = m.byte_order;
         if let (Some(dw), Some(mw)) = (magnitude_64(d), magnitude_64(m)) {
-            let f: Vec<(u64, u32)> = word::factor(mw).iter().collect();
-            return cornacchia_words(dw, mw, &f, order);
+            let f = word::factor(mw);
+            return cornacchia_words(dw, mw, f.as_slice(), order);
         }
         let d = in_order(d.abs(), ByteOrder::LittleEndian);
         let m = in_order(m.abs(), ByteOrder::LittleEndian);
@@ -293,7 +321,7 @@ fn cornacchia_words(d: u64, m: u64, f: &[(u64, u32)], order: ByteOrder) -> Vec<(
         }
     } else {
         let minus_d = (m - d % m) % m;
-        let roots = all_roots(&minus_d, f, &m);
+        let roots = all_word(minus_d, f, m);
         let root = word::isqrt(m);
         for r in roots {
             if r > m / 2 {
@@ -351,12 +379,24 @@ impl Factorization {
     /// ```
     pub fn sqrt_mod(&self, a: &Number) -> Option<Number> {
         let order = a.byte_order;
-        if let Some((f, m)) = self.modulus_words() {
+        // A prime of a word, the common case, without the vector of the primes.
+        if let [(p, 1)] = self.factors()
+            && let Some(p) = magnitude_64(p)
+            && p != 2
+        {
+            let a = word_residue(a, p);
+            if a == 0 {
+                return Some(Number::new_from_u8(0, order));
+            }
+            return sqrt_prime_word(a, p).map(|r| Number::new_from_u64(r, order));
+        }
+        let mut f = [(0, 0); 15];
+        if let Some((k, m)) = self.modulus_words(&mut f) {
             let a = word_residue(a, m);
             if a == 0 || m == 1 {
                 return Some(Number::new_from_u8(0, order));
             }
-            return smallest_root_word(a, &f).map(|r| Number::new_from_u64(r, order));
+            return smallest_root_word(a, &f[..k]).map(|r| Number::new_from_u64(r, order));
         }
         let m = self.value();
         let f: Vec<(Number, u32)> = self
@@ -372,9 +412,10 @@ impl Factorization {
     /// [`Number::sqrt_mod_all`] gives them, without factoring. In the byte order of `a`.
     pub fn sqrt_mod_all(&self, a: &Number) -> Vec<Number> {
         let order = a.byte_order;
-        if let Some((f, m)) = self.modulus_words() {
+        let mut f = [(0, 0); 15];
+        if let Some((k, m)) = self.modulus_words(&mut f) {
             let a = word_residue(a, m);
-            return all_roots(&a, &f, &m)
+            return all_word(a, &f[..k], m)
                 .into_iter()
                 .map(|r| Number::new_from_u64(r, order))
                 .collect();
@@ -423,8 +464,9 @@ impl Factorization {
             d_not_positive();
         }
         let order = self.byte_order();
-        if let (Some(dw), Some((f, m))) = (magnitude_64(d), self.modulus_words()) {
-            return cornacchia_words(dw, m, &f, order);
+        let mut f = [(0, 0); 15];
+        if let (Some(dw), Some((k, m))) = (magnitude_64(d), self.modulus_words(&mut f)) {
+            return cornacchia_words(dw, m, &f[..k], order);
         }
         let d = in_order(d.abs(), ByteOrder::LittleEndian);
         let m = in_order(self.value(), ByteOrder::LittleEndian);
@@ -436,16 +478,20 @@ impl Factorization {
         finish_cornacchia(cornacchia_all(&d, &m, roots), order)
     }
 
-    /// The primes and exponents as words, and the number factored, when it is below `2^64`.
-    fn modulus_words(&self) -> Option<(Vec<(u64, u32)>, u64)> {
-        let mut out = Vec::with_capacity(self.factors().len());
+    /// The primes and exponents as words in `out` and their number, and the number factored, when
+    /// it is below `2^64` (which has at most 15 primes).
+    fn modulus_words(&self, out: &mut [(u64, u32); 15]) -> Option<(usize, u64)> {
+        let f = self.factors();
+        if f.len() > 15 {
+            return None;
+        }
         let mut value = 1u64;
-        for (p, e) in self.factors() {
+        for (o, (p, e)) in out.iter_mut().zip(f) {
             let p = magnitude_64(p)?;
             value = value.checked_mul(p.checked_pow(*e)?)?;
-            out.push((p, *e));
+            *o = (p, *e);
         }
-        Some((out, value))
+        Some((f.len(), value))
     }
 }
 
@@ -511,18 +557,19 @@ fn sqrt_word(a: u64, m: u64) -> Option<u64> {
     if m & 1 == 1 && jacobi::jacobi_word(a, m) == -1 {
         return None;
     }
-    let f: Vec<(u64, u32)> = word::factor(m).iter().collect();
-    smallest_root_word(a, &f)
+    let f = word::factor(m);
+    smallest_root_word(a, f.as_slice())
 }
 
-/// [`smallest_root`] for a word modulus: a prime takes [`sqrt_prime_word`] alone.
+/// [`smallest_root`] for a word modulus: a prime takes [`sqrt_prime_word`] alone, the others the
+/// word path without vectors ([`smallest_word`]).
 fn smallest_root_word(a: u64, f: &[(u64, u32)]) -> Option<u64> {
     if let [(p, 1)] = f
         && *p != 2
     {
         return sqrt_prime_word(a, *p);
     }
-    smallest_root(&a, f)
+    smallest_word(a, f)
 }
 
 /// The roots modulo each prime power of `m = prod p^e` as `(d, b)`, or `None`.
@@ -652,6 +699,36 @@ fn limbs(x: &Number) -> Vec<u64> {
     };
     trim(&mut l);
     l
+}
+
+/// Up to this many limbs a modulus, the Jacobi symbol is taken on the stack.
+const STACK: usize = 16;
+
+/// Reads the magnitude of `x` into `out`, which holds its limbs or more (the rest left as it is);
+/// panics if `out` is shorter.
+fn read_into(x: &Number, out: &mut [u64]) {
+    let k = x.significant().div_ceil(8);
+    // Bounds-checked here, so that a shorter `out` panics instead of being written past.
+    let out = &mut out[..k];
+    // SAFETY: plain integers, the `k` of `out`; `read_limbs` writes them all.
+    let out = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr().cast(), k) };
+    super::modular::ring::read_limbs(x, out);
+}
+
+/// Whether the limbs `a` are below the limbs `b`, of one length.
+fn below_limbs(a: &[u64], b: &[u64]) -> bool {
+    a.iter().rev().cmp(b.iter().rev()) == core::cmp::Ordering::Less
+}
+
+/// `x -= y` for limbs of one length, `x >= y`.
+fn sub_limbs(x: &mut [u64], y: &[u64]) {
+    let mut borrow = false;
+    for (a, &b) in x.iter_mut().zip(y) {
+        let (d, b1) = a.overflowing_sub(b);
+        let (d, b2) = d.overflowing_sub(u64::from(borrow));
+        *a = d;
+        borrow = b1 | b2;
+    }
 }
 
 /// Drops the zero limbs at the top.

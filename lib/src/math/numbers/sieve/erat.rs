@@ -101,6 +101,17 @@ fn segment_bytes(limit: u64) -> (usize, u64, u64) {
     (bytes, max_small.min(limit), max_medium.min(limit))
 }
 
+/// An upper bound of the number of primes up to `n`, Rosser and Schoenfeld's `1.25506 n / ln n`
+/// (for `n > 1`), for the room of the small primes' list, which pushes would otherwise grow from
+/// nothing, a copy each time.
+fn primes_up_to(n: u64) -> usize {
+    if n < 2 {
+        return 0;
+    }
+    let f = n as f64;
+    (1.26 * f / f.ln()) as usize + 1
+}
+
 impl Erat {
     /// A sieve of the numbers from `start` to `stop`, `7 <= start <= stop`, by primes up to `limit`
     /// at most the square root of `stop`.
@@ -123,7 +134,7 @@ impl Erat {
             sieved: false,
             max_small,
             max_medium,
-            small: Vec::new(),
+            small: Vec::with_capacity(primes_up_to(max_small.min(limit))),
             medium: Medium::new(),
             big: Big::new(bytes, limit, max_medium),
         }

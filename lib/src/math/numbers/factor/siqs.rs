@@ -17,12 +17,55 @@
 //! - [`relations`]: the relations, and the cycles of those with large primes;
 //! - [`linalg`]: Montgomery's block Lanczos method, and Gaussian elimination for small matrices;
 //! - [`sqrt`]: the filtering of the matrix and the square roots;
-//! - [`arith`] and [`wide`]: arithmetic on words and on numbers of a few limbs.
+//! - [`arith`] and [`wide`]: arithmetic on words and on numbers of a few limbs;
+//! - `kernels`: the steps of the sieve and of the trial division in NEON on aarch64 (the module
+//!   `aarch64`), in plain Rust elsewhere and under Miri (`portable`).
 //!
 //! Numbers below `2^64` are factored by Pollard's rho method, with Lehman's method should it fail.
 
 mod arith;
 mod fb;
+// The kernels of the sieve, under the name `kernels`: NEON on the 64-bit little-endian aarch64
+// targets of the crate's assembly, where NEON is enabled, as it is by default; the portable ones
+// elsewhere and under Miri, which runs no SIMD of this kind.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_pointer_width = "64",
+    target_feature = "neon",
+    any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "fuchsia"
+    ),
+    not(miri)
+))]
+#[path = "siqs/aarch64.rs"]
+mod kernels;
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_pointer_width = "64",
+    target_feature = "neon",
+    any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "fuchsia"
+    ),
+    not(miri)
+)))]
+#[path = "siqs/portable.rs"]
+mod kernels;
 mod linalg;
 mod params;
 mod poly;
@@ -45,17 +88,21 @@ const TRIAL_TO: u32 = 1000;
 /// A factor of the absolute value of `n` other than 1 and itself, by the self-initialising quadratic
 /// sieve, or `None` when it finds none: always for 0, 1, a prime and a power of a prime, and for
 /// numbers of more than 900 bits, which it would take years to factor. The factor is positive, in
-/// the byte order of `n`. Meant for numbers of 40 to about 100 digits without small factors.
+/// the byte order of `n`. Meant for numbers of 24 to about 100 digits without small factors.
 ///
 /// A prime factor below 1000 is found first (the smallest), a perfect power of a composite number
 /// gives its root, and numbers below `2^64` are factored by Pollard's rho method. Otherwise the
 /// sieve (Alford and Pomerance 1993, Contini 1997) collects relations `Y² − kN` that factor over a
-/// factor base, with up to two large primes, combines them by Montgomery's block Lanczos method
-/// into congruences of squares `X² ≡ Y² (mod N)`, and gives the first `gcd(X − Y, N)` that is a
-/// proper factor: for a product of two primes, one of them. The choices are fixed, so that a
-/// number gives the same factor, in the same time, from run to run. Measured on an Apple M4 Max,
-/// single-threaded, a product of two primes of 30 digits takes about 0.5 s, of 40 digits about 40 s,
-/// of 50 digits about an hour.
+/// factor base, with up to two large primes, combines them by Gaussian elimination or Montgomery's
+/// block Lanczos method into congruences of squares `X² ≡ Y² (mod N)`, and gives the first
+/// `gcd(X − Y, N)` that is a proper factor: for a product of two primes, one of them. The choices
+/// are fixed, so that a number gives the same factor, in the same time, from run to run. The
+/// sieve's parameters and logarithms are rounded from the platform's floating-point `log2`, `ln`
+/// and `powf`, whose last bit Rust leaves to the platform (Apple's and glibc's differ on some of
+/// those it takes), so that on another target a number may, rarely, give the other factor.
+/// Measured on an Apple M4 Max, single-threaded, a 30-digit product of two primes
+/// takes about 0.5 ms, a 40-digit one about 3 ms, a 60-digit one about 0.3 s, an 80-digit one
+/// about 30 s and a 100-digit one about 40 minutes.
 ///
 /// # Examples
 ///
@@ -233,7 +280,7 @@ fn run(n: &[u64]) -> Option<Vec<u64>> {
     let kn = poly::mul_1(n, u64::from(k));
     let bits = sieve::bits_of(n);
     let params = params::for_bits(bits);
-    let fb = match fb::build(n, &kn, params.fb_size) {
+    let fb = match fb::build(n, k, params.fb_size) {
         fb::Built::Factor(p) => return Some(vec![u64::from(p)]),
         fb::Built::Base(fb) => fb,
     };
@@ -247,7 +294,8 @@ fn run(n: &[u64]) -> Option<Vec<u64>> {
         if !enough {
             return None;
         }
-        s.target += 64 + s.target / 20;
+        // More relations, which give more vectors of the null space.
+        s.target += 16 + s.target / 16;
     }
     None
 }

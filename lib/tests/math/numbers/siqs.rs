@@ -110,6 +110,60 @@ const THREE_PRIMES: [(&str, &str); 17] = [
     ("463055046795663606716349553160774304163", "1708597656179"),
 ];
 
+/// Balanced semiprimes of 24 to 44 digits and their smaller factor, from PARI/GP 2.19
+/// (`setrand(20261108)`): at least one for each row of the sieve's parameters up to 150 bits, where
+/// the matrix is solved by Gaussian elimination.
+const TABLE_SEMIPRIMES: [(&str, &str); 17] = [
+    ("111613795193090726273351", "148996640213"),
+    ("1341974000947881594149903", "131091008407"),
+    ("10452520477619479527233843", "1904532067043"),
+    ("282164222634889029227637241", "4086141136153"),
+    ("1337794258457394739170632417", "26705952827657"),
+    ("36264861107851368767096600701", "66698450691527"),
+    ("179987916436909885923917286803", "170543852284261"),
+    ("1445970105152896764846508099103", "185937127253473"),
+    ("36380751143130406270310855448017", "4417114477408279"),
+    ("459160229435590713568517303064659", "4336703275418911"),
+    ("3243474231660087358132110622056209", "42125966341818193"),
+    ("15143582936265471105696149239367897", "14346168686891227"),
+    ("726272637885418447246938856992790423", "821112482256945649"),
+    (
+        "14022179084278879708381335826756212271",
+        "1654493585083507187",
+    ),
+    (
+        "6386607454153669457682130258182995137669",
+        "60682993056337154101",
+    ),
+    (
+        "394922858841242877528332229574110920321611",
+        "438522261324648030191",
+    ),
+    (
+        "28236337517092224097176577602278982999311161",
+        "3441763388025965309701",
+    ),
+];
+
+/// Semiprimes of 50 and 52 digits from the same script, whose matrices of 1500 to 1900 columns go
+/// to Gaussian elimination, and of 62 digits (`setrand(20261109)`), whose matrix of more than 5000
+/// columns goes to block Lanczos and whose factor base has primes above a block, sieved through
+/// buckets.
+const LARGE_SEMIPRIMES: [(&str, &str); 3] = [
+    (
+        "32773262337421171909691810167013181181622908991477",
+        "4469410744098811775463937",
+    ),
+    (
+        "1619705415673778220168931712115454058702017942528063",
+        "39432550208760643014214763",
+    ),
+    (
+        "54378948913005311650486261776698078969450268801641272586626601",
+        "7062248073777160440366694260847",
+    ),
+];
+
 /// The number of the decimal digits `s`, in byte order `order`.
 fn dec(s: &str, order: ByteOrder) -> Number {
     let n: Number = s.parse().expect("decimal digits");
@@ -348,4 +402,35 @@ fn reproducible() {
     let f = factor::siqs(&n);
     assert!(f.is_some());
     assert_eq!(factor::siqs(&n), f);
+}
+
+#[test]
+fn semiprimes_across_the_table() {
+    // Under Miri the first only: a sieve of 24 digits takes about a minute there.
+    for (n, p) in TABLE_SEMIPRIMES
+        .iter()
+        .take(size(TABLE_SEMIPRIMES.len(), 1))
+    {
+        for order in ORDERS.into_iter().take(size(2, 1)) {
+            let n = dec(n, order);
+            let p = dec(p, order);
+            let f = factor::siqs(&n).expect("a factor");
+            assert_factor(&n, &f);
+            assert!(f == p || f == &n / &p, "{f} is not a prime factor of {n}");
+        }
+    }
+}
+
+#[test]
+fn lanczos_and_buckets() {
+    // Not under Miri, where one of them would take days; in the other byte order the second only.
+    for (i, (n, p)) in LARGE_SEMIPRIMES.iter().enumerate().take(size(3, 0)) {
+        for order in ORDERS.into_iter().take(if i == 1 { 2 } else { 1 }) {
+            let n = dec(n, order);
+            let p = dec(p, order);
+            let f = factor::siqs(&n).expect("a factor");
+            assert_factor(&n, &f);
+            assert!(f == p || f == &n / &p, "{f} is not a prime factor of {n}");
+        }
+    }
 }

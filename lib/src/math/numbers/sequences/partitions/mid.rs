@@ -5,77 +5,77 @@
 //! A value has `l` limbs, the least significant first: the top one its integer part, the others
 //! `f = 64 (l - 1)` bits of fraction. Each operation truncates, and each value carries a bound of
 //! its absolute error in units of `2^-f`. `e^x = 2^q e^r` with `r = x - q ln 2` in `[0, ln 2)`,
-//! `e^r - 1` from `r 2^-s` by its Taylor series and `s` doublings; the cosines from their versines
-//! the same way; each series by rectangular splitting ([`Mid::series`]).
+//! `e^r - 1` from `r 2^-s` by its Taylor series and `s` doublings `w^2 + 2w`; the cosines from their
+//! versines the same way, with doublings `4v - 2v^2`; each series by rectangular splitting
+//! ([`Mid::series`]).
+//!
+//! The arithmetic is generic in the length of its arrays ([`Mid`]): from 2 to 8 limbs the length is
+//! a constant, the loops unrolled and the products the straight-line kernels of
+//! [`super::super::small`], in registers; the instances of 16 and [`MAX`] limbs take the length at
+//! run time and the multiplication's schoolbook kernels. Measured on an Apple M4 Max, an
+//! exponential of 4 limbs took about 1800 cycles in arrays of 23 limbs for every value, and the
+//! terms of 2 to 8 limbs half the time or less in their own instances.
 
 use super::super::super::div::limbs::{div_2by1, invert_limb};
-use super::super::super::mul::limbs::{add_n, mul, sub_n};
+use super::super::super::mul::basecase;
+use super::super::super::mul::limbs::{add_n, sub_n};
 use super::super::super::root::mul_1;
-use super::super::super::scratch::Scratch;
 use super::super::super::{ByteOrder, Number};
+use super::super::small;
 use super::expsum::Sum;
-use super::real::pow2;
+use super::real::{log2_below, pow2};
+use core::mem::MaybeUninit;
 
 /// The most limbs of a value.
 pub(super) const MAX: usize = 23;
 
-/// `floor(ln 2 2^1536)`, the least significant limb first, from `Σ 1 / (k 2^k)` with 128 guard
-/// bits: the fraction of every value of [`MAX`] limbs.
-const LN2: [u64; 24] = [
-    0x4C1A_1E0B_D1D6_095D,
-    0xCCCC_4E65_9393_514C,
-    0xC943_E732_B479_CD33,
-    0x1746_0775_DB89_90E5,
-    0x7D2E_23DE_1400_B396,
-    0xEE56_9D6D_FC1E_FA15,
-    0x610D_30F8_8FE5_51A2,
-    0x07F4_CA11_FB5B_FB90,
-    0xDA2D_97C5_0F3F_D5C6,
-    0x655F_A187_2F20_E3A2,
-    0xF5DF_A6BD_3830_3248,
-    0x72CE_87B1_9D65_48CA,
-    0x256F_A0EC_7657_F74B,
-    0xB9EA_9BC3_B136_603B,
-    0x1ACB_DA11_317C_387E,
-    0x3E96_CA16_224A_E8C5,
-    0x2757_3B29_1169_B825,
-    0xED2E_AE35_C138_2144,
-    0x5595_52FB_4AFA_1B10,
-    0xE7B8_7620_6DEB_AC98,
-    0x8A0D_175B_8BAA_FA2B,
-    0x40F3_4326_7298_B62D,
-    0xC9E3_B398_03F2_F6AF,
-    0xB172_17F7_D1CF_79AB,
-];
+/// The fraction of `ln 2` (its integer part is 0), of which every value takes the top limbs.
+const LN2: &[u64] = &super::real::LN2_LIMBS;
 
-/// A value: `l` limbs used.
-pub(super) type Fx = [u64; MAX];
+/// A value: `l` limbs used of `CAP`.
+pub(super) type Fx<const CAP: usize> = [u64; CAP];
 
-/// The arithmetic of values of `l` limbs.
+/// The arithmetic of values of `l` limbs, in arrays of `CAP`: the values are passed and returned
+/// in arrays as long as the longest terms of their instance need, so that the short ones, most of
+/// them, do not move the limbs of the long ones. Instances of 2 to [`small::MAX`] limbs have
+/// `l = CAP`, a constant: their loops are unrolled and their products taken in registers; those of
+/// 16 and [`MAX`] limbs take the multiplication's schoolbook kernels.
 #[derive(Clone, Copy)]
-pub(super) struct Mid {
-    /// The limbs of a value.
+pub(super) struct Mid<const CAP: usize> {
+    /// The limbs of a value, at most `CAP`.
     pub(super) l: usize,
 }
 
-impl Mid {
+impl<const CAP: usize> Mid<CAP> {
+    /// The limbs of a value: `CAP` itself for the instances of up to [`small::MAX`] limbs, a constant
+    /// that unrolls every loop and takes the products in registers; `l` beyond.
+    #[inline(always)]
+    pub(super) fn len(self) -> usize {
+        if CAP <= small::MAX {
+            debug_assert!(self.l == CAP);
+            CAP
+        } else {
+            self.l
+        }
+    }
+
     /// The bits of fraction.
     pub(super) fn f(self) -> u64 {
-        64 * (self.l as u64 - 1)
+        64 * (self.len() as u64 - 1)
     }
 
     /// The integer `c`.
-    fn int(self, c: u64) -> Fx {
-        let mut r = [0; MAX];
-        r[self.l - 1] = c;
+    fn int(self, c: u64) -> Fx<CAP> {
+        let mut r = [0; CAP];
+        r[self.len() - 1] = c;
         r
     }
 
     /// The value from the fixed-point `X 2^-fx`, rounded down, `X >= 0` below `2^(64 + fx)`.
-    pub(super) fn of_number(self, x: &Number, fx: u64) -> Fx {
+    pub(super) fn of_number(self, x: &Number, fx: u64) -> Fx<CAP> {
         let y = super::real::shift(x, self.f() as i64 - fx as i64);
-        let mut r = [0; MAX];
-        for (i, b) in y.value.iter().enumerate().take(8 * self.l) {
+        let mut r = [0; CAP];
+        for (i, b) in y.value.iter().enumerate().take(8 * self.len()) {
             r[i / 8] |= u64::from(*b) << (8 * (i % 8));
         }
         r
@@ -83,18 +83,21 @@ impl Mid {
 
     /// The value from the top limbs of a table `t` of `floor(c 2^(64 (t.len() - 1)))`-like limbs
     /// whose top limb is the integer part: those below its fraction's last are dropped.
-    fn of_table(self, t: &[u64], integer: u64) -> Fx {
-        debug_assert!(t.len() >= self.l - 1);
-        let mut r = [0; MAX];
-        let take = (self.l - 1).min(t.len());
-        r[self.l - 1 - take..self.l - 1].copy_from_slice(&t[t.len() - take..]);
-        r[self.l - 1] = integer;
+    fn of_table(self, t: &[u64], integer: u64) -> Fx<CAP> {
+        debug_assert!(t.len() >= self.len() - 1);
+        let mut r = [0; CAP];
+        let take = (self.len() - 1).min(t.len());
+        r[self.len() - 1 - take..self.len() - 1].copy_from_slice(&t[t.len() - take..]);
+        r[self.len() - 1] = integer;
         r
     }
 
     /// The number of the value, with `negative`, times `2^e`, rounded down in magnitude.
-    pub(super) fn to_number(self, a: &Fx, negative: bool, e: i64) -> Number {
-        let bytes: Vec<u8> = a[..self.l].iter().flat_map(|x| x.to_le_bytes()).collect();
+    pub(super) fn to_number(self, a: &Fx<CAP>, negative: bool, e: i64) -> Number {
+        let bytes: Vec<u8> = a[..self.len()]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
         let x = super::real::shift(
             &Number::new(bytes, ByteOrder::LittleEndian),
             e - self.f() as i64,
@@ -103,8 +106,8 @@ impl Mid {
     }
 
     /// The value as a double, about.
-    pub(super) fn to_f64(self, a: &Fx) -> f64 {
-        let l = self.l;
+    pub(super) fn to_f64(self, a: &Fx<CAP>) -> f64 {
+        let l = self.len();
         a[l - 1] as f64
             + a[l - 2] as f64 * pow2(-64)
             + if l > 2 {
@@ -115,60 +118,119 @@ impl Mid {
     }
 
     /// `a + b`.
-    fn add(self, a: &Fx, b: &Fx) -> Fx {
-        let mut r = [0; MAX];
-        // SAFETY: the arrays hold `l` limbs.
-        unsafe { add_n(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), self.l) };
+    #[inline(always)]
+    fn add(self, a: &Fx<CAP>, b: &Fx<CAP>) -> Fx<CAP> {
+        let mut r = [0; CAP];
+        if CAP <= small::MAX {
+            // Unrolled, the carry in a `u128`.
+            let mut c = 0u128;
+            for i in 0..CAP {
+                c += u128::from(a[i]) + u128::from(b[i]);
+                r[i] = c as u64;
+                c >>= 64;
+            }
+        } else {
+            // SAFETY: the arrays hold `l` limbs.
+            unsafe { add_n(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), self.len()) };
+        }
         r
     }
 
     /// `a - b`, `a >= b`.
-    fn sub(self, a: &Fx, b: &Fx) -> Fx {
-        let mut r = [0; MAX];
-        // SAFETY: the arrays hold `l` limbs.
-        unsafe { sub_n(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), self.l) };
+    #[inline(always)]
+    fn sub(self, a: &Fx<CAP>, b: &Fx<CAP>) -> Fx<CAP> {
+        let mut r = [0; CAP];
+        if CAP <= small::MAX {
+            let mut borrow = 0u64;
+            for i in 0..CAP {
+                let d = u128::from(a[i])
+                    .wrapping_sub(u128::from(b[i]))
+                    .wrapping_sub(u128::from(borrow));
+                r[i] = d as u64;
+                borrow = (d >> 127) as u64;
+            }
+        } else {
+            // SAFETY: the arrays hold `l` limbs.
+            unsafe { sub_n(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), self.len()) };
+        }
         r
     }
 
     /// `a b`, rounded down: a unit.
-    fn mul(self, a: &Fx, b: &Fx) -> Fx {
-        let l = self.l;
-        let mut p = [0u64; 2 * MAX];
-        // SAFETY: the product of `l` limbs by `l` takes `2l`, without scratch below Karatsuba's
-        // method's 24 limbs, which `MAX` stays below.
+    #[inline(always)]
+    fn mul(self, a: &Fx<CAP>, b: &Fx<CAP>) -> Fx<CAP> {
+        if CAP <= small::MAX {
+            let mut r = [0; CAP];
+            // SAFETY: the arrays hold the `CAP` limbs of the operands and of the result.
+            unsafe { small::mul_hi::<CAP>(r.as_mut_ptr(), a.as_ptr(), b.as_ptr()) };
+            return r;
+        }
+        let l = self.len();
+        let mut p = [MaybeUninit::<u64>::uninit(); 2 * MAX];
+        let pp = p.as_mut_ptr().cast::<u64>();
+        let mut r = [0; CAP];
+        // SAFETY: the product of `l` limbs by `l` takes `2l`, all written before the `l` of them
+        // above the fraction's last are read; the schoolbook kernel needs no scratch, and `l`
+        // stays below Karatsuba's 24 limbs.
         unsafe {
-            mul(
-                p.as_mut_ptr(),
-                a.as_ptr(),
-                l,
-                b.as_ptr(),
-                l,
-                Scratch::none(),
-            )
-        };
-        let mut r = [0; MAX];
-        r[..l].copy_from_slice(&p[l - 1..2 * l - 1]);
+            if l <= small::MAX {
+                small::mul(pp, a.as_ptr(), b.as_ptr(), l);
+            } else {
+                basecase::mul(pp, a.as_ptr(), b.as_ptr(), l);
+            }
+            core::ptr::copy_nonoverlapping(pp.add(l - 1), r.as_mut_ptr(), l);
+        }
+        r
+    }
+
+    /// `a^2`, rounded down: a unit.
+    #[inline(always)]
+    fn sqr(self, a: &Fx<CAP>) -> Fx<CAP> {
+        if CAP <= small::MAX {
+            let mut r = [0; CAP];
+            // SAFETY: as above.
+            unsafe { small::sqr_hi::<CAP>(r.as_mut_ptr(), a.as_ptr()) };
+            return r;
+        }
+        let l = self.len();
+        let mut p = [MaybeUninit::<u64>::uninit(); 2 * MAX];
+        let pp = p.as_mut_ptr().cast::<u64>();
+        let mut r = [0; CAP];
+        // SAFETY: as for `mul`.
+        unsafe {
+            if l <= small::MAX {
+                small::sqr(pp, a.as_ptr(), l);
+            } else {
+                basecase::sqr(pp, a.as_ptr(), l);
+            }
+            core::ptr::copy_nonoverlapping(pp.add(l - 1), r.as_mut_ptr(), l);
+        }
         r
     }
 
     /// `a c`.
-    fn mul_u64(self, a: &Fx, c: u64) -> Fx {
-        let mut r = [0; MAX];
+    #[inline(always)]
+    fn mul_u64(self, a: &Fx<CAP>, c: u64) -> Fx<CAP> {
+        let mut r = [0; CAP];
         // SAFETY: the arrays hold `l` limbs; the product's integer part fits its limb.
-        let carry = unsafe { mul_1(r.as_mut_ptr(), a.as_ptr(), self.l, c) };
+        let carry = unsafe { mul_1(r.as_mut_ptr(), a.as_ptr(), self.len(), c) };
         debug_assert!(carry == 0);
         r
     }
 
     /// `a / d`, rounded down: a unit.
-    fn div_u64(self, a: &Fx, d: u64) -> Fx {
+    fn div_u64(self, a: &Fx<CAP>, d: u64) -> Fx<CAP> {
         let s = d.leading_zeros();
         let dn = d << s;
         let v = invert_limb(dn);
-        let mut r = [0; MAX];
+        let mut r = [0; CAP];
         // The dividend shifted left by `s`, from the top.
-        let mut rem = if s == 0 { 0 } else { a[self.l - 1] >> (64 - s) };
-        for i in (0..self.l).rev() {
+        let mut rem = if s == 0 {
+            0
+        } else {
+            a[self.len() - 1] >> (64 - s)
+        };
+        for i in (0..self.len()).rev() {
             let lo = if i == 0 || s == 0 {
                 a[i] << s
             } else {
@@ -182,10 +244,10 @@ impl Mid {
     }
 
     /// `a 2^-k`, rounded down, `k < 64`.
-    fn shr(self, a: &Fx, k: u32) -> Fx {
-        let mut r = [0; MAX];
-        for i in 0..self.l {
-            let hi = if i + 1 < self.l { a[i + 1] } else { 0 };
+    fn shr(self, a: &Fx<CAP>, k: u32) -> Fx<CAP> {
+        let mut r = [0; CAP];
+        for i in 0..self.len() {
+            let hi = if i + 1 < self.len() { a[i + 1] } else { 0 };
             r[i] = if k == 0 {
                 a[i]
             } else {
@@ -196,8 +258,8 @@ impl Mid {
     }
 
     /// Whether `a >= b`.
-    fn ge(self, a: &Fx, b: &Fx) -> bool {
-        for i in (0..self.l).rev() {
+    fn ge(self, a: &Fx<CAP>, b: &Fx<CAP>) -> bool {
+        for i in (0..self.len()).rev() {
             if a[i] != b[i] {
                 return a[i] > b[i];
             }
@@ -206,7 +268,7 @@ impl Mid {
     }
 
     /// `a 2^-k`, rounded down, for any `k`: a unit for each 63 bits.
-    fn shr_long(self, a: &Fx, mut k: u64) -> Fx {
+    fn shr_long(self, a: &Fx<CAP>, mut k: u64) -> Fx<CAP> {
         let mut r = *a;
         while k > 0 {
             let step = k.min(63) as u32;
@@ -225,7 +287,14 @@ impl Mid {
     /// The powers are within `i (ez + 1)` units for `z^i`; a block's sum, divided by `D`, within
     /// `Σ e_i / (d_1 ... d_i) + (2 e_m + e(G') + 1) / D + 1 < 2 m (ez + 1) + 2 + e(G') / 2^m`: the
     /// whole within twice a block's bound.
-    fn series(self, z: &Fx, ez: f64, t: u64, d: impl Fn(u64) -> u64, alternate: bool) -> (Fx, f64) {
+    fn series(
+        self,
+        z: &Fx<CAP>,
+        ez: f64,
+        t: u64,
+        d: impl Fn(u64) -> u64,
+        alternate: bool,
+    ) -> (Fx<CAP>, f64) {
         let one = self.int(1);
         // The block's length: about `√t`, and at most what keeps the product of its `d`s below
         // `2^62`, as the integer limb holds the partial sums.
@@ -244,18 +313,18 @@ impl Mid {
             m -= 1;
         }
         let m = m as usize;
-        let mut powers = [[0u64; MAX]; 16];
+        let mut powers = [[0u64; CAP]; 16];
         powers[0] = one;
         powers[1] = *z;
         for i in 2..=m {
             powers[i] = if i % 2 == 0 {
-                self.mul(&powers[i / 2], &powers[i / 2])
+                self.sqr(&powers[i / 2])
             } else {
                 self.mul(&powers[i - 1], z)
             };
         }
         let blocks = t.div_ceil(m as u64);
-        let mut g = [0u64; MAX];
+        let mut g = [0u64; CAP];
         for b in (0..blocks).rev() {
             let base = b * m as u64;
             let mut acc = one;
@@ -296,9 +365,9 @@ impl Mid {
     /// `r = x - q ln 2` within `ex + q + 1` units, `r' = r 2^-s < 2^-(s + 0.5)`; `e^r' - 1 =
     /// r' Σ r'^j / (j + 1)!` by [`Mid::series`], whose sum is below 2 and within its bound; the `s`
     /// doublings `w (w + 2)` multiply an error by `2w + 2 <= 4` and add a unit.
-    pub(super) fn exp(self, x: &Fx, ex: f64) -> (Fx, i64, f64) {
+    pub(super) fn exp(self, x: &Fx<CAP>, ex: f64) -> (Fx<CAP>, i64, f64) {
         let f = self.f();
-        let ln2 = self.of_table(&LN2, 0);
+        let ln2 = self.of_table(LN2, 0);
         let mut q = (self.to_f64(x) * core::f64::consts::LOG2_E)
             .floor()
             .max(0.0) as u64;
@@ -321,19 +390,21 @@ impl Mid {
         let mut bits = s as f64 + 1.5;
         while bits < f as f64 + 2.0 {
             t += 1;
-            bits += s as f64 + 0.5 + ((t + 1) as f64).log2();
+            bits += s as f64 + 0.5 + log2_below((t + 1) as f64);
         }
         let one = self.int(1);
         let (acc, ea) = self.series(&r, er, t, |j| j + 1, false);
         let mut w = self.mul(&r, &acc);
         // `acc < 2`; the tail past `t` terms adds a unit.
         let mut ew = er * 2.0 + ea * pow2(-(s as i64)) + 2.0;
-        let two = self.int(2);
         // The product of two errors in units is in units of `2^-2f`: `unit` of a unit.
         let unit = pow2(-(f as i64));
         for _ in 0..s {
             let wf = self.to_f64(&w);
-            w = self.mul(&w, &self.add(&w, &two));
+            // `w (w + 2) = w^2 + 2w`: the square's unit, `2w` exact.
+            let w2 = self.sqr(&w);
+            let d = self.add(&w, &w);
+            w = self.add(&w2, &d);
             ew = ew * (2.0 * wf + 2.0) * 1.000_001 + ew * ew * unit + 1.0;
         }
         let y = self.add(&one, &w);
@@ -343,12 +414,12 @@ impl Mid {
     /// `1 / y` for `1 <= y < 2` within `ey` units, and a bound of its error in units: Newton's
     /// iteration `r (2 - y r)` from a double's start, then the residual `t = 1 - y r` within three
     /// units bounds `|r - 1/y| <= (|t| + 3 + ey r) / y`, with `y >= 1`.
-    fn reciprocal(self, y: &Fx, ey: f64) -> (Fx, f64) {
+    fn reciprocal(self, y: &Fx<CAP>, ey: f64) -> (Fx<CAP>, f64) {
         let one = self.int(1);
         let two = self.int(2);
         let start = 1.0 / self.to_f64(y);
-        let mut r = [0u64; MAX];
-        r[self.l - 2] = (start * pow2(64)) as u64;
+        let mut r = [0u64; CAP];
+        r[self.len() - 2] = (start * pow2(64)) as u64;
         let mut good = 40.0;
         while good < self.f() as f64 + 8.0 {
             let yr = self.mul(y, &r);
@@ -374,7 +445,7 @@ impl Mid {
     /// `1 - cos(2z) = 2v (2 - v)`, which multiply the absolute error by at most 4 and add two units.
     /// `y` is within `a / b + 2` units, the steps of the series within two units more than the
     /// last one's error divided by their divisor.
-    pub(super) fn cos_pi(self, a: u64, b: u64) -> Option<(Fx, bool, f64)> {
+    pub(super) fn cos_pi(self, a: u64, b: u64) -> Option<(Fx<CAP>, bool, f64)> {
         let (a, b) = (u128::from(a), u128::from(b));
         let a = if a > b { 2 * b - a } else { a };
         let (a, negative) = if 2 * a > b { (b - a, true) } else { (a, false) };
@@ -397,39 +468,48 @@ impl Mid {
         let zf = self.to_f64(&z);
         // Terms: `2 z^j / (2j + 2)!` below `2^-(f + 2)`.
         let mut j = 1u64;
-        let mut lg = zf.log2() - 1.0;
+        // `log2 z` from above, and those of the divisors from below: the count is at least what
+        // the tail needs.
+        let lz = zf.log2();
+        let mut lg = lz - 1.0;
         while lg > -(f as f64 + 2.0) {
             j += 1;
-            lg += zf.log2() - ((2 * j + 1) as f64).log2() - ((2 * j + 2) as f64).log2();
+            lg += lz - log2_below(((2 * j + 1) * (2 * j + 2)) as f64);
         }
         let one = self.int(1);
         let (acc, ea) = self.series(&z, ez, j, |i| (2 * i + 1) * (2 * i + 2), true);
         // `v = z acc / 2`, then the doublings.
         let mut v = self.shr(&self.mul(&z, &acc), 1);
         let mut ev = (ez + zf * ea + 1.0) / 2.0 + 2.0;
-        let two = self.int(2);
         for _ in 0..s {
-            let p = self.mul(&v, &self.sub(&two, &v));
-            v = self.add(&p, &p);
+            // `2v (2 - v) = 4v - 2v^2`: twice the square's unit, `4v` exact.
+            let v2 = self.sqr(&v);
+            let v2 = self.add(&v2, &v2);
+            let v4 = self.add(&v, &v);
+            let v4 = self.add(&v4, &v4);
+            v = self.sub(&v4, &v2);
             ev = 4.0 * ev + 2.0;
         }
         Some((self.sub(&one, &v), negative, ev))
     }
 
     /// The term `T_k` to about `f - 64` bits of `f`: `(magnitude, negative, q, error)` for
-    /// `T_k = magnitude 2^q`, the error in units of `2^(q - f)`, or `None` for zero.
+    /// `T_k = magnitude 2^q`, the error in units of `2^(q - f)`, or `None` for zero; the cosines of
+    /// `sum` that `cosines` gives (magnitude, sign, absolute error in units) are taken from there,
+    /// the others computed.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn term(
         self,
         sum: &Sum,
         k: u64,
         n24: u64,
-        c: &Fx,
+        c: &Fx<CAP>,
         ec: f64,
-        inv_c: &Fx,
+        inv_c: &Fx<CAP>,
         e_inv: f64,
-        root: (&Fx, f64),
-    ) -> Option<(Fx, bool, i64, f64)> {
+        root: (&Fx<CAP>, f64),
+        cosines: &[Option<(Fx<CAP>, bool, f64)>],
+    ) -> Option<(Fx<CAP>, bool, i64, f64)> {
         // The product of two errors in units is in units of `2^-2f`: `unit` of a unit.
         let unit = pow2(-(self.f() as i64));
         // `x = C / k`, `1 / x = k / C`.
@@ -475,8 +555,11 @@ impl Mid {
         et = et * pre as f64 / n24 as f64 + 1.0;
         tf = tf * pre as f64 / n24 as f64;
         let mut negative = sum.prefactor < 0;
-        for &(a, b) in &sum.cos[..sum.len] {
-            let (c, neg, ecos) = self.cos_pi(a, b)?;
+        for (i, &(a, b)) in sum.cos[..sum.len].iter().enumerate() {
+            let (c, neg, ecos) = match cosines[i] {
+                Some(c) => c,
+                None => self.cos_pi(a, b)?,
+            };
             let cf = self.to_f64(&c);
             et = tf * ecos + cf * et + et * ecos * unit + 1.0;
             t = self.mul(&t, &c);

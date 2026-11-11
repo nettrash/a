@@ -157,8 +157,8 @@ pub(super) fn term(sum: &Sum, k: u64, n24: f64, n24_err: f64, c: f64, c_err: f64
     let (uv, mut err) = u_of(x, dx);
     // `√(3 sp / (k sq))`: the quotient within `u` (and the products' roundings when they pass
     // `2^53`), the square root within `u` and half the quotient's.
-    let num = 3 * u128::from(sum.sp);
-    let den = u128::from(k) * u128::from(sum.sq);
+    // `3 sp` and `k sq` below `2^32`: exact doubles.
+    let (num, den) = (3 * sum.sp, k * sum.sq);
     let mut v = (num as f64 / den as f64).sqrt();
     err += 3.0;
     v *= sum.prefactor as f64 * 4.0;

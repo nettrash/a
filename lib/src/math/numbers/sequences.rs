@@ -5,7 +5,8 @@
 //!
 //! The Fibonacci and Lucas numbers are doubled from tables, two squares a bit, as GMP's
 //! `mpz_fib_ui` does ([`fibonacci`]), and the exact Lucas sequences the same way with `Q^k` beside
-//! them ([`lucas`]). Modulo a number, the sequences are ladders over the index's bits in
+//! them ([`lucas`]), the squares and products of up to eight limbs by straight-line kernels in
+//! registers ([`small`]). Modulo a number, the sequences are ladders over the index's bits in
 //! Montgomery's form, the Baillie–PSW test's arithmetic, and modulo the power of two of an even
 //! modulus by the low halves of products ([`lucas_mod`]). Primorials are balanced product trees of
 //! the primes from the primality test's tables and the segmented sieve ([`primorial`]), and
@@ -17,6 +18,7 @@ mod lucas;
 mod lucas_mod;
 mod partitions;
 mod primorial;
+mod small;
 
 use super::{ByteOrder, Number};
 
@@ -24,10 +26,11 @@ impl Number {
     /// Returns the Fibonacci number `F_n` (`F_0 = 0`, `F_1 = 1`, `F_(k+2) = F_(k+1) + F_k`), in the
     /// byte order `byte_order`, in the shortest form, in one new vector.
     ///
-    /// Up to `F_186`, the last below `2^128`, from a table; beyond, by fast doubling from the table,
-    /// as GMP's `mpz_fib_ui` does: `F_(2k-1) = F_k^2 + F_(k-1)^2` and
-    /// `F_(2k+1) = 4 F_k^2 - F_(k-1)^2 + 2 (-1)^k`, two squares for each bit of `n`, and one product
-    /// for the last, `F_(2k) = F_k (F_k + 2 F_(k-1))` or
+    /// Up to `F_186`, the last below `2^128`, from a table, and up to `F_373` from one product of
+    /// two numbers of the tables, `F_(2k) = F_k L_k` or `F_(2k+1) = F_(k+2) L_(k-1) + 2 (-1)^k`;
+    /// beyond, by fast doubling from the table, as GMP's `mpz_fib_ui` does:
+    /// `F_(2k-1) = F_k^2 + F_(k-1)^2` and `F_(2k+1) = 4 F_k^2 - F_(k-1)^2 + 2 (-1)^k`, two squares
+    /// for each bit of `n`, and one product for the last, `F_(2k) = F_k (F_k + 2 F_(k-1))` or
     /// `F_(2k+1) = (2 F_k + F_(k-1)) (2 F_k - F_(k-1)) + 2 (-1)^k`. The time is that of a few
     /// products of the result's length, `0.694 n` bits.
     ///
@@ -55,8 +58,9 @@ impl Number {
     ///
     /// Up to `L_184`, the last below `2^128`, from a table; beyond, as GMP's `mpz_lucnum_ui` does:
     /// the zero bits at the bottom of `n` as squares, `L_(2k) = L_k^2 - 2 (-1)^k`, from the table or
-    /// from the odd part `2k + 1`, `L_(2k+1) = 5 F_(k-1) (2 F_k + F_(k-1)) - 4 (-1)^k`, with `F_k`
-    /// and `F_(k-1)` from the doubling of [`fibonacci`](Self::fibonacci).
+    /// from the odd part `2k + 1`, `L_(2k+1) = L_k L_(k+1) - (-1)^k` from the table up to 367 and
+    /// `5 F_(k-1) (2 F_k + F_(k-1)) - 4 (-1)^k` beyond, with `F_k` and `F_(k-1)` from the doubling
+    /// of [`fibonacci`](Self::fibonacci).
     ///
     /// # Panics
     ///
@@ -84,8 +88,10 @@ impl Number {
     /// By doubling from the top bit of `n`, two squares a bit: with `Q^k` beside them,
     /// `U_(2k-1) = U_k^2 - Q U_(k-1)^2`, `U_(2k+1) = (P^2 - 3Q) U_k^2 - Q^2 U_(k-1)^2 + 2 Q^k` and
     /// `U_(2k) = (U_(2k+1) + Q U_(2k-1)) / P`, an exact division, then `V_n = P U_n - 2Q U_(n-1)`;
-    /// `P = ±1, Q = -1` from the Fibonacci and Lucas numbers, and `P = 0`, `Q = 0` and `P^2 = 4Q` by
-    /// their closed forms.
+    /// on limbs for `|P|` and `|Q|` below `2^30`, its first steps in `i128`s and each value a step
+    /// in one pass over the squares' limbs, the division by `P` in the same pass; `P = ±1, Q = -1`
+    /// and `P = ±3, Q = 1` from the Fibonacci and Lucas numbers (`U_n(3, 1) = F_(2n)`), and
+    /// `P = 0`, `Q = 0` and `P^2 = 4Q` by their closed forms.
     ///
     /// # Panics
     ///

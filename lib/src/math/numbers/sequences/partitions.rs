@@ -6,16 +6,22 @@
 //! `C = (π/6) √(24n - 1)` and `U(x) = cosh(x) - sinh(x)/x`, the remainder bounded by Rademacher's
 //! `|R(n, N)| < 44π^2 / (225√3) N^-1/2 + (π√2 / 75) (N / (n - 1))^1/2 sinh((π/N) √(2n/3))`. `N` is
 //! the least number of terms for which that bound is at most 1/4. Each `A_k(n)` is a product of
-//! cosines ([`expsum`]); each term is computed in double precision when that is accurate enough
-//! ([`double`]), and otherwise at a precision that falls as `k` grows, up to 1248 bits in fixed
-//! point on limbs on the stack ([`mid`]) and beyond in floating point on numbers ([`real`]), each
-//! with a bound of its error. The terms are summed in fixed point, and the sum rounded to the
-//! nearest integer once the bounds of all errors add up to less than 1/2.
+//! cosines ([`expsum`](mod@expsum)); each term is computed in double precision when that is
+//! accurate enough ([`double`]), and otherwise at a precision that falls as `k` grows, up to 1248
+//! bits in fixed point on limbs on the stack ([`mid`]) and beyond in floating point on numbers
+//! ([`real`]), each with a bound of its error. The terms are summed in fixed point, and the sum
+//! rounded to the nearest integer once the bounds of all errors add up to less than 1/2.
 //!
-//! Measured on an Apple M4 Max, single-threaded, against FLINT 3.6's `partitions_fmpz_ui` (which
-//! keeps `π` and other constants between calls; with its caches cleared before each call in
-//! parentheses): `p(10^4)` 21.0 µs against 22.9 (85.8), `p(10^6)` 283 µs against 209 (275),
-//! `p(10^9)` 31.2 ms against 17.9 (32.0).
+//! The first term's `e^C`, on numbers from `n` of about 10^5, is reduced by `ln 2` first; the
+//! other terms on numbers take `e^(C/k)`, `k = 2^j m` with `m` odd, as the `m`-th root of `e^C` by
+//! Newton's method and `j` square roots, and their cosines of denominators `2^s 3^t q`, `q` 1 or 5,
+//! from closed forms and the half- and triple-angle formulas ([`real::cos_pi_algebraic`]), as do
+//! the terms on 9 limbs and more. The roots `√(3 sp / (k sq))` take four values, kept for the call.
+//!
+//! Measured on an Apple M4 Max, single-threaded, on a quiet machine, in cycles against FLINT 3.6's
+//! `partitions_fmpz_ui` (which keeps `π`, logarithms and tables between calls): `p(500)` 11,000
+//! against 16,300, `p(10^4)` 42,900 against 103,000, `p(10^6)` 601,000 against 873,000, `p(10^7)`
+//! 2.93 M against 3.23 M; `p(10^9)` 20.2 ms against 16.6.
 
 mod double;
 mod expsum;
@@ -25,9 +31,12 @@ mod real;
 use super::super::root::small_number;
 use super::super::{ByteOrder, Number};
 use double::U as UNIT;
-use expsum::{Sum, expsum};
+use expsum::{Sieve, Sum, expsum};
 use mid::Mid;
-use real::{Float, cos_pi, cos_pi_newton, exp, inverse_root, pi, pow2, shift, sqrt};
+use real::{
+    Float, cos_pi, cos_pi_algebraic, cos_pi_newton, exp, inverse_root, log2_above, pi, pow2, shift,
+    sqrt,
+};
 
 /// `p(n)` for `n` up to 416, the last below `2^64`, by Euler's pentagonal recurrence
 /// `p(n) = Σ_(k>=1) (-1)^(k+1) (p(n - k(3k-1)/2) + p(n - k(3k+1)/2))`.
@@ -120,39 +129,6 @@ fn needed_terms(n: f64) -> u64 {
     lo
 }
 
-/// The smallest prime factor of every number up to `n`, by a sieve.
-fn smallest_factors(n: u64) -> Vec<u32> {
-    let len = usize::try_from(n + 1).expect("capacity overflow");
-    let mut spf = vec![0u32; len];
-    for i in 2..len {
-        if spf[i] == 0 {
-            let p = i as u32;
-            let mut j = i;
-            while j < len {
-                if spf[j] == 0 {
-                    spf[j] = p;
-                }
-                j += i;
-            }
-        }
-    }
-    spf
-}
-
-/// The prime factors of `k` with their exponents, increasing, from the sieve.
-fn factors_of(mut k: u64, spf: &[u32], out: &mut Vec<(u64, u32)>) {
-    out.clear();
-    while k > 1 {
-        let p = u64::from(spf[k as usize]);
-        let mut e = 0;
-        while k.is_multiple_of(p) {
-            k /= p;
-            e += 1;
-        }
-        out.push((p, e));
-    }
-}
-
 /// `p(n)` by the series, little-endian, with `extra` bits of precision more than the schedule, which
 /// a failed check of the bound of the error raises.
 fn hrr(n: u64, extra: u64) -> Number {
@@ -166,7 +142,8 @@ fn hrr(n: u64, extra: u64) -> Number {
     let n24f_err = if n24 < 1 << 53 { 0.0 } else { UNIT };
     let cf = core::f64::consts::PI / 6.0 * n24f.sqrt();
     // The precision of the first term, and of `C` and `π` with room to spare.
-    let lt1 = log2_bound(&one_sum(), 1, cf, n24f);
+    let log2_n24 = n24f.log2();
+    let lt1 = log2_bound(&Sum::one(), 1, cf, log2_n24);
     let w_first = (lt1 + g as f64 + 16.0).ceil().max(64.0) as u64;
     // Room for the fixed point of the terms on the stack, up to 128 bits more than their precision.
     let fc = w_first + 176;
@@ -194,26 +171,25 @@ fn hrr(n: u64, extra: u64) -> Number {
     };
     let inv_c = one.div(&Float::of_fixed(c_fix.clone(), fc).cut(fc), fc);
     let inv_c_fix = inv_c.to_fixed(fc);
-    let spf = smallest_factors(terms);
-    let mut constants: [Option<(mid::Fx, mid::Fx)>; mid::MAX + 1] = [None; mid::MAX + 1];
+    let mut sieve = Sieve::new(terms, n);
+    // `C` and `1/C` in the fixed point of each length, once each.
+    let mut constants: Constants = Vec::new();
+    let mut roots: Roots = Vec::new();
+    let mut float_roots: FloatRoots = Vec::new();
     let mut factors = Vec::with_capacity(16);
     let mut big = Number::new_from_u8(0, ByteOrder::LittleEndian);
     let mut small: i128 = 0;
     let mut err = 0.0f64;
     for k in 1..=terms {
-        factors_of(k, &spf, &mut factors);
-        let sum = if k == 1 {
-            one_sum()
-        } else {
-            expsum(k, n, &factors)
-        };
+        sieve.factors(k, &mut factors);
+        let sum = expsum(k, &factors, &mut sieve);
         if sum.prefactor == 0 {
             continue;
         }
         let x = c_f64 / k as f64;
-        let lt = log2_bound(&sum, k, cf, n24f);
+        let lt = log2_bound(&sum, k, cf, log2_n24);
         // The double precision's bound, about: `(60 + 13 cosines + 2x) u` relatively.
-        let low = lt + (60.0 + 13.0 * sum.len as f64 + 2.0 * x).log2() - 53.0;
+        let low = lt + log2_above(60.0 + 13.0 * sum.len as f64 + 2.0 * x) - 53.0;
         if low <= -(g as f64) - 2.0 {
             let (v, e) = double::term(&sum, k, n24f, n24f_err, c_f64, 1.01 * UNIT);
             // `v 2^FRACTION`, exactly, rounded to an integer: half a unit of `2^-FRACTION`.
@@ -224,34 +200,31 @@ fn hrr(n: u64, extra: u64) -> Number {
             // Room for the bits that the fixed point loses: two for each doubling of the
             // exponential and of the cosines (about `2.2 (w + 64)^(1/3)` in all), the factor
             // `4 / (24n - 1)`, and 24 to spare.
-            let room = 4.4 * ((w + 64) as f64).cbrt() + n24f.log2() + 24.0;
-            let mid = Mid {
-                l: (w + room.ceil() as u64).div_ceil(64) as usize + 1,
+            let room = 4.4 * ((w + 64) as f64).cbrt() + log2_n24 + 24.0;
+            let l = (w + room.ceil() as u64).div_ceil(64) as usize + 1;
+            let fixed = (&c_fix, fc, c_err, &inv_c_fix);
+            let n24 = n24 as u64;
+            let cs = (&mut constants, &mut roots);
+            let t = match l {
+                2 => mid_term(Mid::<2> { l }, cs, &sum, k, n24, fixed),
+                3 => mid_term(Mid::<3> { l }, cs, &sum, k, n24, fixed),
+                4 => mid_term(Mid::<4> { l }, cs, &sum, k, n24, fixed),
+                5 => mid_term(Mid::<5> { l }, cs, &sum, k, n24, fixed),
+                6 => mid_term(Mid::<6> { l }, cs, &sum, k, n24, fixed),
+                7 => mid_term(Mid::<7> { l }, cs, &sum, k, n24, fixed),
+                8 => mid_term(Mid::<8> { l }, cs, &sum, k, n24, fixed),
+                9..=16 => mid_term(Mid::<16> { l }, cs, &sum, k, n24, fixed),
+                _ => mid_term(Mid::<{ mid::MAX }> { l }, cs, &sum, k, n24, fixed),
             };
-            let f = mid.f();
-            // `C` and `1/C` in the stack's fixed point, once for each length.
-            let (c, ic) = *constants[mid.l]
-                .get_or_insert_with(|| (mid.of_number(&c_fix, fc), mid.of_number(&inv_c_fix, fc)));
-            let ec = c_err * pow2(f as i64 - fc as i64) + 1.0;
-            // `1/C` within 4 units of `2^-fc` relatively, `1/C < 1`, and the cut.
-            let eic = 4.0 * pow2(f as i64 - fc as i64) + 2.0;
-            // `√(3 sp / (k sq)) = √(3 sp k sq) / (k sq)` within two units.
-            let num = 3 * u128::from(sum.sp);
-            let den = u128::from(k) * u128::from(sum.sq);
-            let square = Number::new_from_u128(num * den, ByteOrder::LittleEndian)
-                << real::shift_count(2 * f);
-            let root = &square.isqrt() / &Number::new_from_u128(den, ByteOrder::LittleEndian);
-            let root = mid.of_number(&root, f);
-            if let Some((v, negative, q, e)) =
-                mid.term(&sum, k, n24 as u64, &c, ec, &ic, eic, (&root, 2.0))
-            {
-                big += mid.to_number(&v, negative, q + FRACTION as i64);
-                err += e * pow2(q - f as i64) + pow2(-(FRACTION as i64));
+            if let Some((t, e)) = t {
+                big += t;
+                err += e;
             }
         } else {
             let w = (lt + g as f64 + 16.0).ceil().max(64.0) as u64;
             let first = first.as_ref().expect("e^C for the terms on numbers");
             let (t, e) = high_term(
+                &mut float_roots,
                 &sum,
                 k,
                 n24,
@@ -280,34 +253,176 @@ fn hrr(n: u64, extra: u64) -> Number {
         >> real::shift_count(FRACTION)
 }
 
-/// The sum `A_1(n) = 1`.
-fn one_sum() -> Sum {
-    Sum {
-        prefactor: 1,
-        sp: 1,
-        sq: 1,
-        cos: [(0, 1); 16],
-        len: 0,
-    }
-}
-
 /// An upper bound of `log2 |T_k|` with `U(x) < e^x`: `log2 |prefactor| + log2 √(3 sp / (k sq)) + 2
 /// - log2(24n - 1) + x log2(e)`, with a bit to spare for the doubles' roundings.
-fn log2_bound(sum: &Sum, k: u64, cf: f64, n24f: f64) -> f64 {
+fn log2_bound(sum: &Sum, k: u64, cf: f64, log2_n24: f64) -> f64 {
     let x = cf / k as f64;
-    (sum.prefactor.unsigned_abs() as f64).log2()
-        + 0.5
-            * ((3 * u128::from(sum.sp)) as f64 / (u128::from(k) * u128::from(sum.sq)) as f64).log2()
+    // Upper bounds of the logarithms, within 0.09 of them.
+    log2_above(sum.prefactor.unsigned_abs() as f64)
+        + 0.5 * log2_above((3 * sum.sp) as f64 / k as f64 / sum.sq as f64)
         + 2.0
-        - n24f.log2()
+        - log2_n24
         + x * core::f64::consts::LOG2_E
         + 1.0
+}
+
+/// `C` and `1/C` in the fixed point of [`Mid`] for the lengths of its values, as they are first
+/// needed: few, as the terms' precisions fall with `k`.
+type Constants = Vec<(usize, mid::Fx<{ mid::MAX }>, mid::Fx<{ mid::MAX }>)>;
+
+/// The square roots `√(num / den)` of the terms on limbs, by the reduced fraction, with the number
+/// of limbs of their fixed point, as they are first needed: `3 sp / (k sq)` takes few values (3,
+/// 3/2, 1 and 1/2, by the factors of 2 and 3 of `k`), the terms' precisions fall with `k`, and a root
+/// to more limbs is cut to fewer.
+type Roots = Vec<((u128, u128), usize, mid::Fx<{ mid::MAX }>)>;
+
+/// `√(num / den)` in the fixed point of at least `l` limbs, within a unit of its last place, and
+/// the number of its limbs: from `roots`, or computed to `l` limbs and kept there.
+fn root_of(roots: &mut Roots, num: u128, den: u128, l: usize) -> (usize, mid::Fx<{ mid::MAX }>) {
+    let g = {
+        let (mut x, mut y) = (num, den);
+        while y != 0 {
+            (x, y) = (y, x % y);
+        }
+        x
+    };
+    let key = (num / g, den / g);
+    let at = roots.iter().position(|(k, _, _)| *k == key);
+    if let Some(i) = at
+        && roots[i].1 >= l
+    {
+        return (roots[i].1, roots[i].2);
+    }
+    // `√(num den 2^(2f)) / den`, rounded down twice: within a unit.
+    let m = Mid::<{ mid::MAX }> { l };
+    let f = m.f();
+    let square =
+        Number::new_from_u128(key.0 * key.1, ByteOrder::LittleEndian) << real::shift_count(2 * f);
+    let root = &square.isqrt() / &Number::new_from_u128(key.1, ByteOrder::LittleEndian);
+    let r = m.of_number(&root, f);
+    match at {
+        Some(i) => roots[i] = (key, l, r),
+        None => roots.push((key, l, r)),
+    }
+    (l, r)
+}
+
+/// The square roots `√(num / den)` of the terms on numbers, by the reduced fraction, with their
+/// precision, as they are first needed (see [`Roots`]).
+type FloatRoots = Vec<((u128, u128), u64, Float)>;
+
+/// `√(num / den)` as a floating number of at least `w` bits within 6 units of its last place, and
+/// its precision: from `roots`, or computed to `w` bits (the root within 2 units, the quotient
+/// within 4) and kept there.
+fn float_root_of(roots: &mut FloatRoots, num: u128, den: u128, w: u64) -> (u64, Float) {
+    let g = {
+        let (mut x, mut y) = (num, den);
+        while y != 0 {
+            (x, y) = (y, x % y);
+        }
+        x
+    };
+    let key = (num / g, den / g);
+    let at = roots.iter().position(|(k, _, _)| *k == key);
+    if let Some(i) = at
+        && roots[i].1 >= w
+    {
+        return (roots[i].1, roots[i].2.clone());
+    }
+    let root = sqrt(
+        &Float {
+            m: Number::new_from_u128(key.0 * key.1, ByteOrder::LittleEndian),
+            e: 0,
+        },
+        w,
+    );
+    let r = root.div(
+        &Float {
+            m: Number::new_from_u128(key.1, ByteOrder::LittleEndian),
+            e: 0,
+        },
+        w,
+    );
+    match at {
+        Some(i) => roots[i] = (key, w, r.clone()),
+        None => roots.push((key, w, r.clone())),
+    }
+    (w, r)
+}
+
+/// The term `T_k` on limbs on the stack by [`Mid`], in fixed point with [`FRACTION`] bits, and a
+/// bound of its absolute error, or `None` when it is zero; `C` and `1/C` in the arithmetic's fixed
+/// point are kept in `constants`, once for each length.
+fn mid_term<const CAP: usize>(
+    mid: Mid<CAP>,
+    (constants, roots): (&mut Constants, &mut Roots),
+    sum: &Sum,
+    k: u64,
+    n24: u64,
+    (c_fix, fc, c_err, inv_c_fix): (&Number, u64, f64, &Number),
+) -> Option<(Number, f64)> {
+    let f = mid.f();
+    let i = match constants.iter().position(|e| e.0 == mid.l) {
+        Some(i) => i,
+        None => {
+            let m = Mid::<{ mid::MAX }> { l: mid.l };
+            constants.push((mid.l, m.of_number(c_fix, fc), m.of_number(inv_c_fix, fc)));
+            constants.len() - 1
+        }
+    };
+    let (_, c, ic) = &constants[i];
+    // The first `CAP` limbs: those above `l` are zero.
+    let c: mid::Fx<CAP> = core::array::from_fn(|i| c[i]);
+    let ic: mid::Fx<CAP> = core::array::from_fn(|i| ic[i]);
+    let ec = c_err * pow2(f as i64 - fc as i64) + 1.0;
+    // `1/C` within 4 units of `2^-fc` relatively, `1/C < 1`, and the cut.
+    let eic = 4.0 * pow2(f as i64 - fc as i64) + 2.0;
+    // `√(3 sp / (k sq))` within two units: from the cache, cut to `l` limbs.
+    let (rl, root) = root_of(
+        roots,
+        3 * u128::from(sum.sp),
+        u128::from(k) * u128::from(sum.sq),
+        mid.l,
+    );
+    let root: mid::Fx<CAP> =
+        core::array::from_fn(|i| if i < mid.l { root[rl - mid.l + i] } else { 0 });
+    // The cosines with closed forms and half-angle chains, from numbers, from 9 limbs: below, the
+    // series in registers took less time than the allocations of the numbers' square roots.
+    let mut cosines = [None; 16];
+    for (i, &(a, b)) in sum.cos[..sum.len].iter().enumerate() {
+        if mid.l <= 8 {
+            break;
+        }
+        match real::cos_pi_fixed(a, b, f, false) {
+            Some(Some((v, negative, e))) => {
+                cosines[i] = Some((mid.of_number(&v, f), negative, e + 1.0))
+            }
+            Some(None) => return None,
+            None => {}
+        }
+    }
+    let (v, negative, q, e) = mid.term(
+        sum,
+        k,
+        n24,
+        &c,
+        ec,
+        &ic,
+        eic,
+        (&root, 2.0),
+        &cosines[..sum.len],
+    )?;
+    Some((
+        mid.to_number(&v, negative, q + FRACTION as i64),
+        e * pow2(q - f as i64) + pow2(-(FRACTION as i64)),
+    ))
 }
 
 /// The term `T_k` in multiple precision, to `w` bits: in fixed point with [`FRACTION`] bits, and a
 /// bound of its absolute error.
 #[allow(clippy::too_many_arguments)]
 fn high_term(
+    float_roots: &mut FloatRoots,
     sum: &Sum,
     k: u64,
     n24: u128,
@@ -326,12 +441,27 @@ fn high_term(
     let ex = c_err + 1.0;
     // `e^x`, and `e^-x` when it is computed first.
     let ((e1, r1), w1) = first;
+    // `k = 2^j m`, `m` odd: `e^(C/k)` is the `2^j`-th root of `e^(C/m)`, by `j` square roots, each of
+    // which halves the relative error and loses two units.
+    let (twos, odd) = (k.trailing_zeros(), k >> k.trailing_zeros());
+    let roots = |mut y: Float, mut r: f64| {
+        for _ in 0..twos {
+            y = sqrt(&y, w);
+            r = r / 2.0 + 2.0;
+        }
+        (y, r)
+    };
     let (y, ry, z) = if k == 1 {
         (e1.clone(), *r1, None)
-    } else if root_is_cheaper(k, w) {
-        let (z, rz) = inverse_root(e1, *r1, w1, k, w);
-        let y = one.div(&z, w);
-        (y, rz + 4.0, Some((z, rz)))
+    } else if odd == 1 {
+        // The cut of `e^C` to `w` bits: its error in units of `2^-w`, and one.
+        let (y, r) = roots(e1.clone().cut(w), *r1 * pow2(w as i64 - w1 as i64) + 1.0);
+        (y, r, None)
+    } else if root_is_cheaper(odd, w) {
+        let (z, rz) = inverse_root(e1, *r1, w1, odd, w);
+        let (y, r) = roots(one.div(&z, w), rz + 4.0);
+        let z = (twos == 0).then_some((z, rz));
+        (y, r, z)
     } else {
         let (y, ry) = exp(&x_fix, fc, ex, w);
         (y, ry, None)
@@ -365,24 +495,16 @@ fn high_term(
     let mut uv = s.mul(&inv_x, w);
     uv.e -= 1;
     let ru = rs + 1.0 + 2.0 + 2.0;
-    // `√(3 sp / (k sq)) = √(3 sp k sq) / (k sq)`.
-    let num = 3 * u128::from(sum.sp);
-    let den = u128::from(k) * u128::from(sum.sq);
-    let root = sqrt(
-        &Float {
-            m: Number::new_from_u128(num, LE) * Number::new_from_u128(den, LE),
-            e: 0,
-        },
+    // `√(3 sp / (k sq)) = √(3 sp k sq) / (k sq)`, within 6 units of its precision `wr >= w`, from
+    // the cache; cut to `w` bits, a unit more.
+    let (wr, root) = float_root_of(
+        float_roots,
+        3 * u128::from(sum.sp),
+        u128::from(k) * u128::from(sum.sq),
         w,
     );
-    let mut t = root.div(
-        &Float {
-            m: Number::new_from_u128(den, LE),
-            e: 0,
-        },
-        w,
-    );
-    let mut rel = 2.0 + 4.0;
+    let mut t = root.cut(w);
+    let mut rel = 6.0 * pow2(w as i64 - wr as i64) + 1.0;
     // Times the prefactor and 4, exactly, over `24n - 1`.
     t.m = &t.m * &Number::new_from_u64(sum.prefactor.unsigned_abs(), LE);
     t.e += 2;
@@ -396,7 +518,9 @@ fn high_term(
     rel += 4.0 + 2.0;
     let mut negative = sum.prefactor < 0;
     for &(a, b) in &sum.cos[..sum.len] {
-        let c = if newton_is_cheaper(a, b, w) {
+        let c = if let Some(c) = cos_pi_algebraic(a, b, w) {
+            c
+        } else if newton_is_cheaper(a, b, w) {
             cos_pi_newton(a, b, w).unwrap_or_else(|()| cos_pi(a, b, w, pi_f, fp))
         } else {
             cos_pi(a, b, w, pi_f, fp)

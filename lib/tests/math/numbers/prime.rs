@@ -205,6 +205,96 @@ const PSEUDOPRIMES: [u64; 40] = [
     58519,
 ];
 
+/// Composites below `2^32` with no prime factor up to 256 that pass the strong test to base 2, so
+/// that only the table of those pseudoprimes tells them composite (found by a search of all the odd
+/// numbers below `2^32`, checked composite by Baillie–PSW): the first ten of the 1971, and those
+/// that the earlier test below `2^32`, the strong tests to 2, 7 and 61, told apart by one base
+/// alone, the 74 that pass 7 too and the 75 that pass 61 too, from all over the table.
+const SPSP_BELOW_2_32: [u64; 159] = [
+    280601, 390937, 458989, 514447, 580337, 741751, 838861, 873181, 877099, 916327, 976873,
+    2205967, 2269093, 2284453, 2387797, 3539101, 5489641, 6386993, 9006401, 9863461, 15188557,
+    19328653, 20261251, 27509653, 36307981, 42984589, 48191653, 51302353, 58449847, 59631211,
+    60581401, 69885649, 72543547, 74927161, 79417801, 96904081, 99115297, 115804501, 116090081,
+    132338881, 134767153, 135969401, 143168581, 146884393, 147287141, 157405249, 167692141,
+    179820257, 180497633, 189714193, 192857761, 206504033, 226359547, 240785047, 252853921,
+    257590661, 284166877, 284736091, 315351521, 329153653, 348989101, 359394751, 373669453,
+    410680357, 414368641, 415476343, 417779909, 418226581, 461272267, 464012033, 483029821,
+    493108481, 568902001, 579956653, 599135767, 651514753, 682528687, 702683101, 746331041,
+    751705597, 753594001, 756205633, 773131927, 816024161, 830664451, 842824981, 878940833,
+    910202509, 932148253, 1009140161, 1011319501, 1027744453, 1054999441, 1070941987, 1072898711,
+    1084444481, 1168256953, 1183338241, 1221127013, 1397357851, 1414154827, 1461307717, 1464568381,
+    1574362441, 1617921667, 1638294661, 1650682153, 1716774481, 1792442737, 1804906517, 1856689453,
+    1909566073, 1914303841, 1921309633, 1930534453, 1934350351, 2057835781, 2101744837, 2141340833,
+    2311558021, 2352371251, 2385574201, 2412172153, 2433791593, 2448039497, 2528291341, 2532630787,
+    2537105761, 2545934077, 2597294701, 2656494271, 2766006253, 2840871041, 2899294889, 2957320351,
+    3014101261, 3037295801, 3063685633, 3172658653, 3237992101, 3296403601, 3306957593, 3320669437,
+    3415379701, 3586833253, 3594110081, 3605151241, 3679657997, 3697278427, 3813919453, 3987960913,
+    4005660961, 4079665633, 4121286907, 4157008813, 4186561633, 4187360341, 4206295433, 4251904273,
+];
+
+#[test]
+fn numbers_below_2_32_take_the_strong_tests_exactly() {
+    let mut state = 0x452821E6_38D01377;
+    for n in SPSP_BELOW_2_32 {
+        assert!(!is_prime_reference(n), "{n} is prime by the reference");
+        check(
+            &mut state,
+            &n.to_le_bytes(),
+            false,
+            "strong pseudoprime to base 2",
+        );
+    }
+    // The edges of the trial division, `257^2`, and of `2^32`.
+    for n in [
+        65_537u64,
+        65_539,
+        66_047,
+        66_049,
+        66_051,
+        66_053,
+        66_067,
+        4_294_967_279,
+        4_294_967_291,
+        4_294_967_293,
+        4_294_967_295,
+        4_294_967_297,
+        4_294_967_311,
+    ] {
+        check(&mut state, &n.to_le_bytes(), is_prime_reference(n), "edge");
+    }
+    for _ in 0..size(100_000, 300) {
+        let n = (xorshift(&mut state) >> (32 + below(&mut state, 16))) | 1;
+        check(
+            &mut state,
+            &n.to_le_bytes(),
+            is_prime_reference(n),
+            "below 2^32",
+        );
+    }
+    // The next and previous primes of random numbers below `2^32`, by stepping with the reference.
+    for _ in 0..size(500, 10) {
+        let n = xorshift(&mut state) >> 32;
+        let x = stored_number(&mut state, &n.to_le_bytes());
+        let next = (n + 1..).find(|&k| is_prime_reference(k)).expect("a prime");
+        assert_result(
+            &x.next_prime(),
+            &expected_i128(i128::from(next)),
+            x.byte_order,
+            &|| format!("next_prime of {n}"),
+        );
+        if n > 2 {
+            let prev = (2..n)
+                .rev()
+                .find(|&k| is_prime_reference(k))
+                .expect("a prime");
+            let r = x.prev_prime().expect("a prime below");
+            assert_result(&r, &expected_i128(i128::from(prev)), x.byte_order, &|| {
+                format!("prev_prime of {n}")
+            });
+        }
+    }
+}
+
 #[test]
 fn known_pseudoprimes_are_composite() {
     let mut state = 0xA4093822_299F31D0;
@@ -495,7 +585,18 @@ fn next_primes_plan_for_candidates_of_either_length() {
 #[test]
 fn next_primes_have_no_prime_before_them() {
     let mut state = 0x9216D5D9_8979FB1B;
-    for bytes in [9, 16, 17, 32, size(64, 17), size(128, 17)] {
+    // 72 and 73 bytes: the interval sieved by the primes to 63,800 and 66,500, beyond the table of the
+    // primes below 8192 from the table of those below 2^16 or from the sieve.
+    for bytes in [
+        9,
+        16,
+        17,
+        32,
+        size(64, 17),
+        size(72, 17),
+        size(73, 17),
+        size(128, 17),
+    ] {
         let x = number(
             &random_magnitude(&mut state, bytes),
             false,

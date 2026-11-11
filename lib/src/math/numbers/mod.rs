@@ -51,21 +51,26 @@
 //!
 //! They are raised to a `u32` power by [`Number::pow`], as `i32::pow` does but exactly, and to the
 //! power of a number modulo another by [`Number::pow_mod`], whose result is Euclid's remainder, never
-//! negative. [`Number::is_probable_prime`] tells whether a number is prime by the Baillie–PSW test,
-//! exact below `2^64`, and [`Number::next_prime`] and [`Number::prev_prime`] give the next and the
+//! negative. [`Number::is_probable_prime`] tells whether a number is prime by the Baillie–PSW test
+//! (below `2^32` by the strong test to base 2 and a table of the composites that pass it), exact
+//! below `2^64`, and [`Number::next_prime`] and [`Number::prev_prime`] give the next and the
 //! previous probable primes. [`primes`] gives the primes in a range of `u64`s, in increasing order,
 //! by a segmented sieve of Eratosthenes after Walisch's primesieve, [`prime_pi`] counts the primes
-//! up to any `u64` by Deléglise and Rivat's method, and [`nth_prime`] gives the n-th prime.
+//! up to any `u64` by Deléglise and Rivat's method with Gourdon's sorting of the special leaves,
+//! and [`nth_prime`] gives the n-th prime.
 //!
 //! [`Number::factor`] gives the factorisation of a number into primes and their exponents, a
 //! [`Factorization`], choosing the method by size as PARI, FLINT and yafu do: trial division,
 //! Hart's one line method, Pollard's rho, `p - 1`, Lenstra's elliptic curve method on Montgomery
 //! curves and the self-initialising quadratic sieve; these, and Williams's `p + 1`, are also
-//! public in [`factor`] (`trial`, `rho`, `pm1`, `pp1`, `ecm`, `siqs`). [`factor::siqs`] finds a
-//! factor of a number by the self-initialising quadratic sieve (Alford and Pomerance 1993, Contini
-//! 1997), with one and two large primes and Montgomery's block Lanczos method, for numbers of 40
-//! to 100 digits without small factors. [`Number::perfect_power`] tells whether a number is `b^k`
-//! for some `k >= 2`, with the largest `k`.
+//! public in [`factor`] (`trial`, `rho`, `pm1`, `pp1`, `ecm`, `siqs`), the second stages of
+//! `pm1`, `pp1` and `ecm` by baby steps and giant steps or, for longer ranges, by fast polynomial
+//! arithmetic (Montgomery and Kruppa's continuation, the FFT continuation). [`factor::siqs`] finds
+//! a factor of a number by the self-initialising quadratic sieve (Alford and Pomerance 1993,
+//! Contini 1997), with one and two large primes, Gaussian elimination and Montgomery's block
+//! Lanczos method, for numbers of 24 to 100 digits without small factors.
+//! [`Number::perfect_power`] tells whether a number is `b^k` for some `k >= 2`, with the largest
+//! `k`.
 //!
 //! A [`Factorization`] gives its number's divisors, their number and the sums of their powers,
 //! Euler's totient, Carmichael's function, Möbius's function, square-freeness and the radical, and
@@ -75,7 +80,8 @@
 //! solutions of `x² + d·y² = m`. [`Number::crt`] solves congruences by the Chinese remainder
 //! theorem, coprime moduli or not; [`Number::multiplicative_order`] and [`Number::primitive_root`]
 //! give orders and the smallest primitive root; and [`Number::discrete_log`] gives the smallest
-//! discrete logarithm for any modulus and base, by Pohlig and Hellman's reduction, with the methods
+//! discrete logarithm for any modulus and base, by Pohlig and Hellman's reduction and, for the
+//! large primes of `p - 1` modulo primes up to 112 bits, the index calculus, with the methods
 //! themselves in [`dlog`].
 //!
 //! [`Number::fibonacci`] and [`Number::lucas`] give the Fibonacci and Lucas numbers,

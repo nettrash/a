@@ -5,6 +5,7 @@
 use super::super::pow::montgomery::Mont1;
 use super::super::pow::window::Registers;
 use super::super::prime::is_prime_u64;
+use core::hint::select_unpredictable;
 
 /// Montgomery's arithmetic modulo an odd `m` in a register, `R = 2^64`, the residues below `m`.
 #[derive(Clone, Copy)]
@@ -91,29 +92,55 @@ impl Odd {
         }
     }
 
-    /// The residue `a` to the power `e`, by a window of two bits from the top: 1 for `e = 0`.
+    /// The residue `a` to the power `e`: 1 for `e = 0`. From the low bit up, the bits in pairs:
+    /// the squares `a^(4^i)` form the only chain of products on the critical path, and each
+    /// pair's factor, the product of `a^(4^i)` and `a^(2 4^i)` or 1 as its bits say (selected,
+    /// without a branch), joins the result by one product off that chain, so that the two
+    /// chains overlap. A product waits about 10 cycles for the one before it and the processor
+    /// takes several at once: measured on an Apple M4 Max, exponents of 32 bits took 295 cycles
+    /// so, against 334 from the top bit by a window of two bits, and of 64 bits 681 against 857.
     #[inline]
     pub(in super::super) fn power(&self, a: u64, e: u64) -> u64 {
-        if e == 0 {
-            return self.one;
+        let one = self.one;
+        let (mut acc, mut s, mut e) = (one, a, e);
+        while e >= 4 {
+            let s2 = self.square(s);
+            let f0 = select_unpredictable(e & 1 != 0, s, one);
+            let f1 = select_unpredictable(e & 2 != 0, s2, one);
+            acc = self.times(acc, self.times(f0, f1));
+            s = self.square(s2);
+            e >>= 2;
         }
-        let a2 = self.square(a);
-        let a3 = self.times(a2, a);
-        let table = [self.one, a, a2, a3];
-        let bits = 64 - e.leading_zeros();
-        // From the top pair of bits, which is not zero.
-        let mut i = (bits + 1) & !1;
-        i -= 2;
-        let mut r = table[(e >> i) as usize & 3];
-        while i != 0 {
-            i -= 2;
-            r = self.square(self.square(r));
-            let w = (e >> i) as usize & 3;
-            if w != 0 {
-                r = self.times(r, table[w]);
+        // The top bits, one or two.
+        match e {
+            0 => acc,
+            1 => self.times(acc, s),
+            2 => self.times(acc, self.square(s)),
+            _ => self.times(acc, self.times(s, self.square(s))),
+        }
+    }
+
+    /// The residues `a` each to the power of its own `e`, by [`power`](Self::power)'s steps for
+    /// all of them in one loop, interleaved: their chains of products are independent, and the
+    /// processor overlaps them, so that `K` powers take far less than `K` times one. Measured on
+    /// an Apple M4 Max, three powers of 32 bits took 393 cycles, against 295 for one.
+    #[inline]
+    pub(in super::super) fn powers<const K: usize>(&self, a: [u64; K], e: [u64; K]) -> [u64; K] {
+        let one = self.one;
+        let (mut acc, mut s, mut e) = ([one; K], a, e);
+        // A pair of bits at a time for every exponent while any has bits left: past its top an
+        // exponent's pairs are zeros, whose factor is 1.
+        while e.iter().any(|&x| x != 0) {
+            for k in 0..K {
+                let s2 = self.square(s[k]);
+                let f0 = select_unpredictable(e[k] & 1 != 0, s[k], one);
+                let f1 = select_unpredictable(e[k] & 2 != 0, s2, one);
+                acc[k] = self.times(acc[k], self.times(f0, f1));
+                s[k] = self.square(s2);
+                e[k] >>= 2;
             }
         }
-        r
+        acc
     }
 }
 
@@ -279,13 +306,11 @@ static SMALL: [Small; SMALL_COUNT] = {
 };
 
 /// The factorisation of a word: at most 15 distinct primes (the product of the first 16 passes
-/// `2^64`), in increasing order, with their exponents.
+/// `2^64`), in increasing order, with their exponents, in place.
 #[derive(Clone, Copy, Debug)]
 pub(in super::super) struct Factors {
-    /// The primes, increasing; the first `len` are set.
-    pub(in super::super) p: [u64; 15],
-    /// Their exponents.
-    pub(in super::super) e: [u32; 15],
+    /// The primes, increasing, with their exponents; the first `len` are set.
+    f: [(u64, u32); 15],
     /// How many there are.
     pub(in super::super) len: usize,
 }
@@ -294,39 +319,39 @@ impl Factors {
     /// No primes: the factorisation of 1.
     pub(in super::super) const fn none() -> Factors {
         Factors {
-            p: [0; 15],
-            e: [0; 15],
+            f: [(0, 0); 15],
             len: 0,
         }
     }
 
     /// The primes with their exponents.
+    #[inline(always)]
+    pub(in super::super) fn as_slice(&self) -> &[(u64, u32)] {
+        &self.f[..self.len]
+    }
+
+    /// The primes with their exponents.
     #[inline]
     pub(in super::super) fn iter(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
-        self.p[..self.len]
-            .iter()
-            .copied()
-            .zip(self.e[..self.len].iter().copied())
+        self.as_slice().iter().copied()
     }
 
     /// Multiplies in `p^e`, keeping the primes in order.
     fn push(&mut self, p: u64, e: u32) {
         let mut i = self.len;
-        while i > 0 && self.p[i - 1] > p {
+        while i > 0 && self.f[i - 1].0 > p {
             i -= 1;
         }
-        if i > 0 && self.p[i - 1] == p {
-            self.e[i - 1] += e;
+        if i > 0 && self.f[i - 1].0 == p {
+            self.f[i - 1].1 += e;
             return;
         }
         let mut j = self.len;
         while j > i {
-            self.p[j] = self.p[j - 1];
-            self.e[j] = self.e[j - 1];
+            self.f[j] = self.f[j - 1];
             j -= 1;
         }
-        self.p[i] = p;
-        self.e[i] = e;
+        self.f[i] = (p, e);
         self.len += 1;
     }
 }
@@ -371,33 +396,99 @@ pub(in super::super) fn factor(mut n: u64) -> Factors {
     f
 }
 
-/// Whether `n`, odd, above the squares of the trial primes, is prime: below `2^32` by the strong
-/// tests to the bases 2, 7 and 61, which no composite below 4,759,123,141 passes (Jaeschke 1993),
-/// in a tenth of the time of the Baillie–PSW test beyond.
+/// Whether the odd `n >= 3` is prime: below `2^32` by the strong tests to the bases 2, 7 and 61,
+/// which no composite below 4,759,123,141 passes (Jaeschke 1993), and the Baillie–PSW test beyond.
+///
+/// The three tests share the exponent `d` of `n - 1 = d 2^s`, so their powers are taken side by
+/// side ([`Odd::powers`]), in about the time of one and a third: measured on an Apple M4 Max, 393
+/// cycles for the three powers of a prime of 32 bits, against 1002 one after the other.
 pub(in super::super) fn is_prime(n: u64) -> bool {
+    debug_assert!(n & 1 == 1 && n >= 3);
     if n >> 32 != 0 {
         return is_prime_u64(n);
     }
     let f = Odd::new(n);
     let s = (n - 1).trailing_zeros();
     let d = (n - 1) >> s;
-    let minus = f.minus(0, f.unit());
-    [2u64, 7, 61].iter().all(|&b| {
-        if b % n == 0 {
+    let one = f.unit();
+    let minus = f.minus(0, one);
+    let bases = [2u64, 7, 61];
+    let mut x = f.powers(bases.map(|b| f.to(b)), [d; 3]);
+    // A base that `n` divides says nothing: `n` is 7 or 61 then, which pass the others.
+    let mut passed = bases.map(|b| b % n == 0);
+    for k in 0..3 {
+        passed[k] |= x[k] == one || x[k] == minus;
+    }
+    for _ in 1..s {
+        if passed.iter().all(|&p| p) {
             return true;
         }
-        let mut x = f.power(f.to(b), d);
-        if x == f.unit() || x == minus {
-            return true;
-        }
-        for _ in 1..s {
-            x = f.square(x);
-            if x == minus {
-                return true;
+        for k in 0..3 {
+            if !passed[k] {
+                x[k] = f.square(x[k]);
+                passed[k] = x[k] == minus;
             }
         }
-        false
-    })
+    }
+    passed.iter().all(|&p| p)
+}
+
+/// Möbius's function of `n >= 1`: 0 when the square of a prime divides it, otherwise `(-1)^k` for
+/// its `k` primes. Not by the whole factorisation: the trial division stops at the first square of
+/// a prime, which more than a third of all numbers have below 512 (`1 - prod (1 - 1/p^2)`); the
+/// number left has no prime below 512, so below `512^2` it is prime, a square of its root is no
+/// square-free number, and below `512^3` a composite is two distinct primes; only beyond are its
+/// factors searched for, each split checked for a common factor (a square) at once.
+pub(in super::super) fn mobius(n: u64) -> i32 {
+    debug_assert!(n != 0);
+    let z = n.trailing_zeros();
+    if z >= 2 {
+        return 0;
+    }
+    let mut n = n >> z;
+    let mut sign = 1 - 2 * z as i32;
+    for s in SMALL.iter() {
+        if s.p * s.p > n {
+            // No prime below `p` divides `n`, which is below `p^2`: 1 or a prime.
+            return if n == 1 { sign } else { -sign };
+        }
+        if n.wrapping_mul(s.inv) <= s.max {
+            n = n.wrapping_mul(s.inv);
+            if n.wrapping_mul(s.inv) <= s.max {
+                return 0;
+            }
+            sign = -sign;
+        }
+    }
+    sign * mobius_rest(n)
+}
+
+/// [`mobius`] of the odd `n > 1` without a prime factor below [`TRIAL`].
+fn mobius_rest(n: u64) -> i32 {
+    const T: u64 = TRIAL as u64;
+    if n < T * T {
+        return -1;
+    }
+    let r = isqrt(n);
+    if r * r == n {
+        return 0;
+    }
+    if is_prime(n) {
+        return -1;
+    }
+    if n < T * T * T {
+        // Two primes, not equal.
+        return 1;
+    }
+    let d = super::super::factor::driver::find_factor_u64(n);
+    let m = n / d;
+    if gcd(d, m) != 1 {
+        return 0;
+    }
+    match mobius_rest(d) {
+        0 => 0,
+        x => x * mobius_rest(m),
+    }
 }
 
 /// Multiplies the factorisation of the odd `n`, without factors below [`TRIAL`], to the power `e`

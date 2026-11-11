@@ -138,21 +138,6 @@ pub(super) fn rem_1(x: &[u64], p: u32) -> u32 {
     r as u32
 }
 
-/// Lemire's constant for remainders by `p` of numbers below `2^32`: `⌊(2^64 − 1)/p⌋ + 1`.
-#[inline]
-pub(super) fn fastmod_constant(p: u32) -> u64 {
-    (u64::MAX / u64::from(p)).wrapping_add(1)
-}
-
-/// `i mod p` by Lemire, Kaser and Kurz's method (2019): the low 64 bits of `c·i` are the fraction
-/// `i/p` to 64 bits, and their product by `p` has the remainder in its high word; exact for every
-/// `i` and `p` below `2^32`.
-#[inline(always)]
-pub(super) fn fastmod(i: u32, c: u64, p: u32) -> u32 {
-    let low = c.wrapping_mul(u64::from(i));
-    ((u128::from(low) * u128::from(p)) >> 64) as u32
-}
-
 /// Montgomery's arithmetic modulo an odd word `n`: residues `x·2^64 mod n`.
 #[derive(Clone, Copy)]
 pub(super) struct Mont {

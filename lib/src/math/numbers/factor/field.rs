@@ -4,9 +4,12 @@
 //! - One limb, two, and three to eight, in registers: the powers' [`Mont1`], [`Mont2`] and
 //!   [`MontN`], each product reduced as it is formed ([`Reg`]); when the top limb is below `2^62`,
 //!   so that `4n < R`, [`Lazy2`] and [`LazyN`], whose residues stay below `2n`, without the
-//!   subtraction after each product.
-//! - Nine limbs and more, in memory: the powers' [`Montgomery`], the multiplication's kernels then
-//!   REDC by the kernel's passes, or by products from 100 limbs ([`Big`]).
+//!   subtraction after each product. On aarch64 the products are the kernels of the powers'
+//!   `registers`, in inline assembly, and the squares take the products of different limbs once.
+//! - Nine limbs and more, in memory: the powers' [`Montgomery`] ([`Big`]): to sixteen limbs the
+//!   kernels of residues in memory on aarch64, the window of the rows in registers; beyond, and on
+//!   other targets, the multiplication's kernels then REDC by the kernel's passes, or by products
+//!   from 100 limbs.
 //!
 //! The operations write their result to a residue of their own, `r = a b`, or in place, `r = r b`,
 //! so that the methods are written once for both: in registers the residues are copied values,
@@ -19,7 +22,8 @@ use super::super::div::limbs::binvert_limb;
 use super::super::mul::basecase;
 use super::super::mul::limbs::{add_n, cmp_n, sub_n};
 use super::super::pow::montgomery::{
-    Mont1, Mont2, MontN, Montgomery, redc_inverse, redc_limbs, rem, rem_itch,
+    Mont1, Mont2, MontN, Montgomery, lazy_mul, lazy_sqr, redc_inverse, redc_limbs, registers, rem,
+    rem_itch,
 };
 use super::super::pow::window::{Registers, Ring};
 use super::super::scratch::Scratch;
@@ -93,6 +97,20 @@ pub(super) trait Arith {
 
     /// Swaps `a` and `b` when `c` is set.
     fn cswap(&self, c: bool, a: &mut Self::V, b: &mut Self::V);
+
+    /// Writes the limbs of the residue as it is held, [`Arith::raw`], to `out`, as many as `n`'s,
+    /// without allocating: for the polynomials of the second stage.
+    #[inline]
+    fn put(&self, a: &Self::V, out: &mut [u64]) {
+        out.copy_from_slice(&self.raw(a));
+    }
+
+    /// `r = r b` for `b` held as the limbs `x`, below `n`, as [`Arith::of_raw`] reads them.
+    #[inline]
+    fn mul_raw(&self, r: &mut Self::V, x: &[u64]) {
+        let b = self.of_raw(x);
+        self.mul_in(r, &b);
+    }
 }
 
 /// A computation on residues modulo `n`, run by [`with_field`] in the arithmetic for `n`'s length.
@@ -415,6 +433,12 @@ pub(super) trait Lanes: Registers<V: Eq> {
     fn is_zero(&self, a: Self::V) -> bool {
         a == Self::value(&[])
     }
+
+    /// Writes the limbs of `a` to `out`, as many as the modulus's, without allocating.
+    #[inline(always)]
+    fn put(a: Self::V, out: &mut [u64]) {
+        out.copy_from_slice(&Self::limbs(a));
+    }
 }
 
 impl Lanes for Mont1 {
@@ -461,6 +485,11 @@ impl Lanes for Mont1 {
     #[inline(always)]
     fn select(c: bool, a: u64, b: u64) -> u64 {
         select_unpredictable(c, a, b)
+    }
+
+    #[inline(always)]
+    fn put(a: u64, out: &mut [u64]) {
+        out[0] = a;
     }
 }
 
@@ -573,6 +602,11 @@ impl Lanes for Mont2 {
     fn select(c: bool, a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
         select_array(c, a, b)
     }
+
+    #[inline(always)]
+    fn put(a: [u64; 2], out: &mut [u64]) {
+        out.copy_from_slice(&a);
+    }
 }
 
 impl<const N: usize> Lanes for MontN<N> {
@@ -614,6 +648,11 @@ impl<const N: usize> Lanes for MontN<N> {
     #[inline(always)]
     fn select(c: bool, a: [u64; N], b: [u64; N]) -> [u64; N] {
         select_array(c, a, b)
+    }
+
+    #[inline(always)]
+    fn put(a: [u64; N], out: &mut [u64]) {
+        out.copy_from_slice(&a);
     }
 }
 
@@ -741,6 +780,11 @@ impl<M: Lanes> Arith for Reg<M> {
         *a = M::select(c, y, x);
         *b = M::select(c, x, y);
     }
+
+    #[inline(always)]
+    fn put(&self, a: &M::V, out: &mut [u64]) {
+        M::put(*a, out);
+    }
 }
 
 // Two limbs, lazily reduced
@@ -748,9 +792,12 @@ impl<M: Lanes> Arith for Reg<M> {
 /// Montgomery's arithmetic modulo an odd `m` of two limbs below `2^126`, `R = B^2`, with the
 /// residues kept below `2m` rather than `m`: as `4m < R`, REDC of a product of two of them is below
 /// `(4 m^2 + R m) / R < 2m` without a subtraction at the end, and a sum or a difference takes one
-/// subtraction or addition of `2m`. REDC goes a limb at a time, each quotient limb `t_i (-1/m)
-/// mod B` and its product by `m` added, the low limb of which is known to clear `t_i`: 8 products
-/// against 12 for both quotient limbs at once.
+/// subtraction or addition of `2m`. On aarch64 the products and squares are the powers' lazy
+/// kernels in registers, a row of the product and a row of the reduction for each limb (beside
+/// three others a product took 5.8 cycles against 7.8 below, after the one before 21 against 19.4);
+/// elsewhere REDC goes a limb at a time, each quotient limb `t_i (-1/m) mod B` and its product by
+/// `m` added, the low limb of which is known to clear `t_i`: 8 products against 12 for both
+/// quotient limbs at once.
 #[derive(Clone, Copy)]
 pub(super) struct Lazy2 {
     /// The modulus, the low limb first.
@@ -815,6 +862,9 @@ impl Registers for Lazy2 {
 
     #[inline(always)]
     fn sqr(&self, a: [u64; 2]) -> [u64; 2] {
+        if let Some(r) = registers::lazy_sqr(&a, &self.m, self.minv) {
+            return r;
+        }
         let p00 = u128::from(a[0]) * u128::from(a[0]);
         let p01 = u128::from(a[0]) * u128::from(a[1]);
         let p11 = u128::from(a[1]) * u128::from(a[1]);
@@ -828,6 +878,9 @@ impl Registers for Lazy2 {
 
     #[inline(always)]
     fn mul(&self, a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
+        if let Some(r) = registers::lazy_mul(&a, &b, &self.m, self.minv) {
+            return r;
+        }
         let p00 = u128::from(a[0]) * u128::from(b[0]);
         let p01 = u128::from(a[0]) * u128::from(b[1]);
         let p10 = u128::from(a[1]) * u128::from(b[0]);
@@ -888,13 +941,19 @@ impl Lanes for Lazy2 {
     fn is_zero(&self, a: [u64; 2]) -> bool {
         a == [0, 0] || a == self.m
     }
+
+    #[inline(always)]
+    fn put(a: [u64; 2], out: &mut [u64]) {
+        out.copy_from_slice(&a);
+    }
 }
 
 // Three to eight limbs, lazily reduced
 
 /// Montgomery's arithmetic modulo an odd `m` of `N` limbs below `R / 4`, `R = B^N`, residues kept
 /// below `2m` as in [`Lazy2`]: the powers' coarsely integrated operand scanning, without the
-/// subtraction at the end, as `(a b + q m) / R < 2m` for `a, b < 2m`.
+/// subtraction at the end, as `(a b + q m) / R < 2m` for `a, b < 2m` ([`lazy_mul`] and
+/// [`lazy_sqr`]: the kernels in registers on aarch64, the Rust rows elsewhere).
 #[derive(Clone, Copy)]
 pub(super) struct LazyN<const N: usize> {
     /// The modulus, the low limb first.
@@ -928,38 +987,12 @@ impl<const N: usize> Registers for LazyN<N> {
 
     #[inline(always)]
     fn sqr(&self, a: [u64; N]) -> [u64; N] {
-        self.mul(a, a)
+        lazy_sqr(&a, &self.m, self.minv)
     }
 
     #[inline(always)]
     fn mul(&self, a: [u64; N], b: [u64; N]) -> [u64; N] {
-        let m = &self.m;
-        let mut t = [0u64; N];
-        let mut top = 0u64;
-        for &bi in b.iter() {
-            let mut c = 0u64;
-            for j in 0..N {
-                let p = u128::from(a[j]) * u128::from(bi) + u128::from(t[j]) + u128::from(c);
-                t[j] = p as u64;
-                c = (p >> 64) as u64;
-            }
-            let s = u128::from(top) + u128::from(c);
-            let (tn, tn1) = (s as u64, (s >> 64) as u64);
-            let q = t[0].wrapping_mul(self.minv);
-            let p = u128::from(q) * u128::from(m[0]) + u128::from(t[0]);
-            let mut c = (p >> 64) as u64;
-            for j in 1..N {
-                let p = u128::from(q) * u128::from(m[j]) + u128::from(t[j]) + u128::from(c);
-                t[j - 1] = p as u64;
-                c = (p >> 64) as u64;
-            }
-            let s = u128::from(tn) + u128::from(c);
-            t[N - 1] = s as u64;
-            top = tn1 + (s >> 64) as u64;
-        }
-        // Below `2m < R`: `top` is 0.
-        debug_assert!(top == 0);
-        t
+        lazy_mul(&a, &b, &self.m, self.minv)
     }
 }
 
@@ -1025,6 +1058,11 @@ impl<const N: usize> Lanes for LazyN<N> {
     fn is_zero(&self, a: [u64; N]) -> bool {
         a == [0; N] || a == self.m
     }
+
+    #[inline(always)]
+    fn put(a: [u64; N], out: &mut [u64]) {
+        out.copy_from_slice(&a);
+    }
 }
 
 // In memory
@@ -1072,8 +1110,13 @@ impl Big {
         let nn = self.m.len();
         let t = self.scratch();
         // SAFETY: as the caller guarantees; the product's `2n` limbs at the start of the scratch,
-        // which `Montgomery::itch` gives.
+        // which `Montgomery::itch` gives; or the kernel of the length, which reads `a` and `b`
+        // before it writes `r`, and gives a residue below `n` for residues below `n`.
         unsafe {
+            if !self.mont.mk.is_null() {
+                registers::long(r, a, b, self.mont.mk, nn);
+                return;
+            }
             if nn < BASECASE {
                 let p = t.take(2 * nn);
                 if b.is_null() {
@@ -1289,6 +1332,19 @@ impl Arith for Big {
         if c {
             core::mem::swap(a, b);
         }
+    }
+
+    #[inline]
+    fn put(&self, a: &Vec<u64>, out: &mut [u64]) {
+        out.copy_from_slice(a);
+    }
+
+    #[inline]
+    fn mul_raw(&self, r: &mut Vec<u64>, x: &[u64]) {
+        assert_eq!(x.len(), self.m.len());
+        let p = r.as_mut_ptr();
+        // SAFETY: as in `mul_in`: `x` holds `nn` limbs, as the assertion checks.
+        unsafe { self.product(p, p, x.as_ptr()) };
     }
 }
 

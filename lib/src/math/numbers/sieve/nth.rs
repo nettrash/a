@@ -64,17 +64,59 @@ fn backward(b: u64, k: u64) -> u64 {
     let mut width = (k.saturating_mul(gap(b)).saturating_mul(2)).max(1 << 12);
     loop {
         let a = b.saturating_sub(width);
+        match scan_down(a, b, k) {
+            Ok(p) => return p,
+            Err(c) => k -= c,
+        }
+        b = a - 1;
+        width = width.saturating_mul(2);
+    }
+}
+
+/// The `k`-th prime from `b` down to `a`, `k >= 1`, or the number of primes from `a` to `b` when
+/// they are fewer: the window counted by the sieve's bits, and the prime read from the bytes of its
+/// last segment, still there, when it is in it, as it nearly always is; else by [`scan`] again.
+fn scan_down(a: u64, b: u64, k: u64) -> Result<u64, u64> {
+    if a < 7 || b.isqrt() / 90 > b - a {
         let c = match scan(a, b, u64::MAX) {
             Ok(_) => unreachable!("no range holds u64::MAX primes"),
             Err(c) => c,
         };
-        if c >= k {
-            return scan(a, b, c - k + 1).expect("the prime of the window");
-        }
-        k -= c;
-        b = a - 1;
-        width = width.saturating_mul(2);
+        return if c >= k {
+            Ok(scan(a, b, c - k + 1).expect("the prime of the window"))
+        } else {
+            Err(c)
+        };
     }
+    let mut s = Segments::new(a, b, u64::MAX);
+    let (mut count, mut last) = (0, 0);
+    while s.next_segment() {
+        last = count_bits(s.bytes());
+        count += last;
+    }
+    if count < k {
+        return Err(count);
+    }
+    if k > last {
+        return Ok(scan(a, b, count - k + 1).expect("the prime of the window"));
+    }
+    // The `(last - k + 1)`-th prime of the last segment: the word, then the bit.
+    let mut j = last - k + 1;
+    let mut base = s.low();
+    for word in s.bytes().as_chunks::<8>().0 {
+        let mut bits = u64::from_le_bytes(*word);
+        let c = u64::from(bits.count_ones());
+        if c < j {
+            j -= c;
+            base += 240;
+            continue;
+        }
+        for _ in 1..j {
+            bits &= bits - 1;
+        }
+        return Ok(base + BIT_VALUES[bits.trailing_zeros() as usize]);
+    }
+    unreachable!("the segment holds its primes")
 }
 
 /// The average gap between the primes near `x`, `ln x`, at least 2.
@@ -162,7 +204,7 @@ fn estimate(n: u64) -> u64 {
 /// `R(x) = 1 + Σ_{k >= 1} (ln x)^k / (k k! ζ(k + 1))`, whose terms are all positive: about
 /// `e ln x` of them, to `10^-17` of the sum.
 fn riemann_r(x: f64) -> f64 {
-    /// `ζ(k)` for `k` from 2 to 20; above, `1 + 2^-k + ... + 5^-k`, within `6^-k`.
+    /// `ζ(k)` for `k` from 2 to 20; above, `1 + 2^-k`.
     static ZETA: [f64; 19] = [
         1.644_934_066_848_226_4,
         1.202_056_903_159_594_2,
@@ -192,10 +234,11 @@ fn riemann_r(x: f64) -> f64 {
         let kf = f64::from(k);
         power *= l / kf;
         let s: i32 = k + 1;
+        // `2^-s` from its exponent; `ζ(s) - 1 - 2^-s < 2 3^-s`, below `10^-9` of it.
         let zeta = if s <= 20 {
             ZETA[(s - 2) as usize]
         } else {
-            1.0 + 2f64.powi(-s) + 3f64.powi(-s) + 4f64.powi(-s) + 5f64.powi(-s)
+            1.0 + f64::from_bits(((1023 - s) as u64) << 52)
         };
         let term = power / (kf * zeta);
         sum += term;

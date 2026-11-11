@@ -9,8 +9,8 @@ use super::super::pow::montgomery::Mont1;
 use super::super::pow::montgomery::even;
 use super::super::scratch::{Scratch, need, scratch};
 use super::bpsw::{Bits, reciprocal, rem_by};
-use super::next::{LAST_PRIME_64, interval, number, primes_beyond_tables, sieve_limit};
-use super::tables::{GROUP, GROUPS, PRIMES};
+use super::next::{LAST_PRIME_64, groups_to, interval, number, primes_beyond_tables, sieve_limit};
+use super::tables::PRIMES;
 use super::{bpsw, is_prime_u64, prime_itch, probable_prime_odd, selfridge_u64};
 use core::mem::MaybeUninit;
 
@@ -143,7 +143,7 @@ unsafe fn search(start: *mut u64, nn: usize, s: Scratch, order: super::super::By
                     i += p as usize;
                 }
             };
-            for g in &GROUP[..GROUPS] {
+            for g in groups_to(limit) {
                 let r = rem_by(start, nn, g.d, g.v);
                 for p in &PRIMES[g.first as usize..g.end as usize] {
                     if p.p < limit {

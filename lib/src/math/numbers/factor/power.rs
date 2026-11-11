@@ -34,24 +34,46 @@ const SQUARES: u64 = 9 * 25 * 49 * 121 * 169 * 289 * 361 * 529 * 841;
 /// The product of the primes from 31 to 47.
 const HIGH: u64 = 31 * 37 * 41 * 43 * 47;
 
-/// `x` modulo the small primes: the remainders by [`SQUARES`] and [`HIGH`].
+/// `x` modulo the small primes: the remainders by [`SQUARES`] and [`HIGH`], and, once the filters
+/// need them, the remainders by the primes of [`SMALL`].
 #[derive(Clone, Copy)]
 struct Residues {
     /// `x mod SQUARES`.
     squares: u64,
     /// `x mod HIGH`.
     high: u64,
+    /// `x mod q` for the primes `q` of [`SMALL`], in their order, when computed.
+    small: [u8; 14],
 }
 
 impl Residues {
-    /// `x mod q` for a prime `q` of [`SMALL`].
+    /// The residues from the remainders by [`SQUARES`] and [`HIGH`].
     #[inline]
-    fn of(&self, q: u64) -> u64 {
-        if q <= 29 {
-            self.squares % q
-        } else {
-            self.high % q
+    fn from(squares: u64, high: u64) -> Residues {
+        Residues {
+            squares,
+            high,
+            small: [0; 14],
         }
+    }
+
+    /// `x mod SMALL[i]`, by a constant divisor once inlined in a loop over [`SMALL`].
+    #[inline(always)]
+    fn at(&self, i: usize) -> u64 {
+        if SMALL[i] <= 29 {
+            self.squares % SMALL[i]
+        } else {
+            self.high % SMALL[i]
+        }
+    }
+
+    /// The remainders by the primes of [`SMALL`], computed now, for [`passes`].
+    #[inline]
+    fn with_small(mut self) -> Residues {
+        for i in 0..SMALL.len() {
+            self.small[i] = self.at(i) as u8;
+        }
+        self
     }
 
     /// The remainders of the limbs `y`, both in one pass, two independent chains a limb.
@@ -64,18 +86,15 @@ impl Residues {
             r1 = div_2by1(r1, l, D1, v1).1;
             r2 = div_2by1(r2, l, D2, v2).1;
         }
-        Residues {
-            squares: r1 % SQUARES,
-            high: r2 % HIGH,
-        }
+        Residues::from(r1 % SQUARES, r2 % HIGH)
     }
 
     /// The remainders of `y`.
     fn u128(y: u128) -> Residues {
-        Residues {
-            squares: (y % u128::from(SQUARES)) as u64,
-            high: (y % u128::from(HIGH)) as u64,
-        }
+        Residues::from(
+            (y % u128::from(SQUARES)) as u64,
+            (y % u128::from(HIGH)) as u64,
+        )
     }
 }
 
@@ -139,6 +158,51 @@ const FILTERS: [(u64, u64, u64); 26] = {
 /// The squares modulo 64, bit `r` set for each.
 const SQUARES_64: u64 = power_residues(2, 64);
 
+/// The range of the indices in [`FILTERS`] of the filters for `p`, which are consecutive.
+const fn filters_of(p: u64) -> (usize, usize) {
+    let (mut lo, mut i) = (FILTERS.len(), 0);
+    while i < FILTERS.len() {
+        if FILTERS[i].0 == p && lo == FILTERS.len() {
+            lo = i;
+        }
+        i += 1;
+    }
+    let mut hi = lo;
+    while hi < FILTERS.len() && FILTERS[hi].0 == p {
+        hi += 1;
+    }
+    (lo, hi)
+}
+
+/// The index of the prime `q` in [`SMALL`].
+const fn small_index(q: u64) -> usize {
+    let mut i = 0;
+    while SMALL[i] != q {
+        i += 1;
+    }
+    i
+}
+
+/// The filters of [`FILTERS`] as `(index of q in SMALL, mask)`, in the same order.
+const FILTER_INDEX: [(usize, u64); 26] = {
+    let mut t = [(0, 0); 26];
+    let mut i = 0;
+    while i < 26 {
+        t[i] = (small_index(FILTERS[i].1), FILTERS[i].2);
+        i += 1;
+    }
+    t
+};
+
+/// The ranges of [`FILTERS`] for `p = 2, 3, 5, 7, 11`.
+const FILTER_RANGES: [(usize, usize); 5] = [
+    filters_of(2),
+    filters_of(3),
+    filters_of(5),
+    filters_of(7),
+    filters_of(11),
+];
+
 /// Whether the residues allow a `p`-th power: those of [`FILTERS`] for `p`, and modulo 64 for
 /// squares, from the low limb `low`.
 #[inline]
@@ -146,9 +210,17 @@ fn passes(res: &Residues, low: u64, p: u64) -> bool {
     if p == 2 && (SQUARES_64 >> (low & 63)) & 1 == 0 {
         return false;
     }
-    FILTERS
+    let (lo, hi) = match p {
+        2 => FILTER_RANGES[0],
+        3 => FILTER_RANGES[1],
+        5 => FILTER_RANGES[2],
+        7 => FILTER_RANGES[3],
+        11 => FILTER_RANGES[4],
+        _ => return true,
+    };
+    FILTER_INDEX[lo..hi]
         .iter()
-        .all(|&(pp, q, mask)| pp != p || (mask >> res.of(q)) & 1 == 1)
+        .all(|&(i, mask)| (mask >> res.small[i]) & 1 == 1)
 }
 
 /// The exponents of the odd primes to 47 in the odd `y`, through `divide(q)`, which gives that
@@ -156,13 +228,16 @@ fn passes(res: &Residues, low: u64, p: u64) -> bool {
 /// for none), and the smallest such prime (53 for none); `None` when the divisor is 1. For the
 /// primes to 29, the remainder by their squares tells first whether one divides only once.
 fn small_exponents(
-    res: &Residues,
+    res: &mut Residues,
     mut g: u64,
     mut divide: impl FnMut(u64) -> u64,
 ) -> Option<(u64, u64)> {
     let mut smallest = 53;
-    for &q in &SMALL {
-        if res.of(q) != 0 {
+    for (i, &q) in SMALL.iter().enumerate() {
+        // Kept for the filters, which run only when the loop ends.
+        let r = res.at(i);
+        res.small[i] = r as u8;
+        if r != 0 {
             continue;
         }
         smallest = smallest.min(q);
@@ -220,7 +295,7 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
         return None;
     }
     let mut res = Residues::limbs(&y);
-    let (mut g, smallest) = small_exponents(&res, z, |q| {
+    let (mut g, smallest) = small_exponents(&mut res, z, |q| {
         // A pass of the number a division: given up after 64, the exponent then left unknown.
         let inv = inverse_limb(q);
         let mut t = y.clone();
@@ -234,6 +309,8 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
         }
         e
     })?;
+    let log_smallest = (smallest as f64).log2();
+    let mut ylog = log2_limbs(&y);
     let mut k: u64 = 1;
     let mut p = if odd { 3 } else { 2 };
     'primes: loop {
@@ -245,7 +322,7 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
                 let bits = bit_length(&y);
                 // A `p`-th power of a root of at least `smallest` has at least `p log2(smallest)`
                 // bits.
-                if (p as f64) * (smallest as f64).log2() > bits as f64 + 0.5 {
+                if (p as f64) * log_smallest > bits as f64 + 0.5 {
                     break 'primes;
                 }
                 if k.saturating_mul(p) > u64::from(u32::MAX) {
@@ -254,11 +331,12 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
                 if !passes(&res, y[0], p) {
                     break;
                 }
-                let Some(root) = root_if_power(&y, p, bits) else {
+                let Some(root) = root_if_power(&y, p, bits, ylog) else {
                     break;
                 };
                 y = root;
-                res = Residues::limbs(&y);
+                ylog = log2_limbs(&y);
+                res = Residues::limbs(&y).with_small();
                 k *= p;
                 if g != 0 {
                     g /= p;
@@ -267,7 +345,7 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
                     }
                 }
             }
-        } else if (p as f64) * (smallest as f64).log2() > bit_length(&y) as f64 + 0.5 {
+        } else if (p as f64) * log_smallest > bit_length(&y) as f64 + 0.5 {
             break;
         }
         p = next_prime_small(p);
@@ -286,6 +364,9 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
 
 /// [`perfect_power_limbs`] for `2 <= x < 2^128`, in registers.
 pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
+    if x >> 64 == 0 {
+        return perfect_power_u64(x as u64, odd).map(|(b, k)| (u128::from(b), k));
+    }
     let z = u64::from(x.trailing_zeros());
     let mut y = x >> z;
     if y == 1 {
@@ -299,7 +380,7 @@ pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
         return None;
     }
     let mut res = Residues::u128(y);
-    let (mut g, smallest) = small_exponents(&res, z, |q| {
+    let (mut g, smallest) = small_exponents(&mut res, z, |q| {
         let (mut t, mut e) = (y, 0);
         while t % u128::from(q) == 0 {
             t /= u128::from(q);
@@ -327,7 +408,7 @@ pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
                     break;
                 }
                 y = r;
-                res = Residues::u128(y);
+                res = Residues::u128(y).with_small();
                 k *= p;
                 if g != 0 {
                     g /= p;
@@ -349,8 +430,95 @@ pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
     Some((y << (z / k), k as u32))
 }
 
-/// The `p`-th root of the odd `y > 1` of `bits` bits when it is a `p`-th power.
-fn root_if_power(y: &[u64], p: u64, bits: u64) -> Option<Vec<u64>> {
+/// [`perfect_power_u128`] for `2 <= x < 2^64`: the remainders by constant divisors, the roots in
+/// floating point, checked exactly.
+fn perfect_power_u64(x: u64, odd: bool) -> Option<(u64, u32)> {
+    let z = u64::from(x.trailing_zeros());
+    let mut y = x >> z;
+    if y == 1 {
+        let k = if odd { z >> z.trailing_zeros() } else { z };
+        if k < 2 {
+            return None;
+        }
+        return Some((1 << (z / k), k as u32));
+    }
+    if z == 1 {
+        return None;
+    }
+    let mut res = Residues::from(y % SQUARES, y % HIGH);
+    let (mut g, smallest) = small_exponents(&mut res, z, |q| {
+        let (mut t, mut e) = (y, 0);
+        while t % q == 0 {
+            t /= q;
+            e += 1;
+        }
+        e
+    })?;
+    let log_smallest = (smallest as f64).log2();
+    let mut k: u64 = 1;
+    let mut p: u64 = if odd { 3 } else { 2 };
+    'primes: loop {
+        if g != 0 && g < p {
+            break;
+        }
+        let bits = 64 - u64::from(y.leading_zeros());
+        if p as f64 * log_smallest > bits as f64 + 0.5 {
+            break;
+        }
+        if g == 0 || g % p == 0 {
+            loop {
+                if !passes(&res, y, p) {
+                    break;
+                }
+                let Some(r) = root_u64(y, p) else {
+                    break;
+                };
+                y = r;
+                res = Residues::from(y % SQUARES, y % HIGH).with_small();
+                k *= p;
+                if g != 0 {
+                    g /= p;
+                    if g % p != 0 {
+                        break;
+                    }
+                }
+                let bits = 64 - u64::from(y.leading_zeros());
+                if p as f64 * log_smallest > bits as f64 + 0.5 {
+                    break 'primes;
+                }
+            }
+        }
+        p = next_prime_small(p);
+    }
+    if k == 1 {
+        return None;
+    }
+    Some((y << (z / k), k as u32))
+}
+
+/// The `p`-th root of `y` when it is a `p`-th power: the square root exactly, other roots from the
+/// floating-point root, exact to 1, and checked.
+#[inline]
+fn root_u64(y: u64, p: u64) -> Option<u64> {
+    if p == 2 {
+        let r = super::primes::isqrt(y);
+        return if r * r == y { Some(r) } else { None };
+    }
+    let f = y as f64;
+    let est = if p == 3 {
+        f.cbrt()
+    } else {
+        f.powf(1.0 / p as f64)
+    };
+    let r = est.round() as u64;
+    [r, r.wrapping_sub(1), r + 1]
+        .into_iter()
+        .find(|&c| c >= 2 && c.checked_pow(p as u32) == Some(y))
+}
+
+/// The `p`-th root of the odd `y > 1` of `bits` bits, whose base-2 logarithm is `ylog`, when it is
+/// a `p`-th power.
+fn root_if_power(y: &[u64], p: u64, bits: u64, ylog: f64) -> Option<Vec<u64>> {
     if p == 2 {
         let n = number_of(y, ByteOrder::LittleEndian);
         let (root, rest) = n.isqrt_rem();
@@ -362,16 +530,19 @@ fn root_if_power(y: &[u64], p: u64, bits: u64) -> Option<Vec<u64>> {
     }
     let root_bits = bits.div_ceil(p);
     if root_bits <= 40 {
-        // The root from the top bits: `log2 y` to 2^-50 or so, so the root to well below 1, and
-        // its power checked modulo `2^64` first.
-        let est = float_root(y, bits, p);
-        let low = y[0];
-        for c in [est.saturating_sub(1), est, est + 1] {
-            if c >= 3 && pow_low(c, p) == low {
-                let n = Number::new_from_u64(c, ByteOrder::LittleEndian);
-                if n.pow(p as u32) == number_of(y, ByteOrder::LittleEndian) {
-                    return Some(vec![c]);
-                }
+        // The root from the top bits: `log2 y` is known to `2^-52 log2 y`, so the root of a power,
+        // below `2^40`, to `2^-6`: a root further from an integer rules the power out, and an
+        // integer root is checked modulo `2^64` first.
+        let r = (ylog / p as f64).exp2();
+        let c = r.round();
+        if (r - c).abs() > 1.0 / 64.0 || c < 3.0 {
+            return None;
+        }
+        let c = c as u64;
+        if pow_low(c, p) == y[0] {
+            let n = Number::new_from_u64(c, ByteOrder::LittleEndian);
+            if n.pow(p as u32) == number_of(y, ByteOrder::LittleEndian) {
+                return Some(vec![c]);
             }
         }
         return None;
@@ -435,8 +606,10 @@ fn pow_low(c: u64, mut p: u64) -> u64 {
     r
 }
 
-/// The `p`-th root of `y`, of `bits` bits, rounded to the nearest integer, from its top 64 bits.
-fn float_root(y: &[u64], bits: u64, p: u64) -> u64 {
+/// The base-2 logarithm of the limbs `y`, the top one not zero, from their top 64 bits: to about
+/// `2^-50`.
+fn log2_limbs(y: &[u64]) -> f64 {
+    let bits = bit_length(y);
     // The top 64 bits, as `t 2^(bits - 64)`, or `y` itself.
     let (t, shift) = if bits <= 64 {
         (y[0] as f64, 0u64)
@@ -449,9 +622,7 @@ fn float_root(y: &[u64], bits: u64, p: u64) -> u64 {
         }
         (top as f64, s)
     };
-    let log = (t.log2() + shift as f64) / p as f64;
-    let r = log.exp2().round();
-    if r >= 1.8e19 { u64::MAX } else { r as u64 }
+    t.log2() + shift as f64
 }
 
 /// Whether the odd `q` is prime, by trial division (`q` stays small: below `2^16`, or below the
@@ -469,8 +640,28 @@ fn is_prime_small(q: u64) -> bool {
 
 /// The next prime after `p`.
 fn next_prime_small(p: u64) -> u64 {
-    if p == 2 {
-        return 3;
+    // The primes to 127 from a mask, bit `q` set for each.
+    const MASK: u128 = {
+        let mut m = 0u128;
+        let mut q = 2;
+        while q < 128 {
+            let mut d = 2;
+            let mut prime = true;
+            while d * d <= q {
+                if q % d == 0 {
+                    prime = false;
+                }
+                d += 1;
+            }
+            if prime {
+                m |= 1 << q;
+            }
+            q += 1;
+        }
+        m
+    };
+    if p < 113 {
+        return u64::from((MASK >> (p + 1)).trailing_zeros()) + p + 1;
     }
     let mut q = p + 2;
     while !is_prime_small(q) {

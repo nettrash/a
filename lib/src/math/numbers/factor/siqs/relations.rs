@@ -10,7 +10,47 @@
 //! search: each edge outside the forest closes one, with the paths of the forest from its ends to
 //! their common ancestor.
 
+use core::hash::{BuildHasherDefault, Hasher};
 use std::collections::{HashMap, HashSet};
+
+/// A hasher of words for the sieve's tables, which hold primes and values that no one chooses
+/// against it: a product by an odd constant and a shift (the same every run, unlike the standard
+/// library's, and some ten times faster on these keys).
+#[derive(Default, Clone, Copy)]
+pub(super) struct WordHasher(u64);
+
+impl Hasher for WordHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    #[inline]
+    fn write_u32(&mut self, x: u32) {
+        self.write_u64(u64::from(x));
+    }
+
+    #[inline]
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(23) ^ x).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, x: usize) {
+        self.write_u64(x as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        // The product's high bits mixed into the low ones, which pick the bucket.
+        self.0 ^ (self.0 >> 29)
+    }
+}
+
+/// The tables of the sieve: maps and sets hashed by [`WordHasher`].
+pub(super) type Words = BuildHasherDefault<WordHasher>;
 
 /// A relation.
 #[derive(Clone, Copy, Debug)]
@@ -39,11 +79,11 @@ pub(super) struct Store {
     pub(super) factors: Vec<u32>,
     /// The values `|Ax + B| mod 2^64` of the relations, so that none is taken twice (two different
     /// ones with the same value, which is unlikely, cost a relation).
-    seen: HashSet<u64>,
+    seen: HashSet<u64, Words>,
     /// The number of full relations.
     fulls: usize,
     /// The vertex of each large prime (1 is vertex 0).
-    vertex: HashMap<u32, u32>,
+    vertex: HashMap<u32, u32, Words>,
     /// The union–find forest of the vertices.
     parent: Vec<u32>,
     /// The number of independent cycles.
@@ -56,9 +96,9 @@ impl Store {
         Store {
             rels: Vec::new(),
             factors: Vec::new(),
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             fulls: 0,
-            vertex: HashMap::new(),
+            vertex: HashMap::default(),
             parent: vec![0],
             cycles: 0,
         }

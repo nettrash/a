@@ -5,24 +5,62 @@
 //!   top bit of `E` with a square for each bit and, for each one, a multiplication by 3, which is
 //!   two additions; a later chunk of `E` takes a power by a sliding window. The second stage
 //!   catches `p - 1 = s q` with `s | E` and one prime `q` up to `B2`, by the Lucas sequence of
-//!   `V_1 = x + 1/x` for `x = 3^E`, whose `V_m - 2` is `x^(-m) (x^m - 1)^2`.
+//!   `V_1 = x + 1/x` for `x = 3^E`, whose `V_m - 2` is `x^(-m) (x^m - 1)^2`, or, for the longer
+//!   ranges, by Montgomery and Kruppa's continuation on `x` ([`mk`](super::mk)), which hands the
+//!   stage back to the Lucas sequence when it cannot tell the primes it caught apart.
 //! - `p + 1`: the Lucas sequence `V_m(P_0)`, `V_0 = 2`, `V_1 = P_0`, is `a^m + a^(-m)` for a root
 //!   `a` of `X^2 - P_0 X + 1`, which lies in the field of `p^2` elements and has an order dividing
 //!   `p + 1` when `P_0^2 - 4` is not a square modulo `p` (and `p - 1` when it is): `V_E(P_0) - 2` is
 //!   then 0 modulo `p` when that order divides `E`. `V_E` is computed by the ladder, a square and a
-//!   product a bit, through the chunks of `E` as `V_(ab)(P) = V_b(V_a(P))`, and the second stage is
-//!   the same as for `p - 1`. The starting values `2/7`, `6/5` and `6`, whose `P_0^2 - 4` are `-3`,
-//!   `-1` and `2` times squares, are tried in turn, so that for a prime with `p + 1` smooth one of
-//!   them takes `p + 1` with a chance of 7 in 8.
+//!   product a bit, through the chunks of `E` as `V_(ab)(P) = V_b(V_a(P))`, or, from
+//!   [`PRAC_LIMBS`] limbs and in memory, by Montgomery's PRAC chain for each prime; the second
+//!   stage is the same as for `p - 1`, Montgomery and Kruppa's continuation in `Z_n[sqrt(Delta)]`
+//!   ([`pp1_stage2`]) or the baby steps and giant steps. The starting values `2/7`, `6/5` and `6`,
+//!   whose `P_0^2 - 4` are `-3`, `-1` and `2` times squares, are tried in turn, so that for a prime
+//!   with `p + 1` smooth one of them takes `p + 1` with a chance of 7 in 8.
 //!
 //! When the greatest common divisor of a stage is `n`, every prime was caught at once: the chunk is
 //! gone over again prime by prime from its start, with a greatest common divisor each.
 
 use super::field::{Arith, Job, invert};
+use super::mk::{pm1_stage2, pp1_stage2};
 use super::primes::primes_in;
 use super::rho::{Gcd, gcd};
 use super::stage1::{Chunk, Stage1, prime_power};
-use super::stage2::{Plan, lucas_ladder, lucas_prac, lucas_stage2};
+use super::stage2::{Plan, lucas_ladder, lucas_prac, lucas_prac_with, lucas_stage2, prac_choice};
+use std::sync::{Arc, Mutex};
+
+/// From this many limbs, `p + 1`'s first stage takes PRAC's chains in registers too: measured on an
+/// Apple M4 Max at `B1 = 10^5`, three starting values, with the multipliers kept, 6 limbs 27 ms
+/// against 30 by the ladder and 8 limbs 44 against 53, while 4 limbs took 16 against 15.
+const PRAC_LIMBS: usize = 6;
+
+/// The bounds up to which the multipliers are kept: a byte a prime, 665 KB at `10^7`.
+const PRAC_KEPT_B1: u64 = 10_000_000;
+
+/// The multipliers of PRAC's chains of the last bound asked for, kept for the next calls: its
+/// three starting values share them, and so do later calls with the bound.
+static PRAC_CHOICES: Mutex<Option<(u64, Arc<[u8]>)>> = Mutex::new(None);
+
+/// The index in [`PRAC_V`](super::stage2) of the multiplier of the cheapest chain for each prime up
+/// to `b1`, in increasing order: computed once for the bound, about 0.4 us a prime, and kept, or
+/// `None` past [`PRAC_KEPT_B1`].
+fn prac_choices(b1: u64) -> Option<Arc<[u8]>> {
+    if b1 > PRAC_KEPT_B1 {
+        return None;
+    }
+    let mut kept = PRAC_CHOICES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((b, c)) = kept.as_ref()
+        && *b == b1
+    {
+        return Some(c.clone());
+    }
+    let c: Arc<[u8]> = primes_in(2, b1)
+        .map(|p| if p < 3 { 0 } else { prac_choice(p) })
+        .collect();
+    *kept = Some((b1, c.clone()));
+    Some(c)
+}
 
 /// The starting values of `p + 1`, as fractions.
 pub(super) const PP1_SEEDS: [(u64, u64); 3] = [(2, 7), (6, 5), (6, 1)];
@@ -70,6 +108,13 @@ impl Job for Pm1Job<'_> {
             return r;
         }
         let plan = self.plan?;
+        // Montgomery and Kruppa's continuation when it costs less, unless it leaves the stage to
+        // this one.
+        if let Some(mk) = plan.mk(f.n().len(), false)
+            && let Some(found) = pm1_stage2(f, &x, &mk)
+        {
+            return found;
+        }
         // `V_1 = x + 1/x`.
         let xi = match invert(f, &x) {
             Ok(v) => v,
@@ -110,16 +155,39 @@ impl Job for Pp1Job<'_> {
         let mut d = f.zero();
         let mut t = [f.zero(), f.zero(), f.zero(), f.zero()];
         // In memory, from nine limbs, stage 1 takes Montgomery's PRAC chain for each prime, about
-        // `1.52 log2 p` products against `2 log2 p` for the ladder on the exponent; in registers the
-        // ladder's independent product and square a bit hide each other's latency, and the chain's
-        // choice of its multiplier costs more than it saves. Measured on an Apple M4 Max at
-        // `B1 = 10^6`, three starting values: 2 limbs 59 ms for the ladder against 71 ms for PRAC
-        // with the golden ratio alone, 4 limbs 155 against 171, 8 limbs about the same, 16 limbs
-        // 1.35 s against 1.20 s. Decided by the type, so that the chain is compiled for the
-        // arithmetic in memory alone.
+        // `1.52 log2 p` products against `2 log2 p` for the ladder on the exponent. Measured on an
+        // Apple M4 Max at `B1 = 10^6`, three starting values, with the golden ratio alone: 2 limbs
+        // 59 ms for the ladder against 71 ms for PRAC, 4 limbs 155 against 171, 8 limbs about the
+        // same, 16 limbs 1.35 s against 1.20 s. In registers below [`PRAC_LIMBS`] limbs the
+        // ladder's independent product and square a bit hide each other's latency; from there,
+        // where the ladder's two products a bit cost twice one, and in memory, the chains take the
+        // multipliers kept for the bound (see [`prac_choices`]), up to [`PRAC_KEPT_B1`]; beyond it
+        // the ladder in registers and the golden ratio's chains in memory.
+        let choices = if A::MEMORY || f.n().len() >= PRAC_LIMBS {
+            prac_choices(b1)
+        } else {
+            None
+        };
+        let mut next = 0usize;
         self.stage1.each(|chunk| {
             let save = v.clone();
-            if A::MEMORY {
+            if let Some(choices) = &choices {
+                // A chain for each prime, as many times as its power, with the multiplier kept.
+                for p in primes_in(chunk.lo, chunk.hi) {
+                    let choice = choices[next];
+                    next += 1;
+                    let mut q = prime_power(p, b1);
+                    while q > 1 {
+                        if p == 2 {
+                            f.sqr_in(&mut v);
+                            f.sub_in(&mut v, &two);
+                        } else {
+                            lucas_prac_with(f, &mut v, p, &two, &mut t, choice);
+                        }
+                        q /= p;
+                    }
+                }
+            } else if A::MEMORY {
                 // A chain for each prime, as many times as its power.
                 for p in primes_in(chunk.lo, chunk.hi) {
                     let mut q = prime_power(p, b1);
@@ -152,7 +220,15 @@ impl Job for Pp1Job<'_> {
         if let Some(r) = result {
             return r;
         }
-        lucas_stage2(f, &v, self.plan?)
+        let plan = self.plan?;
+        // Montgomery and Kruppa's continuation when it costs less, unless it leaves the stage to
+        // this one.
+        if let Some(mk) = plan.mk(f.n().len(), true)
+            && let Some(found) = pp1_stage2(f, &v, &mk)
+        {
+            return found;
+        }
+        lucas_stage2(f, &v, plan)
     }
 }
 

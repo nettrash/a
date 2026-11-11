@@ -1,22 +1,69 @@
-//! Discrete logarithms modulo a number, by method: [`bsgs`], [`rho`] and [`pohlig_hellman`].
+//! Discrete logarithms modulo a number, by method: [`bsgs()`], [`rho()`] and [`pohlig_hellman`].
 //! [`Number::discrete_log`] chooses among them, and factors the modulus first; these take the
 //! modulus as it is, and the order of the base, or a multiple of it, from the caller.
 //!
 //! Each works in the ring of residues that fits the modulus: Montgomery's form modulo an odd
-//! number, in registers up to seven limbs, wrapping products modulo a power of two up to `2^128`,
+//! number, in registers up to eight limbs, wrapping products modulo a power of two up to `2^128`,
 //! and divisions modulo the others.
 
 pub(super) mod bsgs;
+pub(super) mod index;
 pub(super) mod ph;
 pub(super) mod rho;
 
 use super::modular::int::{Int, in_order};
 use super::modular::positive;
-use super::modular::ring::{Ring, limbs_of, with_ring};
+use super::modular::ring::{Ring, limbs_of};
 use super::{ByteOrder, Factorization, Number};
 use bsgs::{Bsgs, MOST_BABY_STEPS};
 use ph::{isqrt_up, ph_in};
 use rho::{Walk, rho_in};
+
+/// [`with_ring!`] with the odd moduli of eight limbs in registers too ([`Many<8>`]), where the
+/// ring on limbs would allocate each product: the walks and the steps of the logarithms take
+/// millions of products.
+///
+/// [`with_ring!`]: super::modular::ring::with_ring
+/// [`Many<8>`]: super::modular::ring::Many
+macro_rules! with_ring_dlog {
+    ($m:expr, |$r:ident| $body:expr) => {
+        match $m {
+            m => {
+                let m: &[u64] = m;
+                if m.len() == 8 && m[0] & 1 == 1 {
+                    let $r = $crate::math::numbers::modular::ring::Many::<8>::new([
+                        m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                    ]);
+                    $body
+                } else {
+                    $crate::math::numbers::modular::ring::with_ring!(m, |$r| $body)
+                }
+            }
+        }
+    };
+}
+pub(super) use with_ring_dlog;
+
+/// [`with_odd!`](super::modular::ring::with_odd) with the moduli of eight limbs in registers, as
+/// [`with_ring_dlog!`].
+macro_rules! with_odd_dlog {
+    ($m:expr, |$r:ident| $body:expr) => {
+        match $m {
+            m => {
+                let m: &[u64] = m;
+                if m.len() == 8 {
+                    let $r = $crate::math::numbers::modular::ring::Many::<8>::new([
+                        m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                    ]);
+                    $body
+                } else {
+                    $crate::math::numbers::modular::ring::with_odd!(m, |$r| $body)
+                }
+            }
+        }
+    };
+}
+pub(super) use with_odd_dlog;
 
 /// The smallest `k` with `0 <= k < order` and `g^k = h (mod m)`, or `None`, by Shanks's
 /// baby-step giant-step method, for `g` of order dividing `order` modulo `m`. In the byte order of
@@ -74,7 +121,7 @@ fn saturated(order: &Number) -> u128 {
 fn search(h: &Number, g: &Number, m: &Number, n: u128) -> Option<u128> {
     let ml = limbs_of(m);
     let inv = g.mod_inverse(m)?;
-    with_ring!(&ml, |r| {
+    with_ring_dlog!(&ml, |r| {
         let hr = r.residue(&limbs_of(h));
         let gr = r.residue(&limbs_of(g));
         let ir = r.residue(&limbs_of(&inv));
@@ -127,10 +174,11 @@ fn search_any(h: &Number, g: &Number, m: &Number, n: u128) -> Option<u128> {
 /// multiplier `M_i = g^(u_i) h^(v_i)` one of 32 chosen by the element, until the walk comes back
 /// to an element it met; `g^a h^b = g^(a') h^(b')` then gives `k = (a' - a) / (b - b') mod order`.
 /// The walk recognises the elements it met by the distinguished ones, about one in `2^(bits/4)`,
-/// which it keeps. About `1.25 sqrt(order)` products and little memory, against the `sqrt(order)`
-/// words of [`bsgs`]. The walk is the same for every run. `None` when `g^order` or `h^order` is
+/// which it keeps, so that eight walks run side by side and share them. About `1.25 sqrt(order)`
+/// products and little memory, against the `sqrt(order)` words of [`bsgs()`]. The walk is the same
+/// for every run. `None` when `g^order` or `h^order` is
 /// not 1, and when `h` is not a power of `g`, which every collision then shows (they all have
-/// `b = b'`): after a few of them the answer is settled by [`bsgs`].
+/// `b = b'`): after a few of them the answer is settled by [`bsgs()`].
 ///
 /// # Panics
 ///
@@ -162,7 +210,7 @@ pub fn rho(h: &Number, g: &Number, m: &Number, order: &Number) -> Option<Number>
     let ml = limbs_of(&m);
     let hl = limbs_of(&h.rem_euclid(&m));
     let gl = limbs_of(&g.rem_euclid(&m));
-    let k = with_ring!(&ml, |r| {
+    let k = with_ring_dlog!(&ml, |r| {
         let hr = r.residue(&hl);
         let gr = r.residue(&gl);
         match q.word() {
@@ -173,7 +221,7 @@ pub fn rho(h: &Number, g: &Number, m: &Number, order: &Number) -> Option<Number>
     k.map(|k| in_order(k, out))
 }
 
-/// [`rho`] in the ring `r`, for an order below `2^63`.
+/// [`rho()`] in the ring `r`, for an order below `2^63`.
 fn rho_word<R: Ring>(r: &R, h: &R::V, g: &R::V, q: u64) -> Option<u64> {
     let ql = [q];
     if !r.is_one(&r.pow(g, &ql)) || !r.is_one(&r.pow(h, &ql)) {
@@ -199,7 +247,7 @@ fn rho_word<R: Ring>(r: &R, h: &R::V, g: &R::V, q: u64) -> Option<u64> {
     }
 }
 
-/// [`rho`] in the ring `r`, for a longer order.
+/// [`rho()`] in the ring `r`, for a longer order.
 fn rho_long<R: Ring>(r: &R, h: &R::V, g: &R::V, q: &Number) -> Option<Number> {
     let ql = limbs_of(q);
     if !r.is_one(&r.pow(g, &ql)) || !r.is_one(&r.pow(h, &ql)) {
@@ -224,10 +272,11 @@ fn rho_long<R: Ring>(r: &R, h: &R::V, g: &R::V, q: &Number) -> Option<Number> {
 /// Pohlig and Hellman (1978): for each prime power `q^f` of `order`, the logarithm of
 /// `h^(order/q^f)` to `g^(order/q^f)`, whose order is `q^f'` with `f' <= f`, is found a digit in
 /// base `q` at a time, each a logarithm in the group of order `q` by stepping through its powers
-/// for `q < 16`, by baby steps and giant steps up to `2^23` (one table for all the digits), and by
-/// Pollard's rho beyond; the logarithms modulo the `q^f'` are joined by the Chinese remainder
-/// theorem, which gives `k` modulo the order of `g`, the smallest, and checked. `None` when `h` is
-/// not a power of `g`, and when `g^order` is not 1 (`order` is not a multiple of the order of `g`).
+/// for `q < 16`, by baby steps and giant steps up to `2^21` modulo a word and `2^23` modulo longer
+/// numbers (one table for all the digits), and by Pollard's rho beyond; the logarithms modulo the
+/// `q^f'` are joined by the Chinese remainder theorem, which gives `k` modulo the order of `g`, the
+/// smallest, and checked. `None` when `h` is not a power of `g`, and when `g^order` is not 1
+/// (`order` is not a multiple of the order of `g`).
 ///
 /// # Panics
 ///
@@ -261,10 +310,10 @@ pub fn pohlig_hellman(h: &Number, g: &Number, m: &Number, order: &Factorization)
         .iter()
         .map(|(p, e)| (in_order(p.clone(), ByteOrder::LittleEndian), *e))
         .collect();
-    let k = with_ring!(&ml, |r| {
+    let k = with_ring_dlog!(&ml, |r| {
         let hr = r.residue(&hl);
         let gr = r.residue(&gl);
-        ph_in(&r, &hr, &gr, &n, None).map(|(k, _)| k)
+        ph_in(&r, &hr, &gr, &n, None, None).map(|(k, _)| k)
     });
     k.map(|k| in_order(k, out))
 }

@@ -6,14 +6,21 @@
 //! recursion: `S1` the ordinary leaves, `S2` the special ones (trivial, easy and hard), and `P2`
 //! the numbers up to `x` with exactly two prime factors above `y`.
 //!
+//! The special leaves are sorted as Gourdon's (2001) are: a leaf `p_b m` whose `x / (p_b m)` is
+//! below `p_b^2` has `φ(x / (p_b m), b - 1) = π(x / (p_b m)) - b + 2`, so that only the leaves at
+//! least `p_b^2`, whose primes are at most `x^(1/4)`, need the sieve ([`s2_hard`]); the leaves of a
+//! prime `q` between `y` and `p_b^2` are easy ones above `y` ([`s2_above`]), and the primes above
+//! `x^(1/4)` do not cross out the sieve. Below `2^16`, the primes, `π` and `P2`'s counts come from
+//! tables computed at compile time, so that small `x` takes no sieve but the hard leaves'.
+//!
 //! The sums are in 64 bits that wrap: each term is below `2^64`, the parts may not be, but the
 //! result, below `2^63`, is right modulo `2^64`, so exact.
 
-use super::super::segments::{Segments, count_bits, each_prime};
-use super::super::wheel::{KEEP_TO, byte_remainder};
+use super::super::segments::{Segments, count_bits, each_prime, isqrt};
+use super::super::wheel::{KEEP_TO, OFFSETS, byte_remainder};
 use super::hard::s2_hard;
 use super::phi::{MAX_A, phi_tiny, tiny_a};
-use super::tables::{FactorTable, PiTable, primes_to};
+use super::tables::{FactorTable, PiTable, SMALL, SMALL_PRIMES, primes_to, small_primes_to};
 
 /// The integer cube root of `x`.
 pub(super) fn icbrt(x: u64) -> u64 {
@@ -40,23 +47,44 @@ fn alpha(x: u64) -> f64 {
     a.clamp(1.0, x16.max(1.0))
 }
 
-/// `π(x)` by Deléglise and Rivat's method, for `x` from about `10^4`.
+/// `π(x)` by Deléglise and Rivat's method, for `x` from about `10^4`, its special leaves sorted as
+/// Gourdon's (2001): the hard ones, whose `φ` needs the sieve, only those with `x / (p_b m)` at
+/// least `p_b^2`, the others by `π`.
 pub(super) fn pi(x: u64, pi_of: impl Fn(u64) -> u64) -> u64 {
     let x13 = icbrt(x);
-    let y = ((x13 as f64 * alpha(x)) as u64).clamp(x13, x.isqrt());
+    let y = ((x13 as f64 * alpha(x)) as u64).clamp(x13, isqrt(x));
     let z = x / y;
-    let p = primes_to(y);
+    // Below `2^16` the primes and `π` come from the tables computed at compile time.
+    let owned_p;
+    let p: &[u32] = if y < SMALL {
+        small_primes_to(y)
+    } else {
+        owned_p = primes_to(y);
+        &owned_p
+    };
     let pi_y = (p.len() - 2) as u64;
     let c = tiny_a(y).min(MAX_A);
-    let table = PiTable::new(y, &p);
-    let factor = FactorTable::new(y, &p);
-    let p2 = p2(x, y, pi_y, &pi_of);
-    let s1 = s1(x, y, c, &p);
-    let trivial = s2_trivial(x, y, z, c, &p, &table);
-    let easy = s2_easy(x, y, z, c, &p, &table);
-    let hard = s2_hard(x, y, z, c, &p, &table, &factor);
+    let owned_t;
+    let table = if y < SMALL {
+        PiTable::small()
+    } else {
+        owned_t = PiTable::blocks(y, p);
+        PiTable::of(&owned_t)
+    };
+    let factor = FactorTable::new(y, p);
+    let p2 = if z < SMALL {
+        p2_small(x, y, pi_y)
+    } else {
+        p2(x, y, pi_y, &pi_of)
+    };
+    let s1 = s1(x, y, c, p);
+    let trivial = s2_trivial(x, y, z, c, p, &table);
+    let easy = s2_easy(x, y, z, c, p, &table);
+    let above = s2_above(x, y, z, c, p, &table);
+    let hard = s2_hard(x, y, z, c, p, &table, &factor);
     s1.wrapping_add(trivial)
         .wrapping_add(easy)
+        .wrapping_add(above)
         .wrapping_add(hard)
         .wrapping_add(pi_y)
         .wrapping_sub(1)
@@ -98,9 +126,9 @@ fn s1(x: u64, y: u64, c: u64, p: &[u32]) -> u64 {
 /// The trivial special leaves `p_b p_l`, `l > b`, whose `φ(x / (p_b p_l), b - 1)` is 1: for the
 /// primes `p_b` from `sqrt(z)` up to `y`, `x / p_b^2 < p_l <= y`.
 #[inline(never)]
-fn s2_trivial(x: u64, y: u64, z: u64, c: u64, p: &[u32], pi: &PiTable) -> u64 {
+fn s2_trivial(x: u64, y: u64, z: u64, c: u64, p: &[u32], pi: &PiTable<'_>) -> u64 {
     let pi_y = pi.pi(y);
-    let start = (u64::from(p[c as usize])).max(z.isqrt()) + 1;
+    let start = (u64::from(p[c as usize])).max(isqrt(z)) + 1;
     if start >= y {
         return 0;
     }
@@ -134,68 +162,327 @@ fn s2_trivial(x: u64, y: u64, z: u64, c: u64, p: &[u32], pi: &PiTable) -> u64 {
 /// `Σ_{Q < q <= T} π(N / q) = π(N / T) (π(T) - π(Q)) + Σ_{N / T < r <= N / Q} (π(N / r) - π(Q))`.
 /// Its primes `r` run over the sparse leaves' `q` (both from `z / p_b` to `sqrt(N)`), so that one
 /// division and one look-up serve both sums, and the terms are independent of one another.
+///
+/// The look-ups, `π(N / q)` for runs of `q`, are made by [`look_up`], in the order of their values
+/// when the table of `π` is larger than the cache.
 #[inline(never)]
-fn s2_easy(x: u64, y: u64, z: u64, c: u64, p: &[u32], pi: &PiTable) -> u64 {
+fn s2_easy(x: u64, y: u64, z: u64, c: u64, p: &[u32], pi: &PiTable<'_>) -> u64 {
     let x13 = icbrt(x);
-    let pi_sqrty = pi.pi(y.isqrt());
+    let pi_sqrty = pi.pi(isqrt(y));
     let pi_x13 = pi.pi(x13.min(y));
     let mut s = 0u64;
-    for b in c.max(pi_sqrty) + 1..=pi_x13 {
-        let prime = u64::from(p[b as usize]);
-        let xp = x / prime;
-        // The leaves `q` from `s_lo` (exclusive) to `q_lo` are sparse, those to `q_hi` clustered.
-        let q_hi = (xp / prime).min(y);
-        let s_lo = (z / prime).clamp(prime, y);
-        let q_lo = xp.isqrt().clamp(prime, y).max(s_lo);
-        let pi_q_lo = pi.pi(q_lo);
-        let clustered = pi.pi(q_hi).saturating_sub(pi_q_lo);
-        // The sparse leaves' indices, and the swapped sum's.
-        let (a1, b1) = (pi.pi(s_lo), pi_q_lo);
-        let (a2, b2) = if clustered > 0 {
-            (pi.pi(xp / q_hi), pi.pi(xp / q_lo))
-        } else {
-            (0, 0)
-        };
-        let (lo, hi) = (a1.max(a2), b1.min(b2));
-        let (both, only1, only2) = if lo < hi {
-            (
-                sum_pi(xp, p, pi, lo, hi),
-                sum_pi(xp, p, pi, a1, lo).wrapping_add(sum_pi(xp, p, pi, hi, b1)),
-                sum_pi(xp, p, pi, a2, lo).wrapping_add(sum_pi(xp, p, pi, hi, b2)),
-            )
-        } else {
-            (0, sum_pi(xp, p, pi, a1, b1), sum_pi(xp, p, pi, a2, b2))
-        };
-        // Each leaf counts `π(x / (p_b q)) - b + 2`.
-        let two_less_b = 2u64.wrapping_sub(b);
-        let sparse = both
-            .wrapping_add(only1)
-            .wrapping_add((b1 - a1).wrapping_mul(two_less_b));
-        s = s.wrapping_add(sparse);
-        if clustered > 0 {
-            let swapped = pi
-                .pi(xp / q_hi)
-                .wrapping_mul(clustered)
-                .wrapping_add(both)
-                .wrapping_add(only2)
-                .wrapping_sub((b2 - a2).wrapping_mul(pi_q_lo));
-            s = s
-                .wrapping_add(swapped)
-                .wrapping_add(clustered.wrapping_mul(two_less_b));
+    // The look-ups of a table that fits in the cache are made at once; those of a larger one are
+    // gathered by batches, to be made by parts of the table.
+    let direct = pi.blocks_len() <= 2 * LOOK_UP_PART;
+    let mut runs: Vec<Run> = Vec::new();
+    macro_rules! run {
+        ($xp:expr, $lo:expr, $hi:expr, $w:expr) => {{
+            let (xp, lo, hi, w) = ($xp, $lo, $hi, $w);
+            if direct {
+                s = s.wrapping_add(sum_pi(xp, p, pi, lo, hi).wrapping_mul(w));
+            } else if lo < hi {
+                runs.push(Run::new(xp, lo, hi, w));
+            }
+        }};
+    }
+    let first = c.max(pi_sqrty) + 1;
+    let mut b = first;
+    while b <= pi_x13 {
+        // The primes by batches, whose runs are looked up together.
+        let last = pi_x13.min(b + RUNS_OF);
+        runs.clear();
+        for b in b..=last {
+            let prime = u64::from(p[b as usize]);
+            let xp = x / prime;
+            // The leaves `q` from `s_lo` (exclusive) to `q_lo` are sparse, those to `q_hi`
+            // clustered.
+            let q_hi = (xp / prime).min(y);
+            let s_lo = (z / prime).clamp(prime, y);
+            let q_lo = isqrt(xp).clamp(prime, y).max(s_lo);
+            let pi_q_lo = pi.pi(q_lo);
+            let clustered = pi.pi(q_hi).saturating_sub(pi_q_lo);
+            // The sparse leaves' indices, and the swapped sum's.
+            let (a1, b1) = (pi.pi(s_lo), pi_q_lo);
+            let (a2, b2) = if clustered > 0 {
+                (pi.pi(xp / q_hi), pi.pi(xp / q_lo))
+            } else {
+                (0, 0)
+            };
+            // Each leaf counts `π(x / (p_b q)) - b + 2`; the swapped sum takes `π(N / T)` for each
+            // clustered leaf and `π(Q)` off each of its terms.
+            let two_less_b = 2u64.wrapping_sub(b);
+            s = s.wrapping_add((b1 - a1).wrapping_mul(two_less_b));
+            if clustered > 0 {
+                s = s
+                    .wrapping_add(a2.wrapping_mul(clustered))
+                    .wrapping_sub((b2 - a2).wrapping_mul(pi_q_lo))
+                    .wrapping_add(clustered.wrapping_mul(two_less_b));
+            }
+            // The look-ups: the two ranges of indices, the part in both looked up once and
+            // counted twice.
+            let (lo, hi) = (a1.max(a2), b1.min(b2));
+            if clustered > 0 && lo < hi {
+                run!(xp, a1.min(a2), lo, 1);
+                run!(xp, lo, hi, 2);
+                run!(xp, hi, b1.max(b2), 1);
+            } else {
+                run!(xp, a1, b1, 1);
+                if clustered > 0 {
+                    run!(xp, a2, b2, 1);
+                }
+            }
         }
+        if !direct {
+            s = s.wrapping_add(look_up(&mut runs, p, pi));
+        }
+        b = last + 1;
+    }
+    s
+}
+
+/// The primes whose runs [`s2_easy`] looks up together, less one.
+const RUNS_OF: u64 = 4095;
+
+/// The look-ups `w Σ π(xp / p[i])` for the indices `i` from `lo` (exclusive) to `hi`.
+#[derive(Clone, Copy)]
+struct Run {
+    xp: u64,
+    lo: u64,
+    hi: u64,
+    w: u64,
+}
+
+impl Run {
+    fn new(xp: u64, lo: u64, hi: u64, w: u64) -> Self {
+        Run { xp, lo, hi, w }
+    }
+}
+
+/// The blocks of the table of `π` that [`look_up`] reads at a time, 64 KiB.
+const LOOK_UP_PART: usize = 4096;
+
+/// The sum of the look-ups of `runs`, `π` of values from 6 up to the table's limit, a table larger
+/// than a few parts: a run's look-ups, from its largest index down, come in increasing order of
+/// their values, so they are made a part of the table after the other, each run taking the look-ups
+/// whose values fall in the part, so that the part's blocks stay in the cache, where the look-ups in
+/// turn would read the whole table from memory. The runs are emptied.
+#[inline(never)]
+fn look_up(runs: &mut Vec<Run>, p: &[u32], pi: &PiTable<'_>) -> u64 {
+    let mut s = 0u64;
+    let blocks = pi.blocks_len();
+    // The first part: that of the smallest value.
+    let least = runs
+        .iter()
+        .map(|r| r.xp / u64::from(p[r.hi as usize]))
+        .min()
+        .unwrap_or(u64::MAX);
+    let mut k = (least / 240) as usize;
+    while !runs.is_empty() {
+        let end = (240 * (k + LOOK_UP_PART) as u64).min(240 * blocks as u64) - 1;
+        for r in runs.iter_mut() {
+            // The look-ups up to the part's end: `p[i] > xp / (end + 1)`.
+            let t = r.xp / (end + 1);
+            if t >= u64::from(p[r.hi as usize]) {
+                continue;
+            }
+            let from = pi.pi(t).max(r.lo);
+            s = s.wrapping_add(sum_pi(r.xp, p, pi, from, r.hi).wrapping_mul(r.w));
+            r.hi = from;
+        }
+        runs.retain(|r| r.lo < r.hi);
+        k += LOOK_UP_PART;
     }
     s
 }
 
 /// `Σ π(n / p_i)` for the indices `i` from `lo` (exclusive) to `hi`, the quotients from 6 up.
 #[inline(always)]
-fn sum_pi(n: u64, p: &[u32], pi: &PiTable, lo: u64, hi: u64) -> u64 {
+fn sum_pi(n: u64, p: &[u32], pi: &PiTable<'_>, lo: u64, hi: u64) -> u64 {
     if lo >= hi {
         return 0;
     }
-    p[lo as usize + 1..=hi as usize]
+    pi.sum_quotients(n, &p[lo as usize + 1..=hi as usize])
+}
+
+/// The easy special leaves above `y`, by Gourdon's sorting of the leaves: `p_b q`, `q` a prime
+/// above `p_b`, with `y <= x / (p_b q) < p_b^2`, whose `φ(x / (p_b q), b - 1)` is
+/// `π(x / (p_b q)) - b + 2`, for the primes `p_b` from `sqrt(y)` to `sqrt(x / y)`. Deléglise and
+/// Rivat's method takes them as hard leaves, by the sieve, with the leaves at least `p_b^2`, which
+/// only those need: then the primes above `x^(1/4)` have none, and do not cross out the sieve's
+/// numbers.
+///
+/// Their `π`, between `y` and `sqrt(x)`, comes from the table below `2^16` when `sqrt(x)` is below
+/// it, and else from a sieve of the numbers from `y` up, in parts whose counts stay in the first
+/// level of the cache: the leaves of a prime, its `q` from the largest down, come in the order of
+/// their `x / (p_b q)`, so that each part takes the next leaves of each prime.
+#[inline(never)]
+fn s2_above(x: u64, y: u64, z: u64, c: u64, p: &[u32], pi: &PiTable<'_>) -> u64 {
+    let first = c.max(pi.pi(isqrt(y))) + 1;
+    let last = pi.pi(isqrt(z).min(y));
+    if first > last {
+        return 0;
+    }
+    let small = isqrt(x) < SMALL;
+    let mut s = 0u64;
+    // The leaves of each prime: the indices `q = p[i]`, `lo < i <= hi`.
+    let mut leaves = Vec::with_capacity(if small {
+        0
+    } else {
+        (last + 1 - first) as usize
+    });
+    for b in first..=last {
+        let prime = u64::from(p[b as usize]);
+        let xp = x / prime;
+        let q_lo = (xp / (prime * prime)).max(prime);
+        let q_hi = (z / prime).min(y);
+        if q_lo < q_hi {
+            let (lo, hi) = (pi.pi(q_lo), pi.pi(q_hi));
+            let two_less_b = 2u64.wrapping_sub(b);
+            if small {
+                s = s
+                    .wrapping_add(sum_pi(xp, p, &PiTable::small(), lo, hi))
+                    .wrapping_add((hi - lo).wrapping_mul(two_less_b));
+            } else if lo < hi {
+                leaves.push(Above {
+                    xp,
+                    lo,
+                    hi,
+                    two_less_b,
+                });
+            }
+        }
+    }
+    if leaves.is_empty() {
+        return s;
+    }
+    // The largest `x / (p_b q)`, from each prime's smallest `q`.
+    let top = leaves
         .iter()
-        .fold(0u64, |s, &q| s.wrapping_add(pi.pi_from_6(n / u64::from(q))))
+        .map(|l| l.xp / u64::from(p[l.lo as usize + 1]))
+        .max()
+        .expect("leaves");
+    let mut sieve = Segments::new(y, top, u64::MAX);
+    // The primes below the part.
+    let mut before = pi.pi(y - 1);
+    let mut counts = vec![0u32; PART];
+    while sieve.next_segment() {
+        let low = sieve.low();
+        let words = sieve.bytes().as_chunks::<8>().0;
+        for (k, part) in words.chunks(PART).enumerate() {
+            // The bits before each word of the part.
+            let mut n = 0u32;
+            for (c, w) in counts.iter_mut().zip(part) {
+                *c = n;
+                n += u64::from_le_bytes(*w).count_ones();
+            }
+            let start = low + 240 * (k * PART) as u64 + 7;
+            let end = start + 240 * part.len() as u64 - 1;
+            for l in &mut leaves {
+                // The leaves up to the part's end: `q > x / (p_b (end + 1))`.
+                let t = l.xp / (end + 1);
+                if t >= u64::from(p[l.hi as usize]) {
+                    continue;
+                }
+                let from = pi.pi(t).max(l.lo);
+                let sum = part_sum(
+                    l.xp,
+                    &p[from as usize + 1..=l.hi as usize],
+                    start,
+                    part,
+                    &counts,
+                );
+                let n = l.hi - from;
+                s = s
+                    .wrapping_add(sum)
+                    .wrapping_add(n.wrapping_mul(before.wrapping_add(l.two_less_b)));
+                l.hi = from;
+            }
+            leaves.retain(|l| l.hi > l.lo);
+            before += u64::from(n);
+        }
+    }
+    debug_assert!(leaves.is_empty());
+    s
+}
+
+/// `Σ π(xp / q) - π(start - 1)` for the primes `q` of `qs`, whose quotients are in the part of the
+/// sieve's words `part` from `start`, from its counts before each word: two at a time, the divisor
+/// known not to be zero, the word's index kept to the part, the two words' bits counted together.
+#[inline(always)]
+fn part_sum(xp: u64, qs: &[u32], start: u64, part: &[[u8; 8]], counts: &[u32]) -> u64 {
+    let last = part.len() - 1;
+    let at = |q: u32| {
+        let r = xp / core::num::NonZeroU64::from(core::num::NonZeroU32::new(q).expect("a prime"))
+            - start;
+        (
+            ((r / 240) as usize).min(last),
+            ERAT_UP_TO[(r % 240) as usize],
+        )
+    };
+    let word = |w: usize| u64::from_le_bytes(part[w]);
+    let (pairs, rest) = qs.as_chunks::<2>();
+    let mut sum = 0u64;
+    for &[q0, q1] in pairs {
+        let ((w0, m0), (w1, m1)) = (at(q0), at(q1));
+        let (b0, b1) = (word(w0) & m0, word(w1) & m1);
+        sum += u64::from(counts[w0]) + u64::from(counts[w1]);
+        sum += u64::from((u128::from(b0) | u128::from(b1) << 64).count_ones());
+    }
+    for &q in rest {
+        let (w, m) = at(q);
+        sum += u64::from(counts[w]) + u64::from((word(w) & m).count_ones());
+    }
+    sum
+}
+
+/// The leaves of a prime `p_b` for [`s2_above`]: `x / p_b`, the indices of its `q` left, from
+/// `lo` (exclusive) to `hi`, and `2 - b`.
+struct Above {
+    xp: u64,
+    lo: u64,
+    hi: u64,
+    two_less_b: u64,
+}
+
+/// The words of the sieve whose counts [`s2_above`] forms at once: 32 KiB of the sieve's bytes and
+/// 16 KiB of counts, which stay in the first-level cache with the leaves' primes.
+const PART: usize = 4096;
+
+/// For the bits of a word of the sieve, the numbers from `30 j + 7` (see
+/// [`wheel`](super::super::wheel)): the masks of the bits of the numbers up to the word's start
+/// plus `7 + r`, for `r` from 0 to 239.
+static ERAT_UP_TO: [u64; 240] = {
+    let mut t = [0u64; 240];
+    let mut r = 0;
+    while r < 240 {
+        let mut m = 0u64;
+        let mut b = 0;
+        while b < 64 {
+            if 30 * (b as u64 / 8) + OFFSETS[b % 8] <= 7 + r as u64 {
+                m |= 1 << b;
+            }
+            b += 1;
+        }
+        t[r] = m;
+        r += 1;
+    }
+    t
+};
+
+/// `P2(x, a)` when `x / y` is below `2^16`: the sum of [`p2`] with each `π(x / p_b)` from the table.
+#[inline(never)]
+fn p2_small(x: u64, y: u64, a: u64) -> u64 {
+    let sqrtx = isqrt(x);
+    if y >= sqrtx {
+        return 0;
+    }
+    let t = PiTable::small();
+    let b = t.pi(sqrtx);
+    let s = ((u128::from(a) * u128::from(a.wrapping_sub(1)) / 2) as u64)
+        .wrapping_sub((u128::from(b) * u128::from(b - 1) / 2) as u64);
+    SMALL_PRIMES[a as usize + 1..=b as usize]
+        .iter()
+        .fold(s, |s, &q| s.wrapping_add(t.pi_from_6(x / u64::from(q))))
 }
 
 /// `P2(x, a)`: the numbers up to `x` with exactly two prime factors above `y = p_a`,
@@ -203,7 +490,7 @@ fn sum_pi(n: u64, p: &[u32], pi: &PiTable, lo: u64, hi: u64) -> u64 {
 /// `x / p` for the largest prime `p <= sqrt(x)` up to `x / y`, counted at each `x / p`.
 #[inline(never)]
 fn p2(x: u64, y: u64, a: u64, pi_of: &impl Fn(u64) -> u64) -> u64 {
-    let sqrtx = x.isqrt();
+    let sqrtx = isqrt(x);
     if y >= sqrtx {
         return 0;
     }

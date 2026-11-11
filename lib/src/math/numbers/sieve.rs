@@ -1,6 +1,7 @@
 //! Prime sieves and prime counting on `u64`: [`primes`], the primes in a range, by a segmented
 //! sieve of Eratosthenes after Walisch's primesieve ([`erat`]); [`prime_pi`], `π(x)`, by
-//! Deléglise and Rivat's method ([`pi`]); and [`nth_prime`], the n-th prime ([`nth`]).
+//! Deléglise and Rivat's method with Gourdon's sorting of the leaves ([`pi`]); and [`nth_prime`],
+//! the n-th prime ([`nth`]).
 
 mod erat;
 mod nth;
@@ -11,6 +12,7 @@ mod wheel;
 
 use super::prime::is_prime_sieved_u64;
 use core::ops::RangeBounds;
+pub(in crate::math::numbers) use pi::tables::SMALL_PRIMES;
 use segments::{Segments, count_bits, extract};
 
 /// The places of the batch of primes of [`Primes`], a power of two.
@@ -120,7 +122,14 @@ impl Primes {
         self.i = self.n;
         loop {
             let Some(sieve) = &mut self.sieve else {
-                return n;
+                // After the primes from the table, the stretches of the sieve.
+                match self.next.take() {
+                    Some(a) => {
+                        self.plan(a);
+                        continue;
+                    }
+                    None => return n,
+                }
             };
             if self.tested != u64::MAX {
                 // The numbers left are tested: by batches.
@@ -202,6 +211,11 @@ impl Primes {
     fn fill(&mut self) -> bool {
         loop {
             let Some(sieve) = self.sieve.as_mut() else {
+                // After the primes from the table, the stretches of the sieve.
+                if let Some(a) = self.next.take() {
+                    self.plan(a);
+                    continue;
+                }
                 self.i = 0;
                 self.n = 0;
                 return false;
@@ -304,26 +318,43 @@ pub fn primes(range: impl RangeBounds<u64>) -> Primes {
         return p;
     }
     p.last = b;
-    for q in [2, 3, 5] {
-        if a <= q && q <= b {
-            p.buf[p.n] = q;
-            p.n += 1;
+    // The first stretch of the sieve: 4096 numbers, about a hundred primes even near `2^64`.
+    p.width = 1 << 12;
+    if a < SMALL {
+        // The first batch from the table of the primes below `2^16`, with no sieve to start: those
+        // from `a` to `b`, the batch's places at most; the sieve from the next number on.
+        // The primes below `2^16`: the table less its 0 before and the prime after.
+        let table = &SMALL_PRIMES[1..SMALL_PRIMES.len() - 1];
+        let from = table.partition_point(|&q| u64::from(q) < a);
+        let to = table[from..]
+            .partition_point(|&q| u64::from(q) <= b)
+            .min(BUF);
+        for (place, &q) in p.buf.iter_mut().zip(&table[from..from + to]) {
+            *place = u64::from(q);
         }
+        p.n = to;
+        let next = if to == BUF { p.buf[BUF - 1] + 1 } else { SMALL };
+        if next <= b {
+            p.next = Some(next);
+        }
+        return p;
     }
     if b >= 7 {
-        // The first stretch: 4096 numbers, about a hundred primes even near `2^64`.
-        p.width = 1 << 12;
-        p.plan(a.max(7));
+        p.plan(a);
     }
     p
 }
 
+/// The numbers below which the first primes of a range come from the table of the primes.
+const SMALL: u64 = 1 << 16;
+
 /// Returns `π(x)`, the number of primes up to `x`, exactly for every `u64`.
 ///
-/// Below `2^16` from a table, below `2·10^5` by the sieve's bits, and above by Deléglise and
-/// Rivat's method (1996) as Oliveira e Silva (2006) and Walisch's primecount carry it out, in
-/// `O(x^(2/3) / log² x)` time and `O(x^(1/3) log³ x)` space: on an Apple M4 Max, `π(10^16)` takes
-/// 1.4 s and less than 10 MB, `π(2^64 - 1)` 161 s and 83 MB.
+/// Below `2^16` from a table computed at compile time, and above by Deléglise and Rivat's method
+/// (1996) as Oliveira e Silva (2006) and Walisch's primecount carry it out, its special leaves
+/// sorted as Gourdon's (2001), so that only those that need it are counted by the sieve, in
+/// `O(x^(2/3) / log² x)` time and `O(x^(1/3) log³ x)` space: on an Apple M4 Max, `π(10^6)` takes
+/// 1.04 µs, `π(10^16)` 988 ms and less than 10 MB, `π(2^64 - 1)` 99.0 s and 83 MB.
 ///
 /// # Examples
 ///
@@ -335,21 +366,6 @@ pub fn primes(range: impl RangeBounds<u64>) -> Primes {
 /// ```
 pub fn prime_pi(x: u64) -> u64 {
     pi::prime_pi(x)
-}
-
-/// The number of primes from `a` to `b`, by the sieve.
-fn count(a: u64, b: u64) -> u64 {
-    if a > b {
-        return 0;
-    }
-    let mut n = [2, 3, 5].iter().filter(|&&q| a <= q && q <= b).count() as u64;
-    if b >= 7 {
-        let mut s = Segments::new(a.max(7), b, u64::MAX);
-        while s.next_segment() {
-            n += count_bits(s.bytes());
-        }
-    }
-    n
 }
 
 /// Returns the `n`-th prime, `nth_prime(1) = 2`, for `n` up to `π(2^64 - 1)`,

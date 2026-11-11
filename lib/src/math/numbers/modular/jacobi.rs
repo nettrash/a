@@ -1,6 +1,7 @@
-//! The Jacobi symbol of long numbers by Lehmer's method, the symbol carried through the quotients,
-//! after Möller ("Efficient computation of the Jacobi symbol", 2008), whose algorithm GMP's
-//! `mpn_jacobi_n` takes.
+//! The Jacobi symbol of long numbers: by the binary method on all their limbs at once up to six
+//! limbs (in assembly on aarch64, see the kernels), and beyond by Lehmer's method, the symbol
+//! carried through the quotients, after Möller ("Efficient computation of the Jacobi symbol",
+//! 2008), whose algorithm GMP's `mpn_jacobi_n` takes.
 //!
 //! Euclid's algorithm on the pair `(a, b)`, `b` odd, reduces one number by a multiple of the other
 //! at each step. The symbol `(a / b)` is `(-1)^e (x / y)` for the current pair, `y` the one that
@@ -12,6 +13,46 @@
 //! depends only on the quotient and on both numbers modulo 4, which the state below keeps, so the
 //! symbol follows the quotients that Lehmer's method finds from the top limbs alone, and the whole
 //! numbers are needed only at the end.
+
+// The kernels under the name `kernels`, chosen as the greatest common divisor's are: assembly on
+// 64-bit little-endian aarch64 where the system allows unaligned accesses, and portable Rust
+// elsewhere and under Miri.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_pointer_width = "64",
+    any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "fuchsia"
+    ),
+    not(miri)
+))]
+#[path = "jacobi/aarch64.rs"]
+mod kernels;
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_pointer_width = "64",
+    any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "fuchsia"
+    ),
+    not(miri)
+)))]
+#[path = "jacobi/portable.rs"]
+mod kernels;
 
 /// The state: bit 0 the sign `e`, bits 1-2 `a mod 4`, bits 3-4 `b mod 4`, bit 5 set when `a` is
 /// the denominator.
@@ -114,25 +155,46 @@ const LIMIT_2: u64 = 2;
 const LIMIT_1: u64 = 1 << 33;
 
 /// The quotient and remainder of `n` by `d`, `n >= d`, the quotient below `2^63`: three
-/// conditional subtractions for a quotient below 8, one bit at a time otherwise.
+/// conditional subtractions for a quotient below 8, one bit at a time otherwise. A multiple `2^k d`
+/// that does not fit in 128 bits is above `n`, and not subtracted: so `d` may be as large as `n`,
+/// as it is when hgcd2 starts on numbers of 128 bits whose quotient is small (taking those apart,
+/// as the steps did before, sent a sixth of the steps of random numbers to the slow division).
 #[inline(always)]
 fn divmod2(n: u128, d: u128) -> (u64, u128) {
-    if (n >> 3) < d && d >> 125 == 0 {
+    if (n >> 3) < d {
+        let z = d.leading_zeros();
         let mut r = n;
         let mut q = 0;
         for k in [2, 1, 0] {
             let (t, borrow) = r.overflowing_sub(d << k);
-            r = core::hint::select_unpredictable(borrow, r, t);
-            q = (q << 1) | u64::from(!borrow);
+            let take = !borrow & (z >= k);
+            r = core::hint::select_unpredictable(take, t, r);
+            q = (q << 1) | u64::from(take);
         }
         return (q, r);
     }
     long_q2(n, d)
 }
 
-/// [`divmod2`] for large quotients.
+/// [`divmod2`] for large quotients: from the hardware's division of the top 64 bits of `n` by the
+/// bits of `d` at the same place, `e`, when `d` has 32 bits or more there, which makes `e - 1` at
+/// most the quotient and at most two below it, so that its remainder needs two conditional
+/// subtractions; one bit at a time otherwise (quotients of 32 bits or more).
 #[inline(never)]
 fn long_q2(mut n: u128, d: u128) -> (u64, u128) {
+    let s = n.leading_zeros();
+    let (nn, dd) = (((n << s) >> 64) as u64, ((d << s) >> 64) as u64);
+    if dd >> 32 != 0 {
+        let q = nn / dd - 1;
+        let mut r = n - d * u128::from(q);
+        let mut q = q;
+        for _ in 0..2 {
+            let take = r >= d;
+            r -= if take { d } else { 0 };
+            q += u64::from(take);
+        }
+        return (q, r);
+    }
     let k = d.leading_zeros().saturating_sub(n.leading_zeros());
     let mut d = d << k;
     let mut q = 0u64;
@@ -281,24 +343,31 @@ fn sub_in(x: &mut [u64], y: &[u64]) {
 }
 
 /// The Jacobi symbol `(a / b)` of limbs, the least significant first, for `a < b` and `b` odd:
-/// Lehmer's steps while a number has three limbs or more, then the binary method on two, which
-/// measured faster there.
+/// [`jacobi_in`] on vectors.
 pub(in super::super) fn jacobi(mut x: Vec<u64>, mut y: Vec<u64>) -> i32 {
     let n = y.len();
     x.resize(n, 0);
+    jacobi_in(&mut x, &mut y)
+}
+
+/// The Jacobi symbol `(a / b)` of the limbs `x` and `y` of one length, the least significant first,
+/// for `a < b` and `b` odd, in place: Lehmer's steps while a number has three limbs or more, then
+/// the binary method on two, which measured faster there.
+pub(in super::super) fn jacobi_in(x: &mut [u64], y: &mut [u64]) -> i32 {
+    debug_assert!(x.len() == y.len());
     let mut s = init(x.first().copied().unwrap_or(0), y[0]);
     loop {
-        let n = len(&y).max(len(&x));
-        if n <= 2 {
-            return finish(&x, &y, s);
+        let n = len(y).max(len(x));
+        if n <= BINARY {
+            return finish_binary(x, y, s, n);
         }
         let (xh, xl, yh, yl) = top(&x[..n], &y[..n]);
         if let Some(m) = hgcd2(xh, xl, yh, yl, &mut s) {
             reduce(&mut x[..n], &mut y[..n], m);
-        } else if !subdiv(&mut x, &mut y, n, &mut s) {
+        } else if !subdiv(x, y, n, &mut s) {
             // One number is much smaller than the other, or the two are close: one step by a
             // subtraction and a division, which may bring a number to 0.
-            return finish(&x, &y, s);
+            return finish(x, y, s);
         }
     }
 }
@@ -358,7 +427,7 @@ fn top(x: &[u64], y: &[u64]) -> (u64, u64, u64, u64) {
 
 /// The step that hgcd2 cannot take: the larger number less the smaller, then the larger by the
 /// smaller, the state carried through both; `false` when a number reaches 0.
-fn subdiv(x: &mut Vec<u64>, y: &mut Vec<u64>, n: usize, s: &mut State) -> bool {
+fn subdiv(x: &mut [u64], y: &mut [u64], n: usize, s: &mut State) -> bool {
     use super::super::{ByteOrder, Number};
     use super::ring::{from_limbs, limbs_of};
     let x_larger = cmp(&x[..n], &y[..n]) == core::cmp::Ordering::Greater;
@@ -392,6 +461,83 @@ fn subdiv(x: &mut Vec<u64>, y: &mut Vec<u64>, n: usize, s: &mut State) -> bool {
     big.iter_mut().for_each(|l| *l = 0);
     big[..rl.len()].copy_from_slice(&rl);
     !rl.is_empty()
+}
+
+/// Up to this many limbs, the binary method takes the numbers from Lehmer's steps: its steps, on
+/// the numbers' limbs in registers, reduce more bits in a cycle than hgcd2's quotients and their
+/// matrices up to there. Measured on an Apple M4 Max against Lehmer's steps all the way, with the
+/// portable steps, random numbers of 384 bits took 0.66 of the time, of 512 bits 0.78 and of 640
+/// bits 0.85, against 0.69, 0.89 and 0.95 for up to 8 limbs, 0.69, 0.91 and 0.90 for up to 5; with
+/// the steps in assembly from 2 to 6 limbs, 0.52, 0.69 and 0.75 on fresh numbers.
+const BINARY: usize = 6;
+
+/// The symbol from the state and the pair of at most [`BINARY`] limbs, `n` of them significant:
+/// the numerator's factors of two out, then the binary steps from `n` limbs down.
+fn finish_binary(x: &[u64], y: &[u64], s: State, n: usize) -> i32 {
+    if n <= 2 {
+        return finish(x, y, s);
+    }
+    let (num, den) = if a_is_denominator(s) { (y, x) } else { (x, y) };
+    let mut bits = (1 - sign(s) as i64) as u64; // bit 1 set for a sign of −1
+    let mut u = [0u64; BINARY];
+    let mut v = [0u64; BINARY];
+    u[..n].copy_from_slice(&num[..n]);
+    v[..n].copy_from_slice(&den[..n]);
+    if u.iter().all(|&l| l == 0) {
+        return if v[0] == 1 && v[1..].iter().all(|&l| l == 0) {
+            sign(s)
+        } else {
+            0
+        };
+    }
+    // The factors of two of the numerator, each `(2 / v)`.
+    let mut z = 0u32;
+    while u[0] == 0 {
+        u.copy_within(1.., 0);
+        u[BINARY - 1] = 0;
+        z += 64;
+    }
+    let c = u[0].trailing_zeros();
+    if c > 0 {
+        for i in 0..BINARY - 1 {
+            u[i] = (u[i] >> c) | (u[i + 1] << (64 - c));
+        }
+        u[BINARY - 1] >>= c;
+    }
+    bits ^= u64::from((z + c) & 1) * (v[0] ^ (v[0] >> 1));
+    // From the length down, a limb at a time.
+    macro_rules! down {
+        ($n:literal, $steps:path) => {
+            if n >= $n {
+                let mut a = [0u64; $n];
+                let mut b = [0u64; $n];
+                a.copy_from_slice(&u[..$n]);
+                b.copy_from_slice(&v[..$n]);
+                if !$steps(&mut a, &mut b, &mut bits) {
+                    return 0;
+                }
+                u[..$n].copy_from_slice(&a);
+                v[..$n].copy_from_slice(&b);
+            }
+        };
+    }
+    down!(6, kernels::steps_6);
+    down!(5, kernels::steps_5);
+    let mut u4 = [u[0], u[1], u[2], u[3]];
+    let mut v4 = [v[0], v[1], v[2], v[3]];
+    if !kernels::steps_4(&mut u4, &mut v4, &mut bits) {
+        return 0;
+    }
+    let mut u3 = [u4[0], u4[1], u4[2]];
+    let mut v3 = [v4[0], v4[1], v4[2]];
+    if !kernels::steps_3(&mut u3, &mut v3, &mut bits) {
+        return 0;
+    }
+    let Some((a, b, bits)) = kernels::steps_22(u3[0], u3[1], v3[0], v3[1], bits) else {
+        return 0;
+    };
+    let sign = 1 - 2 * ((bits >> 1) & 1) as i32;
+    sign * jacobi_word(a, b)
 }
 
 /// The symbol from the state and the pair, at most two limbs long now, or with a number 0.
@@ -449,7 +595,7 @@ fn to_u128(x: &[u64]) -> u128 {
 }
 
 /// The Jacobi symbol `(x / n)` for an odd `n` of up to two limbs, by [`jacobi_word`]'s binary
-/// steps on two limbs while either number has a second one, then on one.
+/// steps on two limbs while either number has a second one ([`kernels::steps_22`]), then on one.
 pub(in super::super) fn jacobi_128(mut x: u128, n: u128) -> i32 {
     debug_assert!(n & 1 == 1);
     if x >= n {
@@ -462,56 +608,14 @@ pub(in super::super) fn jacobi_128(mut x: u128, n: u128) -> i32 {
     if x == 0 {
         return i32::from(n == 1);
     }
-    let mut bits = 0u64;
     let z = x.trailing_zeros();
     x >>= z;
-    bits ^= u64::from(z & 1) * ((n ^ (n >> 1)) as u64);
-    // On the limbs apart: the shift is counted on the low limb of the difference, which is not
-    // zero but once in 2^64 (that case shifts by the whole limb first).
-    let (mut xh, mut xl) = ((x >> 64) as u64, x as u64);
-    let (mut nh, mut nl) = ((n >> 64) as u64, n as u64);
-    while xh != 0 && nh != 0 {
-        let (tl, b1) = xl.overflowing_sub(nl);
-        let (th, b2) = xh.overflowing_sub(nh);
-        let (th, b3) = th.overflowing_sub(u64::from(b1));
-        let below = b2 | b3;
-        if tl == 0 {
-            if th == 0 {
-                return 0;
-            }
-            // A whole limb of zeros: rare.
-            let t = (u128::from(th) << 64) | u128::from(tl);
-            let a = if below { t.wrapping_neg() } else { t };
-            bits ^= if below { xl & nl } else { 0 };
-            if below {
-                (nh, nl) = (xh, xl);
-            }
-            let z = a.trailing_zeros();
-            let a = a >> z;
-            (xh, xl) = ((a >> 64) as u64, a as u64);
-            bits ^= u64::from(z & 1) * (nl ^ (nl >> 1));
-            continue;
-        }
-        let z = tl.trailing_zeros();
-        bits ^= if below { xl & nl } else { 0 };
-        nl = core::hint::select_unpredictable(below, xl, nl);
-        nh = core::hint::select_unpredictable(below, xh, nh);
-        // `|t|` by the mask of `below`.
-        let m = 0u64.wrapping_sub(u64::from(below));
-        let (al, c) = (tl ^ m).overflowing_sub(m);
-        let ah = (th ^ m).wrapping_sub(m).wrapping_sub(u64::from(c));
-        xl = (al >> z) | (ah << (64 - z));
-        xh = ah >> z;
-        bits ^= u64::from(z & 1) * (nl ^ (nl >> 1));
-    }
-    let x = (u128::from(xh) << 64) | u128::from(xl);
-    let n = (u128::from(nh) << 64) | u128::from(nl);
-    if n >> 64 == 0 {
-        let sign = 1 - 2 * ((bits >> 1) & 1) as i32;
-        return sign * jacobi_word((x % n) as u64, n as u64);
-    }
-    // `x` odd and of one limb: reciprocity, then `n` modulo `x`.
-    bits ^= (x & n) as u64;
+    let bits = u64::from(z & 1) * ((n ^ (n >> 1)) as u64);
+    let Some((x, n, bits)) =
+        kernels::steps_22(x as u64, (x >> 64) as u64, n as u64, (n >> 64) as u64, bits)
+    else {
+        return 0;
+    };
     let sign = 1 - 2 * ((bits >> 1) & 1) as i32;
-    sign * jacobi_word((n % x) as u64, x as u64)
+    sign * jacobi_word(x, n)
 }

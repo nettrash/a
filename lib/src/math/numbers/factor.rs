@@ -14,14 +14,18 @@
 
 pub(super) mod driver;
 mod ecm;
+mod ecmfft;
 mod field;
+mod mk;
 mod pm1;
+mod poly;
 mod power;
 mod primes;
 mod rho;
 mod siqs;
 mod stage1;
 mod stage2;
+mod tree;
 mod trial;
 
 pub use siqs::siqs;
@@ -154,7 +158,7 @@ impl Number {
     /// the test for a perfect power, and the search for a factor: below `2^64`, Hart's one line
     /// method up to 40 bits and the elliptic curve method in registers above; beyond, a short run
     /// of Pollard's rho, `p - 1` from 45 digits, the elliptic curve method by levels of growing
-    /// bounds, and the self-initialising quadratic sieve for cofactors of 28 to 110 digits once the
+    /// bounds, and the self-initialising quadratic sieve for cofactors of 24 to 110 digits once the
     /// curves have made factors of 30 % of their digits unlikely. The curves go on until they find
     /// a factor, so that the factorisation always ends, in a time that grows with the second
     /// largest prime factor. See the [factorisation page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/factor.md)
@@ -183,11 +187,37 @@ impl Number {
             zero_factorisation();
         }
         let order = self.byte_order;
-        let factors = driver::factor_limbs(x)
-            .into_iter()
-            .map(|(p, e)| (number_of(&p, order), e))
-            .collect();
-        Factorization::new(factors, order)
+        let mut words: Vec<(u64, u32)> = Vec::new();
+        let mut long = driver::factor_limbs(x, &mut words);
+        // The primes in increasing order, each once: the words first, then the longer ones.
+        words.sort_unstable_by_key(|w| w.0);
+        long.sort_unstable_by(|a, b| {
+            a.0.len()
+                .cmp(&b.0.len())
+                .then_with(|| a.0.iter().rev().cmp(b.0.iter().rev()))
+        });
+        let mut factors: Vec<(Number, u32)> = Vec::with_capacity(words.len() + long.len());
+        let mut last = 0;
+        for (p, e) in words {
+            if p == last {
+                let k = &mut factors.last_mut().expect("the prime before").1;
+                *k = k.checked_add(e).unwrap_or_else(|| exponent_overflow());
+            } else {
+                factors.push((number_of(&[p], order), e));
+                last = p;
+            }
+        }
+        let mut prev: Option<Vec<u64>> = None;
+        for (p, e) in long {
+            if prev.as_ref() == Some(&p) {
+                let k = &mut factors.last_mut().expect("the prime before").1;
+                *k = k.checked_add(e).unwrap_or_else(|| exponent_overflow());
+            } else {
+                factors.push((number_of(&p, order), e));
+                prev = Some(p);
+            }
+        }
+        Factorization { factors, order }
     }
 
     /// `Some((b, k))` when the absolute value of `self` is `b^k` for some `k >= 2`, with the largest
@@ -264,10 +294,11 @@ impl Number {
 /// divided by those primes to their exponents. For 0, no primes and the cofactor 0.
 ///
 /// The odd primes below 8192 are tried by remainders of `n` modulo products of consecutive
-/// primes that fit in a limb, four products a pass, and a multiplication for each prime, as the
-/// primality test does; primes beyond by a segmented sieve. Once the cofactor is below `2^64`,
-/// each prime is tried on it directly, and the division stops when the prime's square passes the
-/// cofactor, which is then 1 or a prime, given among the primes when it is at most `bound`.
+/// primes that fit in a limb, eight products a pass, and a multiplication for each prime, the
+/// primes of a product together; primes beyond by a segmented sieve. Once the cofactor is below
+/// `2^64`, the primes are tried on it directly, eight at a time, and the division stops when the
+/// prime's square passes the cofactor, which is then 1 or a prime, given among the primes when it
+/// is at most `bound`.
 ///
 /// # Examples
 ///
@@ -341,12 +372,15 @@ pub fn rho(n: &Number, iterations: u64) -> Option<Number> {
 /// the bounds `b1` (stage 1) and `b2` (stage 2), or `None`. In the byte order of `n`.
 ///
 /// It finds a prime `p` when `p - 1` is a product of prime powers up to `b1` and at most one more
-/// prime up to `b2`. Stage 1 computes `3^E` for `E` the product of the largest powers of the primes
-/// up to `b1` that are at most `b1`, with a square a bit of `E` (about `1.44 b1` of them); stage 2
-/// takes the primes up to `b2` by the baby-step giant-step continuation with prime pairing, about a
-/// product for each prime and fewer as pairs serve two. The primes up to the continuation's `D/2`,
-/// at most 30030, are taken in stage 1 when `b1` is below it. An even number gives 2, a prime
-/// `None` at once.
+/// prime up to `b2` (or a little past it). Stage 1 computes `3^E` for `E` the product of the
+/// largest powers of the primes up to `b1` that are at most `b1`, with a square a bit of `E` (about
+/// `1.44 b1` of them); stage 2 takes the primes up to `b2` by the baby-step giant-step continuation
+/// with prime pairing, about a product for each prime, or for longer ranges by Montgomery and
+/// Kruppa's continuation by fast polynomial arithmetic, which takes every number prime to its `P`
+/// up to a little past `b2` in about `sqrt(b2)` products of residues and a few products of
+/// polynomials of that degree. The primes up to the baby-step giant-step continuation's `D/2`, at
+/// most 30030, are taken in stage 1 when `b1` is below it. An even number gives 2, a prime `None`
+/// at once.
 ///
 /// # Examples
 ///
@@ -381,9 +415,11 @@ pub fn pm1(n: &Number, b1: u64, b2: u64) -> Option<Number> {
 /// It finds a prime `p` when `p + 1` (or `p - 1`, depending on the starting value) is a product of
 /// prime powers up to `b1` and at most one more prime up to `b2`. Stage 1 computes the Lucas
 /// sequence `V_E(P_0)`, `V_0 = 2`, `V_1 = P_0`, for the exponent `E` of [`pm1`], by the ladder, a
-/// square and a product a bit; stage 2 is that of [`pm1`]. The starting values `2/7`, `6/5` and `6`
-/// are tried in turn: for a prime with `p + 1` smooth, one of them works with a chance of 7 in 8.
-/// An even number gives 2, a prime `None` at once.
+/// square and a product a bit, or from six limbs by Montgomery's PRAC chains, about 1.5 products a
+/// bit (in registers, to six to eight limbs, for `b1` up to `10^7`); stage 2 is that of [`pm1`], in
+/// `Z_n[sqrt(V^2 - 4)]` for the continuation by polynomials.
+/// The starting values `2/7`, `6/5` and `6` are tried in turn: for a prime with `p + 1` smooth,
+/// one of them works with a chance of 7 in 8. An even number gives 2, a prime `None` at once.
 ///
 /// # Examples
 ///
@@ -417,13 +453,21 @@ pub fn pp1(n: &Number, b1: u64, b2: u64) -> Option<Number> {
 /// method on Montgomery curves with the bounds `b1` and `b2`, on up to `curves` curves, or `None`.
 /// In the byte order of `n`.
 ///
-/// The curves are Suyama's of `sigma = 6, 7, 8, ...`, GMP-ECM's `-param 0`, whose group orders are
-/// multiples of 12. A curve finds a prime `p` when its group order modulo `p` is a product of prime
-/// powers up to `b1` and at most one more prime up to `b2`. Stage 1 multiplies the point by the
-/// exponent `E` of [`pm1`] by Montgomery's ladder, 4 squares and 6 products a bit, taking it to
-/// affine after each chunk of `E`; stage 2 is the baby-step giant-step continuation with prime
-/// pairing, one product for each pair. The primes up to the continuation's `D/2` are taken in
-/// stage 1 when `b1` is below it. An even number gives 2, a prime `None` at once.
+/// The curves are those of GMP-ECM's `-param 2` for `sigma = 2, 3, 4, ...` (`-sigma 2:s`): Suyama's
+/// curves, whose group orders are multiples of 12, made from the multiples of a point on
+/// `y^2 = x^3 + 36` so that the starting point is `x = 2`; from a `sigma` whose multiple of that
+/// point is at infinity modulo every prime of `n` at once, after which the curves would repeat
+/// modulo each, GMP-ECM's `-param 1` curves instead (`-sigma 1:s`). A curve finds a prime `p` when
+/// its group order modulo `p` is a product of prime powers up to `b1` and at most one more prime up
+/// to `b2`. Stage 1 multiplies the point by the exponent `E` of [`pm1`] by Montgomery's ladder, 4
+/// squares and 5 products a bit, as the product by the point's `x` is a doubling, taking it to
+/// affine after each chunk of `E`, in registers several curves together, step for step; stage 2 is
+/// the baby-step giant-step continuation with prime pairing, one product for each pair, or for
+/// longer ranges the FFT continuation, the product of the values at the baby steps' `x` of the
+/// product of the giant steps' polynomials modulo theirs, which takes every number prime to its `D`
+/// up to a little past `b2`. The factor given is the first curve's to find one. The primes up to the
+/// continuation's `D/2` are taken in stage 1 when `b1` is below it. An even number gives 2, a prime
+/// `None` at once.
 ///
 /// # Examples
 ///

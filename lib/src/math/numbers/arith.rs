@@ -6,10 +6,14 @@
 //! and every [`Factorization`] of a number at least `2^64`, on numbers, whose products are taken
 //! by balanced trees, so that a long result is built from operands of about equal lengths.
 
+mod divisors;
+mod product;
+
 use super::modular::int::in_order;
 use super::modular::ring::{magnitude_64, magnitude_128};
 use super::modular::word;
 use super::{ByteOrder, Factorization, Number};
+use product::{LIMBS, Limbs, Product};
 use std::borrow::Cow;
 
 impl Factorization {
@@ -33,8 +37,9 @@ impl Factorization {
     /// ```
     pub fn divisors(&self) -> Vec<Number> {
         let order = self.byte_order();
-        if let Some(w) = self.words() {
-            return divisors_of(&w, 1u64, |d, p| d * p)
+        let mut w = [(0, 0); 15];
+        if let Some(n) = self.words(&mut w) {
+            return divisors_of(&w[..n], 1u64, |d, p| d * p)
                 .into_iter()
                 .map(|d| Number::new_from_u64(d, order))
                 .collect();
@@ -45,11 +50,20 @@ impl Factorization {
                 .map(|d| Number::new_from_u128(d, order))
                 .collect();
         }
-        // Long divisors: each a product of one before it and a prime, then sorted, which takes
-        // fewer products and copies than merging long numbers.
+        // Counted saturated: a count past `usize::MAX` fails to allocate, as it must.
         let total = self.factors().iter().fold(1usize, |n, (_, e)| {
             n.saturating_mul((*e as usize).saturating_add(1))
         });
+        if total >= divisors::LONG_MIN
+            && self
+                .factors()
+                .iter()
+                .all(|(p, _)| p.significant() <= 8 * divisors::PRIME_LIMBS)
+        {
+            return divisors::divisors_long(self.factors(), order);
+        }
+        // Few divisors, or long ones of long primes: each a product of one before it and a prime,
+        // then sorted, which takes fewer products and copies than merging long numbers.
         let mut d = Vec::with_capacity(total);
         d.push(Number::new_from_u8(1, order));
         for (p, e) in self.factors() {
@@ -105,6 +119,9 @@ impl Factorization {
         if k == 0 {
             return self.divisor_count();
         }
+        if let Some(s) = sigma_limbs(self.factors(), k, order) {
+            return s;
+        }
         let parts: Vec<Number> = self
             .factors()
             .iter()
@@ -127,8 +144,12 @@ impl Factorization {
     /// ```
     pub fn totient(&self) -> Number {
         let order = self.byte_order();
-        if let Some(w) = self.words() {
-            return Number::new_from_u64(totient_of(&w), order);
+        let mut w = [(0, 0); 15];
+        if let Some(n) = self.words(&mut w) {
+            return Number::new_from_u64(totient_of(&w[..n]), order);
+        }
+        if let Some(t) = totient_limbs(self.factors(), order) {
+            return t;
         }
         let f = self.factors();
         let mut parts = Vec::with_capacity(2 * f.len());
@@ -158,8 +179,9 @@ impl Factorization {
     /// ```
     pub fn carmichael(&self) -> Number {
         let order = self.byte_order();
-        if let Some(w) = self.words() {
-            return Number::new_from_u64(carmichael_of(&w), order);
+        let mut w = [(0, 0); 15];
+        if let Some(n) = self.words(&mut w) {
+            return Number::new_from_u64(carmichael_of(&w[..n]), order);
         }
         let parts: Vec<Number> = self
             .factors()
@@ -212,34 +234,27 @@ impl Factorization {
     pub fn radical(&self) -> Number {
         let order = self.byte_order();
         let f = self.factors();
-        if f.len() <= LINEAR {
-            let bytes: usize = f.iter().map(|(p, _)| p.value.len()).sum::<usize>() + 8;
-            let mut v = Vec::with_capacity(bytes);
-            v.push(1u8);
-            let mut acc = Number {
-                value: v,
-                negative: false,
-                byte_order: order,
-            };
-            for (p, _) in f {
-                acc *= p;
-            }
-            return acc;
+        if let Some(r) = radical_limbs(f, order) {
+            return r;
         }
         let parts: Vec<Number> = f.iter().map(|(p, _)| p.clone()).collect();
         in_order(product_of(parts), order)
     }
 
-    /// The primes and exponents as words, when the number is below `2^64`.
-    fn words(&self) -> Option<Vec<(u64, u32)>> {
-        let mut out = Vec::with_capacity(self.factors().len());
+    /// The primes and exponents as words in `out`, and how many there are, when the number is
+    /// below `2^64` (which has at most 15 primes).
+    fn words(&self, out: &mut [(u64, u32); 15]) -> Option<usize> {
+        let f = self.factors();
+        if f.len() > 15 {
+            return None;
+        }
         let mut value = 1u64;
-        for (p, e) in self.factors() {
+        for (o, (p, e)) in out.iter_mut().zip(f) {
             let p = magnitude_64(p)?;
             value = value.checked_mul(p.checked_pow(*e)?)?;
-            out.push((p, *e));
+            *o = (p, *e);
         }
-        Some(out)
+        Some(f.len())
     }
 
     /// The primes and exponents as `u128`s, when the number is below `2^128`.
@@ -277,8 +292,8 @@ impl Number {
     pub fn divisors(&self) -> Vec<Number> {
         let order = self.byte_order;
         if let Some(w) = magnitude_word(self) {
-            let f: Vec<(u64, u32)> = factor_word(w).iter().collect();
-            return divisors_of(&f, 1u64, |d, p| d * p)
+            let f = factor_word(w);
+            return divisors_of(f.as_slice(), 1u64, |d, p| d * p)
                 .into_iter()
                 .map(|d| Number::new_from_u64(d, order))
                 .collect();
@@ -353,8 +368,8 @@ impl Number {
     #[track_caller]
     pub fn totient(&self) -> Number {
         if let Some(w) = magnitude_word(self) {
-            let f: Vec<(u64, u32)> = factor_word(w).iter().collect();
-            return Number::new_from_u64(totient_of(&f), self.byte_order);
+            let f = factor_word(w);
+            return Number::new_from_u64(totient_of(f.as_slice()), self.byte_order);
         }
         self.factor().totient()
     }
@@ -377,8 +392,8 @@ impl Number {
     #[track_caller]
     pub fn carmichael(&self) -> Number {
         if let Some(w) = magnitude_word(self) {
-            let f: Vec<(u64, u32)> = factor_word(w).iter().collect();
-            return Number::new_from_u64(carmichael_of(&f), self.byte_order);
+            let f = factor_word(w);
+            return Number::new_from_u64(carmichael_of(f.as_slice()), self.byte_order);
         }
         self.factor().carmichael()
     }
@@ -402,14 +417,10 @@ impl Number {
     #[track_caller]
     pub fn mobius(&self) -> i32 {
         if let Some(w) = magnitude_word(self) {
-            let f = factor_word(w);
-            return if f.iter().any(|(_, e)| e > 1) {
-                0
-            } else if f.len.is_multiple_of(2) {
-                1
-            } else {
-                -1
-            };
+            if w == 0 {
+                zero();
+            }
+            return word::mobius(w);
         }
         self.factor().mobius()
     }
@@ -432,7 +443,7 @@ impl Number {
             return false;
         }
         if let Some(w) = magnitude_word(self) {
-            return factor_word(w).iter().all(|(_, e)| e == 1);
+            return word::mobius(w) != 0;
         }
         self.factor().is_squarefree()
     }
@@ -569,6 +580,147 @@ fn carmichael_of(f: &[(u64, u32)]) -> u64 {
         };
         l / word::gcd(l, x) * x
     })
+}
+
+// Limbs
+
+/// The bits that a product of the primes `f` to `k` times their exponents, and `extra` more
+/// factors of a bit, can reach: at most this, counted saturated, from the primes' bytes.
+fn bits_bound(f: &[(Number, u32)], k: u32, extra: u64) -> u64 {
+    f.iter().fold(extra, |s, (p, e)| {
+        s.saturating_add(
+            (8 * p.significant() as u64)
+                .saturating_mul(u64::from(*e))
+                .saturating_mul(u64::from(k)),
+        )
+    })
+}
+
+/// Whether a product of at most `bits` bits fits in limbs: the room it is checked for at each step,
+/// its limbs so far and the factor's, each part of a limb counted whole, is at most two limbs more
+/// than the bits of the whole.
+fn fits(bits: u64) -> bool {
+    bits.saturating_add(128) <= 64 * LIMBS as u64
+}
+
+/// `φ(n)` in limbs (see [`product`]), when it fits: `prod p^(e-1) (p - 1)`, in the byte order
+/// `order`. The product is made into a number here, so that its buffers never move.
+fn totient_limbs(f: &[(Number, u32)], order: ByteOrder) -> Option<Number> {
+    if !fits(bits_bound(f, 1, 0)) {
+        return None;
+    }
+    let mut acc = Product::one();
+    let mut x = Limbs::new();
+    for (p, e) in f {
+        if !x.read(p)
+            || *e > 1 && (!power_pays(x.as_slice(), *e - 1) || !acc.mul_power(x.as_slice(), *e - 1))
+        {
+            return None;
+        }
+        x.decrement();
+        let x = x.as_slice();
+        if !acc.room(x.len()) {
+            return None;
+        }
+        acc.mul(x);
+    }
+    Some(acc.number(order))
+}
+
+/// `σ_k(n)` in limbs, `k >= 1`, when it fits: the product of `1 + p^k + ... + p^(ek)`, each by
+/// Horner's rule from `p^k`, in the byte order `order`.
+fn sigma_limbs(f: &[(Number, u32)], k: u32, order: ByteOrder) -> Option<Number> {
+    if !fits(bits_bound(f, k, f.len() as u64)) || f.iter().any(|(p, e)| !horner_pays(p, *e, k)) {
+        return None;
+    }
+    let mut acc = Product::one();
+    let mut x = Limbs::new();
+    let mut pk = Product::one();
+    let mut s = Product::one();
+    for (p, e) in f {
+        if !x.read(p) {
+            return None;
+        }
+        if k == 1 {
+            pk.set(x.as_slice());
+        } else {
+            pk.set_one();
+            if !power_pays(x.as_slice(), k) || !pk.mul_power(x.as_slice(), k) {
+                return None;
+            }
+        }
+        let pk = pk.as_limbs();
+        // `p^k + 1`, then times `p^k` plus 1 for each further power.
+        s.set(pk);
+        if !s.room(1) {
+            return None;
+        }
+        s.add_word(1);
+        for _ in 1..*e {
+            if !s.room(pk.len()) {
+                return None;
+            }
+            s.mul(pk);
+            if !s.room(1) {
+                return None;
+            }
+            s.add_word(1);
+        }
+        let s = s.as_limbs();
+        if !acc.room(s.len()) {
+            return None;
+        }
+        acc.mul(s);
+    }
+    Some(acc.number(order))
+}
+
+/// Whether Horner's rule in limbs pays for `σ_k(p^e)`: its `e` steps each cost about as much as a
+/// few limb products, against the numbers' sum in 128 bits when `p^(ke)` fits there, and otherwise
+/// their power and exact division. Measured on an Apple M4 Max, `σ_1` and `σ_2` of `2^e` and `3^e`
+/// in limbs took 0.87 to 0.91 times the numbers' time for `e = 12`, 0.91 to 1.15 for 16 and 1.18 to
+/// 1.43 for 24 (in 128 bits there); of primes of 31 to 64 bits 0.61 to 0.73 times for `e = 24`,
+/// 0.81 to 1.07 for 32, and from 1.21 to 7.3 times for longer runs of steps.
+fn horner_pays(p: &Number, e: u32, k: u32) -> bool {
+    let in_128 = magnitude_128(p)
+        .is_some_and(|w| u64::from(128 - w.leading_zeros()) * u64::from(k) * u64::from(e) < 127);
+    e <= if in_128 { 12 } else { 24 }
+}
+
+/// Whether [`Product::mul_power`] pays for `p^e`, the limbs `p`: its products one after another,
+/// `s` of them by `l` limbs, take about `s^2 l^2 / 2` limb products, against about a third of that
+/// for the numbers' power by squaring, whose fixed costs are the larger part while `s^2 l / 2` is
+/// at most about 200 (the kernels take longer operands at fewer cycles a limb product): 20 products
+/// by a word, 14 by two limbs, 6 by nine. Measured on an Apple M4 Max, `φ(p^e)` and `σ_k(p)` in
+/// limbs took 0.61 to 0.87 times the time of the numbers for 15 to 20 products by a word, 0.70 to
+/// 0.83 for 8 to 11 by two limbs and 0.66 for 3 by nine, against 1.21 to 2.1 times for 24 to 40 by
+/// a word, 1.10 to 1.56 for 15 to 23 by two limbs and 0.95 to 1.0 from 7 by nine.
+fn power_pays(p: &[u64], e: u32) -> bool {
+    let (steps, l) = match *p {
+        // The products by a word's largest power below `2^64`, of `64 / bits` factors at least.
+        [w] => (e.div_ceil(64 / (64 - w.leading_zeros())), 1u64),
+        _ => (e, p.len() as u64),
+    };
+    let s = u64::from(steps);
+    s.saturating_mul(s).saturating_mul(l) / 2 <= 200
+}
+
+/// The radical in limbs, when it fits, in the byte order `order`: a product of a factor a prime,
+/// which fails early when it does not fit.
+fn radical_limbs(f: &[(Number, u32)], order: ByteOrder) -> Option<Number> {
+    let mut acc = Product::one();
+    let mut x = Limbs::new();
+    for (p, _) in f {
+        if !x.read(p) {
+            return None;
+        }
+        let x = x.as_slice();
+        if !acc.room(x.len()) {
+            return None;
+        }
+        acc.mul(x);
+    }
+    Some(acc.number(order))
 }
 
 // Numbers

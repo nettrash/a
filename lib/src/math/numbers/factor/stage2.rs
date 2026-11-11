@@ -18,9 +18,19 @@
 //! For the Lucas sequences of `p - 1` and `p + 1`, `x_m = V_m = a^m + a^(-m)` for the element `a`
 //! of the first stage: `V_(m+n) = V_m V_n - V_(m-n)` gives the baby steps and the giant steps with a
 //! product each.
+//!
+//! The plan also chooses, per call from the bounds and the modulus's length, between this
+//! continuation and those by fast polynomial arithmetic ([`mk`](super::mk) for `p - 1` and `p + 1`,
+//! [`ecmfft`](super::ecmfft) for the curves) by their estimated times ([`Plan::mk`],
+//! [`Plan::ecm_fft`]); those hand the stage back to this one when they cannot tell the primes
+//! they caught apart.
+
+use std::sync::OnceLock;
 
 use super::ecm::rotate;
+use super::ecmfft::FftPlan;
 use super::field::Arith;
+use super::mk::MkPlan;
 use super::primes::primes_in;
 use super::rho::{Gcd, gcd};
 
@@ -51,9 +61,25 @@ pub(super) struct Plan {
     pub(super) k_last: u64,
     /// The words of a giant step's bitmap.
     pub(super) words: usize,
-    /// The bitmaps of all the giant steps, when kept.
-    cached: Option<Vec<u64>>,
+    /// The bitmaps of all the giant steps, made on the first use when they are to be kept.
+    cached: OnceLock<Vec<u64>>,
+    /// Whether they are to be kept.
+    keep: bool,
+    /// The parameters of the continuations by polynomials, made on first use.
+    kept: OnceLock<Box<Kept>>,
 }
+
+/// The parameters of the continuations by polynomials a plan keeps, by the limbs of the modulus
+/// up to [`KEPT_LIMBS`], each made on first use: about 8 KB, allocated when one is asked for.
+struct Kept {
+    /// Montgomery and Kruppa's, for `p - 1` and `p + 1`.
+    mk: [[OnceLock<Option<MkPlan>>; 2]; KEPT_LIMBS],
+    /// The elliptic curve method's.
+    fft: [OnceLock<Option<FftPlan>>; KEPT_LIMBS],
+}
+
+/// The limbs of the moduli whose parameters of the continuations by polynomials a plan keeps.
+const KEPT_LIMBS: usize = 32;
 
 impl Plan {
     /// The plan for the bounds `b1 < b2`, `D` chosen for a method whose baby and giant steps cost
@@ -82,8 +108,9 @@ impl Plan {
         // Giant steps from that of the first prime above `b1` to that of the last below `b2`; the
         // nearest multiple `k D` of a prime `q > D/2` has `k >= 1`.
         let k_first = (b1 + 1 + half) / d;
-        let k_last = (b2 + half) / d;
-        let mut plan = Plan {
+        let k_last = ((u128::from(b2) + u128::from(half)) / u128::from(d)) as u64;
+        let steps = k_last - k_first + 1;
+        Some(Plan {
             d,
             b1,
             b2,
@@ -92,28 +119,103 @@ impl Plan {
             k_first,
             k_last,
             words,
-            cached: None,
-        };
-        let steps = k_last - k_first + 1;
-        if steps.saturating_mul(words as u64 * 8) <= CACHE_BYTES {
-            let mut all = Vec::new();
-            plan.fill(k_first, steps, &mut all);
-            plan.cached = Some(all);
-        }
-        Some(plan)
+            cached: OnceLock::new(),
+            keep: steps.saturating_mul(words as u64 * 8) <= CACHE_BYTES,
+            kept: OnceLock::new(),
+        })
     }
 
     /// Sets `out` to the bitmaps of the `count` giant steps from `k0`.
     pub(super) fn block(&self, k0: u64, count: u64, out: &mut Vec<u64>) {
-        match &self.cached {
-            Some(all) => {
-                let w = self.words;
-                let start = ((k0 - self.k_first) as usize) * w;
-                out.clear();
-                out.extend_from_slice(&all[start..start + count as usize * w]);
-            }
-            None => self.fill(k0, count, out),
+        if !self.keep {
+            return self.fill(k0, count, out);
         }
+        let all = self.cached.get_or_init(|| {
+            let mut all = Vec::new();
+            self.fill(self.k_first, self.k_last - self.k_first + 1, &mut all);
+            all
+        });
+        let w = self.words;
+        let start = ((k0 - self.k_first) as usize) * w;
+        out.clear();
+        out.extend_from_slice(&all[start..start + count as usize * w]);
+    }
+
+    /// The kept parameters, allocated on first use.
+    fn kept(&self) -> &Kept {
+        self.kept.get_or_init(|| {
+            Box::new(Kept {
+                mk: [const { [const { OnceLock::new() }, const { OnceLock::new() }] }; KEPT_LIMBS],
+                fft: [const { OnceLock::new() }; KEPT_LIMBS],
+            })
+        })
+    }
+
+    /// The parameters of Montgomery and Kruppa's continuation for `p - 1` (`pp1` false) or `p + 1`
+    /// with a modulus of `k` limbs, when it costs less than this one: `None` at once when this one
+    /// is too short for the other to pay.
+    pub(super) fn mk(&self, k: usize, pp1: bool) -> Option<MkPlan> {
+        let mm = super::mk::product_ns(k);
+        let lucas = self.lucas_cost(k);
+        // About the least the other costs, its fixed part (see `mk::cost`: 28 us and 350 products,
+        // `f`, `h`, an evaluation of at least 16 points), so that its parameters are not searched
+        // for when this one is clearly cheaper. Under Miri, whenever it applies: its cases are
+        // small, and the unsafe code is there.
+        if lucas < 600.0 * mm + 30_000.0 && !cfg!(miri) {
+            return None;
+        }
+        let make =
+            || MkPlan::new(self.b1, self.b2, k, pp1).filter(|p| p.cost < lucas || cfg!(miri));
+        match self.kept().mk.get(k) {
+            Some(cells) => cells[usize::from(pp1)].get_or_init(make).clone(),
+            None => make(),
+        }
+    }
+
+    /// The parameters of the elliptic curve method's continuation by polynomials for a modulus of
+    /// `k` limbs, when it costs less than this one.
+    pub(super) fn ecm_fft(&self, k: usize) -> Option<FftPlan> {
+        let mm = super::mk::product_ns(k);
+        let bsgs = self.ecm_cost(k);
+        // As in [`Plan::mk`]: the other's fixed part (see `FftPlan::new`: 60 us, the baby steps, the
+        // tree of `F` and its inverse) is about 600 products and 90 us at its least, with `D = 210`;
+        // this threshold, above it, skips the search where only that least `D` could pay.
+        if bsgs < 2000.0 * mm + 100_000.0 && !cfg!(miri) {
+            return None;
+        }
+        let make = || FftPlan::new(self.b1, self.b2, k).filter(|p| p.cost < bsgs || cfg!(miri));
+        match self.kept().fft.get(k) {
+            Some(cell) => cell.get_or_init(make).clone(),
+            None => make(),
+        }
+    }
+
+    /// The time of this continuation for the elliptic curve method with a modulus of `k` limbs:
+    /// about a product for each prime, the baby steps and the giant steps, an addition of points
+    /// and its share of the normalisation each, and the sieve.
+    pub(super) fn ecm_cost(&self, k: usize) -> f64 {
+        let (b1, b2) = (self.b1 as f64, self.b2 as f64);
+        let primes = (b2 / b2.ln() - b1 / b1.max(3.0).ln()).max(0.0);
+        let giants = (self.k_last - self.k_first + 1) as f64;
+        let mm = super::mk::product_ns(k);
+        primes * (mm + 0.5)
+            + (giants + self.js.len() as f64) * 9.0 * mm
+            + self.d as f64 * 1.5 * mm
+            + 0.05 * (b2 - b1)
+    }
+
+    /// The time of the continuation for `p - 1` and `p + 1` for a modulus of `k` limbs, in the
+    /// nanoseconds of [`product_ns`](super::mk::product_ns): about a product for each prime of
+    /// `(B1, B2]` (fewer as pairs serve two, but with the time of the sieve and the bitmaps), the
+    /// steps, and the sieve, made once a plan, at about 0.05 ns a number.
+    pub(super) fn lucas_cost(&self, k: usize) -> f64 {
+        let (b1, b2) = (self.b1 as f64, self.b2 as f64);
+        let primes = (b2 / b2.ln() - b1 / b1.max(3.0).ln()).max(0.0);
+        let giants = (self.k_last - self.k_first + 1) as f64;
+        let mm = super::mk::product_ns(k);
+        // In one limb the four chains of products overlap.
+        let per_prime = if k == 1 { 0.75 } else { 1.0 } * mm + 0.5;
+        primes * per_prime + 0.5 * (giants + self.js.len() as f64) * mm + 0.05 * (b2 - b1)
     }
 
     /// Sieves the bitmaps of the `count` giant steps from `k0` into `out`.
@@ -280,6 +382,30 @@ fn prac_cost(k: u64, v: f64) -> u64 {
 /// about `1.5 log2 k` products and squares against `2 log2 k` for the ladder. `t` holds five
 /// working residues, `two` the residue of 2.
 pub(super) fn lucas_prac<A: Arith>(f: &A, a: &mut A::V, k: u64, two: &A::V, t: &mut [A::V; 4]) {
+    lucas_prac_with(f, a, k, two, t, prac_choice(k));
+}
+
+/// The multiplier of [`PRAC_V`] whose chain for `k` costs least, by its index.
+pub(super) fn prac_choice(k: u64) -> u8 {
+    let mut best = (u64::MAX, 0u8);
+    for (i, &v) in PRAC_V.iter().enumerate() {
+        let c = prac_cost(k, v);
+        if c < best.0 {
+            best = (c, i as u8);
+        }
+    }
+    best.1
+}
+
+/// [`lucas_prac`] with the multiplier of index `choice`, from [`prac_choice`].
+pub(super) fn lucas_prac_with<A: Arith>(
+    f: &A,
+    a: &mut A::V,
+    k: u64,
+    two: &A::V,
+    t: &mut [A::V; 4],
+    choice: u8,
+) {
     // `x = y z - w`, `V_(m+n) = V_m V_n - V_(m-n)`, and `x = y^2 - 2`.
     let add3 = |x: &mut A::V, y: &A::V, z: &A::V, w: &A::V| {
         f.mul(x, y, z);
@@ -289,14 +415,7 @@ pub(super) fn lucas_prac<A: Arith>(f: &A, a: &mut A::V, k: u64, two: &A::V, t: &
         f.sqr(x, y);
         f.sub_in(x, two);
     };
-    let mut best = (u64::MAX, PRAC_V[0]);
-    for &v in &PRAC_V {
-        let c = prac_cost(k, v);
-        if c < best.0 {
-            best = (c, v);
-        }
-    }
-    let r = (k as f64 * best.1 + 0.5) as u64;
+    let r = (k as f64 * PRAC_V[usize::from(choice)] + 0.5) as u64;
     let (mut d, mut e) = (k - r, 2 * r - k);
     let [b, c, tt, t2] = t;
     b.clone_from(a);

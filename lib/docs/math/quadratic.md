@@ -16,72 +16,93 @@
 
 The Kronecker symbol takes the factors of two of `n` and its sign out, by the rules above, and is then the Jacobi symbol.
 
-- Words: the binary method, the factors of two of the numerator taken out (each turns the sign when the denominator is 3 or 5 modulo 8, bit 1 of `n ^ n/2`), then the larger of two odd numbers less the smaller, swapped by reciprocity (which turns the sign when both are 3 modulo 4, bit 1 of their `and`). The swap is a select, and the shift is counted on the difference before its sign is made positive, which has the same zero bits, so that a step is four instructions deep: 220 cycles for random words against 560 for the plain loop. On two limbs the same steps on the limbs apart, until one number has one limb, which then takes the other modulo it.
-- Three limbs and more: Lehmer's method with the symbol carried through the quotients, after Möller ("Efficient computation of the Jacobi symbol", 2008), whose algorithm GMP's `mpn_jacobi_n` takes. Euclid's algorithm reduces one number by a multiple of the other at each step; the symbol is `(−1)^e·(x/y)` for the current pair, `y` the one that plays the denominator, which is always odd: reducing the numerator by multiples of the denominator leaves it as it is; reducing the denominator by an odd numerator first swaps their parts by reciprocity; and reducing it by an even numerator `n` takes, for each subtraction, `(n/d) = (−1)^((d−1)/2)·s(d − n, d)·(n/(d − n))`, `s` the sign of reciprocity. All of that depends only on the quotient modulo 4 and on both numbers modulo 4, a state of six bits whose 512 transitions are a table built at compile time, so the symbol follows the quotients that the [greatest common divisor](gcd.md)'s hgcd2 finds from the top two limbs, applied to the whole numbers as a matrix in one pass; the steps hgcd2 cannot take are a subtraction and a division. The whole numbers are needed only at the end.
+- Words: the binary method, the factors of two of the numerator taken out (each turns the sign when the denominator is 3 or 5 modulo 8, bit 1 of `n ^ n/2`), then the larger of two odd numbers less the smaller, swapped by reciprocity (which turns the sign when both are 3 modulo 4, bit 1 of their `and`). The swap is a select, and the shift is counted on the difference before its sign is made positive, which has the same zero bits, so that a step is four instructions deep.
+- Two limbs to six: the same steps on all the limbs at once, until both numbers fit in one limb less, then on one less, down to a word. The magnitude of a negative difference is the complement of its limbs above the lowest and the negation of the lowest (which is not zero but once in `2^64`, taken apart), so the steps do not wait for a carry across the limbs; on aarch64 they are in assembly, the greatest common divisor's `gcd_22` steps widened to the numbers' limbs, with the sign carried beside them, off the critical path (on fresh numbers of three and four limbs 2.4 and 3 times as fast as the same steps in Rust). Each step reduces about 1.4 bits in 7 to 10 cycles, which beats Lehmer's steps up to six limbs.
+- Seven limbs and more: Lehmer's method with the symbol carried through the quotients, after Möller ("Efficient computation of the Jacobi symbol", 2008), whose algorithm GMP's `mpn_jacobi_n` takes. Euclid's algorithm reduces one number by a multiple of the other at each step; the symbol is `(−1)^e·(x/y)` for the current pair, `y` the one that plays the denominator, which is always odd: reducing the numerator by multiples of the denominator leaves it as it is; reducing the denominator by an odd numerator first swaps their parts by reciprocity; and reducing it by an even numerator `n` takes, for each subtraction, `(n/d) = (−1)^((d−1)/2)·s(d − n, d)·(n/(d − n))`, `s` the sign of reciprocity. All of that depends only on the quotient modulo 4 and on both numbers modulo 4, a state of six bits whose 512 transitions are a table built at compile time, so the symbol follows the quotients that the [greatest common divisor](gcd.md)'s hgcd2 finds from the top two limbs, applied to the whole numbers as a matrix in one pass; the steps hgcd2 cannot take are a subtraction and a division. The quotients below 8 are three conditional subtractions, whatever the size of the divisor, and the larger ones the hardware's division of the top 64 bits, corrected by at most two subtractions. When the numbers are down to six limbs, the binary steps take them.
+- Up to 16 limbs the numbers are read into limbs on the stack, and a numerator below twice the modulus is reduced by one subtraction; longer ones are in vectors.
 
 ## Square roots
 
-- Modulo an odd prime `p`: for `p = 3 (mod 4)` the single power `a^((p+1)/4)`; otherwise, with `p − 1 = q·2^s`, Tonelli and Shanks's method: `x = a^((q+1)/2)` has `x² = a·b` for `b = a^q`, of order dividing `2^s`, and each step multiplies `x` and `b` by powers of `c = z^q`, `z` the first non-square (by the Jacobi symbol), until `b` is 1, up to `s²/2` products. For `s > 24`, Cipolla's method (1903) instead: with `w = t² − a` not a square, `(t + ω)^((p+1)/2)` in the field of `u + v·ω`, `ω² = w`, is a root, about four and a half powers whatever `s` (the prime of P-224, `s = 96`, took 68,000 cycles against 655,000 for FLINT's Tonelli–Shanks). In Montgomery's form, in the ring that fits the prime's length, all in a register below `2^64`. The root is checked.
+- Modulo an odd prime `p`: for `p = 3 (mod 4)` the single power `a^((p+1)/4)`; for `p = 5 (mod 8)` Atkin's method (1992), one power too: with `v = (2a)^((p−5)/8)` and `i = 2a·v²`, a square root of −1 when `a` is a square, `a·v·(i − 1)` is a root; otherwise, with `p − 1 = q·2^s`, Tonelli and Shanks's method: `x = a^((q+1)/2)` has `x² = a·b` for `b = a^q`, of order dividing `2^s`, and each step multiplies `x` and `b` by powers of `c = z^q`, `z` the first non-square, until `b` is 1, up to `s²/2` products. The powers `a^((q−1)/2)` and `z^((q−1)/2)` have the same exponent and are taken side by side, the processor overlapping their products, and `c = z·(z^((q−1)/2))²`; below `2^64` the non-square is found by reciprocity, `(z/p) = (p/z)`, from `p mod z` and the squares modulo the primes below 64. For `s > 24`, Cipolla's method (1903) instead: with `w = t² − a` not a square, `(t + ω)^((p+1)/2)` in the field of `u + v·ω`, `ω² = w`, is a root, about four and a half powers whatever `s`. In Montgomery's form, in the ring that fits the prime's length, the exponents in limbs; below `2^64` all in a register, the powers from the low bit up, in pairs of bits, so that the chain of squares is the only one on the critical path. The root is checked.
 - Modulo `p^e`: Hensel's lifting, Newton's steps `x − (x² − a)/(2x)`, each doubling the power of `p` the root is right modulo; modulo `2^e`, `a` odd: one root modulo 2, two modulo 4 for `a = 1 (mod 4)` and four modulo `2^k`, `k >= 3`, for `a = 1 (mod 8)`, `±x` and `±x + 2^(k−1)`, `x` found a bit at a time in a word, by the 2-adic Newton's steps beyond.
 - `a = p^v·u` with `u` prime to `p`: no root for an odd `v < e`; for `v >= e` (`a = 0`) the multiples of `p^⌈e/2⌉`; otherwise `p^(v/2)` times the roots of `u` modulo `p^(e−v)`, each with every multiple of `d = p^(e − v/2)` added. The roots modulo `p^e` are so the residues of a few numbers `b` modulo `d`.
-- Modulo `m = ∏ p^e`: the roots are the solutions of the Chinese remainder theorem for every choice of one `b` modulo each `d`, `Σ b_i·c_i mod D` with the theorem's coefficients `c_i` for `D = ∏ d`, plus every multiple of `D` below `m`. `sqrt_mod_all` forms them all; `sqrt_mod` the smallest by trying every choice, or by meeting in the middle beyond 4096 of them, as the first 26 odd primes have `2^26`: the choices split in two halves whose sums `x` and `y` are formed apart, the `y`s sorted, and for each `x` the smallest `x + y − D` with `y >= D − x`, by a binary search, or else `x + min y`.
+- Modulo `m = ∏ p^e`: the roots are the solutions of the Chinese remainder theorem for every choice of one `b` modulo each `d`, `Σ b_i·c_i mod D` with the theorem's coefficients `c_i` for `D = ∏ d`, plus every multiple of `D` below `m`. `sqrt_mod_all` forms them all; `sqrt_mod` the smallest by trying every choice, or by meeting in the middle beyond 4096 of them, as the first 26 odd primes have `2^26`: the choices split in two halves whose sums `x` and `y` are formed apart, the `y`s sorted, and for each `x` the smallest `x + y − D` with `y >= D − x`, by a binary search, or else `x + min y`. Below `2^64` without a vector: the parts in an array, each a few roots, and the sums of the terms `b_i·c_i` depth first, one addition modulo `D` each.
 - An odd modulus whose Jacobi symbol is −1 is answered without factoring, and `a = 0` too.
 
 ## Cornacchia's algorithm
 
 Cornacchia (1908): a primitive solution of `x² + d·y² = m` has `x = r·y (mod m)` for a square root `r` of `−d` modulo `m`, and Euclid's algorithm on `m` and `r` stops at the first remainder `x` with `x² <= m`; `(m − x²)/d` is then `y²` when there is a solution for `r` at all. Every root `r <= m/2` is taken (`r` and `m − r` give the same solution), from `sqrt_mod_all`, so that a composite `m` has all its solutions. The first steps of Euclid's algorithm are Lehmer's, while the remainders are 128 bits above the bound, by the hgcd2 of the Jacobi symbol: every step it takes leaves both numbers above the bound. Below `2^64`, all in words.
 
-Measured on an Apple M4 Max with nothing else running, single-threaded (interleaved runs, the median of five, in cycles per call by the harness's estimate of the clock). The Kronecker symbol of random numbers of the bits given, the bottom one odd, against GMP 6.3's `mpz_kronecker`, FLINT 3.6's `fmpz_kronecker` and PARI 2.19's `kronecker`:
+Measured on 2026-11-11 on an Apple M4 Max on the quiet machine (the load average at 3.4 to 5.2 of its 16 cores, from the system's own services; the clock at 4.45 to 4.51 GHz; one thread, PARI's too, every process with `MallocNanoZone` unset, under the system's default allocator, the harness built with fat LTO and one codegen unit), in cycles per call by the harness's estimate of the clock: interleaved with the previous version (0.2.32) and the references, in three passes of seven rounds, each cell the median of the 21, each round on fresh inputs of each contender's own, in an order that turns with the round. The Kronecker symbol of random numbers of the bits given, the bottom one odd, against GMP 6.3's `mpz_kronecker` and FLINT 3.6's `fmpz_kronecker`, first on pools of up to 256 inputs that each measurement goes over again and again, as the earlier measurements did, then on pools of up to 16,384, too many for the processor's branch predictors to learn:
 
-| Bits | a | GMP | FLINT | PARI |
+| Bits | a | 0.2.32 | GMP | FLINT |
 | --- | --- | --- | --- | --- |
-| 64 | 222 | 218 | 215 | 613 |
-| 128 | 498 | 369 | 375 | 2920 |
-| 256 | 1771 | 1401 | 1409 | 8011 |
-| 512 | 3760 | 3836 | 3673 | 18,835 |
-| 1024 | 8049 | 9246 | 8979 | 40,970 |
-| 2048 | 17,479 | 20,183 | 19,769 | 91,363 |
-| 4096 | 41,069 | 44,361 | 43,469 | 217,848 |
-| 16,384 | 277,350 | 270,652 | 265,135 | 1.81 M |
+| 64 | 272 | 272 | 312 | 314 |
+| 128 | 643 | 865 | 656 | 662 |
+| 192 | 1252 | 2190 | 1774 | 1766 |
+| 256 | 1715 | 2968 | 2630 | 2779 |
+| 384 | 2827 | 4761 | 4665 | 4874 |
+| 512 | 4753 | 6662 | 6959 | 7400 |
+| 640 | 6515 | 8722 | 9623 | 9792 |
+| 768 | 8452 | 11,008 | 11,956 | 12,071 |
+| 1024 | 12,427 | 15,023 | 16,359 | 16,596 |
+| 2048 | 30,530 | 32,406 | 35,010 | 35,723 |
+| 4096 | 72,089 | 72,787 | 77,152 | 78,309 |
+| 16,384 | 470,010 | 469,889 | 465,040 | 466,434 |
 
-From 1024 to 4096 bits 1.08 to 1.15 times faster than GMP, whose method it is, as the greatest common divisor's hgcd2 is faster than GMP's; within 3 % at 64, 512 and 16,384 bits; 1.26 times slower at 256 bits and 1.35 times at 128, where the binary method on two limbs is not as quick as GMP's. Up to version 0.2.31 the binary method on limbs took 2.9 times as long at 128 bits, 3.2 times at 1024 and 16 times at 16,384.
+On fresh inputs, in the same passes:
 
-Square roots modulo primes: `sqrt_mod`, which factors the modulus (the primality test is most of its time), and the factorisation's `sqrt_mod`, which does not, against FLINT's `fmpz_sqrtmod` and PARI's `Fp_sqrt`, which take the modulus as prime; for words also FLINT's `n_sqrtmod` (at 63 bits for the row of 64):
-
-| Prime | a | a, factored | FLINT | PARI |
+| Bits | a | 0.2.32 | GMP | FLINT |
 | --- | --- | --- | --- | --- |
-| 32 bits | 1479 | 563 | 695 (`n_sqrtmod` 630) | 395 |
-| 64 bits | 2740 | 991 | 1519 (`n_sqrtmod` 1380) | 1589 |
-| 128 bits | 17,001 | 7140 | 12,899 | 13,142 |
-| 256 bits | 54,438 | 16,287 | 29,842 | 40,995 |
-| 1024 bits | 2.11 M | 639,978 | 924,152 | 1.18 M |
-| 2^255 − 19 | 67,646 | 22,944 | 36,734 | 35,195 |
-| 2^521 − 1 | 340,304 | 89,229 | 96,956 | 135,352 |
-| P-224 (`s = 96`) | 87,176 | 45,424 | 456,826 | 149,740 |
+| 64 | 295 | 291 | 324 | 331 |
+| 128 | 670 | 875 | 989 | 1000 |
+| 192 | 1263 | 2525 | 2495 | 2508 |
+| 256 | 1711 | 3469 | 3566 | 3565 |
+| 384 | 2837 | 5429 | 5807 | 5749 |
+| 512 | 5099 | 7365 | 7998 | 8009 |
+| 1024 | 13,115 | 15,594 | 17,090 | 17,048 |
+| 4096 | 73,163 | 74,493 | 80,376 | 80,355 |
+| 16,384 | 468,461 | 476,204 | 476,523 | 476,436 |
 
-Known to be prime, 1.1 to 2.5 times faster than FLINT and PARI, and 10 times FLINT's Tonelli–Shanks for P-224's prime by Cipolla's method, but for primes of 32 bits, where PARI's `Fl_sqrt` is 1.43 times faster. With the primality test, up to 3.7 times slower.
+Faster than GMP and FLINT at every size but 16,384 bits on the inputs gone over again (1 % behind both there, and 0.98 of their time on fresh inputs, where all are Lehmer's method): 0.61 to 0.76 of the best one's time from 192 to 1024 bits, where the binary steps in assembly replaced Lehmer's up to six limbs and take its numbers below them (1.21 to 1.75 times as fast as the previous version), and at 128 bits 0.98 of GMP's time (1.35 times as fast as the previous version). On fresh inputs GMP's and FLINT's branches, which their predictors no longer learn, cost them up to a half more (1.28 to 1.51 times their time on the inputs gone over again from 128 to 256 bits, 1.03 and 1.04 at 1024): 0.48 to 0.51 of their time from 192 to 384 bits, 0.68 at 128, 0.64 to 0.77 from 512 to 1024.
+
+Square roots modulo primes, the factorisation's `sqrt_mod`, which does not factor the modulus, and `sqrt_mod`, which does (the primality test is most of its time), against FLINT's `fmpz_sqrtmod` and PARI's `Fp_sqrt`, which take the modulus as prime; for words also FLINT's `n_sqrtmod` (at 63 bits for the row of 64):
+
+| Prime | a, factored | 0.2.32, factored | a | 0.2.32 | FLINT | PARI |
+| --- | --- | --- | --- | --- | --- | --- |
+| 32 bits | 553 | 892 | 1503 | 2658 | 1304 (`n_sqrtmod` 1275) | 660 |
+| 64 bits | 1009 | 1664 | 4308 | 4926 | 3219 (`n_sqrtmod` 2587) | 2781 |
+| 128 bits | 7905 | 11,276 | 27,302 | 33,164 | 21,487 | 21,853 |
+| 256 bits | 22,022 | 35,338 | 86,287 | 123,396 | 65,840 | 81,901 |
+| 1024 bits | 618,185 | 987,307 | 2.30 M | 3.34 M | 1.39 M | 1.90 M |
+| 2^255 − 19 | 20,615 | 35,750 | 75,204 | 110,805 | 57,779 | 57,621 |
+| 2^521 − 1 | 91,574 | 145,975 | 342,410 | 554,487 | 157,984 | 218,804 |
+| P-224 (`s = 96`) | 61,760 | 82,796 | 115,877 | 152,837 | 768,049 | 250,674 |
+
+Known to be prime, faster than FLINT and PARI at every size, 0.25 to 0.58 of the faster one's time from 64 bits on, and PARI's `Fl_sqrt` at 32 bits now too (0.84 of its time; 1.35 times slower before): the powers of a word from the low bit up, Atkin's single power for `p = 5 (mod 8)` (2^255 − 19 1.73 times faster than before, the other primes 1.34 to 1.65 times), Tonelli and Shanks's two powers side by side, and no vector. With the primality test of the unfactored form, 1.14 to 1.77 times faster than before (1.77 at 32 bits), its three strong tests' powers taken side by side.
 
 All the roots modulo words with a few prime factors, from their factorisation, against FLINT's `n_sqrtmodn`, and with the factorisation, against PARI's `Zn_sqrt`, which gives one root:
 
-| Modulus | `sqrt_mod_all` | factored | `sqrt_mod` | FLINT, factored | PARI, one root |
-| --- | --- | --- | --- | --- | --- |
-| 2 primes of 32 bits | 69,611 | 1774 | 69,199 | 1915 | 366,753 |
-| 4 primes of 16 bits | 27,692 | 2796 | 26,816 | 1978 | 34,095 |
-| 2^20 times a prime of 40 bits | 2824 | 1812 | 2445 | 1595 | 4737 |
+| Modulus | factored | 0.2.32 | `sqrt_mod_all` | `sqrt_mod` | FLINT, factored | PARI, one root |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 primes of 32 bits | 2289 | 3536 | 140,752 | 139,330 | 3485 | 654,942 |
+| 4 primes of 16 bits | 3560 | 4940 | 40,875 | 39,912 | 3743 | 58,175 |
+| 2^20 times a prime of 40 bits | 2142 | 3021 | 4168 | 3660 | 2750 | 9134 |
 
-From the factorisation, within 1.14 to 1.41 times FLINT's, and faster for two primes of 32 bits; with the factorisation of the modulus by [`factor`](factor.md), all the roots 1.2 to 5.3 times faster than PARI's one.
+From the factorisation, 0.66 to 0.95 of FLINT's time (before 1.01 times it for two primes of 32 bits, 1.32 and 1.10 times it for the others); with the factorisation of the modulus by [`factor`](factor.md), most of the time for two primes of 32 bits.
 
 Cornacchia's algorithm modulo primes the form represents, against PARI's `qfbcornacchia`, which takes the modulus as prime:
 
-| Equation | a | a, factored | PARI |
-| --- | --- | --- | --- |
-| x² + y², 64 bits | 3681 | 2065 | 4117 |
-| x² + y², 128 bits | 24,654 | 14,521 | 14,633 |
-| x² + y², 256 bits | 75,919 | 39,668 | 39,704 |
-| x² + 2y², 256 bits | 70,224 | 34,165 | 40,228 |
-| x² + 7y², 1024 bits | 2.23 M | 641,311 | 850,553 |
+| Equation | a, factored | 0.2.32, factored | a | PARI |
+| --- | --- | --- | --- | --- |
+| x² + y², 64 bits | 1919 | 3450 | 4934 | 6965 |
+| x² + y², 128 bits | 14,815 | 21,702 | 34,402 | 25,506 |
+| x² + y², 192 bits | 27,972 | 44,891 | 65,761 | 46,175 |
+| x² + y², 256 bits | 43,170 | 67,522 | 106,487 | 71,479 |
+| x² + 2y², 256 bits | 42,883 | 55,663 | 107,713 | 72,644 |
+| x² + 7y², 1024 bits | 678,899 | 1.09 M | 2.39 M | 1.61 M |
 
-Known to be prime, as fast as PARI's for `x² + y²` at 128 and 256 bits, and 1.18 to 2 times faster otherwise; with the primality test of `Number::cornacchia`, up to 2.6 times slower.
+Known to be prime, 0.28 to 0.61 of PARI's time (0.50 to 0.97 of it before); with the primality test of `Number::cornacchia`, 0.71 of PARI's time at 64 bits and 1.35 to 1.49 times slower beyond.
 
 ## Examples
 
@@ -127,4 +148,5 @@ assert_eq!(Number::cornacchia(&n(2), &n(1009)), [(n(19), n(18))]);
 
 - Time complexity: `jacobi` and `kronecker` O(n²) in the limbs, as Lehmer's greatest common divisor; `sqrt_mod` the factorisation of `m` (a [primality test](prime.md) for a prime), then about one `pow_mod` modulo each prime and `O(s²)` products for `p − 1 = q·2^s`, `s <= 24`, about four and a half beyond, `O(log e)` steps of Hensel's lifting modulo `p^e`, and the Chinese remainder theorem's sums for every choice of the roots modulo the prime powers (`O(2^(k/2)·k)` for `k` odd primes by meeting in the middle); `cornacchia` that and one Euclid's algorithm on numbers of the modulus's length for each pair of roots
 - Space complexity: the vectors of the operands, of the roots modulo the prime powers and of their sums; `sqrt_mod_all` its result
-- Soundness: no `unsafe` code of its own beyond the rings of residues, which use the powers' Montgomery kernels through their working memory plans; the operands are left as they were
+- Time complexity, below `2^64` and modulo primes of a word: `sqrt_mod` and `sqrt_mod_all` with no vector but the result's, and the roots modulo a composite word one addition each
+- Soundness: the binary steps of the Jacobi symbol on two to six limbs are inline assembly on 64-bit little-endian aarch64, on registers only, with the same steps in Rust elsewhere and under Miri; the rings of residues use the powers' Montgomery kernels through their working memory plans, and the remainders' scratch is on the stack for short numbers; the operands are left as they were

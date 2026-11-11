@@ -320,6 +320,139 @@ fn perfect_power_of_large_powers() {
     }
 }
 
+/// The largest `k >= 2` with `x = c^k` and that `c`, by trying every `k`, odd ones only with `odd`:
+/// `None` when there is none. The roots by bisection, exactly.
+fn largest_power(x: u128, odd: bool) -> Option<(u128, u32)> {
+    if x < 4 {
+        return None;
+    }
+    for k in (2..128u32).rev() {
+        if odd && k % 2 == 0 {
+            continue;
+        }
+        // The largest `c` with `c^k <= x`.
+        let (mut lo, mut hi) = (1u128, 1u128 << (128 / k + 1));
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            match mid.checked_pow(k) {
+                Some(y) if y <= x => lo = mid,
+                _ => hi = mid,
+            }
+        }
+        if lo >= 2 && lo.checked_pow(k) == Some(x) {
+            return Some((lo, k));
+        }
+    }
+    None
+}
+
+#[test]
+fn perfect_power_of_words_and_two_limbs() {
+    // Powers below 2^64 (one limb, by constant divisors and floating-point roots) and below 2^128,
+    // the numbers next to them, and both signs: the largest exponent, odd for a negative number.
+    // Under Miri, a few of each kind.
+    let mut state = 0x0F0F_1234_5678_9ABCu64;
+    let mut cases: Vec<u128> = Vec::new();
+    if cfg!(miri) {
+        let p = (1u128 << 31) - 1;
+        for x in [
+            1 << 62,
+            1 << 127,
+            3u128.pow(39),
+            3u128.pow(80),
+            6u128.pow(24),
+            7u128.pow(22),
+            p * p,
+            p * p * p,
+            p.pow(4),
+        ] {
+            cases.extend([x - 1, x, x + 2]);
+        }
+    } else {
+        for b in 2..=300u128 {
+            let mut x = b;
+            while let Some(y) = x.checked_mul(b) {
+                x = y;
+                cases.extend([x - 1, x, x + 1]);
+            }
+        }
+        for _ in 0..400 {
+            let b = u128::from(xorshift(&mut state) >> below(&mut state, 60)).max(2);
+            for k in 2..=5u32 {
+                if let Some(x) = b.checked_pow(k) {
+                    cases.extend([x, x + 2, x.wrapping_sub(2)]);
+                }
+            }
+        }
+    }
+    for x in cases {
+        for negative in [false, true] {
+            let expected = largest_power(x, negative);
+            for order in ORDERS {
+                let mut n = Number::new_from_u128(x, order);
+                n.negative = negative && x != 0;
+                let got = n.perfect_power().map(|(b, k)| {
+                    assert!(b.byte_order() == order);
+                    assert_eq!(b.negative, negative, "the sign of the root of {n}");
+                    (u128::try_from(&b.abs()).unwrap(), k)
+                });
+                assert_eq!(got, expected, "perfect_power({n})");
+            }
+        }
+    }
+}
+
+#[test]
+fn perfect_power_roots_of_many_limbs() {
+    // Squares, cubes and higher powers of roots of 33 to 600 bits, beyond the floating-point roots
+    // and by them (roots of at most 40 bits) to large exponents, of primes and of composite roots
+    // that are powers again, and the numbers next to them.
+    let mut state = 0x7777_0000_1111_2222u64;
+    let shapes: &[(u64, u32)] = if cfg!(miri) {
+        &[(41, 2), (41, 3)]
+    } else {
+        &[
+            (41, 2),
+            (41, 3),
+            (64, 5),
+            (85, 3),
+            (128, 2),
+            (170, 3),
+            (300, 2),
+            (341, 3),
+            (600, 2),
+            (70, 13),
+            // Roots of at most 40 bits, by the floating-point root, to large exponents.
+            (39, 13),
+            (40, 31),
+            (40, 101),
+            (33, 127),
+        ]
+    };
+    for &(bits, k) in shapes {
+        // A prime root, a product of primes, and a power of a prime of 20 bits.
+        let p = random_big_prime(&mut state, bits);
+        let mut q = random_prime(&mut state, 20);
+        while q.bits() < bits {
+            q = &q * &random_prime(&mut state, 20);
+        }
+        let r = random_prime(&mut state, 20);
+        let r = r.pow(bits.div_ceil(20) as u32);
+        for root in [p, q, r] {
+            let n = root.pow(k);
+            let (b, kk) = n
+                .perfect_power()
+                .unwrap_or_else(|| panic!("perfect_power({n})"));
+            // The largest exponent: `k` times that of the root, if it is a power itself.
+            let inner = root.perfect_power().map_or(1, |(_, e)| e);
+            assert_eq!(kk, k * inner, "perfect_power({root}^{k})");
+            assert_eq!(b.pow(kk), n);
+            assert!((&n + 2u8).perfect_power().is_none_or(|(_, e)| e < k));
+            assert!((&n - 2u8).perfect_power().is_none_or(|(_, e)| e < k));
+        }
+    }
+}
+
 #[test]
 fn perfect_power_of_zero_and_units() {
     for order in ORDERS {
@@ -377,6 +510,106 @@ fn trial_small_numbers() {
             assert_eq!(c, rest, "trial({n}, {bound})");
         }
     }
+}
+
+#[test]
+fn trial_at_block_and_group_edges() {
+    // Products of the tables' primes, chosen at the edges of the blocks of eight that a word is
+    // tested by and of the groups that a longer number is reduced by, to small powers, times
+    // cofactors of primes above 2^20, of one, two, three and five limbs, against bounds at the
+    // chosen primes and between them.
+    let primes: Vec<u64> = (3..8192u64)
+        .step_by(2)
+        .filter(|&p| {
+            (3..p)
+                .step_by(2)
+                .take_while(|d| d * d <= p)
+                .all(|d| p % d != 0)
+        })
+        .collect();
+    let big = [
+        1_048_583u64,
+        1_048_589,
+        1_048_601,
+        4_294_967_311,
+        1_099_511_627_791,
+    ];
+    let mut state = 0xDEAD_BEEF_0123_4567u64;
+    for case in 0..size(300, 6) {
+        let mut chosen: Vec<(u64, u32)> = Vec::new();
+        for _ in 0..1 + below(&mut state, 3) {
+            // Indices at the edges of the blocks of eight, and anywhere.
+            let i = match below(&mut state, 3) {
+                0 => 8 * below(&mut state, primes.len() / 8),
+                1 => (8 * below(&mut state, primes.len() / 8) + 7).min(primes.len() - 1),
+                _ => below(&mut state, primes.len()),
+            };
+            let p = primes[i];
+            if chosen.iter().all(|c| c.0 != p) {
+                chosen.push((p, 1 + below(&mut state, 3) as u32));
+            }
+        }
+        chosen.sort();
+        let mut n = Number::new_from_u8(1, ByteOrder::LittleEndian);
+        for &(p, e) in &chosen {
+            n = &n * &Number::new_from_u64(p, ByteOrder::LittleEndian).pow(e);
+        }
+        let mut cofactor = Number::new_from_u8(1, ByteOrder::LittleEndian);
+        for _ in 0..case % 5 {
+            cofactor = &cofactor
+                * &Number::new_from_u64(big[below(&mut state, big.len())], ByteOrder::LittleEndian);
+        }
+        let n = &n * &cofactor;
+        let pick = chosen[below(&mut state, chosen.len())].0;
+        // Under Miri, the bounds within the tables (the table beyond them is safe code).
+        let top = if cfg!(miri) { 8191 } else { u64::MAX };
+        for bound in [pick - 1, pick, pick + 1, 8190, 8191, 8192, 1 << 20].map(|b| b.min(top)) {
+            let expected: Vec<(u64, u32)> = chosen
+                .iter()
+                .copied()
+                .filter(|&(p, _)| p <= bound)
+                .collect();
+            let mut rest = n.clone();
+            for &(p, e) in &expected {
+                rest = rest.div_exact(&Number::new_from_u64(p, ByteOrder::LittleEndian).pow(e));
+            }
+            for order in ORDERS {
+                let m = num(&n.to_string(), order);
+                let (f, c) = factor::trial(&m, bound);
+                assert_eq!(f, expected, "trial({n}, {bound})");
+                assert_eq!(c, rest, "trial({n}, {bound})");
+            }
+        }
+    }
+}
+
+#[test]
+fn factor_merges_repeated_primes() {
+    // A prime found again in another split of the cofactor, in words and in limbs.
+    let p = 1_048_583u64;
+    let q = 1_048_601u64;
+    let words = [p * p * q, 1_009 * 8_209 * p * p, 8_191 * 8_191 * 8_209];
+    for x in words {
+        let f = Number::new_from_u64(x, ByteOrder::BigEndian).factor();
+        let w: Vec<(u64, u32)> = f
+            .factors()
+            .iter()
+            .map(|(p, e)| (u64::try_from(p).unwrap(), *e))
+            .collect();
+        let mut expected = naive(x);
+        expected.sort();
+        assert_eq!(w, expected, "factor({x})");
+    }
+    if cfg!(miri) {
+        return;
+    }
+    // Primes of 40 and 70 bits, each twice, in a number of four limbs.
+    let a = Number::new_from_u64(1_099_511_627_791, ByteOrder::LittleEndian);
+    let b: Number = "1180591620717411303449".parse().unwrap();
+    let n = &(&a * &a) * &(&b * &b);
+    let f = n.factor();
+    assert_eq!(written(f.factors(), false), format!("{a}^2 {b}^2"));
+    assert_eq!(f.value(), n);
 }
 
 #[test]
@@ -539,6 +772,239 @@ fn ecm_finds_factors() {
             proper(&n, &f);
             // The same curves give the same factor.
             assert_eq!(factor::ecm(&n, b1, b2, 200), Some(f));
+        }
+    }
+}
+
+/// Semiprimes, `B1`, the number of curves the first factor of stage 1 takes, and that factor: the
+/// curves of `sigma = 2, 3, ...` are GMP-ECM 7.0.7's `-param 2` curves of the same `sigma`, whose
+/// stage 1 gave the same factor (by `ecm -sigma 2:s B1 B1`, the first `s` that finds one), in every
+/// arithmetic: one limb, two (below and above `2^126`), three, four, and ten in memory.
+const ECM_STAGE1: &[(&str, u64, u32, &str)] = &[
+    ("7843536060553914529", 400, 1, "37832233"),
+    ("6402306133617297769", 400, 1, "33925139"),
+    ("10022780026205623601", 1000, 3, "756051619"),
+    ("10029971945297330771", 1000, 1, "14773135381"),
+    (
+        "15906437126690854234328917905725872897",
+        1000,
+        2,
+        "955619549",
+    ),
+    (
+        "12586674413154226893422191073448206143",
+        1000,
+        2,
+        "672427117",
+    ),
+    (
+        "204570448279252699917570503617265879027",
+        3000,
+        1,
+        "13271510459",
+    ),
+    (
+        "144767755087836663608128654335932146369",
+        3000,
+        2,
+        "9584423021",
+    ),
+    (
+        "1024708501523072096808090319964964013984666162409169927937",
+        2000,
+        1,
+        "1059100313",
+    ),
+    (
+        "753926807895168874535744265493063300794369109273454399563",
+        2000,
+        2,
+        "704368927",
+    ),
+    (
+        "63733346042983503413504712691921058193293936479980794879856085284180753662807",
+        2000,
+        1,
+        "729326407",
+    ),
+    (
+        "2079726811071358092429817530455469993287542173519524317027189265255789746721003260427729612927466246771887384406621682277127847922534309380171996083463729255236767997624887938706267",
+        2000,
+        2,
+        "618168751",
+    ),
+];
+
+#[test]
+fn ecm_curves_are_gmp_ecm_param_2() {
+    // Under Miri, the first two, of one limb.
+    let cases = &ECM_STAGE1[..size(ECM_STAGE1.len(), 2)];
+    for &(s, b1, first, f) in cases {
+        for order in ORDERS {
+            let n = num(s, order);
+            let f = num(f, order);
+            if first > 1 {
+                assert!(
+                    factor::ecm(&n, b1, 0, first - 1).is_none(),
+                    "ecm({s}, {b1}), {} curves",
+                    first - 1
+                );
+            }
+            // The first factor stays the answer however many curves follow, in blocks of four,
+            // three, two or one.
+            let more = if cfg!(miri) { 0 } else { 5 };
+            for c in first..=first + more {
+                assert_eq!(
+                    factor::ecm(&n, b1, 0, c),
+                    Some(f.clone()),
+                    "ecm({s}, {b1}), {c} curves"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ecm_stage1_in_two_chunks() {
+    if cfg!(miri) {
+        return;
+    }
+    // The point of the curve of `sigma = 2` modulo the prime of 40 bits has the order
+    // 2 · 7103 · 3139489: the second chunk of the exponent (its primes from about 2.9 million),
+    // which goes a curve at a time from the affine point of the first, finds it at `B1 = 3.2·10^6`
+    // and not at `3.1·10^6`, as GMP-ECM's `-sigma 2:2` does.
+    let n: Number = "3051284979218919266167267584209".parse().unwrap();
+    let p = Number::new_from_u64(1_070_389_013_417, ByteOrder::BigEndian);
+    assert_eq!(factor::ecm(&n, 3_200_000, 0, 2), Some(p));
+    assert!(factor::ecm(&n, 3_100_000, 0, 1).is_none());
+}
+
+#[test]
+fn ecm_curves_after_a_point_at_infinity_modulo_n() {
+    // `P = (-3, 3)` on `y^2 = x^3 + 36` has the order 13 modulo both 6807781579 and 9200633909
+    // (PARI's `ellorder`): `13 P` is at infinity modulo their product itself, and the multiples of
+    // `P` would only repeat modulo both from there. The curves of `sigma = 2` to 12 find nothing
+    // in stage 1 at `B1 = 300`; from 13 on the curves are GMP-ECM's `-param 1` ones, of which that
+    // of `sigma = 15` is the first to find a factor, as GMP-ECM's `-sigma 1:15` does.
+    if cfg!(miri) {
+        // Under Miri, the curves to `sigma = 15` at a small bound, which find nothing.
+        let n = num("62635906040812962311", ByteOrder::BigEndian);
+        assert!(factor::ecm(&n, 30, 0, 14).is_none());
+        return;
+    }
+    for order in ORDERS {
+        let n = num("62635906040812962311", order);
+        assert!(factor::ecm(&n, 300, 0, 13).is_none());
+        assert_eq!(factor::ecm(&n, 300, 0, 14), Some(num("6807781579", order)));
+        // The curves before stay GMP-ECM's `-param 2` ones: at `B1 = 20,000` that of `sigma = 11`
+        // is the first to find a factor in stage 1, as GMP-ECM's `-sigma 2:24` does, the same
+        // curve modulo both primes (GMP-ECM's own `-sigma 2:11` reaches `11 P` as `12 P - P`,
+        // whose addition is then a doubling modulo both, and stops at `n`).
+        assert!(factor::ecm(&n, 20_000, 0, 9).is_none());
+        assert_eq!(
+            factor::ecm(&n, 20_000, 0, 10),
+            Some(num("9200633909", order))
+        );
+    }
+}
+
+#[test]
+fn factor_when_the_point_has_one_order_modulo_every_prime() {
+    if cfg!(miri) {
+        return;
+    }
+    // Products of primes modulo all of which `(-3, 3)` on `y^2 = x^3 + 36` has the same order
+    // (11, 13, 18, 24, 25, 25 and 27), so that the multiples of the point are at infinity modulo
+    // the whole number at that `sigma`: below `2^64`, of two limbs, and of 109 and 118 digits,
+    // which the curves must split, without the quadratic sieve at 118 digits (with it, hours at
+    // 109). With every curve after that `sigma` degenerate, the last two never ended. Since the
+    // quadratic sieve takes the cofactors from 24 digits, only the numbers of 109 and 118 digits
+    // reach that `sigma` in `factor` (the sieve splits those of 24 to 27 digits, after at most eight
+    // curves, and the curves find the others' factors before it);
+    // `ecm_curves_after_a_point_at_infinity_modulo_n` takes the curves of two limbs past it.
+    let c98 = "29539715157404123500384353184228095608817754455287919647028798105705653919402287502001072199096401";
+    let cases: &[&[&str]] = &[
+        &["1222496419", "1420979669"],
+        &["6807781579", "9200633909"],
+        &["14949872371657", "16085027698633"],
+        &["688012331113", "3862010124001"],
+        &["236622852601", c98],
+        &["392261101", "236622852601", c98],
+        &["68858200547", "4170958242679"],
+    ];
+    for primes in cases {
+        let mut n = Number::new_from_u8(1, ByteOrder::BigEndian);
+        for p in primes.iter() {
+            n = &n * &num(p, ByteOrder::BigEndian);
+        }
+        let f = n.factor();
+        assert_eq!(written(f.factors(), false), primes.join(" "), "factor({n})");
+    }
+}
+
+#[test]
+fn ecm_answer_is_the_first_curves() {
+    // Whatever the width of the blocks the curves go through stage 1 in, the factor is the first
+    // curve's to find one: once `c` curves give a factor, more give the same.
+    let shapes: &[(u64, u64, u64)] = if cfg!(miri) {
+        &[(14, 40, 30)]
+    } else {
+        &[
+            (26, 64, 120),
+            (30, 64, 300),
+            (30, 98, 300),
+            (40, 128, 600),
+            (30, 190, 300),
+        ]
+    };
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for &(fbits, nbits, b1) in shapes {
+        for _ in 0..size(6, 1) {
+            let p = random_prime(&mut state, fbits);
+            let q = random_big_prime(&mut state, nbits - fbits);
+            let n = &p * &q;
+            let mut first: Option<Number> = None;
+            for c in 1..=size(9, 2) as u32 {
+                let r = factor::ecm(&n, b1, 50 * b1, c);
+                match &first {
+                    Some(f) => assert_eq!(r.as_ref(), Some(f), "ecm({n}), {c} curves"),
+                    None => {
+                        if let Some(f) = r {
+                            proper(&n, &f);
+                            first = Some(f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A random prime of `bits` bits, any number of them.
+fn random_big_prime(state: &mut u64, bits: u64) -> Number {
+    let limbs = bits.div_ceil(64);
+    let mut bytes = Vec::new();
+    for _ in 0..limbs {
+        bytes.extend_from_slice(&xorshift(state).to_le_bytes());
+    }
+    let x = &Number::new(bytes, ByteOrder::LittleEndian) >> (64 * limbs - bits) as usize;
+    let top = &Number::new_from_u8(1, ByteOrder::LittleEndian) << (bits as usize - 1);
+    let p = (&x | &top).next_prime();
+    if p.bits() == bits {
+        p
+    } else {
+        random_big_prime(state, bits)
+    }
+}
+
+/// A random prime of `bits` bits, at least 2 and at most 63.
+fn random_prime(state: &mut u64, bits: u64) -> Number {
+    loop {
+        let x = xorshift(state);
+        let x = (x >> (64 - bits)) | (1 << (bits - 1)) | 1;
+        let p = Number::new_from_u64(x, ByteOrder::LittleEndian).next_prime();
+        if p.bits() == bits {
+            return p;
         }
     }
 }

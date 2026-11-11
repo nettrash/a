@@ -7,10 +7,13 @@
 //! back in at the end, and the result's length is bounded before it starts, so that its working
 //! memory is allocated once; a power of up to 64 bytes is computed in registers.
 //!
-//! A power modulo an odd number is computed in Montgomery's form ([`montgomery`]) by a sliding
-//! window over the exponent's bits ([`window`]); modulo a power of two by the low halves of products
-//! ([`low`]); and modulo any other even number `m = 2^k m'` as both, modulo `m'` and modulo `2^k`,
-//! put together by the Chinese remainder theorem, as GMP's `mpz_powm` does.
+//! A power modulo an odd number is computed in Montgomery's form ([`montgomery`]), in registers up
+//! to eight limbs (seven where the target has no kernels of Montgomery's products,
+//! [`REGISTER_KERNELS`]), by a sliding window over the exponent's bits ([`window`]), or from the
+//! low bit up to three limbs (two without the kernels), where a product waits longer for the one
+//! before than for its operands ([`window::power_low_first`]); modulo a power of two by the low
+//! halves of products ([`low`]); and modulo any other even number `m = 2^k m'` as both, modulo
+//! `m'` and modulo `2^k`, put together by the Chinese remainder theorem, as GMP's `mpz_powm` does.
 
 // The kernel of Montgomery's reduction under the name `kernels`, chosen as those of the
 // multiplication are: assembly on 64-bit little-endian aarch64 where the system allows unaligned
@@ -65,8 +68,8 @@ use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 use core::ptr;
 use low::{Low, Low2, LowN, mullo, mullo_itch};
-use montgomery::{Mont1, Mont2, MontN, Montgomery, even, lshift, rem, rem_itch};
-use window::{power, power_in_registers, window};
+use montgomery::{Mont1, Mont2, MontN, Montgomery, REGISTER_KERNELS, even, lshift, rem, rem_itch};
+use window::{power, power_in_registers, power_low_first, window};
 
 impl Number {
     /// Returns `self` raised to the power `exp`, in the byte order of `self`, in the shortest form,
@@ -232,14 +235,14 @@ fn small_pow_mod(b: u128, e: u128, m: u128) -> u128 {
                 let ring = Mont1::new(ol[0]);
                 let mut x = 0;
                 rem(&mut x, bl.as_ptr(), bn, 1, ol.as_ptr(), 1, s);
-                let y = power_in_registers(&ring, x, el.as_ptr(), ebits);
+                let y = power_low_first(&ring, x, el.as_ptr(), ebits);
                 u128::from(ring.plain(y))
             } else {
                 let ring = Mont2::new(ol);
                 let mut x = [0; 2];
                 rem(x.as_mut_ptr(), bl.as_ptr(), bn, 2, ol.as_ptr(), 2, s);
                 // SAFETY: the exponent's limbs hold its `ebits` bits.
-                let y = power_in_registers(&ring, x, el.as_ptr(), ebits);
+                let y = power_low_first(&ring, x, el.as_ptr(), ebits);
                 let y = ring.plain(y);
                 u128::from(y[0]) | (u128::from(y[1]) << 64)
             }
@@ -1031,25 +1034,26 @@ unsafe fn powm_odd(
                 let ring = Mont1::new(*m);
                 let mut x = 0;
                 rem(&mut x, b, bn, 1, m, 1, s);
-                let y = power_in_registers(&ring, x, e, ebits);
+                let y = power_low_first(&ring, x, e, ebits);
                 *r = ring.plain(y);
             }
             2 => {
                 let ring = Mont2::new([*m, *m.add(1)]);
                 let mut x = [0; 2];
                 rem(x.as_mut_ptr(), b, bn, 2, m, 2, s);
-                let y = power_in_registers(&ring, x, e, ebits);
+                let y = power_low_first(&ring, x, e, ebits);
                 let z = ring.plain(y);
                 (*r, *r.add(1)) = (z[0], z[1]);
             }
-            // Three to seven limbs in registers: measured on an Apple M4 Max with exponents as
-            // long as the modulus, 6 limbs took 54,300 cycles so against 62,700 in limbs, 7 limbs
-            // 83,800 against 92,400, and 8 limbs 123,000 against 117,000.
+            // Three to seven limbs in registers, and eight with the kernels ([`REGISTER_KERNELS`]):
+            // measured on an Apple M4 Max with exponents as long as the modulus, 8 limbs took
+            // 68,500 cycles so against 121,400 in limbs before the kernels.
             3 => powm_registers::<3>(r, b, bn, e, ebits, m, s),
             4 => powm_registers::<4>(r, b, bn, e, ebits, m, s),
             5 => powm_registers::<5>(r, b, bn, e, ebits, m, s),
             6 => powm_registers::<6>(r, b, bn, e, ebits, m, s),
             7 => powm_registers::<7>(r, b, bn, e, ebits, m, s),
+            8 if REGISTER_KERNELS => powm_registers::<8>(r, b, bn, e, ebits, m, s),
             _ => {
                 let keep = Montgomery::new_itch(n);
                 let ring = Montgomery::new(m, n, s.first(keep));
@@ -1063,6 +1067,16 @@ unsafe fn powm_odd(
         }
     }
 }
+
+/// Up to this many limbs a power in registers takes its exponent's bits from the low end
+/// ([`power_low_first`]), whose products stay off the chain of squares, and beyond by the sliding
+/// window, which takes fewer products: the kernels' squares take longer one after the other than
+/// side by side, three times as long at two limbs, twice at three and 1.6 times at four. Measured
+/// on an Apple M4 Max with exponents as long as the modulus, a modulus of one limb took 999 cycles
+/// so against 1176 by the window, two limbs 3530 against 3964, three 8190 against 8375, and four
+/// 15,340 against 14,400. Without the kernels ([`REGISTER_KERNELS`]) up to two limbs: the Rust
+/// rows of three took 1.10 to 1.21 times as long so.
+const LOW_FIRST: usize = if REGISTER_KERNELS { 3 } else { 2 };
 
 /// [`powm_odd`] for a modulus of `N` limbs, in registers.
 ///
@@ -1086,7 +1100,11 @@ unsafe fn powm_registers<const N: usize>(
         let ring = MontN::new(mm);
         let mut x = [0; N];
         rem(x.as_mut_ptr(), b, bn, N, m, N, s);
-        let y = power_in_registers(&ring, x, e, ebits);
+        let y = if N <= LOW_FIRST {
+            power_low_first(&ring, x, e, ebits)
+        } else {
+            power_in_registers(&ring, x, e, ebits)
+        };
         let z = ring.plain(y);
         ptr::copy_nonoverlapping(z.as_ptr(), r, N);
     }

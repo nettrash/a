@@ -81,16 +81,23 @@ impl Chooser {
     ) -> Chooser {
         let log: Vec<f64> = fb.prime.iter().map(|&p| f64::from(p).log2()).collect();
         let end = end.max(first + 1).min(fb.prime.len());
-        // The number of primes: those of about `bits` bits, but at least two, and no larger than the
-        // largest prime allowed.
-        let top = log[end - 1];
-        let mut s = ((target / f64::from(bits)).round() as usize).max(2);
-        while s > 2 && target / (s as f64) < log[first] + 1.0 {
-            s -= 1;
-        }
-        while target / (s as f64) > top - 0.5 && s < 20 {
-            s += 1;
-        }
+        // The number of primes: the nearest to `target/bits` whose mean size is within the primes
+        // allowed, half a bit from each end, so that the last prime can make up for the others.
+        let (bottom, top) = (log[first], log[end - 1]);
+        let ideal = target / f64::from(bits);
+        let fits = |s: usize| {
+            let mean = target / s as f64;
+            mean >= bottom + 0.5 && mean <= top - 0.5
+        };
+        let s = (2..=20usize)
+            .filter(|&s| fits(s))
+            .min_by(|&a, &b| {
+                (a as f64 - ideal)
+                    .abs()
+                    .partial_cmp(&(b as f64 - ideal).abs())
+                    .expect("finite")
+            })
+            .unwrap_or_else(|| ((target / (0.5 * (bottom + top))).round() as usize).clamp(2, 20));
         let mut chooser = Chooser {
             s,
             target,
@@ -98,7 +105,7 @@ impl Chooser {
             hi: end,
             first,
             end,
-            tolerance: 0.05,
+            tolerance: 0.1,
             used: HashSet::new(),
             random: Random::new(seed),
             log,

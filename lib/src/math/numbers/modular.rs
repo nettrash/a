@@ -4,8 +4,9 @@
 //! The moduli below `2^64` take paths of their own, on words in registers: their factorisation
 //! ([`word::factor`]), their residues in Montgomery's form, and the orders and logarithms counted
 //! in words. Longer moduli are factored by [`Number::factor`] and their residues kept in the ring
-//! that fits their length ([`ring`]), in registers up to seven limbs. Both run the same algorithms,
-//! written once over the integers they count in ([`int`]).
+//! that fits their length ([`ring`]), in registers up to seven limbs, and eight for the discrete
+//! logarithms ([`dlog`](super::dlog)). Both run the same algorithms, written once over the integers
+//! they count in ([`int`]).
 
 pub(super) mod crt;
 pub(super) mod int;
@@ -29,10 +30,11 @@ impl Number {
     ///
     /// The residues may have any sign and length. Two congruences `x = r (mod m)` and
     /// `x = s (mod n)` have a solution exactly when `g = gcd(m, n)` divides `s - r`, and it is
-    /// `r + m t` with `t = (s - r)/g (m/g)^(-1) mod n/g`, modulo `m n / g`. Moduli below `2^64`
-    /// are joined one at a time on limbs, as Garner's method does, in groups of 64; longer moduli,
-    /// and the groups' results, are joined in pairs up a balanced tree, by the greatest common
-    /// divisor and the inverse.
+    /// `r + m t` with `t = (s - r)/g (m/g)^(-1) mod n/g`, modulo `m n / g`. A few moduli below
+    /// `2^64` are joined in registers, and two moduli of up to 16 limbs on the stack; more moduli
+    /// below `2^64` one at a time on limbs, as Garner's method does, in groups of 64, and from 150
+    /// of them by the product and remainder trees in limbs; longer moduli, and the groups' results,
+    /// are joined in pairs up a balanced tree, by the greatest common divisor and the inverse.
     ///
     /// # Panics
     ///
@@ -60,8 +62,56 @@ impl Number {
         let order = congruences
             .first()
             .map_or(ByteOrder::LittleEndian, |c| c.0.byte_order);
+        // A few congruences modulo words, the common case: in registers while the solution fits in
+        // two words, without a vector.
+        if congruences.len() <= FEW {
+            let mut w = [(0u64, 0u64); FEW];
+            let mut words = true;
+            for (o, (r, m)) in w.iter_mut().zip(congruences) {
+                match ring::magnitude_64(m) {
+                    Some(m) => *o = (word_residue(r, m), m),
+                    None => {
+                        words = false;
+                        break;
+                    }
+                }
+            }
+            if words {
+                let w = &w[..congruences.len()];
+                let (x, l) = match crt::registers(w)? {
+                    crt::Registers::Done(x, l) => (
+                        ring::from_limbs(&[x as u64, (x >> 64) as u64], order),
+                        ring::from_limbs(&[l as u64, (l >> 64) as u64], order),
+                    ),
+                    crt::Registers::Full(x, l, i) => {
+                        let (x, l) = crt::limbs_from(w, x, l, i)?;
+                        (ring::from_limbs(&x, order), ring::from_limbs(&l, order))
+                    }
+                };
+                return Some((x, l));
+            }
+        }
+        // Two congruences of moduli of a few limbs, on the stack.
+        if let [(r1, m1), (r2, m2)] = congruences
+            && let Some(x) = crt::pair((r1, m1), (r2, m2), order)
+        {
+            return Some(x);
+        }
         let long_moduli = congruences.iter().any(|(_, m)| m.significant() > 8);
-        if congruences.len() >= crt::FAST_WORDS || long_moduli && congruences.len() >= crt::FAST {
+        if !long_moduli && congruences.len() >= crt::FAST_WORDS {
+            let c: Vec<(u64, u64)> = congruences
+                .iter()
+                .map(|(r, m)| {
+                    let m = ring::magnitude_64(m).unwrap_or(1);
+                    (word_residue(r, m), m)
+                })
+                .collect();
+            if let Some((x, l)) = crt::fast_words(&c) {
+                return Some((ring::from_limbs(&x, order), ring::from_limbs(&l, order)));
+            }
+            // The moduli are not pairwise coprime, and the trees of numbers below would find so
+            // again: the joins take them.
+        } else if long_moduli && congruences.len() >= crt::FAST {
             let c: Vec<(Number, Number)> = congruences
                 .iter()
                 .map(|(r, m)| {
@@ -134,8 +184,8 @@ impl Number {
             if word::gcd(a, w) != 1 {
                 return None;
             }
-            let f: Vec<(u64, u32)> = word::factor(w).iter().collect();
-            let o = order::order_mod::<u64>(&a, &f);
+            let f = word::factor(w);
+            let o = order::order_mod::<u64>(&a, f.as_slice());
             return Some(Number::new_from_u64(product(&o), order));
         }
         let m = in_order(m.abs(), ByteOrder::LittleEndian);
@@ -188,12 +238,11 @@ impl Number {
                     let two = w % 2 == 0;
                     let odd = if two { w / 2 } else { w };
                     let f = word::factor(odd);
-                    if f.len != 1 {
+                    let [(p, k)] = *f.as_slice() else {
                         return None;
-                    }
-                    let (p, k) = (f.p[0], f.e[0]);
-                    let p1: Vec<(u64, u32)> = word::factor(p - 1).iter().collect();
-                    root::smallest::<u64>(&p, k, two, &p1)
+                    };
+                    let p1 = word::factor(p - 1);
+                    root::smallest::<u64>(&p, k, two, p1.as_slice())
                 }
             };
             return Some(Number::new_from_u64(g, order));
@@ -216,19 +265,27 @@ impl Number {
 
     /// The discrete logarithm of `self` to `base` modulo `m`: the smallest `k >= 0` with
     /// `base^k = self (mod m)`, or `None` when there is none. By Pohlig and Hellman's reduction to
-    /// the prime powers dividing the order of `base`, each by the baby-step giant-step method or
-    /// Pollard's rho, as fits its size. In the byte order of `self`.
+    /// the prime powers dividing the order of `base`, each by the baby-step giant-step method,
+    /// Pollard's rho or the index calculus, as fits its size. In the byte order of `self`.
     ///
     /// Any modulus and any `base` are taken, prime to `m` or not: `m` is factored, and each prime
     /// power `p^e` says what it can of `k`. One that `base` is prime to gives `k` modulo the order of
-    /// `base` there, by Pohlig and Hellman (1978) over the primes of `p - 1`, factored, and `p`
-    /// itself: each prime `q` of the order a digit at a time, by stepping through the powers for
-    /// `q < 16`, by Shanks's baby steps and giant steps up to `2^23`, by Pollard's rho beyond, and
-    /// for `q = p` by a division, as the elements of order `p` modulo `p^e` are `1 + p^(e-1) c`.
-    /// One that divides `base` by `p^v` gives `k >= ceil(e / v)` when it divides `self` `e` times,
-    /// and `k = v_p(self) / v` otherwise. The classes are joined by the Chinese remainder theorem.
-    /// The cost is that of the factorisations and about `sqrt(q)` products modulo `p^e` for the
-    /// largest prime `q` of the order.
+    /// `base` there: modulo the part of the order that divides `p - 1`, computed modulo `p`, and
+    /// modulo the part that is a power of `p`, computed modulo `p^e` on the powers to `p - 1`, by
+    /// Pohlig and Hellman (1978) over the primes of `p - 1`, factored, and `p` itself: each prime `q`
+    /// of the order a digit at a time, by stepping through the powers for `q < 16`, by Shanks's baby
+    /// steps and giant steps up to `2^21` modulo a word and `2^23` modulo longer numbers, by
+    /// Pollard's rho beyond, and for `q = p` by a division, as the elements of order `p` modulo
+    /// `p^e` are `1 + p^(e-1) c`. For a prime `p` of at most 112 bits whose `p - 1` has a large
+    /// prime `q` once (from `2^33` up to 40 bits, `2^40` at 64 and `2^53` at 112), that `q` is
+    /// taken by the index calculus: the linear sieve of Coppersmith, Odlyzko and Schroeppel
+    /// (1986) finds the logarithms of a base of small primes modulo `q`, and each logarithm needed
+    /// comes from a multiple whose rational reconstruction modulo `p` has smooth halves. One that
+    /// divides `base` by `p^v` gives `k >= ceil(e / v)` when it divides `self` `e` times, and
+    /// `k = v_p(self) / v` otherwise. The classes are joined by the Chinese remainder theorem. The
+    /// cost is that of the factorisations and about `sqrt(q)` products modulo `p^e` for the
+    /// largest prime `q` of the order, or that of the index calculus modulo `p`, subexponential:
+    /// about a millisecond at 56 bits, 6 at 72 and 80 at 96.
     ///
     /// # Panics
     ///
@@ -275,6 +332,9 @@ impl Number {
         log::discrete_log::<Number>(&h, &g, &m, &f).map(|k| in_order(k, order))
     }
 }
+
+/// Up to this many congruences, [`Number::crt`] first tries them in registers.
+const FEW: usize = 8;
 
 /// Panics unless `m` is positive.
 #[inline(always)]

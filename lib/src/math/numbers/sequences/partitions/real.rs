@@ -6,6 +6,11 @@
 //! value carries a bound of its error: absolute, in units of `2^-f`, for fixed-point numbers, and
 //! relative, in units of `2^-w`, for floating ones; each truncation adds one unit and each product
 //! the sum of its factors' errors, so the bounds follow the computation step by step.
+//!
+//! `π` and `ln 2` come from tables of 16,384 bits ([`PI_LIMBS`], [`LN2_LIMBS`]), `π` beyond from
+//! the Chudnovskys' series; the cosines of angles with small denominators from closed forms and the
+//! half- and triple-angle formulas ([`cos_pi_algebraic`]), the others from Newton's method on
+//! Chebyshev polynomials ([`cos_pi_newton`]) or from their series ([`cos_pi`]).
 
 use super::super::super::{ByteOrder, Number};
 
@@ -274,6 +279,268 @@ const PI_LIMBS: [u64; 257] = [
     0x0000000000000003,
 ];
 
+/// `floor(ln 2 2^16384)`, the least significant limb first, from `Σ 1 / (k 2^k)` in integers with 128
+/// guard bits: `ln 2` for the reduction of the first term's exponential up to the precision of
+/// [`PI_LIMBS`], and the fraction of every value of the terms on limbs.
+pub(super) const LN2_LIMBS: [u64; 256] = [
+    0xDD9C92F002CA30F8,
+    0x87B4C29E7FB208A9,
+    0x613EE2AC34E4E9E7,
+    0x8DE2AA9176BDB500,
+    0x4DBFE4CEBD7FE74B,
+    0x66840367AE0B74CB,
+    0xFED51F626393CCC5,
+    0x990E84C33202ECC9,
+    0x054D8B71FC0C0D10,
+    0x119F38BD9D90D43E,
+    0x8CEE2EC9AF2D8731,
+    0x8E0352BB66B37977,
+    0x12C3E3F53DB5A720,
+    0x82997D87B22199E9,
+    0x7AEFCB7AF226FE13,
+    0x6FC5EE5748041D64,
+    0xBDDA0B625F39C4C8,
+    0x99AB4C95D1A1ED94,
+    0x40257B2B7F308EB7,
+    0xB3D1FEEDCB09F14C,
+    0x57FBEFFA0345B5AA,
+    0xE7D993D899572381,
+    0xB6DBF8BC4E6D07F9,
+    0xA44A4D5D7E8DAB6B,
+    0xF32018E14FE46C75,
+    0x932247FF56563467,
+    0x2B9F73AD3DDA7560,
+    0x6DA24640BBE2BA0F,
+    0x94CCC4CDFEFC08EA,
+    0x343F671D4877FC71,
+    0x607B1B85535B4CE9,
+    0x43FD280FCE7DF51D,
+    0xEFADE356ED90B7A9,
+    0xFA220BBDEC995C53,
+    0x7D06BDA5B72AA613,
+    0xEE11689688D0FD96,
+    0x0B82E686CE94A838,
+    0x03D0604A998E0195,
+    0xA3734AD2CC114BFF,
+    0x95AF931CF8317D02,
+    0xED5F3D14AF707BB0,
+    0xEEC90443850ACA3B,
+    0xA9024784BE09F609,
+    0x1179057FC450DCA7,
+    0xD20A751FCC43A7C4,
+    0xA203F76ED0E79070,
+    0x6410110BD615E257,
+    0x57FFCD4A70AA1EDF,
+    0xFA4D768EE2FE5271,
+    0x1B2F45A16299E5AC,
+    0xCB9856B29FADC8EC,
+    0x6A3141F601E3BD2B,
+    0xB4AF621A8A555E27,
+    0x5928DCDB041E9325,
+    0x018D2B3101223478,
+    0xAFAE7DAC1D5387BF,
+    0xA55783CE134A42BB,
+    0x2BA8C6120DA6A649,
+    0x738AF20F3CCF6D58,
+    0x58A59908F1670776,
+    0xBE8FDB6792689FF1,
+    0x6D105839F0319222,
+    0x680B77F6CAB5ED37,
+    0xFA4507BA0026761A,
+    0x3C7C334B5EFDB4C6,
+    0x582DC46AE726E49E,
+    0x98570B152CEC2FBD,
+    0x9C45E2715D3D15C2,
+    0xA527BD4447ADB7D1,
+    0x7C847E90A373F5A9,
+    0x03F81FC6473930FF,
+    0x20A7043A0742281B,
+    0x414CBC1BB5F505D2,
+    0x7A6ED2658ADEA5EE,
+    0xFD036381A74342DA,
+    0x8AEEDE384FA88B87,
+    0x9E7F586217AEB406,
+    0xD66AE99D7EFBEA3D,
+    0xC3CE35B948CB5253,
+    0x1A4C99C9A092C106,
+    0xA769F887324B53DE,
+    0x0C36312177D1B7B1,
+    0xC43962E112EE6799,
+    0x4694870E71C194CB,
+    0x5585F6DDD13A0595,
+    0x6C5501316DED1F3E,
+    0x95DBBD18C4EF702D,
+    0x2268A5E0C92F5181,
+    0xE2C73E6FDC29696E,
+    0xC901AFF64A09C45B,
+    0x7533E747D9047F55,
+    0x9DB25DA9BECCB4C2,
+    0x15A2832291FF14FC,
+    0xC1684223D7C6E681,
+    0x3E08EB679C1DB7FF,
+    0xDD826C5D3770067E,
+    0x88255E1C0839CBCB,
+    0x817642C6F224F70F,
+    0x7F4CE0B6FFD8B947,
+    0x9AEE5B60899D5224,
+    0xDF1FFC2E2288F8CA,
+    0x7EE236FDC33BC8E7,
+    0x0116E6B65AEB3BE7,
+    0x5709468D78EBD2DA,
+    0xF60A3EB81747F87E,
+    0xEF1FD9678CC0B5E9,
+    0x5A8B7808DF43BD8E,
+    0x341B06E211977B07,
+    0x2B661CD85063034E,
+    0xDD617335DFDD424F,
+    0xC7BBA02811376090,
+    0xD6F7E1B9E1903D71,
+    0x7C7CD17AF804D933,
+    0x27A900B1AF5E75F8,
+    0xB01B2AE0E98E0E15,
+    0x843BFA1873F0C446,
+    0x5B2238677A2BFBBD,
+    0x0FA8601CF6868A05,
+    0x93435B9C277736A7,
+    0x5A66203D62FD1E70,
+    0xB16EA8911AFBF1AE,
+    0x77CF0656907FB9B1,
+    0xAC5E3701D7D77253,
+    0xFEA79D89D5C5ED40,
+    0x144E67EBE9B42698,
+    0x971CC90B5518569F,
+    0xA4B8D1ECF7567EB0,
+    0xCBB9AC407DDB6C13,
+    0xD571EC6C1366A992,
+    0x435A0CE134C2838F,
+    0xD2AAE89CCC3B76FC,
+    0xEE94E62F110A6783,
+    0xBAF86856CCD3C3B6,
+    0x988012E8314186ED,
+    0x8A886EB3C87B7295,
+    0xE30219C8AA9CE884,
+    0x1D822DD6E2F76797,
+    0x852BE3E8FC99F14D,
+    0x5A9139DB14EFCC30,
+    0x347F8304D889659E,
+    0x4012A82962C59CAB,
+    0xDF59EAE051707062,
+    0xB12DFAB414451579,
+    0x80BC423433562E94,
+    0xAF6D605871EF7AFB,
+    0x1A356B2A73B7EAAD,
+    0xF91096AC3195220A,
+    0xC95F260FD10036F9,
+    0xF9EEEEA98A2400CA,
+    0x6DC085A98AC8D8CA,
+    0x6808292057FD99B6,
+    0x624F14A51A4A026B,
+    0x73E5B5C1585318E7,
+    0xC12963B0FF01EAAB,
+    0x2B552879A6168695,
+    0x8FD9405789F45681,
+    0xF2D89D2A4B183527,
+    0x1BDA1F85EF6FDBF2,
+    0x1AA4FB42B9A3DEF4,
+    0xD6CCE1DAA5053701,
+    0xAC14B958784934B8,
+    0x12B5E8C202461069,
+    0xA3D091F656658154,
+    0xD162AF053B1751F3,
+    0x846532E4B9694EDA,
+    0xB779DFE49D7307CC,
+    0xAD8A43DC4212B210,
+    0x6FE51A8CFAA72EF2,
+    0x88D586554E2A0E8A,
+    0x20CDB5CCB3DB2392,
+    0x14F0CD976EA354BB,
+    0x471BF4F445F0A88A,
+    0x0F023B220224FCD8,
+    0xF11785903155BBD9,
+    0x33CE3573FACC5FDC,
+    0x154C60320E2FF793,
+    0x53DAEC3F64F1B783,
+    0xDB4A9316F281501E,
+    0xBE2EC92156C9F949,
+    0x0CA8F58D94F0341C,
+    0x554B03D7D2874A00,
+    0xFB0C75DF5497E00C,
+    0xEE6E0850ECA42D06,
+    0x364F5B8AEF22EC2F,
+    0x897A39CE78B63C9F,
+    0x52AB33161E238438,
+    0x062B1A63A6C4C60C,
+    0x3EA8449FE8F70EDD,
+    0x6425A41526FAC51C,
+    0xC5E5767DF95884E0,
+    0xC0B1B31D8A0E23FA,
+    0x85DB6AB03A49BD0D,
+    0x175EB4AFC8DAADD8,
+    0xF07AFFF3A892374E,
+    0x8F6826250DEA891E,
+    0xCECB72F19C38339D,
+    0x5F6F7CEBAC9F45AE,
+    0x6C472096E76115C0,
+    0x972CD18BFBBD9D42,
+    0x0AB111BBBD67C724,
+    0x473826FDA0C238B9,
+    0x61C1696DD24AAEBD,
+    0x156E0C292413D5E3,
+    0x95184460DC4E7487,
+    0xD7622658901E646A,
+    0xEF2F0CE2D7373958,
+    0x2AC5B61CC4E9207C,
+    0x57339BA2BEBA7D05,
+    0x0060E49908391A0C,
+    0x621363196AF50302,
+    0x05C128D53D0BD2F9,
+    0x36E02B20CEE886B9,
+    0x0BBB16FAF3D949F2,
+    0x422183EDC9942109,
+    0x5E9222B88C66D3C5,
+    0x61AFFD446B1CA3CF,
+    0x268A5C1F9538B982,
+    0x8D6F5177FBCF0755,
+    0xA17293D1228A4EF9,
+    0x44A02554731CDC8E,
+    0x96D4E6D330AF889B,
+    0x5570B6C68F969834,
+    0x7598A1951AE273EE,
+    0x4D162DB3B365853D,
+    0x5F50B5185064C18B,
+    0x078F735D1B2DB31B,
+    0xAE313CDB6C606CB1,
+    0x955D5179B1E17B9D,
+    0x0C480A5417350D2C,
+    0x074DB6015CFE7AA3,
+    0x6A9C7F8A5E148E82,
+    0x25669B333564A337,
+    0x4C1A1E0BD1D6095D,
+    0xCCCC4E659393514C,
+    0xC943E732B479CD33,
+    0x17460775DB8990E5,
+    0x7D2E23DE1400B396,
+    0xEE569D6DFC1EFA15,
+    0x610D30F88FE551A2,
+    0x07F4CA11FB5BFB90,
+    0xDA2D97C50F3FD5C6,
+    0x655FA1872F20E3A2,
+    0xF5DFA6BD38303248,
+    0x72CE87B19D6548CA,
+    0x256FA0EC7657F74B,
+    0xB9EA9BC3B136603B,
+    0x1ACBDA11317C387E,
+    0x3E96CA16224AE8C5,
+    0x27573B291169B825,
+    0xED2EAE35C1382144,
+    0x559552FB4AFA1B10,
+    0xE7B876206DEBAC98,
+    0x8A0D175B8BAAFA2B,
+    0x40F343267298B62D,
+    0xC9E3B39803F2F6AF,
+    0xB17217F7D1CF79AB,
+];
+
 /// The fraction of `π`, [`PI_LIMBS`] without its integer part.
 pub(super) const PI_TABLE: &[u64] = PI_LIMBS.split_last().expect("not empty").1;
 
@@ -300,12 +567,37 @@ pub(super) fn shift(x: &Number, k: i64) -> Number {
     }
 }
 
-/// `floor(π 2^f)` less at most 4: from the table up to 4096 bits, by Chudnovsky's series beyond.
+/// The longest precision of `π` that [`PI_CACHE`] keeps: `2^22` bits, 512 KiB, the series of `n` up
+/// to about `10^12`.
+const PI_CACHE_BITS: u64 = 1 << 22;
+
+/// `π` beyond the table, for the series of `n` above about `2 10^7`: the longest computed so far, as
+/// `(f, floor(π 2^f) less at most 4)`, for the process; filled by [`pi`] at its first precision
+/// above the table and replaced by a longer one, never past [`PI_CACHE_BITS`]. The partition
+/// numbers do not depend on it: a value cut from a longer one stays within the same bound.
+static PI_CACHE: std::sync::Mutex<Option<(u64, Number)>> = std::sync::Mutex::new(None);
+
+/// `floor(π 2^f)` less at most 4: from the table up to 16,384 bits, by Chudnovsky's series beyond,
+/// kept in [`PI_CACHE`] and cut from there for shorter precisions (`floor(x 2^-d)` of a value within
+/// 4 below is within `1 + 4 2^-d <= 3` below for `d >= 1`).
 pub(super) fn pi(f: u64) -> Number {
     if f <= PI_BITS {
         return of_limbs(&PI_LIMBS) >> shift_count(PI_BITS - f);
     }
-    chudnovsky(f)
+    if let Ok(cache) = PI_CACHE.lock()
+        && let Some((bits, v)) = cache.as_ref()
+        && *bits >= f
+    {
+        return v >> shift_count(bits - f);
+    }
+    let v = chudnovsky(f);
+    if f <= PI_CACHE_BITS
+        && let Ok(mut cache) = PI_CACHE.lock()
+        && cache.as_ref().is_none_or(|(bits, _)| *bits < f)
+    {
+        *cache = Some((f, v.clone()));
+    }
+    v
 }
 
 /// `π 2^f` within 4 below, by the Chudnovskys' series (1988)
@@ -541,7 +833,7 @@ pub(super) fn terms(s: u64, f: u64) -> u64 {
     let mut bits = s as f64 + 1.0;
     while bits < f as f64 + 1.0 {
         t += 1;
-        bits += s as f64 + ((t + 1) as f64).log2();
+        bits += s as f64 + log2_below((t + 1) as f64);
     }
     t
 }
@@ -553,12 +845,38 @@ pub(super) fn reduction(w: u64) -> u64 {
 }
 
 /// `e^x` for `x = X 2^-fx > 0` within `ex` units of `2^-fx`, to a relative error below
-/// `err 2^-w`, as a floating number of `w` bits and `err`.
+/// `err 2^-w`, as a floating number of `w` bits and `err`; reduced by `ln 2` first up to the
+/// precision of the table [`LN2_LIMBS`].
 ///
 /// `x = 2^s r` with `r < 2^-s0`; `e^r - 1 = r Σ r^j / (j + 1)!` by [`series`], then `s` doublings
 /// `e^(2y) - 1 = (e^y - 1)(e^y - 1 + 2)`, in floating numbers, each of which multiplies the
 /// relative error by `1 + (e^y - 1)/(e^y + 1) < 2` and adds two units; then 1 is added.
 pub(super) fn exp(x: &Number, fx: u64, ex: f64, w: u64) -> (Float, f64) {
+    debug_assert!(!x.is_negative());
+    if fx > PI_BITS || (x >> shift_count(fx)).bits() < 2 {
+        return exp_reduced(x, fx, ex, w);
+    }
+    // `x = q ln 2 + r` with `0 <= r < ln 2`, `ln 2` from the table within a unit of `2^-fx`: `r`
+    // within `ex + q` units, and `e^x = 2^q e^r` with the doublings of `x`'s integer bits saved.
+    let ln2 = of_limbs(&LN2_LIMBS) >> shift_count(PI_BITS - fx);
+    let xf = Float::of_fixed(x.clone(), fx).to_f64();
+    let mut q = (xf / core::f64::consts::LN_2).floor().max(0.0) as u64;
+    let mut r = x - &(&ln2 * &Number::new_from_u64(q, LE));
+    while r.is_negative() {
+        q -= 1;
+        r += &ln2;
+    }
+    while r >= ln2 {
+        q += 1;
+        r -= &ln2;
+    }
+    let (mut v, rel) = exp_reduced(&r, fx, ex + q as f64 + 1.0, w);
+    v.e += q as i64;
+    (v, rel)
+}
+
+/// [`exp`] without the reduction by `ln 2`.
+fn exp_reduced(x: &Number, fx: u64, ex: f64, w: u64) -> (Float, f64) {
     debug_assert!(!x.is_negative());
     let int_bits = (x >> shift_count(fx)).bits();
     let s0 = reduction(w);
@@ -616,11 +934,39 @@ fn ratio_to_two(y: &Float) -> f64 {
 pub(super) fn pow2(e: i64) -> f64 {
     if e > 1023 {
         f64::INFINITY
-    } else if e < -1074 {
-        0.0
+    } else if e >= -1022 {
+        // A normal number: its exponent field, exactly.
+        f64::from_bits(((1023 + e) as u64) << 52)
+    } else if e >= -1074 {
+        // A subnormal one: its bit in the mantissa.
+        f64::from_bits(1u64 << (e + 1074))
     } else {
-        (e as f64).exp2()
+        0.0
     }
+}
+
+/// An upper bound of `log2 x` for `x > 0`, without the system's `log2`: `x = 2^e (1 + m)` with
+/// `0 <= m < 1` and `log2(1 + m) - m <= 0.0861` (its largest value, at `m = 1/ln 2 - 1`), so within
+/// `0.087` of it.
+#[inline]
+pub(super) fn log2_above(x: f64) -> f64 {
+    debug_assert!(x > 0.0 && x.is_finite());
+    let b = x.to_bits();
+    let e = (b >> 52) as i64 - 1023;
+    let m = f64::from_bits((b & ((1 << 52) - 1)) | (1023 << 52)) - 1.0;
+    e as f64 + m + 0.0861
+}
+
+/// A lower bound of `log2 x` for `x >= 1`, without the system's `log2`: `x = 2^e (1 + m)` with
+/// `0 <= m < 1` and `log2(1 + m) >= m`, the chord of a concave function. Within `0.086` of it; the
+/// counts of terms that add it up are then at least what they need.
+#[inline]
+pub(super) fn log2_below(x: f64) -> f64 {
+    debug_assert!(x >= 1.0);
+    let b = x.to_bits();
+    let e = (b >> 52) as i64 - 1023;
+    let m = f64::from_bits((b & ((1 << 52) - 1)) | (1023 << 52)) - 1.0;
+    e as f64 + m
 }
 
 /// `cos(π a / b)` for `0 <= a < 2b`, to `w` bits, with `pi_f` the fixed-point `π` of `fp` bits
@@ -699,6 +1045,268 @@ pub(super) fn cos_pi(a: u64, b: u64, w: u64, pi_f: &Number, fp: u64) -> Option<(
     Some((r.cut(w), negative, rel * pow2(w as i64 - f as i64) + 2.0))
 }
 
+/// Whether `cos(π p / q)` for a reduced `p / q` has a closed form or a chain of the half-angle
+/// and triple-angle formulas down to one ([`cos_fixed`]): `q = 2^s 3^t q'` with `q'` 1 or 5.
+fn algebraic(q: u64) -> bool {
+    let mut q = q >> q.trailing_zeros();
+    while q.is_multiple_of(3) {
+        q /= 3;
+    }
+    matches!(q, 1 | 5)
+}
+
+/// `cos(π a / b)` for `0 <= a < 2b` as [`cos_pi`] gives it, when the reduced denominator is
+/// `2^s 3^t q` with `q` 1 or 5, and `None` otherwise: from the closed forms of the angles `π p / q`
+/// for `q` up to 6 (`1/2`, `√2/2`, `√3/2`, `(√5 ± 1)/4`), the half-angle formula for an even
+/// denominator, as Arb's `_arb_cos_pi_fmpq_algebraic` takes it, and the triple-angle one for an odd
+/// multiple of 3, a root of a cubic ([`cos_fixed`]).
+pub(super) fn cos_pi_algebraic(a: u64, b: u64, w: u64) -> Option<Option<(Float, bool, f64)>> {
+    let (a, b) = (u128::from(a), u128::from(b));
+    let a = if a > b { 2 * b - a } else { a };
+    let (a, negative) = if 2 * a > b { (b - a, true) } else { (a, false) };
+    if 2 * a == b {
+        return Some(None);
+    }
+    if a == 0 {
+        return Some(Some((
+            Float {
+                m: Number::new_from_u8(1, LE),
+                e: 0,
+            },
+            negative,
+            0.0,
+        )));
+    }
+    let g = gcd(a, b);
+    let (p, q) = ((a / g) as u64, (b / g) as u64);
+    if !algebraic(q) {
+        return None;
+    }
+    let extra = 2 * u64::from(64 - q.leading_zeros()) + 4;
+    // The result is at least `sin(π/q) > 2^-bits(q)`: `bits(q)` more for its relative precision.
+    let top = w + extra + 16;
+    let (c, e) = cos_fixed(p, q, top, extra);
+    debug_assert!(!c.is_negative());
+    // Relative within `e 2^-top / c` and the cut.
+    let x = Float::of_fixed(c, top);
+    let low = x.to_f64() * 0.999;
+    let rel = e * pow2(w as i64 - top as i64) / low + 2.0;
+    Some(Some((x.cut(w), negative, rel)))
+}
+
+/// `cos(π a / b)` for `0 <= a < 2b` in fixed point with `f` bits, its magnitude, its sign and a bound
+/// of its absolute error in units of `2^-f`, as [`cos_pi_algebraic`] computes it, when the reduced
+/// denominator allows (`None` otherwise, and `Some(None)` for zero); `cubic` whether a step of the
+/// triple-angle formula may be taken.
+pub(super) fn cos_pi_fixed(
+    a: u64,
+    b: u64,
+    f: u64,
+    cubic: bool,
+) -> Option<Option<(Number, bool, f64)>> {
+    let (a, b) = (u128::from(a), u128::from(b));
+    let a = if a > b { 2 * b - a } else { a };
+    let (a, negative) = if 2 * a > b { (b - a, true) } else { (a, false) };
+    if 2 * a == b {
+        return Some(None);
+    }
+    if a == 0 {
+        return Some(Some((
+            Number::new_from_u8(1, LE) << shift_count(f),
+            negative,
+            0.0,
+        )));
+    }
+    let g = gcd(a, b);
+    let (p, q) = ((a / g) as u64, (b / g) as u64);
+    if !algebraic(q)
+        || (!cubic && (q >> q.trailing_zeros()).is_multiple_of(3) && q >> q.trailing_zeros() > 3)
+    {
+        return None;
+    }
+    let extra = 2 * u64::from(64 - q.leading_zeros()) + 4;
+    let (c, e) = cos_fixed(p, q, f + 8, extra);
+    // Cut to `f` bits: a unit more.
+    Some(Some((&c >> 8usize, negative, e / 256.0 + 1.0)))
+}
+
+/// `cos(π p / q)` in fixed point with `f` bits, signed, for `0 <= p <= q` with [`algebraic`]`(q)`
+/// (its reduced form), and a bound of its absolute error in units of `2^-f`; `extra` bits more for each
+/// level below:
+///
+/// - `p/q > 1/2`: `-cos(π (q - p) / q)`;
+/// - the closed forms of `q <= 6`;
+/// - an even `q`: for `p/q <= 1/2`, `√((1 + cos(πp/(q/2)))/2)` when `4p <= q`, and
+///   `√((1 - cos(π(q/2 - p)/(q/2)))/2)` otherwise; a root `c = √u` of a `u` within `e` moves by at
+///   most `e / (2c)`, `c` at least half its double, which is within `12 u` of it;
+/// - an odd multiple of 3: the root `c` near its double of `4c^3 - 3c = t`, `t = cos(3πp/q)`, by
+///   Newton's method from the double, the precision doubled at each step, less the bits that the
+///   conditioning `f'(c) = 12c^2 - 3` costs, which vanishes at `θ = π/3` ([`cubic`]); the error from
+///   the residual `r = 4c^3 - 3c - t`, within `9` units and that of `t`: `|c - c*| <= (|r| + 9 +
+///   e_t) / (|f'(c)| / 2)`, as `|f''| <= 28` keeps `|f'|` above half its value within `|f'| / 64` of
+///   `c`, a distance the bound and the double's are checked to be below, which keeps the other roots
+///   of the cubic, `cos(θ ± 2π/3)`, out.
+fn cos_fixed(p: u64, q: u64, f: u64, extra: u64) -> (Number, f64) {
+    let g = gcd(u128::from(p), u128::from(q)) as u64;
+    let (p, q) = (p / g, q / g);
+    if 2 * p > q {
+        let (c, e) = cos_fixed(q - p, q, f, extra);
+        return (-c, e);
+    }
+    let one = Number::new_from_u8(1, LE) << shift_count(f);
+    if 2 * p == q {
+        return (Number::new_from_u8(0, LE), 0.0);
+    }
+    if p == 0 {
+        return (one, 0.0);
+    }
+    // `isqrt(x 2^(2f))`, `√x` rounded down, within a unit.
+    let root_of = |x: u64| (Number::new_from_u64(x, LE) << shift_count(2 * f)).isqrt();
+    match (p, q) {
+        // `cos(π/3) = 1/2`, exactly.
+        (1, 3) => (&one >> 1usize, 0.0),
+        // `√2/2 = √(1/2)` and `√3/2 = √(3/4)`: a unit, after the exact shift of the radicand.
+        (1, 4) => (
+            (Number::new_from_u8(1, LE) << shift_count(2 * f - 1)).isqrt(),
+            1.0,
+        ),
+        (1, 6) => (
+            (Number::new_from_u8(3, LE) << shift_count(2 * f - 2)).isqrt(),
+            1.0,
+        ),
+        // `(1 ± √5)/4`: the root within a unit, a quarter of it after the shift, which rounds down
+        // by less than a unit.
+        (1, 5) => (&(&one + &root_of(5)) >> 2usize, 2.0),
+        (2, 5) => (&(&root_of(5) - &one) >> 2usize, 2.0),
+        _ if q.is_multiple_of(2) => {
+            let h = q / 2;
+            let (inner, plus) = if 4 * p <= q {
+                (p, true)
+            } else {
+                (h - p, false)
+            };
+            // `cos(π inner / h)`, `inner / h <= 1/2`, at `extra` bits more.
+            let (c, ec) = cos_fixed(inner, h, f + extra, extra);
+            let onex = Number::new_from_u8(1, LE) << shift_count(f + extra);
+            let u = if plus { &onex + &c } else { &onex - &c };
+            // `u / 2` within `ec / 2` units of `2^-(f + extra)`, and its root in fixed point with `f`
+            // bits: `√(U 2^-(f+extra) / 2) 2^f = √(U 2^(f - extra - 1))`.
+            let shifted = if f > extra {
+                &u << shift_count(f - extra - 1)
+            } else {
+                &u >> shift_count(extra + 1 - f)
+            };
+            let r = shifted.isqrt();
+            // The root moves by `(ec/2) 2^-(f+extra) / (2c)` at most, `c` the result, at least half
+            // its double; in units of `2^-f`, and one for the rounding.
+            let c_low = super::double::cos_pi(p, q) * 0.5;
+            let e = ec / 2.0 * pow2(-(extra as i64)) / (2.0 * c_low) + 1.0;
+            (r, e)
+        }
+        _ => {
+            debug_assert!(q.is_multiple_of(3) && q > 6);
+            cubic(p, q, f, extra)
+        }
+    }
+}
+
+/// `cos(π p / q)` for `0 < p/q < 1/2` and an odd multiple `q` of 3, by the triple-angle formula
+/// (see [`cos_fixed`]), and the bound of its error in units of `2^-f`.
+fn cubic(p: u64, q: u64, f: u64, extra: u64) -> (Number, f64) {
+    // `t = cos(3πp/q) = cos(π p / (q/3))`, `p / (q/3) < 3/2`: reduced to `[0, 1]` by
+    // `cos(π x) = cos(π (2 - x))`.
+    let h = q / 3;
+    let inner = if p > h { 2 * h - p } else { p };
+    let (t, et) = cos_fixed(inner, h, f + extra, extra);
+    let start = super::double::cos_pi(p, q);
+    // The conditioning: `f'(c) = 12c^2 - 3`, about `d0` at the root, vanishes at `θ = π/3`, where
+    // `4c^3 - 3c = -1` has a double root, and the angles of a denominator `3^j` next to `π/3` come
+    // within `π / 3^j` of it. A step's residual, within about 10 units, moves its correction by
+    // `10 / d0` units, the `guard` bits each precision carries; its quadratic constant
+    // `f'' / (2f') = 12c / f'(c)`, at most `12 / d0`, costs `lost` bits a step.
+    // Kept above `10^-12`, which no reduced denominator below `2^35` comes near: its angles are at
+    // least `π/q > 10^-10` off `π/3`.
+    let d0 = (12.0 * start * start - 3.0).abs().max(1e-12);
+    let guard = (16.0 / d0).log2().ceil().max(0.0) as u64;
+    let lost = (12.0 / d0).log2().ceil().max(0.0) as u64 + 1;
+    // The bits each step makes right, from `f + 16` down: a step from `s` right bits makes about
+    // `2s - lost` right at its precision, `guard` bits above them; down to what the double holds,
+    // 49 bits (within `12 u` of the root, which is below 1), or `lost + 18`, below which the halving
+    // would stop falling. Without the guard and the constant's bits a step near `π/3` fell short by a
+    // few bits, a shortfall that doubled at each step: `cos(2188π/6561)` to 4000 bits was right to
+    // fewer than 3900, and to 16000 its residual did not fit a double.
+    let mut right = vec![f + 16];
+    let floor = 49u64.max(lost + 18);
+    while *right.last().expect("not empty") > floor {
+        let s = *right.last().expect("not empty");
+        right.push((s + lost) / 2 + 8);
+    }
+    // A step of Newton's method at `pr` bits from `c` of `fc` bits: `c - f(c) / f'(c)` with
+    // `f(x) = 4x^3 - 3x - t` and `f'(x) = 12 x^2 - 3`.
+    let step = |c: &Number, fc: u64, pr: u64| -> Number {
+        let x = shift(c, pr as i64 - fc as i64);
+        let tp = shift(&t, pr as i64 - (f + extra) as i64);
+        let x2 = shift(&(&x * &x), -(pr as i64));
+        let x3 = shift(&(&x2 * &x), -(pr as i64));
+        let fx = &(&(&x3 << 2usize) - &(&x * 3u32)) - &tp;
+        let three = Number::new_from_u8(3, LE) << shift_count(pr);
+        let dfx = &(&x2 * 12u32) - &three;
+        let correction = &(&fx << shift_count(pr)) / &dfx;
+        &x - &correction
+    };
+    let mut c = Number::new_from_u64((start * pow2(60)) as u64, LE);
+    let mut fc = 60u64;
+    // The last of `right` is what the start holds.
+    for &s in right.iter().rev().skip(1) {
+        c = step(&c, fc, s + guard);
+        fc = s + guard;
+    }
+    // The residual at the precision of the last step: `x^2` within a unit, `x^3` within
+    // `|x| + 1 <= 2`, `4 x^3` within 8, and `t` within `et 2^-extra`; then `|c - c*| <=
+    // (|r| + er) / (|f'| / 2)` units of `2^-pr`, `dist`, while `|f'|` stays above half (below).
+    let pr = fc;
+    let bound = |c: &Number| -> (f64, f64, f64) {
+        let x2 = shift(&(c * c), -(pr as i64));
+        let x3 = shift(&(&x2 * c), -(pr as i64));
+        let tp = shift(&t, pr as i64 - (f + extra) as i64);
+        let r = &(&(&x3 << 2usize) - &(c * 3u32)) - &tp;
+        let xf = Float::of_fixed(c.clone(), pr).to_f64();
+        let dfx = (12.0 * xf * xf - 3.0).abs();
+        let er = 8.0 + 1.0 + et * pow2(pr as i64 - (f + extra) as i64);
+        let dist = (Float::of_fixed(r, 0).to_f64().abs() + er) / (dfx / 2.0) * 1.001;
+        (dist, dfx, xf)
+    };
+    let (mut dist, mut dfx, mut xf) = bound(&c);
+    // Steps more at the last precision while `c` is short of `f + 16` right bits by more than 10: a
+    // guard for a conditioning that the double misjudged.
+    for _ in 0..4 {
+        if dist.is_finite() && dist.log2() <= (guard + 10) as f64 {
+            break;
+        }
+        c = step(&c, pr, pr);
+        (dist, dfx, xf) = bound(&c);
+    }
+    // Within `δ = |f'(c)| / 64` of `c`, `|f''| = 24 |y| <= 28` keeps `|f'| >= |f'(c)| / 2`: `f` is
+    // monotone there, so it has one root within `dist` of `c` when that is below `δ`, and no other.
+    // `cos(πp/q)` is a root within `|c - start| + 12 u` of `c`, the double being within `12 u` of it,
+    // so it is that root when that is below `δ` too. (Near `θ = π/3` the other roots,
+    // `cos(θ ± 2π/3)`, come within `√3 |sin(θ - π/3)|` of it, which the check keeps out of `δ`.) In
+    // logarithms: `2^-pr` is no double past 1074 bits.
+    let delta = dfx / 64.0;
+    let away = (xf - start).abs();
+    assert!(
+        dist.is_finite()
+            && dist.log2() - (pr as f64) < delta.log2()
+            && away + 16.0 * super::double::U < delta,
+        "Newton's method on the triple angle did not converge"
+    );
+    // Rounded down to `f` bits: a unit more, the distance in units of `2^-f`.
+    (
+        shift(&c, f as i64 - pr as i64),
+        dist * pow2(f as i64 - pr as i64) + 1.0,
+    )
+}
+
 /// `a - b` for floating numbers with `a > b > 0`, cut to `w` bits.
 fn sub(a: &Float, b: &Float, w: u64) -> Float {
     let e = a.e.min(b.e);
@@ -756,12 +1364,15 @@ fn residual(a: &Float, x: &Float, k: u64, p: u64, f: u64) -> (Number, u64) {
 /// bits, and its relative error in units of `2^-w`.
 ///
 /// Newton's iteration for `a^(-1/k)`, which takes no division: `x + x (1 - a x^k) / k`, the
-/// precision doubled at each step from a double's start. Its error is bounded afterwards from the
+/// precision doubled at each step from a double's start, less the bits of the step's quadratic
+/// constant: for `x = a^(-1/k) (1 + δ)` the step gives `a^(-1/k) (1 - (k + 1) δ^2 / 2 + ...)`, so
+/// from `s` right bits about `2s - log2((k + 1) / 2)`. Its error is bounded afterwards from the
 /// residual `t = 1 - a x^k` computed once more: with `x = a^(-1/k) (1 + δ)`, `(1 + δ)^k = 1 - t`,
 /// so `|δ| <= |t| / (k (1 - |t|))`; `t` is within a unit of the fixed point and two for each cut of
 /// the power and the product, and `a`'s own error reaches `x` divided by `k`.
 pub(super) fn inverse_root(a: &Float, ra: f64, wa: u64, k: u64, w: u64) -> (Float, f64) {
-    // The start: `2^(-log2(a) / k)`, about 30 bits right.
+    // The start: `2^(-log2(a) / k)`, right to about `50 - log2 |l|` bits (the roundings of the
+    // double `l` and of `log2 a`, divided by `k`).
     let l = -a.log2() / k as f64;
     let e0 = l.floor();
     let mant = ((l - e0).exp2() * pow2(52)) as u64;
@@ -769,11 +1380,18 @@ pub(super) fn inverse_root(a: &Float, ra: f64, wa: u64, k: u64, w: u64) -> (Floa
         m: Number::new_from_u64(mant, LE),
         e: e0 as i64 - 52,
     };
+    // The precisions from the target down: each step reaches its precision from half of it plus
+    // the constant's bits, `lost >= log2((k + 1) / 2) + 1`, and 8 to spare, down to what the start
+    // already holds; at least `lost + 18`, below which the halving would stop falling. Without
+    // `lost`, a step fell short by about that many bits, a shortfall that doubled at each step: at
+    // `k = 643` and 4458 bits `x` was right to fewer than 4300, and `p(10^11)` failed its bound.
+    let lost = u64::from(64 - k.leading_zeros());
+    let start = ((50.0 - (l.abs() + 1.0).log2()).max(0.0) as u64).max(lost + 18);
     let target = w + 16;
     let mut precisions = vec![target];
-    while *precisions.last().expect("not empty") > 50 {
+    while *precisions.last().expect("not empty") > start {
         let p = *precisions.last().expect("not empty");
-        precisions.push(p / 2 + 8);
+        precisions.push((p + lost) / 2 + 8);
     }
     for &p in precisions.iter().rev().skip(1) {
         // Room for the correction, of about half the bits.
@@ -794,7 +1412,29 @@ pub(super) fn inverse_root(a: &Float, ra: f64, wa: u64, k: u64, w: u64) -> (Floa
         .cut(p);
     }
     let p = target + 8;
-    let (t, products) = residual(a, &x, k, p, p);
+    let (mut t, mut products) = residual(a, &x, k, p, p);
+    // Steps more at the target while the residual shows `x` short of it (`|t| / k` above about
+    // `2^-target`): a guard for a start the schedule misjudged, each step at least doubling the
+    // right bits.
+    let enough = lost + 12;
+    for _ in 0..4 {
+        if t.bits() <= enough {
+            break;
+        }
+        let mut xm = x.clone();
+        let have = xm.m.bits();
+        if have < target {
+            xm.m = &xm.m << shift_count(target - have);
+            xm.e -= (target - have) as i64;
+        }
+        let d = &(&(&xm.m * &t) >> shift_count(p)) / k;
+        x = Float {
+            m: &xm.m + &d,
+            e: xm.e,
+        }
+        .cut(target);
+        (t, products) = residual(a, &x, k, p, p);
+    }
     // `|t|` and its error, in units of `2^-w`: far below 1 as fractions, so `1 - |t| > 0.999`.
     let tu = t.to_f64().abs() * pow2(w as i64 - p as i64);
     let eu = (1.0 + 2.0 * products as f64 + ra * pow2(p as i64 - wa as i64) + 2.0)
@@ -891,10 +1531,16 @@ pub(super) fn cos_pi_newton(a: u64, b: u64, w: u64) -> Result<Option<(Float, boo
     let start = Number::new_from_u64((x0 * pow2(60)) as u64, LE);
     let mut x = start.clone();
     let mut fx = 60u64;
+    // A step from `s` right bits makes `2s - log2 c` right for the quadratic constant `c = |f''| /
+    // (2 |f'|)` at the root, `cos θ / (2 sin^2 θ)` for `T_m` and three times that for `U_(m-1)`, below
+    // `2^(2 bits(b))`: each precision is reached from half of it plus those bits. Without them, at
+    // `cos(π/511)` the steps fell short by about two bits, a shortfall that doubled at each step: to
+    // 16,000 bits its bound was `4 10^18` units.
+    let lost = 2 * bits;
     let mut precisions = vec![target];
     while *precisions.last().expect("not empty") > 90 {
         let p = *precisions.last().expect("not empty");
-        precisions.push(p / 2 + 8);
+        precisions.push((p + lost) / 2 + 8);
     }
     for &p in precisions.iter().rev() {
         let xp = shift(&x, p as i64 - fx as i64);

@@ -1,6 +1,8 @@
 //! The hard special leaves of Deléglise and Rivat's method: `φ(x / n, b - 1)` for the leaves
-//! `n = p_b m` whose `x / n` is above `y`, from a segmented sieve of the numbers from 0 to `z`
-//! crossed out by the primes in order, `p_b` after the leaves of `b` are read.
+//! `n = p_b m` whose `x / n` is at least `y`, those of a prime `q = m` only when `x / n` is at least
+//! `p_b^2` too (the others are easy, their `φ` from `π`, as Gourdon sorts them), so that `p_b` is at
+//! most `x^(1/4)`: from a segmented sieve of the numbers from 0 to `z` crossed out by the primes in
+//! order, `p_b` after the leaves of `b` are read.
 //!
 //! As in primecount, the sieve holds a bit for each number prime to 30 (`30 j + {1, 7, ..., 29}`
 //! in byte `j`), and the numbers left up to a point are counted from counters of the bits left in
@@ -8,11 +10,54 @@
 //! indexed tree. primecount counts from the last leaf's point on, by its counters then by words;
 //! here the count of a leaf is formed afresh, with no branches: the bits before its block of 64
 //! bytes, from the blocks' counters summed once for each prime ([`Sieve::prepare`]), and those of
-//! the words of the block up to it, masked ([`rank`]), so that the leaves of a prime are
+//! the words of the block up to it, masked ([`kernels::rank`]), so that the leaves of a prime are
 //! independent of one another and overlap in the processor, where a count carried from leaf to leaf
 //! mispredicts the ends of its loops. Measured at `x = 10^16`, this took the hard leaves from 2.6
 //! to 1.0 s.
 
+// The kernels under the name `kernels`: NEON on the 64-bit little-endian aarch64 targets that the
+// numbers' assembly runs on, where NEON is enabled, as it is by default; portable Rust elsewhere and
+// under Miri, which runs no SIMD of this kind.
+#[cfg(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_pointer_width = "64",
+    target_feature = "neon",
+    any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "fuchsia"
+    ),
+    not(miri)
+))]
+#[path = "hard/aarch64.rs"]
+mod kernels;
+#[cfg(not(all(
+    target_arch = "aarch64",
+    target_endian = "little",
+    target_pointer_width = "64",
+    target_feature = "neon",
+    any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "fuchsia"
+    ),
+    not(miri)
+)))]
+#[path = "hard/portable.rs"]
+mod kernels;
+
+use super::super::segments::isqrt;
 use super::tables::{FactorTable, PiTable, UP_TO};
 
 /// The numbers of the bits of a byte from its multiple of 30.
@@ -122,13 +167,14 @@ struct State {
 }
 
 /// `log2` of the bytes of a block, and its words.
-const BLOCK: u32 = 6;
-const WORDS: usize = 1 << (BLOCK - 3);
+pub(super) const BLOCK: u32 = 6;
+pub(super) const WORDS: usize = 1 << (BLOCK - 3);
 
 /// The primes below this are crossed out with no counts, and the counts formed again from the
 /// bits: they cross out so many bits of each block that taking each off its counter, one after the
-/// other, costs more.
-const SMALL: u64 = 400;
+/// other, costs more. A speed threshold only: under Miri it is lower, so that the inputs of a size
+/// Miri can run reach the crossing with the counters too.
+const SMALL: u64 = if cfg!(miri) { 30 } else { 400 };
 
 /// The sieve of the hard leaves.
 struct Sieve {
@@ -183,16 +229,19 @@ impl Sieve {
         let used = (n.div_ceil(240) * 8) as usize;
         let q = low / 30;
         let (mut a, mut b) = ((q % 1001) as usize, (q % 323) as usize);
-        for byte in &mut self.bytes[..used] {
-            *byte = PATTERN_A[a] & PATTERN_B[b];
-            a += 1;
-            if a == 1001 {
-                a = 0;
+        // In runs to the end of a pattern, byte by byte with no index wrapping, which the compiler
+        // takes 16 bytes at a time.
+        let mut at = 0;
+        while at < used {
+            let n = (used - at).min(1001 - a).min(323 - b);
+            let run = self.bytes[at..at + n].iter_mut();
+            for (byte, (&pa, &pb)) in run.zip(PATTERN_A[a..a + n].iter().zip(&PATTERN_B[b..b + n]))
+            {
+                *byte = pa & pb;
             }
-            b += 1;
-            if b == 323 {
-                b = 0;
-            }
+            at += n;
+            a = if a + n == 1001 { 0 } else { a + n };
+            b = if b + n == 323 { 0 } else { b + n };
         }
         self.bytes[used..].fill(0);
         // The numbers from `high` on are not of the segment.
@@ -223,42 +272,23 @@ impl Sieve {
         self.stale = false;
     }
 
-    /// Prepares the counts of the leaves of a prime: the bits before each block, by four chains of
-    /// sums, over the four quarters of the blocks, which the processor runs side by side, and the
-    /// sums of the quarters before each added after.
+    /// Forms the counters of the blocks again if they are out of date.
+    #[inline(always)]
+    fn fresh(&mut self) {
+        if self.stale {
+            self.recount();
+        }
+    }
+
+    /// Prepares the counts of the leaves of a prime: the bits before each block, from the blocks'
+    /// counters ([`kernels::prefix`]).
     #[inline(never)]
     fn prepare(&mut self) {
         if self.stale {
             self.recount();
         }
-        let blocks = self.blocks.len();
-        self.before.resize(blocks, 0);
-        let q = blocks / 4;
-        let (b0, rest) = self.before.split_at_mut(q);
-        let (b1, rest) = rest.split_at_mut(q);
-        let (b2, b3) = rest.split_at_mut(q);
-        let (c0, rest) = self.blocks.split_at(q);
-        let (c1, rest) = rest.split_at(q);
-        let (c2, c3) = rest.split_at(q);
-        let mut n = [0u32; 4];
-        for i in 0..q {
-            b0[i] = n[0];
-            b1[i] = n[1];
-            b2[i] = n[2];
-            b3[i] = n[3];
-            n[0] += u32::from(c0[i]);
-            n[1] += u32::from(c1[i]);
-            n[2] += u32::from(c2[i]);
-            n[3] += u32::from(c3[i]);
-        }
-        let mut carry = 0u32;
-        for (k, part) in [b1, b2, b3].into_iter().enumerate() {
-            carry += n[k];
-            part.iter_mut().for_each(|b| *b += carry);
-        }
-        // The blocks past the four quarters, when they are not a multiple of 4: none, as a segment
-        // is a whole number of groups of 4 blocks.
-        debug_assert_eq!(blocks % 4, 0);
+        self.before.resize(self.blocks.len(), 0);
+        kernels::prefix(&mut self.before, &self.blocks);
     }
 
     /// Crosses out the multiples of the prime `p`, of index `b`, in the segment, keeping the counts
@@ -333,7 +363,7 @@ fn count_bytes(bytes: &[u8]) -> u64 {
 }
 
 /// For each word of a block, the masks that keep the words before it.
-static WORDS_BEFORE: [[u64; WORDS]; WORDS] = {
+pub(super) static WORDS_BEFORE: [[u64; WORDS]; WORDS] = {
     let mut t = [[0u64; WORDS]; WORDS];
     let mut j = 0;
     while j < WORDS {
@@ -346,27 +376,6 @@ static WORDS_BEFORE: [[u64; WORDS]; WORDS] = {
     }
     t
 };
-
-/// The bits of the numbers from the segment's start to `low + stop`: those before the block of
-/// `stop`, those of the words of the block before its word, and those of its word up to it.
-#[inline(always)]
-fn rank(words: &[[u8; 8]], before: &[u32], stop: u64) -> u64 {
-    let w = (stop / 240) as usize;
-    let block = w >> (BLOCK - 3);
-    let n = u64::from(before[block]);
-    // The masks come from a table: a mask formed from the index, a select, is turned back into a
-    // loop to the index, with a branch for each word.
-    let first = block << (BLOCK - 3);
-    let ws: &[[u8; 8]; WORDS] = words[first..first + WORDS].try_into().expect("a block");
-    let masks = &WORDS_BEFORE[w - first];
-    let bits: u32 = ws
-        .iter()
-        .zip(masks)
-        .map(|(word, &m)| (u64::from_le_bytes(*word) & m).count_ones())
-        .sum();
-    let x = u64::from_le_bytes(words[w]) & UP_TO[(stop % 240) as usize];
-    n + u64::from(bits) + u64::from(x.count_ones())
-}
 
 /// Dispatches [`plain`] by the class `c`.
 #[inline(always)]
@@ -456,8 +465,9 @@ fn count_class<const COUNT: bool>(
 
 /// Crosses out the multiples of a prime of class `C`, `sp` its `p / 30`, from the one at byte `m`
 /// and position `w`, counting the bits cleared; with `COUNT`, takes each off the counter of its
-/// block. Returns the byte of the next multiple from the end of `s`, its position, and
-/// the bits cleared.
+/// block. To the end of the wheel's turn one at a time, then the eight multiples of each turn at
+/// once, with one check of the end a turn, then one at a time to the end. Returns the byte of the
+/// next multiple from the end of `s`, its position, and the bits cleared.
 #[inline(never)]
 fn count<const C: usize, const COUNT: bool>(
     s: &mut [u8],
@@ -467,56 +477,78 @@ fn count<const C: usize, const COUNT: bool>(
     mut m: usize,
 ) -> (usize, usize, u64) {
     let len = s.len();
+    // A block for each `1 << BLOCK` bytes: the block of a byte of `s` is one of `blocks`.
+    assert!(!COUNT || blocks.len() << BLOCK == len);
     let mut cleared = 0u64;
     let d: [usize; 8] = core::array::from_fn(|k| sp * D30[k] as usize + STEP[C][k].1 as usize);
     macro_rules! hit {
-        ($k:expr) => {{
-            let k = $k;
-            let byte = s[m];
-            let bit = (byte >> STEP[C][k].0) & 1;
-            s[m] = byte & !(1 << STEP[C][k].0);
-            if COUNT {
-                blocks[m >> BLOCK] -= u16::from(bit);
+        ($at:expr, $k:expr) => {{
+            let at: usize = $at;
+            debug_assert!(at < len);
+            // SAFETY: `at < len`, by the checks before each use, and the blocks cover `s`, as
+            // asserted above.
+            unsafe {
+                let byte = *s.get_unchecked(at);
+                let bit = (byte >> STEP[C][$k].0) & 1;
+                *s.get_unchecked_mut(at) = byte & !(1 << STEP[C][$k].0);
+                if COUNT {
+                    *blocks.get_unchecked_mut(at >> BLOCK) -= u16::from(bit);
+                }
+                cleared += u64::from(bit);
             }
-            cleared += u64::from(bit);
         }};
     }
     while w < 8 {
         if m >= len {
             return (m - len, w, cleared);
         }
-        hit!(w);
+        hit!(m, w);
         m += d[w];
         w += 1;
     }
-    loop {
-        macro_rules! step {
-            ($k:expr) => {{
-                if m >= len {
-                    return (m - len, $k, cleared);
-                }
-                hit!($k);
-                m += d[$k];
-            }};
-        }
-        step!(0);
-        step!(1);
-        step!(2);
-        step!(3);
-        step!(4);
-        step!(5);
-        step!(6);
-        step!(7);
+    // The offsets of the eight multiples of a turn from its first, and the turn's bytes.
+    let mut o = [0usize; 8];
+    for k in 1..8 {
+        o[k] = o[k - 1] + d[k - 1];
     }
+    let turn = o[7] + d[7];
+    let end = len.saturating_sub(o[7]);
+    while m < end {
+        // `m + o[k] <= m + o[7] < len`.
+        hit!(m, 0);
+        hit!(m + o[1], 1);
+        hit!(m + o[2], 2);
+        hit!(m + o[3], 3);
+        hit!(m + o[4], 4);
+        hit!(m + o[5], 5);
+        hit!(m + o[6], 6);
+        hit!(m + o[7], 7);
+        m += turn;
+    }
+    for k in 0..8 {
+        if m >= len {
+            return (m - len, k, cleared);
+        }
+        hit!(m, k);
+        m += d[k];
+    }
+    // A turn is longer than its last offset: `m` is past the end.
+    (m - len, 0, cleared)
 }
 
 /// The leaves `p m` of the segment from `low`, for the `m` from `min_m` (exclusive) to `max_m`,
 /// square-free with their prime factors above `p`: `Σ -μ(m) φ(x / (p m), b - 1)`, `phi_b` the
 /// numbers left before the segment.
+///
+/// The entries of the leaves are gathered first ([`kernels::gather`]), with no branch on whether
+/// each is one; the leaves after, in any order, as each is counted afresh. The counts before the
+/// blocks are prepared only once a leaf is found: a prime's range of `m` holds less than one number
+/// in most segments near the end of the sieve, and at `10^18` 10 of the 17 million preparations
+/// found no leaf; for a few leaves in one chunk, the blocks' counters are summed for each instead.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn m_leaves(
-    sieve: &Sieve,
+    sieve: &mut Sieve,
     factor: &FactorTable,
     xp: u64,
     prime: u64,
@@ -527,41 +559,134 @@ fn m_leaves(
 ) -> u64 {
     let first = FactorTable::index(min_m) + 1;
     let entries = factor.entries(first, FactorTable::index(max_m));
-    let words = sieve.bytes.as_chunks::<8>().0;
-    let mut s = 0u64;
-    // The entries of the leaves are gathered first, with no branch on whether each is one, which
-    // would be mispredicted for about one entry in three; the leaves after, in any order, as each
-    // is counted afresh.
+    // The primes of these leaves are at most `sqrt(y)`, below `2^16`.
+    let prime16 = u16::try_from(prime).expect("a prime below 2^16");
     let mut leaves = [0u16; 256];
-    for (c, chunk) in entries.chunks(256).enumerate() {
-        let mut n = 0;
-        for (k, &e) in chunk.iter().enumerate() {
-            leaves[n] = k as u16;
-            n += usize::from(u64::from(e) > prime);
+    let mut chunks = entries.chunks(256).enumerate();
+    // The first chunk with leaves.
+    let (c0, n0) = loop {
+        let Some((c, chunk)) = chunks.next() else {
+            return 0;
+        };
+        let n = kernels::gather(chunk, prime16, &mut leaves);
+        if n > 0 {
+            break (c, n);
         }
-        let base = first + 256 * c as u64;
-        for &k in &leaves[..n] {
-            let e = chunk[k as usize];
-            let m = FactorTable::number(base + u64::from(k));
-            let xpm = xp / m;
-            let phi_xpm = phi_b + rank(words, &sieve.before, xpm - low);
-            // `-μ(m) φ`: `μ(m) = -1` for an odd number of prime factors, so the leaf adds its `φ`
-            // then, and subtracts it otherwise, by a mask rather than a branch.
-            let minus = u64::from(e & 1) ^ 1;
-            s = s.wrapping_add((phi_xpm ^ minus.wrapping_neg()).wrapping_add(minus));
-        }
+    };
+    let direct = entries.len() <= 256 && n0 <= FEW;
+    if direct {
+        sieve.fresh();
+    } else {
+        sieve.prepare();
+    }
+    let sieve = &*sieve;
+    let base = |c: usize| first + 256 * c as u64;
+    let start = &entries[256 * c0..(256 * c0 + 256).min(entries.len())];
+    if direct {
+        return chunk_leaves::<true>(sieve, start, &leaves[..n0], base(c0), xp, low, phi_b);
+    }
+    let mut s = chunk_leaves::<false>(sieve, start, &leaves[..n0], base(c0), xp, low, phi_b);
+    for (c, chunk) in chunks {
+        let n = kernels::gather(chunk, prime16, &mut leaves);
+        s = s.wrapping_add(chunk_leaves::<false>(
+            sieve,
+            chunk,
+            &leaves[..n],
+            base(c),
+            xp,
+            low,
+            phi_b,
+        ));
     }
     s
 }
 
-/// The leaves `p q` of the segment from `low`, for the primes `q` of `qs`: `Σ φ(x / (p q), b - 1)`.
-#[inline(never)]
-fn q_leaves(sieve: &Sieve, qs: &[u32], xp: u64, low: u64, phi_b: u64) -> u64 {
+/// A prime's leaves in a segment at most which [`m_leaves`] and [`q_leaves`] count each from the
+/// blocks' counters ([`kernels::rank_direct`]) rather than prepare the counts before the blocks.
+const FEW: usize = 8;
+
+/// The leaves of the entries `chunk[k]`, `k` of `leaves`, the first of index `base`, for
+/// [`m_leaves`]: with the counts before the blocks prepared, or, with `DIRECT`, from the blocks'
+/// counters.
+#[inline(always)]
+fn chunk_leaves<const DIRECT: bool>(
+    sieve: &Sieve,
+    chunk: &[u16],
+    leaves: &[u16],
+    base: u64,
+    xp: u64,
+    low: u64,
+    phi_b: u64,
+) -> u64 {
     let words = sieve.bytes.as_chunks::<8>().0;
+    // What [`kernels::rank`] and [`kernels::rank_direct`] take, by the segment's whole groups of
+    // four blocks.
+    assert!(!words.is_empty() && words.len().is_multiple_of(WORDS));
+    assert_eq!(
+        if DIRECT {
+            sieve.blocks.len()
+        } else {
+            sieve.before.len()
+        },
+        words.len() / WORDS
+    );
+    let mut s = 0u64;
+    for &k in leaves {
+        let e = chunk[k as usize];
+        let m = FactorTable::number(base + u64::from(k));
+        let stop = xp / m - low;
+        // SAFETY: the lengths are those asserted above.
+        let phi_xpm = phi_b
+            + unsafe {
+                if DIRECT {
+                    kernels::rank_direct(words, &sieve.blocks, stop)
+                } else {
+                    kernels::rank(words, &sieve.before, stop)
+                }
+            };
+        // `-μ(m) φ`: `μ(m) = -1` for an odd number of prime factors, so the leaf adds its `φ`
+        // then, and subtracts it otherwise, by a mask rather than a branch.
+        let minus = u64::from(e & 1) ^ 1;
+        s = s.wrapping_add((phi_xpm ^ minus.wrapping_neg()).wrapping_add(minus));
+    }
+    s
+}
+
+/// The leaves `p q` of the segment from `low`, for the primes `q` of `qs`: `Σ φ(x / (p q), b - 1)`;
+/// for a few, from the blocks' counters, as [`m_leaves`].
+#[inline(never)]
+fn q_leaves(sieve: &mut Sieve, qs: &[u32], xp: u64, low: u64, phi_b: u64) -> u64 {
+    let direct = qs.len() <= FEW;
+    if direct {
+        sieve.fresh();
+    } else {
+        sieve.prepare();
+    }
+    let sieve = &*sieve;
+    let words = sieve.bytes.as_chunks::<8>().0;
+    // What [`kernels::rank`] and [`kernels::rank_direct`] take, by the segment's whole groups of
+    // four blocks.
+    assert!(!words.is_empty() && words.len().is_multiple_of(WORDS));
+    assert_eq!(
+        if direct {
+            sieve.blocks.len()
+        } else {
+            sieve.before.len()
+        },
+        words.len() / WORDS
+    );
     let mut s = 0u64;
     for &q in qs {
-        let xpq = xp / u64::from(q);
-        s = s.wrapping_add(phi_b + rank(words, &sieve.before, xpq - low));
+        let stop = xp / u64::from(q) - low;
+        // SAFETY: the lengths are those asserted above.
+        let count = unsafe {
+            if direct {
+                kernels::rank_direct(words, &sieve.blocks, stop)
+            } else {
+                kernels::rank(words, &sieve.before, stop)
+            }
+        };
+        s = s.wrapping_add(phi_b + count);
     }
     s
 }
@@ -574,13 +699,14 @@ pub(super) fn s2_hard(
     z: u64,
     c: u64,
     p: &[u32],
-    pi: &PiTable,
+    pi: &PiTable<'_>,
     factor: &FactorTable,
 ) -> u64 {
     debug_assert_eq!(c, 8);
     let c = c as usize;
-    let pi_sqrty = pi.pi(y.isqrt()) as usize;
-    let mut max_b = pi.pi(z.isqrt().min(y)) as usize;
+    let pi_sqrty = pi.pi(isqrt(y)) as usize;
+    // A leaf `p_b m`, `m > p_b`, at least `p_b^2` has `p_b^4 < x`.
+    let mut max_b = pi.pi(isqrt(z).min(y).min(isqrt(isqrt(x)))) as usize;
     if max_b <= c {
         return 0;
     }
@@ -597,7 +723,7 @@ pub(super) fn s2_hard(
         // The primes that may still have leaves, from here on, are crossed out in every segment, so
         // that `phi[b]` counts the numbers left before the segment; those with leaves in it are
         // from `min_b` to `top`.
-        max_b = max_b.min(pi.pi((x / low1).isqrt().min(z.isqrt()).min(y)) as usize);
+        max_b = max_b.min(pi.pi(isqrt(x / low1).min(isqrt(z)).min(y)) as usize);
         if max_b <= c {
             break;
         }
@@ -637,9 +763,8 @@ pub(super) fn s2_hard(
                     max_b = b - 1;
                     break 'segment;
                 }
-                sieve.prepare();
                 s = s.wrapping_add(m_leaves(
-                    &sieve, factor, xp, prime, min_m, max_m, low, phi[b],
+                    &mut sieve, factor, xp, prime, min_m, max_m, low, phi[b],
                 ));
                 phi[b] += sieve.total;
                 sieve.cross(prime, b, keep(b));
@@ -651,7 +776,8 @@ pub(super) fn s2_hard(
                 let xp = x / prime;
                 let xp_low = (xp / low1).min(y);
                 let xp_high = (xp / high).min(y);
-                let l = pi.pi(xp_low.min(z / prime)) as usize;
+                // The leaves at least `y` and `p_b^2`: `q <= x / (p_b y)`, `q <= x / p_b^3`.
+                let l = pi.pi(xp_low.min(z / prime).min(xp / (prime * prime))) as usize;
                 let min_hard = xp_high.max(prime);
                 if prime >= u64::from(p[l]) {
                     max_b = b - 1;
@@ -659,8 +785,9 @@ pub(super) fn s2_hard(
                 }
                 // The primes `q` from `min_hard` (exclusive) to `p_l`.
                 let first = pi.pi(min_hard) as usize + 1;
-                sieve.prepare();
-                s = s.wrapping_add(q_leaves(&sieve, &p[first..=l], xp, low, phi[b]));
+                if first <= l {
+                    s = s.wrapping_add(q_leaves(&mut sieve, &p[first..=l], xp, low, phi[b]));
+                }
                 phi[b] += sieve.total;
                 sieve.cross(prime, b, keep(b));
                 b += 1;

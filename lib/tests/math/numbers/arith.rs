@@ -382,3 +382,268 @@ fn divisors_of_long_numbers() {
     let want: Number = (0..=40u32).map(|i| n(3).pow(3 * i)).sum();
     assert_eq!(f.divisor_sigma(3), want);
 }
+
+/// The functions of a factorisation by their products taken one at a time as numbers: the tests'
+/// own, plain references for the products in limbs.
+fn plain_totient(f: &[(Number, u32)]) -> Number {
+    f.iter()
+        .fold(n(1), |acc, (p, e)| acc * (p - 1u8) * p.pow(e - 1))
+}
+
+fn plain_sigma(f: &[(Number, u32)], k: u32) -> Number {
+    f.iter().fold(n(1), |acc, (p, e)| {
+        let pk = p.pow(k);
+        let mut s = n(1);
+        for _ in 0..*e {
+            s = s * &pk + 1u8;
+        }
+        acc * s
+    })
+}
+
+fn plain_radical(f: &[(Number, u32)]) -> Number {
+    f.iter().fold(n(1), |acc, (p, _)| acc * p)
+}
+
+#[test]
+fn products_in_limbs_up_to_their_bound() {
+    // Products near the bound of the limbs on the stack (46 limbs, 2944 bits) and past it, words'
+    // powers in pieces, long primes, both byte orders and primes not in the shortest form.
+    let p61 = (n(1) << 61usize) - 1u8;
+    let p127 = (n(1) << 127usize) - 1u8;
+    let p521 = (n(1) << 521usize) - 1u8;
+    let cases: Vec<Vec<(Number, u32)>> = vec![
+        vec![(n(2), 100), (n(3), 60)],
+        vec![(n(2), 2900)],
+        vec![(n(2), 3000), (n(3), 1)],
+        vec![(n(3), 1800)],
+        vec![(p61.clone(), 40)],
+        vec![(p61.clone(), 47), (n(5), 3)],
+        vec![(p127.clone(), 22), (n(7), 2)],
+        vec![(p127.clone(), 23)],
+        vec![(p521.clone(), 5)],
+        vec![(p521.clone(), 6), (p127.clone(), 1)],
+        vec![
+            (n(2), 1),
+            (n(3), 1),
+            (n(5), 1),
+            (p61.clone(), 2),
+            (p127.clone(), 3),
+        ],
+    ];
+    let cases = if cfg!(miri) { &cases[..1] } else { &cases[..] };
+    for f in cases {
+        for order in [ByteOrder::BigEndian, ByteOrder::LittleEndian] {
+            for odd_form in [false, true] {
+                let primes: Vec<(Number, u32)> = f
+                    .iter()
+                    .map(|(p, e)| {
+                        let p = Number::from_str_radix(&p.to_string(), 10, order).unwrap();
+                        (if odd_form { other(&p) } else { p }, *e)
+                    })
+                    .collect();
+                let fac = Factorization::new(primes, order);
+                let what = format!("{f:?} {order:?} {odd_form}");
+                assert_eq!(fac.totient(), plain_totient(f), "{what}");
+                assert_eq!(fac.radical(), plain_radical(f), "{what}");
+                assert_eq!(fac.totient().byte_order, order);
+                for k in [1u32, 2, 3] {
+                    assert_eq!(fac.divisor_sigma(k), plain_sigma(f, k), "{what} k {k}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn divisors_of_close_primes() {
+    // Two consecutive primes, below 2^64 and of 121 bits, whose logarithms no float tells apart:
+    // their divisors are put in order by their limbs. And primes too long for the limbs' products
+    // (35 limbs).
+    let mut pairs = vec![(
+        Number::new_from_u64(18_446_744_073_709_551_533, ByteOrder::BigEndian),
+        Number::new_from_u64(18_446_744_073_709_551_557, ByteOrder::BigEndian),
+    )];
+    if !cfg!(miri) {
+        let p = (n(1) << 120usize).next_prime();
+        let q = (&p + 1u8).next_prime();
+        pairs.push((p, q));
+    }
+    let r = n(1_000_003);
+    for ((p, q), order) in pairs
+        .iter()
+        .flat_map(|pq| [ByteOrder::BigEndian, ByteOrder::LittleEndian].map(|o| (pq.clone(), o)))
+    {
+        let f = Factorization::new(vec![(q.clone(), 1), (p.clone(), 2), (r.clone(), 1)], order);
+        let d = f.divisors();
+        assert_eq!(d.len(), 12);
+        assert!(d.windows(2).all(|w| w[0] < w[1]), "{order:?}");
+        let v = f.value();
+        assert!(d.iter().all(|x| v.rem_euclid(x).is_zero()));
+        assert!(d.iter().all(|x| x.byte_order == order));
+        assert_eq!(d[1], r);
+        assert_eq!((&d[2], &d[3]), (&p, &q));
+        assert_eq!((&d[4], &d[5]), (&(&p * &r), &(&q * &r)));
+    }
+    if cfg!(miri) {
+        return;
+    }
+    let m2203 = (n(1) << 2203usize) - 1u8;
+    let f = Factorization::new(vec![(m2203.clone(), 1), (n(3), 2)], ByteOrder::BigEndian);
+    assert_eq!(
+        f.divisors(),
+        [n(1), n(3), n(9), m2203.clone(), &m2203 * 3u8, &m2203 * 9u8]
+    );
+}
+
+#[test]
+fn mobius_of_words_with_large_square_factors() {
+    // Squares and cubes of primes past the trial division's 512, products of two primes below and
+    // past 512^3, and strong pseudoprimes to 2 and 3 (1373653, 25326001) without small factors.
+    let q = [521u64, 1031, 65537, 1_000_003];
+    let mut cases: Vec<(u64, i32)> = vec![
+        (1_373_653, 1),
+        (25_326_001, 1),
+        (829 * 1657 * 3, -1),
+        (521 * 523, 1),
+        (65537 * 65539 * 7, -1),
+    ];
+    for &a in &q {
+        cases.push((a * a, 0));
+        cases.push((a * a * 3, 0));
+        if let Some(c) = a.checked_mul(a).and_then(|x| x.checked_mul(a)) {
+            cases.push((c, 0));
+        }
+        for &b in &q {
+            if a < b {
+                cases.push((a * b, 1));
+                if let Some(x) = (a * b).checked_mul(1_000_033) {
+                    cases.push((x, -1));
+                }
+                if let Some(x) = (a * a).checked_mul(b) {
+                    cases.push((x, 0));
+                }
+            }
+        }
+    }
+    let cases = if cfg!(miri) { &cases[..4] } else { &cases[..] };
+    for &(m, mu) in cases {
+        for order in [ByteOrder::BigEndian, ByteOrder::LittleEndian] {
+            let x = Number::new_from_u64(m, order);
+            assert_eq!(x.mobius(), mu, "{m}");
+            assert_eq!(x.is_squarefree(), mu != 0, "{m}");
+            assert_eq!((-&x).mobius(), mu, "-{m}");
+        }
+    }
+}
+
+#[test]
+fn powers_on_both_sides_of_the_limbs_budgets() {
+    // σ_k and φ of prime powers on both sides of the bounds that send the products in limbs back
+    // to the numbers' powers (Horner's rule up to 12 steps when the sum fits in 128 bits, 24
+    // otherwise; powers one product at a time up to 20 products by a word, 14 by two limbs):
+    // short primes, words and two limbs, against the tests' own products of numbers.
+    let primes = [
+        n(2),
+        n(3),
+        n((1 << 31) - 1),
+        n((1 << 61) - 1),
+        Number::new_from_u64(u64::MAX - 58, ByteOrder::BigEndian),
+        (n(1) << 89usize) - 1u8,
+        (n(1) << 127usize) - 1u8,
+    ];
+    // Under Miri one prime of a word, both sides of each bound: Horner's rule in limbs (13 steps)
+    // and not (25), the power by products (12 of them) and not (24), `p^3` in limbs.
+    let exponents: &[u32] = if cfg!(miri) {
+        &[13, 25]
+    } else {
+        &[
+            1, 8, 11, 12, 13, 15, 16, 17, 20, 23, 24, 25, 31, 32, 33, 40, 64,
+        ]
+    };
+    let ks: &[u32] = if cfg!(miri) {
+        &[1, 3]
+    } else {
+        &[1, 2, 3, 8, 16, 20, 24, 40]
+    };
+    let primes = if cfg!(miri) {
+        &primes[3..4]
+    } else {
+        &primes[..]
+    };
+    for p in primes {
+        for &e in exponents {
+            for order in [ByteOrder::BigEndian, ByteOrder::LittleEndian] {
+                let q = Number::from_str_radix(&p.to_string(), 10, order).unwrap();
+                let f = vec![(p.clone(), e)];
+                let fac = Factorization::new(vec![(q.clone(), e)], order);
+                assert_eq!(fac.totient(), plain_totient(&f), "φ({p}^{e})");
+                for &k in ks {
+                    assert_eq!(fac.divisor_sigma(k), plain_sigma(&f, k), "σ_{k}({p}^{e})");
+                }
+                // With a second factor, whose products stay in limbs.
+                let g = vec![(p.clone(), e), (n(1_000_003), 2)];
+                let fac = Factorization::new(vec![(q, e), (n(1_000_003), 2)], order);
+                assert_eq!(fac.totient(), plain_totient(&g), "φ({p}^{e} 1000003^2)");
+                assert_eq!(
+                    fac.divisor_sigma(1),
+                    plain_sigma(&g, 1),
+                    "σ({p}^{e} 1000003^2)"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn divisors_on_both_sides_of_the_long_path() {
+    // The divisors of numbers past 2^128 from 40 divisors on are made in limbs, below that as
+    // products of numbers: counts on both sides, against every product of prime powers sorted.
+    let p = [
+        (n(1) << 89usize) - 1u8,
+        (n(1) << 107usize) - 1u8,
+        (n(1) << 61usize) - 1u8,
+        n(1_000_003),
+        n(65_537),
+        n(3),
+    ];
+    let shapes: &[&[u32]] = if cfg!(miri) {
+        &[&[1, 1, 0, 0, 1, 0], &[1, 1, 1, 0, 1, 3]]
+    } else {
+        &[
+            &[1, 1, 0, 0, 0, 0],
+            &[1, 1, 0, 0, 1, 3],
+            &[1, 1, 1, 1, 1, 0],
+            &[1, 0, 2, 0, 0, 12],
+            &[1, 1, 1, 0, 1, 3],
+            &[1, 1, 0, 0, 0, 9],
+            &[2, 1, 0, 0, 1, 3],
+            &[1, 1, 1, 1, 1, 1],
+        ]
+    };
+    for shape in shapes {
+        let f: Vec<(Number, u32)> = p
+            .iter()
+            .zip(shape.iter())
+            .filter(|(_, e)| **e > 0)
+            .map(|(p, e)| (p.clone(), *e))
+            .collect();
+        let mut want = vec![n(1)];
+        for (q, e) in &f {
+            let mut next = Vec::new();
+            for d in &want {
+                for i in 0..=*e {
+                    next.push(d * &q.pow(i));
+                }
+            }
+            want = next;
+        }
+        want.sort();
+        for order in [ByteOrder::BigEndian, ByteOrder::LittleEndian] {
+            let fac = Factorization::new(f.clone(), order);
+            let d = fac.divisors();
+            assert_eq!(d, want, "{shape:?} {order:?}");
+            assert!(d.iter().all(|x| x.byte_order == order));
+        }
+    }
+}
