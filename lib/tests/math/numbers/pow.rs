@@ -592,3 +592,177 @@ fn negative_exponents_panic() {
         &|| "3^-0 mod 7".into(),
     );
 }
+
+/// Edge cases of the operands of Montgomery's kernels, `len` bytes: the modulus by `kind`, all ones
+/// (`R - 1`), the top bit set, a small top limb, a low limb of 1 with zero limbs above it, or random.
+fn kernel_modulus(state: &mut u64, len: usize, kind: usize) -> Vec<u8> {
+    let mut m = random_magnitude(state, len);
+    match kind {
+        0 => m.fill(0xFF),
+        1 => m[len - 1] |= 0x80,
+        2 => {
+            // A top limb of a few bits: the kernels' window and the reduction's top carry.
+            let top = len.saturating_sub(8).max(1);
+            m[top..].fill(0);
+            m[top - 1] = 1 + (xorshift(state) % 3) as u8;
+            m[len - 1] = m[len - 1].max(1);
+        }
+        3 => {
+            m.fill(0);
+            m[0] = 1;
+            m[len - 1] = 0xC0;
+        }
+        _ => {}
+    }
+    m[0] |= 1;
+    m
+}
+
+#[test]
+fn powers_modulo_every_kernel_length() {
+    let mut state = 0x9E3779B9_7F4A7C15;
+    // Odd moduli of one limb to eighteen, around the kernels' lengths: two to eight limbs in
+    // registers (the powers from the low bit up to three), eight to sixteen by the kernels of
+    // residues in memory, and the multiplication's kernels from seventeen; bases at the edges and
+    // longer than the modulus, exponents of one bit, all ones (a product a bit) and powers of two
+    // (squares alone), in both byte orders.
+    // Under Miri, which runs the portable code, one length of each path and fewer cases.
+    let lengths: Vec<usize> = if cfg!(miri) {
+        vec![1, 2, 3, 9]
+    } else {
+        (1..=18).collect()
+    };
+    for limbs in lengths {
+        for bytes in [8 * limbs, 8 * limbs - 3] {
+            if cfg!(miri) && bytes != 8 * limbs {
+                continue;
+            }
+            for kind in 0..size(5, 2) {
+                let m = kernel_modulus(&mut state, bytes, kind);
+                let mn = number(&m, false, ORDERS[below(&mut state, 2)]);
+                // `m - 1`, `m` (zero), `m + 1` (one), `2m - 1`: the residues at the edges.
+                let mut bases: Vec<Vec<u8>> = vec![vec![], vec![1], vec![2]];
+                let ml = le_bytes(&mn);
+                let one = [1u8];
+                bases.push(sub_le(&ml, &one));
+                bases.push(ml.clone());
+                bases.push(significant(&mul_magnitudes(&ml, &[2])));
+                bases.push(significant(&sub_le(&mul_magnitudes(&ml, &[2]), &one)));
+                bases.push(random_magnitude(&mut state, bytes));
+                bases.push(random_magnitude(&mut state, 2 * bytes + 1));
+                let el = size(16, 2).min(2 + 64 / limbs);
+                let exponents: Vec<Vec<u8>> = vec![
+                    vec![1],
+                    vec![2],
+                    vec![3],
+                    vec![0xFF; el],
+                    {
+                        let mut e = vec![0; el];
+                        e[el - 1] = 0x80;
+                        e
+                    },
+                    random_magnitude(&mut state, el),
+                ];
+                for b in &bases {
+                    for e in &exponents {
+                        if cfg!(miri) && below(&mut state, 8) != 0 {
+                            continue;
+                        }
+                        let ob = ORDERS[below(&mut state, 2)];
+                        let bn = number(b, below(&mut state, 3) == 0, ob);
+                        let en = number(e, false, ORDERS[below(&mut state, 2)]);
+                        let result = bn.pow_mod(&en, &mn);
+                        let inputs = || {
+                            format!(
+                                "{limbs} limbs, kind {kind}: {} pow_mod({}, {})",
+                                describe(&bn),
+                                describe(&en),
+                                describe(&mn)
+                            )
+                        };
+                        assert_result(&result, &expected_pow_mod(&bn, &en, &mn), ob, &inputs);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn powers_modulo_powers_of_two_at_every_kernel_length() {
+    let mut state = 0x7F4A7C15_9E3779B9;
+    // `2^z` for `z` at the edges of the limbs of the low halves' kernels (nine to sixteen limbs),
+    // their divide and conquer (from eighteen, the halves to the kernels) and the rows: bases of the
+    // modulus's length and longer, all ones among them, and odd, exponents up to 3 limbs.
+    let limbs = [8, 9, 10, 15, 16, 17, 18, 24, 31, 32, 33, 40, 41];
+    for &l in limbs.iter().filter(|&&l| l <= size(41, 10)) {
+        for z in [64 * l - 1, 64 * l] {
+            let mut m = vec![0u8; z / 8 + 1];
+            m[z / 8] = 1 << (z % 8);
+            for kind in 0..3 {
+                let len = 8 * l + if kind == 2 { 9 } else { 0 };
+                let mut b = match kind {
+                    0 => vec![0xFF; len],
+                    _ => random_magnitude(&mut state, len),
+                };
+                b[0] |= 1;
+                let el = 1 + below(&mut state, size(24, 2));
+                let er = random_magnitude(&mut state, el);
+                for e in [vec![2u8], vec![3], er] {
+                    let order = ORDERS[below(&mut state, 2)];
+                    let (bn, en, mn) = (
+                        number(&b, false, order),
+                        number(&e, false, ORDERS[below(&mut state, 2)]),
+                        number(&m, false, ORDERS[below(&mut state, 2)]),
+                    );
+                    assert_result(
+                        &bn.pow_mod(&en, &mn),
+                        &expected_pow_mod(&bn, &en, &mn),
+                        order,
+                        &|| format!("2^{z}, base kind {kind}, {} exponent bytes", e.len()),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn low_halves_of_squares_and_products_at_every_length() {
+    let mut state = 0x3C6EF372_FE94F82B;
+    // `b^2` and `b^3` modulo `2^z`, `z` of `l` limbs, against the reference products cut to `z`
+    // bits: the low halves of squares and of products on every path, the kernels (nine to sixteen
+    // limbs on aarch64), the rows (seventeen, or nine to 39 elsewhere) and divide and conquer (from
+    // eighteen limbs on aarch64, its halves to the kernels, from 40 elsewhere, and the shares of
+    // Toom-3 from 172). Under Miri, which runs the portable code, the rows and divide and conquer.
+    let lengths: Vec<usize> = if cfg!(miri) {
+        vec![39, 40, 41]
+    } else {
+        (9..=48).chain([63, 64, 65, 100, 171, 172, 173]).collect()
+    };
+    for &l in &lengths {
+        for z in [64 * l - 1 - below(&mut state, 63), 64 * l] {
+            let mut m = vec![0u8; z / 8 + 1];
+            m[z / 8] = 1 << (z % 8);
+            let len = 8 * l + below(&mut state, 9);
+            let b = random_magnitude(&mut state, len);
+            for e in [2u32, 3] {
+                let order = ORDERS[below(&mut state, 2)];
+                let bn = number(&b, false, order);
+                let en = Number::new_from_u32(e, ORDERS[below(&mut state, 2)]);
+                let mn = number(&m, false, ORDERS[below(&mut state, 2)]);
+                let mut want = pow_magnitude(&b, e);
+                want.truncate(z.div_ceil(8));
+                if z % 8 != 0 && want.len() == z.div_ceil(8) {
+                    *want.last_mut().unwrap() &= (1u8 << (z % 8)) - 1;
+                }
+                assert_result(
+                    &bn.pow_mod(&en, &mn),
+                    &expected(&want, false),
+                    order,
+                    &|| format!("{} ^ {e} mod 2^{z}", describe(&bn)),
+                );
+            }
+        }
+    }
+}

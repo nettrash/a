@@ -8,11 +8,11 @@
 Algorithms in pure Rust, with no dependencies:
 
 - **Sorting** (`a::sort`): 23 sorting algorithms by comparison and by key, and a default sort.
-- **Integers of any size** (`a::math::numbers`): `Number`, with its arithmetic up to transforms for the longest products, roots, powers modulo a number, greatest common divisors, primes and text in any radix.
+- **Integers of any size** (`a::math::numbers`): `Number`, with its arithmetic up to transforms for the longest products, roots, powers modulo a number, greatest common divisors, primes and text in any radix; prime sieves and counting, factorisation up to the quadratic sieve, arithmetic functions, modular arithmetic and discrete logarithms, and integer sequences.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, OpenSSL, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, PARI, FLINT, primesieve, GMP-ECM, OpenSSL, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
 
 ## Usage
 
@@ -129,9 +129,15 @@ Measured on an Apple M4 Max with new input for every sort; each page has the oth
 | [Bitwise operations](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/bits.md) | `&`, `\|`, `^` and `!` in two's complement; `bits`, `count_ones`, `trailing_zeros`, `bit` and `set_bit` |
 | [Text](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/radix.md) | `Display`, hexadecimal, octal and binary formatting; `to_str_radix` and `from_str_radix` in any radix from 2 to 36 |
 | [Greatest common divisor](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/gcd.md) | `gcd`, `lcm`, `gcd_ext` and `mod_inverse`: Lehmer's method and the subquadratic half gcd |
-| [Powers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pow.md) | `pow`, and `pow_mod` by Montgomery's multiplication |
-| [Primes](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/prime.md) | `is_probable_prime` by Baillie–PSW, exact below 2⁶⁴, and `next_prime` |
-| [Squares modulo a prime](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quadratic.md) | `jacobi`, and `sqrt_mod` by Tonelli and Shanks's method |
+| [Powers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pow.md) | `pow`, and `pow_mod` by Montgomery's multiplication, with generated assembly kernels on aarch64 |
+| [Primes](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/prime.md) | `is_probable_prime` by Baillie–PSW (below 2³² the strong test to base 2 and a table of its pseudoprimes), exact below 2⁶⁴, `next_prime` and `prev_prime` |
+| [Prime sieves and counting](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/sieve.md) | `primes(range)`, `prime_pi` and `nth_prime` on `u64`: primesieve's segmented sieve, Deléglise–Rivat with Gourdon's sorting of the special leaves |
+| [Factorisation](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/factor.md) | `factor` into primes and exponents, the method chosen by size: trial division, Hart's one line method, Pollard's rho, `p − 1`, the elliptic curve method on Montgomery curves and the quadratic sieve; `trial`, `rho`, `pm1`, `pp1` and `ecm` on their own, their second stages by baby steps and giant steps or by fast polynomial arithmetic (Montgomery and Kruppa's continuation for `p ± 1`, the FFT continuation for the curves); `perfect_power` |
+| [Quadratic sieve](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/siqs.md) | `factor::siqs`: a factor by the self-initialising quadratic sieve, with one and two large primes, Gaussian elimination and block Lanczos, for numbers of 24 to 100 digits |
+| [Squares modulo a number](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quadratic.md) | `jacobi` and `kronecker` by the binary method up to six limbs (in assembly on aarch64) and Lehmer's beyond; `sqrt_mod` and `sqrt_mod_all` modulo any number by Tonelli–Shanks, Atkin's method, Cipolla, Hensel's lifting and the Chinese remainder theorem; Cornacchia's `x² + d·y² = m` |
+| [Arithmetic functions](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/arith.md) | `divisors`, `divisor_count`, `divisor_sigma`, `totient`, `carmichael`, `mobius`, `is_squarefree` and `radical`, of a number or of its factorisation |
+| [Modular arithmetic](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/modular.md) | `crt` for any moduli, `multiplicative_order`, `primitive_root`, and `discrete_log` by Pohlig–Hellman, baby steps and giant steps, Pollard's rho (`dlog`), and the index calculus modulo primes up to 112 bits |
+| [Sequences](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/sequences.md) | `fibonacci` and `lucas` by fast doubling, `lucas_sequence` and `lucas_sequence_mod` (Montgomery ladders, any index), `primorial` by product trees, and `partitions` by the Hardy–Ramanujan–Rademacher series |
 
 Measured on an Apple M4 Max in cycles per call, over random operands of the length given, little-endian, against GMP 6.3 and num-bigint 0.4; each page has the conditions, more sizes and the other operations. GMP is faster on some short operands; "–" is not measured:
 
@@ -152,14 +158,39 @@ Measured on an Apple M4 Max in cycles per call, over random operands of the leng
 | `gcd` | 64 B | 5,138 | 6,853 | 26,954 |
 | | 1 KiB | 117,118 | 163,209 | 1.15 M |
 | | 64 KiB | 55.5 M | 64.4 M | 4,013 M |
-| `pow_mod`, the exponent as long as the modulus | 64 B | 119,000 | 128,779 | 271,225 |
-| | 256 B | 4.30 M | 5.13 M | 9.09 M |
-| | 1 KiB | 233 M | 239 M | 683 M |
+| `pow_mod`, the exponent as long as the modulus | 64 B | 71,173 | 137,731 | 248,009 |
+| | 256 B | 4.70 M | 5.53 M | 10.0 M |
+| | 1 KiB | 231 M | 255 M | 705 M |
 | `to_str_radix(10)` | 128 B | 983 | 2,453 | 4,417 |
 | | 8 KiB | 504,112 | 607,962 | 2.33 M |
 | | 64 KiB | 7.29 M | 12.6 M | 50.3 M |
-| `is_probable_prime` of a prime | 256 bits | 68,457 | 159,951 | – |
-| | 2048 bits | 14.9 M | 20.9 M | – |
+| `is_probable_prime` of a prime | 256 bits | 49,258 | 170,831 | – |
+| | 2048 bits | 16.1 M | 21.6 M | – |
+
+Number theory, measured on an Apple M4 Max on one thread (the references too), against the fastest of primesieve 12.16, primecount 8.8, PARI 2.19, FLINT 3.6, GMP 6.3, GMP-ECM 7.0.7 and msieve 1.53 that has the function; in cycles, or in time where marked; each page has the conditions and the other contenders:
+
+| Operation | Size | `a` | Fastest reference |
+| --- | --- | ---: | --- |
+| `primes(a..=b).count()` | [10¹², 10¹² + 10¹⁰] | 909 ms | primesieve 1.05 s |
+| `prime_pi(x)` | x = 10¹⁶ | 988 ms | primecount 1.35 s |
+| `nth_prime(n)` | n = 10¹² | 32.8 ms | primecount 44.9 ms |
+| `prev_prime` | 256 bits | 206,438 | GMP 613,061 |
+| `factor`, two primes of 32 bits | 64 bits | 25.6 µs | PARI 133 µs |
+| `ecm`, one curve, stage 1, `B1` = 50,000 | 256 bits | 7.73 ms | GMP-ECM 16.9 ms (`-param 1`) |
+| `ecm`, one curve, stage 2 to `100·B1`, `B1` = 250,000 | 512 bits | 22.5 ms | GMP-ECM 41.2 ms (`-param 0`) |
+| `pm1`, stage 2 to `100·B1`, `B1` = 10⁶ | 512 bits | 8.91 ms | GMP-ECM 22.5 ms |
+| `factor`, two primes | 28 digits | 0.542 ms | PARI 0.832 ms |
+| `factor`, two primes | 40 digits | 5.14 ms | PARI 12.0 ms |
+| `factor::siqs`, two primes | 60 digits | 0.33 s | PARI 0.99 s |
+| | 80 digits | 26.0 s | msieve 93.2 s |
+| | 100 digits | 2,340 s | msieve 7,430 s |
+| `kronecker` | 1024 bits | 13,115 | FLINT 17,048 |
+| `Factorization::sqrt_mod` | prime of 256 bits | 22,022 | FLINT 65,840 |
+| `crt` | 1000 primes of 64 bits | 4.84 M | PARI 5.36 M |
+| `discrete_log` | safe prime of 64 bits | 7.19 M | PARI 211 M |
+| `fibonacci` | n = 10⁶ | 1.99 M | GMP 4.17 M |
+| `primorial` | n = 10⁶ | 13.3 M | FLINT 20.1 M |
+| `partitions` | n = 10⁶ | 138 µs | FLINT 196 µs (244 µs with its caches cleared) |
 
 ### Elliptic curves
 

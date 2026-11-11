@@ -16,19 +16,25 @@
 //!   one square and one product a bit instead ([`strong_lucas`]): measured on an Apple M4 Max, primes
 //!   of 256 bits took 11 % less time with it, of 512 bits 13 % and of 1024 bits 9 %.
 //!
-//! The residues are in registers up to seven limbs ([`Field`]) and in limbs in memory beyond
-//! ([`LimbField`]), always fully reduced, below `n`, so that equal residues are equal limbs.
+//! The residues are in registers up to seven limbs ([`Field`]), and eight where the target has the
+//! kernels of Montgomery's products in registers ([`REGISTER_KERNELS`]: eight limbs reach
+//! [`bpsw_limbs`], which takes the registers' path for them there), and in limbs in memory beyond
+//! ([`LimbField`]), always fully reduced, below `n`, so that equal residues are equal limbs. Their
+//! products and squares are the [powers](super::super::pow)' Montgomery kernels: in registers, and
+//! from eight to sixteen limbs with the operands in memory, on aarch64.
 
 use super::super::div::limbs::{div_2by1, invert_limb};
 use super::super::mul::limbs::{add_n, cmp_n, sub_n};
-use super::super::pow::montgomery::{Mont1, Mont2, MontN, Montgomery, even, rem, rem_itch};
+use super::super::pow::montgomery::{
+    Mont1, Mont2, MontN, Montgomery, REGISTER_KERNELS, even, rem, rem_itch,
+};
 use super::super::pow::window::{Registers, Ring};
 use super::super::scratch::{Scratch, need};
 use core::cmp::Ordering;
 use core::ptr;
 
 /// The arithmetic of residues modulo an odd `n` held in registers, fully reduced.
-pub(super) trait Field: Registers {
+pub(in crate::math::numbers) trait Field: Registers {
     /// The residue of zero.
     fn zero(&self) -> Self::V;
 
@@ -175,9 +181,9 @@ fn half_mod<const N: usize>(a: [u64; N], m: &[u64; N]) -> [u64; N] {
 fn residue_of<const N: usize>(c: u64, m: &[u64; N]) -> [u64; N] {
     let mut r = [0; N];
     let mut buf = [0u64; 64];
-    // The dividend `c B^N` of `N + 1 <= 8` limbs by a divisor of `N <= 7` takes
-    // `rem_itch(N + 1, N) <= 8 + 2 * 10` limbs of scratch, which the buffer holds, and which `rem`
-    // checks.
+    // The dividend `c B^N` of `N + 1 <= 9` limbs by a divisor of `N <= 8` (eight from
+    // `bpsw_limbs`) takes `rem_itch(N + 1, N) <= 8 + 2 * 10` limbs of scratch, which the buffer
+    // holds, and which `rem` checks.
     let s = Scratch::new(buf.as_mut_ptr(), 8 + 2 * 10);
     // SAFETY: the scratch is that of the remainder.
     unsafe { rem(r.as_mut_ptr(), &c, 1, N, m.as_ptr(), N, s) };
@@ -547,7 +553,7 @@ pub(super) unsafe fn bpsw<F: Field>(
 /// The arithmetic of residues modulo an odd `n` of `nn` limbs in memory, fully reduced, below `n`:
 /// Montgomery's products and squares followed by one subtraction of `n` when they are not below
 /// it, which suffices as REDC of a product of two residues below `n` is below `2n`.
-pub(super) struct LimbField {
+pub(in crate::math::numbers) struct LimbField {
     /// The Montgomery arithmetic.
     mont: Montgomery,
     /// The scratch of its products.
@@ -557,7 +563,7 @@ pub(super) struct LimbField {
 impl LimbField {
     /// The limbs of working memory that a field of `nn` limbs needs, for `Montgomery::new` and the
     /// scratch.
-    pub(super) fn itch(nn: usize) -> usize {
+    pub(in crate::math::numbers) fn itch(nn: usize) -> usize {
         Montgomery::new_itch(nn) + Montgomery::itch(nn).max(rem_itch(nn + 1, nn))
     }
 
@@ -567,7 +573,7 @@ impl LimbField {
     ///
     /// `nn >= 3`; the limbs of `n` and the [`LimbField::itch`] at `s` must stay valid while the
     /// field is used, `s` start on 16 bytes.
-    pub(super) unsafe fn new(n: *const u64, nn: usize, s: Scratch) -> Self {
+    pub(in crate::math::numbers) unsafe fn new(n: *const u64, nn: usize, s: Scratch) -> Self {
         need!(s, Self::itch(nn));
         // SAFETY: as the caller guarantees.
         unsafe {
@@ -581,7 +587,7 @@ impl LimbField {
 
     /// The limbs of a residue.
     #[inline(always)]
-    fn nn(&self) -> usize {
+    pub(in crate::math::numbers) fn nn(&self) -> usize {
         self.mont.n
     }
 
@@ -591,7 +597,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a`.
     #[inline(always)]
-    pub(super) unsafe fn sqr(&self, r: *mut u64, a: *const u64) {
+    pub(in crate::math::numbers) unsafe fn sqr(&self, r: *mut u64, a: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             self.mont.sqr(r, a, self.t);
@@ -605,7 +611,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a` or `b`.
     #[inline(always)]
-    pub(super) unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64) {
+    pub(in crate::math::numbers) unsafe fn mul(&self, r: *mut u64, a: *const u64, b: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             self.mont.mul(r, a, b, self.t);
@@ -619,7 +625,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a` or `b`.
     #[inline(always)]
-    pub(super) unsafe fn add(&self, r: *mut u64, a: *const u64, b: *const u64) {
+    pub(in crate::math::numbers) unsafe fn add(&self, r: *mut u64, a: *const u64, b: *const u64) {
         let nn = self.nn();
         // SAFETY: as the caller guarantees.
         unsafe {
@@ -635,7 +641,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a` or `b`.
     #[inline(always)]
-    pub(super) unsafe fn sub(&self, r: *mut u64, a: *const u64, b: *const u64) {
+    pub(in crate::math::numbers) unsafe fn sub(&self, r: *mut u64, a: *const u64, b: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             if sub_n(r, a, b, self.nn()) {
@@ -650,7 +656,7 @@ impl LimbField {
     ///
     /// The residues must be valid; `r` may be `a`.
     #[inline(always)]
-    unsafe fn neg(&self, r: *mut u64, a: *const u64) {
+    pub(in crate::math::numbers) unsafe fn neg(&self, r: *mut u64, a: *const u64) {
         // SAFETY: as the caller guarantees.
         unsafe {
             if is_zero(a, self.nn()) {
@@ -666,7 +672,7 @@ impl LimbField {
     /// # Safety
     ///
     /// The residues must be valid; `r` may be `a`.
-    unsafe fn half(&self, r: *mut u64, a: *const u64) {
+    pub(in crate::math::numbers) unsafe fn half(&self, r: *mut u64, a: *const u64) {
         let nn = self.nn();
         // SAFETY: as the caller guarantees.
         unsafe {
@@ -692,7 +698,7 @@ impl LimbField {
     /// # Safety
     ///
     /// The residue must be valid.
-    unsafe fn residue(&self, r: *mut u64, c: u64) {
+    pub(in crate::math::numbers) unsafe fn residue(&self, r: *mut u64, c: u64) {
         // SAFETY: the scratch holds `rem_itch(nn + 1, nn)` limbs.
         unsafe { rem(r, &c, 1, self.nn(), self.mont.m, self.nn(), self.t) }
     }
@@ -767,6 +773,18 @@ pub(super) unsafe fn bpsw_limbs(
     select: impl FnOnce() -> Option<i64>,
 ) -> bool {
     let nn = f.nn();
+    if REGISTER_KERNELS && nn == 8 {
+        // Eight limbs in registers where the target has the kernels of Montgomery's products:
+        // measured on an Apple M4 Max, primes of 512 bits took 212,000 cycles so against 414,000 in
+        // limbs. Without the kernels (`REGISTER_KERNELS`) the Rust rows took 1.03 to 1.04 times as
+        // long as the limbs (primes, composites and random odd numbers of 512 bits, the next and the
+        // previous prime from random ones), so eight limbs stay in memory there.
+        let mut m = [0; 8];
+        // SAFETY: `bits.n` holds the eight limbs of `n`.
+        unsafe { ptr::copy_nonoverlapping(bits.n, m.as_mut_ptr(), 8) };
+        // SAFETY: forwarded.
+        return unsafe { bpsw(&MontN::<8>::new(m), bits, select) };
+    }
     let stride = even(nn);
     need!(s, 10 * stride);
     // SAFETY: every residue lies in the working memory at `s`, apart from the others.

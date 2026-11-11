@@ -51,21 +51,59 @@
 //!
 //! They are raised to a `u32` power by [`Number::pow`], as `i32::pow` does but exactly, and to the
 //! power of a number modulo another by [`Number::pow_mod`], whose result is Euclid's remainder, never
-//! negative. [`Number::is_probable_prime`] tells whether a number is prime by the Baillie–PSW test,
-//! exact below `2^64`, and [`Number::next_prime`] gives the next probable prime.
-//! [`Number::jacobi`] gives the Jacobi symbol, and [`Number::sqrt_mod`] a square root modulo an odd
-//! prime.
+//! negative. [`Number::is_probable_prime`] tells whether a number is prime by the Baillie–PSW test
+//! (below `2^32` by the strong test to base 2 and a table of the composites that pass it), exact
+//! below `2^64`, and [`Number::next_prime`] and [`Number::prev_prime`] give the next and the
+//! previous probable primes. [`primes`] gives the primes in a range of `u64`s, in increasing order,
+//! by a segmented sieve of Eratosthenes after Walisch's primesieve, [`prime_pi`] counts the primes
+//! up to any `u64` by Deléglise and Rivat's method with Gourdon's sorting of the special leaves,
+//! and [`nth_prime`] gives the n-th prime.
+//!
+//! [`Number::factor`] gives the factorisation of a number into primes and their exponents, a
+//! [`Factorization`], choosing the method by size as PARI, FLINT and yafu do: trial division,
+//! Hart's one line method, Pollard's rho, `p - 1`, Lenstra's elliptic curve method on Montgomery
+//! curves and the self-initialising quadratic sieve; these, and Williams's `p + 1`, are also
+//! public in [`factor`] (`trial`, `rho`, `pm1`, `pp1`, `ecm`, `siqs`), the second stages of
+//! `pm1`, `pp1` and `ecm` by baby steps and giant steps or, for longer ranges, by fast polynomial
+//! arithmetic (Montgomery and Kruppa's continuation, the FFT continuation). [`factor::siqs`] finds
+//! a factor of a number by the self-initialising quadratic sieve (Alford and Pomerance 1993,
+//! Contini 1997), with one and two large primes, Gaussian elimination and Montgomery's block
+//! Lanczos method, for numbers of 24 to 100 digits without small factors.
+//! [`Number::perfect_power`] tells whether a number is `b^k` for some `k >= 2`, with the largest
+//! `k`.
+//!
+//! A [`Factorization`] gives its number's divisors, their number and the sums of their powers,
+//! Euler's totient, Carmichael's function, Möbius's function, square-freeness and the radical, and
+//! a number the same by its factorisation. [`Number::jacobi`] and [`Number::kronecker`] give the
+//! Jacobi and Kronecker symbols, [`Number::sqrt_mod`] the smallest square root modulo any positive
+//! number and [`Number::sqrt_mod_all`] all of them, and [`Number::cornacchia`] the primitive
+//! solutions of `x² + d·y² = m`. [`Number::crt`] solves congruences by the Chinese remainder
+//! theorem, coprime moduli or not; [`Number::multiplicative_order`] and [`Number::primitive_root`]
+//! give orders and the smallest primitive root; and [`Number::discrete_log`] gives the smallest
+//! discrete logarithm for any modulus and base, by Pohlig and Hellman's reduction and, for the
+//! large primes of `p - 1` modulo primes up to 112 bits, the index calculus, with the methods
+//! themselves in [`dlog`].
+//!
+//! [`Number::fibonacci`] and [`Number::lucas`] give the Fibonacci and Lucas numbers,
+//! [`Number::lucas_sequence`] the Lucas sequences `U_n(P, Q)` and `V_n(P, Q)` and
+//! [`Number::lucas_sequence_mod`] the same modulo a number for an index of any size,
+//! [`Number::primorial`] the product of the primes up to a number, and [`Number::partitions`] the
+//! number of partitions of a number, by Hardy, Ramanujan and Rademacher's series.
 
 mod add;
+mod arith;
 mod bits;
 mod byte_order;
 mod cmp;
 mod convert;
 mod div;
 mod divisor;
+pub mod dlog;
+pub mod factor;
 mod factorial;
 mod gcd;
 mod iter;
+mod modular;
 mod mul;
 mod number;
 mod pow;
@@ -75,7 +113,9 @@ mod quadratic;
 mod radix;
 mod root;
 mod scratch;
+mod sequences;
 mod shift;
+mod sieve;
 mod sign;
 mod sub;
 
@@ -85,5 +125,7 @@ pub(crate) use pow::montgomery::{redc_inverse, redc_limbs};
 pub use byte_order::ByteOrder;
 pub use convert::TryFromNumberError;
 pub use divisor::Divisor;
+pub use factor::Factorization;
 pub use number::Number;
 pub use radix::{NumberErrorKind, ParseNumberError};
+pub use sieve::{Primes, nth_prime, prime_pi, primes};

@@ -18,8 +18,8 @@
 
 mod binomial;
 mod odd;
-mod primes;
-mod product;
+pub(super) mod primes;
+pub(super) mod product;
 
 use super::mul::Product;
 use super::root::{lshift, small_number};

@@ -119,8 +119,26 @@ struct MathPow;
 #[doc = include_str!("../docs/math/prime.md")]
 struct MathPrime;
 
+#[doc = include_str!("../docs/math/sieve.md")]
+struct MathSieve;
+
+#[doc = include_str!("../docs/math/factor.md")]
+struct MathFactor;
+
+#[doc = include_str!("../docs/math/siqs.md")]
+struct MathSiqs;
+
+#[doc = include_str!("../docs/math/sequences.md")]
+struct MathSequences;
+
 #[doc = include_str!("../docs/math/quadratic.md")]
 struct MathQuadratic;
+
+#[doc = include_str!("../docs/math/arith.md")]
+struct MathArith;
+
+#[doc = include_str!("../docs/math/modular.md")]
+struct MathModular;
 
 #[doc = include_str!("../docs/math/ec.md")]
 struct MathEc;

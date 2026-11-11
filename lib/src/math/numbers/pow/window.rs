@@ -198,3 +198,41 @@ pub(super) unsafe fn power_in_registers<R: Registers>(
         r
     }
 }
+
+/// `b^e` in `ring` for the exponent of `ebits` bits at `e`, at least 1, from the low bit up: the
+/// squares `b^(2^i)` make one chain and the product of those of the one bits a second beside it, so
+/// that a power takes about a square's time a bit, its products in the shadow of the squares, where
+/// those of [`power_in_registers`]'s window wait for each other. For the arithmetic in registers
+/// whose products take longer one after the other than side by side, the shortest residues: the
+/// branches test the exponent's bits only, which are known long before the products they choose.
+///
+/// # Safety
+///
+/// The exponent's limbs must be valid for reads, its top bit set.
+#[inline(always)]
+pub(super) unsafe fn power_low_first<R: Registers>(
+    ring: &R,
+    b: R::V,
+    e: *const u64,
+    ebits: u64,
+) -> R::V {
+    // SAFETY: as the caller guarantees: every bit read is at most bit `ebits`, which is set.
+    unsafe {
+        // The squares up to the lowest one bit, whose power starts the product.
+        let mut x = b;
+        let mut i = 1;
+        while !bit(e, i) {
+            x = ring.sqr(x);
+            i += 1;
+        }
+        let mut r = x;
+        while i < ebits {
+            x = ring.sqr(x);
+            i += 1;
+            if bit(e, i) {
+                r = ring.mul(r, x);
+            }
+        }
+        r
+    }
+}
