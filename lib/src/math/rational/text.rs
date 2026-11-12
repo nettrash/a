@@ -3,20 +3,29 @@
 //! an exponent, exactly; [`Rational::from_str_radix`] and [`Rational::to_str_radix`] read and write
 //! integers and fractions in the radices from 2 to 36; and the conversions from integers.
 //!
-//! The parts are read and written as [`Number`]s are, by divide and conquer from a few hundred
+//! Parts of up to 64 bits are read and written in registers, in every radix, with no allocation
+//! but the text written: decimal digits are read eight at a time, checked and combined by three
+//! products (Lemire's method), binary ones eight at a time packed by one product, those of the
+//! other powers of two by shifts, and those of other radices by a product and a sum each, the last
+//! digit of the largest words checked for overflow; a fraction is then reduced by the gcd of two
+//! words. Words are written in decimal two digits at a time from a table, in binary eight at a time
+//! spread by one product, in the other powers of two by shifts, and in other radices in blocks
+//! below `2^32`, each digit by a product with the radix's reciprocal.
+//!
+//! Longer parts are read and written as [`Number`]s are, by divide and conquer from a few hundred
 //! digits on, in time `O(M(n) log n)` for `n` digits; a fraction read is then reduced by the gcd of
 //! its parts. A decimal `d₁…dₙ.f₁…fₘ e x` is the integer `d₁…dₙf₁…fₘ` (its trailing zeros dropped,
 //! each adding one to the exponent) times `10^(x − m)`. A negative power of ten leaves the
 //! fraction `N/10^k` in lowest terms but for the factors 2 or 5 of `N`, which its last digit tells
 //! apart: one of `1, 3, 7, 9` shares neither with `10^k`, an even one only twos, which a shift
 //! removes, and `5` only fives, which a remainder by `5^27` counts, a gcd with `5^k` past that.
-//! Text of up to 19 digits, with an exponent of up to 19 in magnitude, is read in registers.
-//! `Display` writes parts of up to 64 bits two digits at a time from a table, and fractions of up
-//! to 320 characters on the stack, so that the only allocation is the text the formatter keeps.
+//! Digits that make a word, with an exponent of up to 19 in magnitude, are read in registers and
+//! reduced so, into words. `Display` writes fractions of longer parts of up to 320 characters on
+//! the stack, so that the only allocation is the text the formatter keeps.
 
-use super::small::{self, Small, gcd};
-use super::{Rational, is_one, one, trim};
-use crate::math::numbers::{ByteOrder, Number};
+use super::small::{Small, gcd};
+use super::{Rational, is_one, one};
+use crate::math::numbers::{ByteOrder, Magnitude, Number};
 use core::fmt;
 use core::fmt::Write;
 use core::str::FromStr;
@@ -65,28 +74,35 @@ impl fmt::Display for Rational {
     /// assert_eq!(format!("{:+}", Rational::from(5)), "+5");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if is_one(&self.den) {
-            return fmt::Display::fmt(&self.num, f);
-        }
-        let negative = self.num.is_negative() && !self.num.is_zero();
         if let Some(x) = Small::of(self) {
-            let mut buf = [0u8; 41];
-            let len = small_text(x.num, x.den, &mut buf);
-            return f.pad_integral(!negative, "", ascii(&buf[..len]));
+            let mut buf = [0u8; WORD_TEXT];
+            let i = small_text(x.negative, x.num, x.den, &mut buf);
+            if f.width().is_none() && !f.sign_plus() {
+                // The sign and the digits in one piece: one write, and for `to_string` one
+                // allocation of the text, where `pad_integral` writes the sign apart.
+                return f.write_str(ascii(&buf[i..]));
+            }
+            let digits = i + usize::from(x.negative);
+            return f.pad_integral(!x.negative, "", ascii(&buf[digits..]));
         }
+        let (num, den) = (self.numer(), self.denom());
+        if is_one(den) {
+            return fmt::Display::fmt(num, f);
+        }
+        let negative = num.is_negative();
         // At most `log10(256) < 2.41` digits a byte, and one more, for each part, and the sign.
-        let bound = (self.num.value.len() + self.den.value.len()) * 5 / 2 + 4;
+        let bound = (num.value.len() + den.value.len()) * 5 / 2 + 4;
         if bound <= STACK_TEXT {
             // Written on the stack, and from there once to the formatter.
             let mut text = StackText {
                 bytes: [0; STACK_TEXT],
                 len: 0,
             };
-            write!(text, "{}/{}", self.num, self.den)?;
+            write!(text, "{num}/{den}")?;
             return f.pad_integral(!negative, "", text.as_str(usize::from(negative)));
         }
         let mut s = String::with_capacity(bound);
-        write!(s, "{}/{}", self.num, self.den)?;
+        write!(s, "{num}/{den}")?;
         f.pad_integral(!negative, "", &s[usize::from(negative)..])
     }
 }
@@ -102,10 +118,22 @@ const PAIRS: [[u8; 2]; 100] = {
     t
 };
 
-/// Writes the decimal digits of `x` at the end of `buf`, two at a time; returns where they start.
+/// Writes the decimal digits of `x` in `buf` to end before `end`, two at a time; returns where
+/// they start.
 #[inline(always)]
-fn digits_u64(mut x: u64, buf: &mut [u8; 20]) -> usize {
-    let mut i = 20;
+fn digits_u64(mut x: u64, buf: &mut [u8; WORD_TEXT], end: usize) -> usize {
+    let mut i = end;
+    // Blocks of eight digits from the bottom, each written as four pairs at once.
+    while x >= 100_000_000 {
+        let block = x % 100_000_000;
+        x /= 100_000_000;
+        let (high, low) = ((block / 10_000) as usize, (block % 10_000) as usize);
+        i -= 8;
+        buf[i..i + 2].copy_from_slice(&PAIRS[high / 100]);
+        buf[i + 2..i + 4].copy_from_slice(&PAIRS[high % 100]);
+        buf[i + 4..i + 6].copy_from_slice(&PAIRS[low / 100]);
+        buf[i + 6..i + 8].copy_from_slice(&PAIRS[low % 100]);
+    }
     while x >= 100 {
         let pair = (x % 100) as usize;
         x /= 100;
@@ -122,17 +150,21 @@ fn digits_u64(mut x: u64, buf: &mut [u8; 20]) -> usize {
     i
 }
 
-/// Writes `num/den` in decimal at the start of `out`; returns the length.
+/// The most characters of a rational in words in decimal: a sign, 20 digits, `/` and 20 more.
+const WORD_TEXT: usize = 42;
+
+/// Writes `-num/den` in decimal at the end of `buf`, from the last character back, the `-` only
+/// when `negative` is set and `/den` only when `den` is not 1; returns where the text starts.
 #[inline]
-fn small_text(num: u64, den: u64, out: &mut [u8; 41]) -> usize {
-    let mut buf = [0u8; 20];
-    let i = digits_u64(num, &mut buf);
-    let a = 20 - i;
-    out[..a].copy_from_slice(&buf[i..]);
-    out[a] = b'/';
-    let j = digits_u64(den, &mut buf);
-    out[a + 1..a + 1 + 20 - j].copy_from_slice(&buf[j..]);
-    a + 21 - j
+fn small_text(negative: bool, num: u64, den: u64, buf: &mut [u8; WORD_TEXT]) -> usize {
+    let mut i = WORD_TEXT;
+    if den != 1 {
+        i = digits_u64(den, buf, i) - 1;
+        buf[i] = b'/';
+    }
+    i = digits_u64(num, buf, i) - 1;
+    buf[i] = b'-';
+    i + usize::from(!negative)
 }
 
 /// ASCII bytes as text.
@@ -172,6 +204,125 @@ impl fmt::Write for StackText {
     }
 }
 
+/// The digits of the radices from 2 to 36, letters lower-case.
+const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// For each radix from 3 on, the largest power `b = radix^k` below `2^32` and `k`: a word is cut into
+/// blocks of `k` digits by divisions by `b`, and the digits of a block found by multiplications.
+const BLOCKS: [(u64, usize); 37] = {
+    let mut t = [(0u64, 0usize); 37];
+    let mut r = 3;
+    while r <= 36 {
+        let (mut b, mut k) = (1u64, 0);
+        while b * r < 1 << 32 {
+            b *= r;
+            k += 1;
+        }
+        t[r as usize] = (b, k);
+        r += 1;
+    }
+    t
+};
+
+/// `floor(2^64 / radix) + 1` for each radix from 3 on that is not a power of two: for `x < 2^32`,
+/// `floor(x / radix)` is the high word of `x` times it, as the error of the product, below
+/// `x / 2^64 < 2^-32`, is less than `1 / radix`, the distance from `x / radix` to the next integer
+/// above it.
+const INVERSES: [u64; 37] = {
+    let mut t = [0u64; 37];
+    let mut r = 3;
+    while r <= 36 {
+        t[r as usize] = u64::MAX / r + 1;
+        r += 1;
+    }
+    t
+};
+
+/// Writes the digits of `x` in `radix`, not 10, at the end of `buf`, without zeros in front, `0`
+/// for zero; returns where they start.
+#[inline]
+fn digits_radix(x: u64, radix: u32, buf: &mut [u8; 64]) -> usize {
+    let mut i = 64;
+    if radix == 2 {
+        if x == 0 {
+            buf[63] = b'0';
+            return 63;
+        }
+        // Each byte of `x` spread into eight digits by one product, the highest bit first.
+        let bits = 64 - x.leading_zeros() as usize;
+        for g in 0..bits.div_ceil(8) {
+            let b = (x >> (8 * g)) & 0xFF;
+            let t = (b.wrapping_mul(0x8040_2010_0804_0201) >> 7) & 0x0101_0101_0101_0101;
+            buf[56 - 8 * g..64 - 8 * g].copy_from_slice(&(t | 0x3030_3030_3030_3030).to_le_bytes());
+        }
+        return 64 - bits;
+    }
+    if radix.is_power_of_two() {
+        let (bits, mask) = (radix.trailing_zeros(), u64::from(radix) - 1);
+        let mut x = x;
+        loop {
+            i -= 1;
+            buf[i] = DIGITS[(x & mask) as usize];
+            x >>= bits;
+            if x == 0 {
+                return i;
+            }
+        }
+    }
+    let (b, k) = BLOCKS[radix as usize];
+    let v = INVERSES[radix as usize];
+    let r = u64::from(radix);
+    let mut x = x;
+    loop {
+        // A block below `2^32` and what is above it.
+        let (high, mut block) = if x >= b { (x / b, x % b) } else { (0, x) };
+        let mut n = 0;
+        loop {
+            let q = ((u128::from(block) * u128::from(v)) >> 64) as u64;
+            i -= 1;
+            buf[i] = DIGITS[(block - q * r) as usize];
+            block = q;
+            n += 1;
+            // The whole block, zeros in front, below the top one.
+            if block == 0 && (high == 0 || n == k) {
+                break;
+            }
+        }
+        if high == 0 {
+            return i;
+        }
+        x = high;
+    }
+}
+
+/// The text of a rational in words in `radix`: the sign, the digits of the numerator and, but for
+/// an integer, `/` and those of the denominator, written on the stack and copied once into the
+/// string.
+fn word_text(x: Small, radix: u32) -> String {
+    if radix == 10 {
+        let mut buf = [0u8; WORD_TEXT];
+        let i = small_text(x.negative, x.num, x.den, &mut buf);
+        return String::from(ascii(&buf[i..]));
+    }
+    let mut out = [0u8; 130];
+    let mut len = usize::from(x.negative);
+    out[0] = b'-';
+    {
+        let mut digits = [0u8; 64];
+        let i = digits_radix(x.num, radix, &mut digits);
+        out[len..len + 64 - i].copy_from_slice(&digits[i..]);
+        len += 64 - i;
+        if x.den != 1 {
+            out[len] = b'/';
+            len += 1;
+            let j = digits_radix(x.den, radix, &mut digits);
+            out[len..len + 64 - j].copy_from_slice(&digits[j..]);
+            len += 64 - j;
+        }
+    }
+    String::from(ascii(&out[..len]))
+}
+
 impl fmt::Debug for Rational {
     /// Writes the number as [`Display`](fmt::Display) does.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -188,30 +339,45 @@ impl From<Number> for Rational {
 }
 
 impl From<&Number> for Rational {
-    /// The integer `n` as `n/1`, in new vectors.
+    /// The integer `n` as `n/1`: in words when it fits in 64 bits, and otherwise in new vectors.
     #[inline]
     fn from(n: &Number) -> Rational {
+        let m = Magnitude::of(n);
+        if m.bytes.len() <= 8 {
+            return Rational::from_word(m.negative, m.small() as u64, 1, n.byte_order());
+        }
         Rational::from_integer(n.clone())
     }
 }
 
-macro_rules! from_primitive {
+macro_rules! from_unsigned {
     ($($t:ty),*) => {$(
         impl From<$t> for Rational {
             #[doc = concat!("The `", stringify!($t), "` `v` as `v/1`, little-endian.")]
             #[inline]
             fn from(v: $t) -> Rational {
-                let mut num = Number::from(v);
-                trim(&mut num);
-                Rational::from_reduced(num, one(ByteOrder::LittleEndian))
+                // In words when it fits in 64 bits.
+                Rational::from_u128(false, v as u128, 1, ByteOrder::LittleEndian)
             }
         }
     )*};
 }
 
-from_primitive!(
-    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
-);
+macro_rules! from_signed {
+    ($($t:ty),*) => {$(
+        impl From<$t> for Rational {
+            #[doc = concat!("The `", stringify!($t), "` `v` as `v/1`, little-endian.")]
+            #[inline]
+            fn from(v: $t) -> Rational {
+                // In words when it fits in 64 bits.
+                Rational::from_u128(v < 0, (v as i128).unsigned_abs(), 1, ByteOrder::LittleEndian)
+            }
+        }
+    )*};
+}
+
+from_unsigned!(u8, u16, u32, u64, u128, usize);
+from_signed!(i8, i16, i32, i64, i128, isize);
 
 // Writing
 
@@ -236,28 +402,26 @@ impl Rational {
     /// ```
     #[track_caller]
     pub fn to_str_radix(&self, radix: u32) -> String {
-        if is_one(&self.den) {
-            return self.num.to_str_radix(radix);
+        assert!(
+            (2..=36).contains(&radix),
+            "from_str_radix_int: must lie in the range `[2, 36]` - found {radix}"
+        );
+        if let Some(x) = Small::of(self) {
+            return word_text(x, radix);
+        }
+        let (num, den) = (self.numer(), self.denom());
+        if is_one(den) {
+            return num.to_str_radix(radix);
         }
         if radix == 10 {
-            if let Some(x) = Small::of(self) {
-                let mut buf = [0u8; 41];
-                let len = small_text(x.num, x.den, &mut buf);
-                let mut s = String::with_capacity(len + usize::from(x.negative));
-                if x.negative {
-                    s.push('-');
-                }
-                s.push_str(ascii(&buf[..len]));
-                return s;
-            }
             // In one vector, from the buffers of the formatting of the parts.
-            let bound = (self.num.value.len() + self.den.value.len()) * 5 / 2 + 4;
+            let bound = (num.value.len() + den.value.len()) * 5 / 2 + 4;
             let mut s = String::with_capacity(bound);
-            let _ = write!(s, "{}/{}", self.num, self.den);
+            let _ = write!(s, "{num}/{den}");
             return s;
         }
-        let den = self.den.to_str_radix(radix);
-        let mut s = self.num.to_str_radix(radix);
+        let den = den.to_str_radix(radix);
+        let mut s = num.to_str_radix(radix);
         s.reserve_exact(1 + den.len());
         s.push('/');
         s.push_str(&den);
@@ -374,36 +538,204 @@ fn signed(src: &str) -> Result<(bool, &str), ParseRationalError> {
     }
 }
 
-/// The value of up to 19 decimal digits, `None` for more, none, or a character that is not one.
+/// The value of each byte as a digit, letters in either case, and 36 for a byte that is a digit in
+/// no radix.
+const VALUES: [u8; 256] = {
+    let mut t = [36u8; 256];
+    let mut i = 0;
+    while i < 10 {
+        t[b'0' as usize + i] = i as u8;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 26 {
+        t[b'a' as usize + i] = 10 + i as u8;
+        t[b'A' as usize + i] = 10 + i as u8;
+        i += 1;
+    }
+    t
+};
+
+/// For each radix, how many digits any word holds, `radix^n ≤ 2^64`, and how many the largest
+/// word has: one more, unless the radix is a power of two whose bits divide 64.
+const WORD_DIGITS: [(usize, usize); 37] = {
+    let mut t = [(0usize, 0usize); 37];
+    let mut r = 2;
+    while r <= 36 {
+        let (mut p, mut n) = (1u128, 0);
+        while p * r <= 1 << 64 {
+            p *= r;
+            n += 1;
+        }
+        t[r as usize] = (n, if p == 1 << 64 { n } else { n + 1 });
+        r += 1;
+    }
+    t
+};
+
+/// The value of the digit `c` in `radix`, `radix` or more when it is not one.
 #[inline(always)]
-fn word(run: &[u8]) -> Option<u64> {
-    if run.is_empty() || run.len() > 19 {
+fn digit(c: u8, radix: u32) -> u64 {
+    if radix <= 10 {
+        u64::from(c.wrapping_sub(b'0'))
+    } else {
+        u64::from(VALUES[c as usize])
+    }
+}
+
+/// The value of the digits `run` in `radix` when it is a word: `None` for no digits, a character
+/// that is not one, or more digits than the largest word has (zeros in front too); a value past
+/// `2^64` with as many digits as the largest word is `None` as well.
+#[inline(always)]
+fn word(run: &[u8], radix: u32) -> Option<u64> {
+    match radix {
+        10 => decimal_word(run),
+        2 => binary_word(run),
+        4 => bits_word::<2>(run),
+        8 => bits_word::<3>(run),
+        16 => bits_word::<4>(run),
+        32 => bits_word::<5>(run),
+        _ => radix_word(run, radix),
+    }
+}
+
+/// [`word`] in a radix that is not a power of two: a product and a sum a digit, the last digit of
+/// the largest words checked.
+#[inline(always)]
+fn radix_word(run: &[u8], radix: u32) -> Option<u64> {
+    let (safe, most) = WORD_DIGITS[radix as usize];
+    if run.is_empty() || run.len() > most {
         return None;
     }
+    let r = u64::from(radix);
+    let (head, tail) = run.split_at(run.len().min(safe));
     let mut v = 0u64;
-    for &c in run {
-        let d = c.wrapping_sub(b'0');
-        if d > 9 {
+    for &c in head {
+        let d = digit(c, radix);
+        if d >= r {
             return None;
         }
-        v = v * 10 + u64::from(d);
+        v = v * r + d;
+    }
+    for &c in tail {
+        let d = digit(c, radix);
+        if d >= r {
+            return None;
+        }
+        v = v.checked_mul(r)?.checked_add(d)?;
     }
     Some(v)
 }
 
-/// The value of the decimal digits `high` followed by `low`, up to 19 of them in all, `None` for
-/// none or a character that is not a digit.
+/// [`word`] in the radix `2^B`, from 4 to 32: a shift a digit.
 #[inline(always)]
-fn word_pair(high: &[u8], low: &[u8]) -> Option<u64> {
+fn bits_word<const B: u32>(run: &[u8]) -> Option<u64> {
+    let most = 64usize.div_ceil(B as usize);
+    if run.is_empty() || run.len() > most {
+        return None;
+    }
     let mut v = 0u64;
-    for &c in high.iter().chain(low) {
+    for &c in run {
+        let d = digit(c, 1 << B);
+        if d >> B != 0 {
+            return None;
+        }
+        v = v << B | d;
+    }
+    // With as many digits as the largest word, the first one must leave room for the others.
+    if run.len() == most && digit(run[0], 1 << B) >> (64 - B * (most as u32 - 1)) != 0 {
+        return None;
+    }
+    Some(v)
+}
+
+/// [`word`] in binary: eight digits at a time, checked and packed into a byte by one product.
+#[inline(always)]
+fn binary_word(run: &[u8]) -> Option<u64> {
+    if run.is_empty() || run.len() > 64 {
+        return None;
+    }
+    let mut v = 0u64;
+    let (chunks, rest) = run.as_chunks::<8>();
+    for &chunk in chunks {
+        let x = u64::from_le_bytes(chunk);
+        // Each byte `0` or `1`, which the product gathers into one, the first the highest bit.
+        if x & 0xFEFE_FEFE_FEFE_FEFE != 0x3030_3030_3030_3030 {
+            return None;
+        }
+        let bits = (x & 0x0101_0101_0101_0101).wrapping_mul(0x8040_2010_0804_0201) >> 56;
+        v = v << 8 | bits;
+    }
+    for &c in rest {
+        let d = c.wrapping_sub(b'0');
+        if d > 1 {
+            return None;
+        }
+        v = v << 1 | u64::from(d);
+    }
+    Some(v)
+}
+
+/// [`word`] in decimal: eight digits at a time, checked and combined in three products (Lemire's
+/// method), up to 19 digits, and a twentieth checked.
+#[inline(always)]
+fn decimal_word(run: &[u8]) -> Option<u64> {
+    if run.is_empty() || run.len() > 20 {
+        return None;
+    }
+    let (head, tail) = run.split_at(run.len().min(19));
+    let mut v = 0u64;
+    let (chunks, rest) = head.as_chunks::<8>();
+    for &chunk in chunks {
+        let x = u64::from_le_bytes(chunk);
+        // Each byte from `0x30` to `0x39`: its high half 3, and still 3 with 6 added.
+        let high = 0xF0F0_F0F0_F0F0_F0F0;
+        if x & high | (x.wrapping_add(0x0606_0606_0606_0606) & high) >> 4 != 0x3333_3333_3333_3333 {
+            return None;
+        }
+        // The first digit is the low byte: pairs, then quadruples, then the eight.
+        let x = x & 0x0F0F_0F0F_0F0F_0F0F;
+        let x = (x.wrapping_mul(10) + (x >> 8)) & 0x00FF_00FF_00FF_00FF;
+        let x = (x.wrapping_mul(100) + (x >> 16)) & 0x0000_FFFF_0000_FFFF;
+        let x = (x.wrapping_mul(10_000) + (x >> 32)) & 0xFFFF_FFFF;
+        v = v * 100_000_000 + x;
+    }
+    for &c in rest {
         let d = c.wrapping_sub(b'0');
         if d > 9 {
             return None;
         }
         v = v * 10 + u64::from(d);
     }
-    (!high.is_empty() || !low.is_empty()).then_some(v)
+    for &c in tail {
+        let d = c.wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add(u64::from(d))?;
+    }
+    Some(v)
+}
+
+/// The value of the decimal digits `high` followed by `low` when it is a word, as [`word`] has it.
+#[inline(always)]
+fn word_pair(high: &[u8], low: &[u8]) -> Option<u64> {
+    if low.is_empty() {
+        return word(high, 10);
+    }
+    if high.len() + low.len() > 20 {
+        return None;
+    }
+    let v = if high.is_empty() { 0 } else { word(high, 10)? };
+    let mut v = Some(v);
+    for &c in low {
+        let d = digit(c, 10);
+        if d > 9 {
+            return None;
+        }
+        v = v?.checked_mul(10)?.checked_add(d);
+    }
+    v
 }
 
 /// The magnitude that the digits `run` write in `radix`, little-endian, in the shortest form.
@@ -422,31 +754,34 @@ fn with_sign(mut n: Number, negative: bool) -> Number {
     n
 }
 
-/// The integer of the sign `negative` and the magnitude `m`, little-endian.
+/// The integer of the sign `negative` and the magnitude `m`, little-endian; zero is not negative.
 #[inline(always)]
 fn small_integer(negative: bool, m: u128) -> Rational {
-    Rational::from_reduced(
-        small::number(ByteOrder::LittleEndian, negative, m),
-        one(ByteOrder::LittleEndian),
-    )
+    Rational::from_u128(negative && m != 0, m, 1, ByteOrder::LittleEndian)
 }
 
-/// The integer of the sign `negative` and the digits `run` in `radix`.
+/// The integer of the sign `negative` and the digits `run` in `radix`: in registers when it is a
+/// word.
+#[inline(always)]
 fn integer(run: &str, radix: u32, negative: bool) -> Result<Rational, ParseRationalError> {
-    if radix == 10
-        && let Some(v) = word(run.as_bytes())
-    {
-        return Ok(small_integer(negative, u128::from(v)));
+    match word(run.as_bytes(), radix) {
+        Some(v) => Ok(small_integer(negative, u128::from(v))),
+        None => long_integer(run, radix, negative),
     }
+}
+
+/// [`integer`] of digits that are not a word, or not digits.
+#[inline(never)]
+fn long_integer(run: &str, radix: u32, negative: bool) -> Result<Rational, ParseRationalError> {
     let n = with_sign(magnitude(run, radix)?, negative);
     Ok(Rational::from_reduced(n, one(ByteOrder::LittleEndian)))
 }
 
-/// The fraction `±p/q` of the digits `p` and `q` in `radix`, in lowest terms.
+/// The fraction `±p/q` of the digits `p` and `q` in `radix`, in lowest terms: in registers when
+/// both are words.
+#[inline(always)]
 fn fraction(p: &str, q: &str, radix: u32, negative: bool) -> Result<Rational, ParseRationalError> {
-    if radix == 10
-        && let (Some(x), Some(y)) = (word(p.as_bytes()), word(q.as_bytes()))
-    {
+    if let (Some(x), Some(y)) = (word(p.as_bytes(), radix), word(q.as_bytes(), radix)) {
         if y == 0 {
             return Err(error(RationalErrorKind::ZeroDenominator));
         }
@@ -454,11 +789,24 @@ fn fraction(p: &str, q: &str, radix: u32, negative: bool) -> Result<Rational, Pa
             return Ok(small_integer(false, 0));
         }
         let g = gcd(x, y);
-        return Ok(Rational::from_reduced(
-            small::number(ByteOrder::LittleEndian, negative, u128::from(x / g)),
-            small::number(ByteOrder::LittleEndian, false, u128::from(y / g)),
+        return Ok(Rational::from_word(
+            negative,
+            x / g,
+            y / g,
+            ByteOrder::LittleEndian,
         ));
     }
+    long_fraction(p, q, radix, negative)
+}
+
+/// [`fraction`] of parts that are not both words, or not digits.
+#[inline(never)]
+fn long_fraction(
+    p: &str,
+    q: &str,
+    radix: u32,
+    negative: bool,
+) -> Result<Rational, ParseRationalError> {
     let num = magnitude(p, radix)?;
     let den = magnitude(q, radix)?;
     if den.is_zero() {
@@ -555,19 +903,32 @@ fn decimal(int: &str, rest: &str, negative: bool) -> Result<Rational, ParseRatio
         k -= frac_digits.len() as i64;
         (int, frac_digits)
     };
-    // Digits of up to 19 and a power of ten of up to 19, in registers.
+    // Digits that make a word and a power of ten of up to 19, in registers.
     if k.unsigned_abs() < 20
-        && high.len() + low.len() <= 19
         && let Some(v) = word_pair(high.as_bytes(), low.as_bytes())
     {
-        let ten = TENS[k.unsigned_abs() as usize];
+        let f = k.unsigned_abs() as usize;
         if k >= 0 {
-            return Ok(small_integer(negative, u128::from(v) * u128::from(ten)));
+            return Ok(small_integer(negative, u128::from(v) * u128::from(TENS[f])));
         }
-        let g = gcd(v, ten);
-        return Ok(Rational::from_reduced(
-            small::number(ByteOrder::LittleEndian, negative, u128::from(v / g)),
-            small::number(ByteOrder::LittleEndian, false, u128::from(ten / g)),
+        // `v/10^f`, `v` not divisible by 10: its twos or its fives, up to `f`, are the divisor.
+        let (num, den) = if v % 2 == 0 {
+            let t = v.trailing_zeros().min(f as u32);
+            (v >> t, TENS[f] >> t)
+        } else if v % 5 == 0 {
+            let mut c = 1;
+            while c < f && v % FIVES[c + 1] == 0 {
+                c += 1;
+            }
+            (v / FIVES[c], TENS[f] / FIVES[c])
+        } else {
+            (v, TENS[f])
+        };
+        return Ok(Rational::from_word(
+            negative,
+            num,
+            den,
+            ByteOrder::LittleEndian,
         ));
     }
     let joined;

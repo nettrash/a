@@ -15,18 +15,26 @@
 //! own that the steps write over, the products in two buffers of working memory, and the exact
 //! quotient by Hensel's method, so that a step allocates nothing once the vectors have grown.
 //!
-//! Large systems with few right-hand sides, and large determinants, go by Dixon's p-adic lifting
-//! instead ([`dixon`]), whose work is `O(n³)` operations on words. The product of matrices of
-//! rationals clears the rows of the left one and the columns of the right one the same way, and
-//! multiplies integers.
+//! Matrices of up to 8 rows whose elements are in words and whose minors stay below `2^61` by
+//! Hadamard's bound run in registers on the stack instead ([`registers`]), with nothing allocated
+//! but the result. Large systems with few right-hand sides, and large determinants, go by Dixon's
+//! p-adic lifting ([`dixon`]), whose work is `O(n³)` operations on words. The product of matrices
+//! of rationals clears the rows of the left one and the columns of the right one the same way, and
+//! multiplies integers, in registers when the elements are in words.
+//!
+//! The parts of a rational in words are read from its words in place, never through
+//! [`Rational::numer`], which makes and keeps two numbers for it; the results are written in
+//! words when their parts fit.
 
 use super::Matrix;
 
 mod dixon;
-use crate::math::numbers::{ByteOrder, Magnitude, Number, nat};
+mod registers;
+use crate::math::numbers::{ByteOrder, Magnitude, Number, fraction, nat};
 use crate::math::rational::{Rational, in_order};
 use core::cmp::Ordering;
 use core::mem;
+use registers::{Op, Out, Outcome, Source};
 
 /// An integer beyond the registers: a sign and a magnitude of limbs, the least significant
 /// first, without zero limbs at the top, not zero.
@@ -71,8 +79,13 @@ impl Int {
     }
 
     /// The number `n`.
+    #[inline]
     fn of(n: &Number) -> Int {
-        let m = Magnitude::of(n);
+        Int::of_magnitude(Magnitude::of(n))
+    }
+
+    /// The integer of the magnitude `m`, of a number or of a word read in place.
+    fn of_magnitude(m: Magnitude<'_>) -> Int {
         let b = m.bytes;
         if b.len() <= 8 {
             let v = m.small() as u64;
@@ -88,6 +101,41 @@ impl Int {
             d[i / 8] |= (*byte as u64) << (8 * (i % 8));
         }
         Int::of_limbs(m.negative, d)
+    }
+
+    /// The integer of the sign `negative` and the magnitude `v`.
+    #[inline]
+    fn of_word(negative: bool, v: u64) -> Int {
+        if v < 1 << 63 {
+            S(if negative { -(v as i64) } else { v as i64 })
+        } else {
+            B(Big {
+                neg: negative,
+                d: vec![v],
+            })
+        }
+    }
+
+    /// The numerator and the denominator of `x`, its words read in place.
+    #[inline]
+    fn parts(x: &Rational) -> (Int, Int) {
+        match x.word() {
+            Some(w) => (Int::of_word(w.negative, w.num), Int::of_word(false, w.den)),
+            None => {
+                let (num, den) = x.magnitudes();
+                (Int::of_magnitude(num), Int::of_magnitude(den))
+            }
+        }
+    }
+
+    /// The sign and the magnitude when it fits in 64 bits.
+    #[inline]
+    fn word(&self) -> Option<(bool, u64)> {
+        match self {
+            S(x) => Some((*x < 0, x.unsigned_abs())),
+            B(b) if b.d.len() == 1 => Some((b.neg, b.d[0])),
+            B(_) => None,
+        }
     }
 
     /// The integer `x`.
@@ -266,26 +314,10 @@ fn inverse(a: u64) -> u64 {
     x
 }
 
-/// The greatest common divisor of two words, by Stein's binary method.
-fn gcd(mut a: u64, mut b: u64) -> u64 {
-    if a == 0 {
-        return b;
-    }
-    if b == 0 {
-        return a;
-    }
-    let shift = (a | b).trailing_zeros();
-    a >>= a.trailing_zeros();
-    loop {
-        b >>= b.trailing_zeros();
-        if a > b {
-            mem::swap(&mut a, &mut b);
-        }
-        b -= a;
-        if b == 0 {
-            return a << shift;
-        }
-    }
+/// The greatest common divisor of two words, either of which may be zero.
+#[inline(always)]
+fn gcd(a: u64, b: u64) -> u64 {
+    fraction::gcd_words(a, b)
 }
 
 /// A divisor prepared to divide exactly: for one in a register, its power of two, the inverse of
@@ -697,43 +729,73 @@ fn back_substitute(u: &[Int], n: usize, cols: usize, mut f: impl FnMut(usize, &[
     }
 }
 
-/// `n` with the sign `negative` in the byte order `order`, in the shortest form.
-#[inline]
-fn word_number(order: ByteOrder, negative: bool, m: u64) -> Number {
-    let mut n = Number::new_from_u64(m, order);
-    n.negative = negative && m != 0;
-    n
-}
-
 /// The rational `y / d`, `d` not zero and `dn` its number, in lowest terms, in the byte order
-/// `order`: by one greatest common divisor, in registers when both fit.
+/// `order`: by one greatest common divisor, in words when both parts fit in 64 bits.
 fn reduce(y: &Int, d: &Int, dn: Option<&Number>, order: ByteOrder) -> Rational {
-    if let (S(a), S(b)) = (y, d) {
-        let (ua, ub) = (a.unsigned_abs(), b.unsigned_abs());
-        if ua == 0 {
-            return Rational::from_reduced(
-                word_number(order, false, 0),
-                word_number(order, false, 1),
-            );
+    if let (Some((ny, a)), Some((nd, b))) = (y.word(), d.word()) {
+        if a == 0 {
+            return Rational::from_word(false, 0, 1, order);
         }
-        let g = gcd(ua, ub);
-        let (ua, ub) = if g == 1 { (ua, ub) } else { (ua / g, ub / g) };
-        return Rational::from_reduced(
-            word_number(order, (*a < 0) != (*b < 0), ua),
-            word_number(order, false, ub),
-        );
+        let g = gcd(a, b);
+        return Rational::from_word(ny != nd, a / g, b / g, order);
     }
     if y.is_zero() {
-        return reduce(&S(0), &S(1), None, order);
+        return Rational::from_word(false, 0, 1, order);
     }
     if d.is_one() {
-        return Rational::from_reduced(y.number(order), word_number(order, false, 1));
+        return Rational::from_reduced(y.number(order), Number::new_from_u8(1, order));
     }
     let den = match dn {
         Some(n) => n.clone(),
         None => d.number(order),
     };
     Rational::new(y.number(order), den)
+}
+
+/// `x` in the byte order `order`, its words or its numbers turned around when it is in the other.
+fn in_order_of(x: Rational, order: ByteOrder) -> Rational {
+    if x.byte_order() == order {
+        return x;
+    }
+    match x.word() {
+        Some(w) => Rational::from_word(w.negative, w.num, w.den, order),
+        None => {
+            let (p, q) = x.into_parts();
+            Rational::from_reduced(in_order(p, order), in_order(q, order))
+        }
+    }
+}
+
+/// The determinant of a `2 × 2` matrix of rationals beyond the registers as FLINT's
+/// `fmpq_mat_det` takes it, `a·d - b·c` by the rationals' own arithmetic, whose reductions keep
+/// the numbers shorter than the rows cleared of their denominators and the greatest common divisor
+/// of the end.
+fn two_by_two_det(a: &Matrix<Rational>, order: ByteOrder) -> Rational {
+    let x = &(&a[(0, 0)] * &a[(1, 1)]) - &(&a[(0, 1)] * &a[(1, 0)]);
+    in_order_of(x, order)
+}
+
+/// The reciprocal of the determinant of a `2 × 2` matrix of rationals, or `None` when it is zero.
+fn two_by_two_recip(a: &Matrix<Rational>) -> Option<Rational> {
+    let d = &(&a[(0, 0)] * &a[(1, 1)]) - &(&a[(0, 1)] * &a[(1, 0)]);
+    (!d.is_zero()).then(|| d.into_recip())
+}
+
+/// The inverse of a `2 × 2` matrix of rationals beyond the registers as FLINT's `fmpq_mat_inv`
+/// takes it: the adjugate times the reciprocal of the determinant, by the rationals' arithmetic.
+fn two_by_two_inverse(a: &Matrix<Rational>, order: ByteOrder) -> Option<Matrix<Rational>> {
+    let r = two_by_two_recip(a)?;
+    let x = [
+        &a[(1, 1)] * &r,
+        -(&a[(1, 0)] * &r),
+        -(&a[(0, 1)] * &r),
+        &a[(0, 0)] * &r,
+    ];
+    Some(Matrix::from_column_major(
+        2,
+        2,
+        x.into_iter().map(|x| in_order_of(x, order)).collect(),
+    ))
 }
 
 /// The least common multiple of the positive `l` and `d`.
@@ -765,15 +827,19 @@ fn clear(parts: &[&Matrix<Rational>]) -> (Vec<Int>, Vec<Int>) {
 }
 
 /// Pushes the rationals of `xs()` onto `m`, each times the least common multiple of their
-/// denominators, which it returns.
+/// denominators, which it returns; the words of the rationals in words read in place.
 fn clear_into<'a, I: Iterator<Item = &'a Rational>>(m: &mut Vec<Int>, xs: impl Fn() -> I) -> Int {
+    if let Some(l) = clear_words_into(m, &xs) {
+        return l;
+    }
     let start = m.len();
     let mut l = S(1);
     for x in xs() {
-        if !x.is_integer() {
-            l = lcm(l, &Int::of(x.denom()));
+        let (num, den) = Int::parts(x);
+        if !den.is_one() {
+            l = lcm(l, &den);
         }
-        m.push(Int::of(x.numer()));
+        m.push(num);
     }
     if !l.is_one() {
         // Each numerator times `l` over its denominator.
@@ -784,7 +850,7 @@ fn clear_into<'a, I: Iterator<Item = &'a Rational>>(m: &mut Vec<Int>, xs: impl F
             let f = if x.is_integer() {
                 l.clone()
             } else {
-                match (&l, Int::of(x.denom())) {
+                match (&l, Int::parts(x).1) {
                     (S(l), S(d)) => S(l / d),
                     (l, d) => Int::of(
                         &l.number(ByteOrder::LittleEndian)
@@ -798,15 +864,123 @@ fn clear_into<'a, I: Iterator<Item = &'a Rational>>(m: &mut Vec<Int>, xs: impl F
     l
 }
 
+/// `x mod d` for the limbs `x`, least significant first, and a non-zero word `d`.
+#[inline]
+fn rem_1(x: &[u64], d: u64) -> u64 {
+    x.iter().rev().fold(0u64, |r, &l| {
+        ((u128::from(r) << 64 | u128::from(l)) % u128::from(d)) as u64
+    })
+}
+
+/// `x ← x·f` for the trimmed limbs `x` and a word `f`.
+#[inline]
+fn mul_1(x: &mut Vec<u64>, f: u64) {
+    let mut carry = 0u64;
+    for l in x.iter_mut() {
+        let p = u128::from(*l) * u128::from(f) + u128::from(carry);
+        *l = p as u64;
+        carry = (p >> 64) as u64;
+    }
+    if carry != 0 {
+        x.push(carry);
+    }
+}
+
+/// `x / d` for the limbs `x` of a multiple of the non-zero word `d`, into `q`, trimmed: the
+/// power of two shifted out, then Hensel's division by the odd part, from the low end.
+fn divexact_1(q: &mut Vec<u64>, x: &[u64], d: u64) {
+    let z = d.trailing_zeros();
+    let odd = d >> z;
+    let inv = nat::binvert(odd);
+    q.clear();
+    let mut borrow = 0u64;
+    for i in 0..x.len() {
+        let xi = if z == 0 {
+            x[i]
+        } else {
+            (x[i] >> z) | x.get(i + 1).map_or(0, |&h| h << (64 - z))
+        };
+        let (s, b) = xi.overflowing_sub(borrow);
+        let qi = s.wrapping_mul(inv);
+        q.push(qi);
+        borrow = ((u128::from(qi) * u128::from(odd)) >> 64) as u64 + u64::from(b);
+    }
+    trim(q);
+}
+
+/// [`clear_into`] for a row of rationals all in words, whose common denominator may pass the
+/// registers: the least common multiple on limbs, a remainder, a greatest common divisor and a
+/// product by a word for each denominator, and each numerator times the multiple's quotient by
+/// its denominator, with no number made. `None`, with `m` as it was, when an element is not in
+/// words.
+fn clear_words_into<'a, I: Iterator<Item = &'a Rational>>(
+    m: &mut Vec<Int>,
+    xs: &impl Fn() -> I,
+) -> Option<Int> {
+    // The multiple in a word while it fits, and on limbs from the first that passes it.
+    let mut w = 1u64;
+    let mut l: Vec<u64> = Vec::new();
+    for x in xs() {
+        let d = x.word()?.den;
+        if d == 1 {
+            continue;
+        }
+        if l.is_empty() {
+            let g = gcd(w, d);
+            match (w / g).checked_mul(d) {
+                Some(x) => w = x,
+                None => {
+                    l.push(w);
+                    mul_1(&mut l, d / g);
+                }
+            }
+        } else {
+            let g = gcd(rem_1(&l, d), d);
+            if d != g {
+                mul_1(&mut l, d / g);
+            }
+        }
+    }
+    if l.is_empty() {
+        for x in xs() {
+            let x = x.word()?;
+            let f = if x.den == w { 1 } else { w / x.den };
+            m.push(match x.num.checked_mul(f) {
+                Some(v) => Int::of_word(x.negative, v),
+                None => {
+                    let p = u128::from(x.num) * u128::from(f);
+                    Int::of_limbs(x.negative, vec![p as u64, (p >> 64) as u64])
+                }
+            });
+        }
+        return Some(Int::of_word(false, w));
+    }
+    let mut q = Vec::new();
+    for x in xs() {
+        let x = x.word()?;
+        if x.num == 0 {
+            m.push(S(0));
+            continue;
+        }
+        divexact_1(&mut q, &l, x.den);
+        let mut v = Vec::with_capacity(q.len() + 1);
+        v.extend_from_slice(&q);
+        mul_1(&mut v, x.num);
+        m.push(Int::of_limbs(x.negative, v));
+    }
+    Some(Int::of_limbs(false, l))
+}
+
 /// `c = a·b` for the column-major `m × k` matrix of rationals `a` and `k × n` one `b`, the
 /// elements of `c` little-endian as the zeros it holds: the rows of `a` and the columns of `b`
 /// multiplied by the least common multiples `l_i` and `r_j` of their denominators, the product of
 /// those integers, then one reduction of each element by `l_i·r_j`: `m·k·n` products of integers
 /// and `m·n` greatest common divisors, against `m·k·n` products and sums of rationals, each with
-/// its own. The sums of products are in 64-bit registers when the elements' lengths and `k` make
-/// it safe, in 128 bits when that does, and checked beyond. Products of two terms, and of four
-/// with a denominator beyond 32 bits, are the sums of products of rationals, which the rationals'
-/// register paths make faster there.
+/// its own. When every element is in words and the cleared integers fit in them, all of it runs
+/// on the stack ([`registers::product`]). Otherwise the sums of products are in 64-bit registers
+/// when the elements' lengths and `k` make it safe, in 128 bits when that does, and checked
+/// beyond; products of two terms, and of four with a denominator beyond 32 bits, are the sums of
+/// products of rationals, which the rationals' register paths make faster there.
 pub(super) fn product(
     c: &mut [Rational],
     a: &[Rational],
@@ -815,11 +989,11 @@ pub(super) fn product(
     k: usize,
     n: usize,
 ) {
-    if k == 0 {
+    if k == 0 || registers::product(c, a, b, m, k, n) {
         return;
     }
     let order = ByteOrder::LittleEndian;
-    let long = |x: &Rational| Magnitude::of(x.denom()).bytes.len() > 4;
+    let long = |x: &Rational| x.magnitudes().1.bytes.len() > 4;
     if k <= 2 || (k <= 4 && (a.iter().any(long) || b.iter().any(long))) {
         for j in 0..n {
             for i in 0..m {
@@ -828,11 +1002,13 @@ pub(super) fn product(
                     s += &a[i + p * m] * &b[p + j * k];
                 }
                 // Little-endian, as the zero that the sum would start from.
-                let s = if s.byte_order() == order {
-                    s
-                } else {
-                    let (x, y) = s.into_parts();
-                    Rational::from_reduced(in_order(x, order), in_order(y, order))
+                let s = match s.word() {
+                    _ if s.byte_order() == order => s,
+                    Some(w) => Rational::from_word(w.negative, w.num, w.den, order),
+                    None => {
+                        let (x, y) = s.into_parts();
+                        Rational::from_reduced(in_order(x, order), in_order(y, order))
+                    }
                 };
                 c[i + j * m] = s;
             }
@@ -1030,7 +1206,9 @@ impl Matrix<Rational> {
     /// division of integers no longer than the minors; from 28 rows (22 when an integer passes
     /// 63 bits) it is the least common multiple of the denominators of the solution of a system
     /// by Dixon's p-adic lifting, a divisor of the determinant, times the quotient's residues
-    /// modulo primes, `O(n³)` operations on words (FLINT's method). The determinant of the
+    /// modulo primes, `O(n³)` operations on words (FLINT's method). Up to 8 rows of rationals in
+    /// words whose minors stay below `2^61`, all of it runs in registers on the stack; a `2 × 2`
+    /// matrix with a fraction is `a·d - b·c` by the rationals' arithmetic. The determinant of the
     /// `0 × 0` matrix is 1; the result is in the byte order of the top left element.
     ///
     /// # Panics
@@ -1055,7 +1233,16 @@ impl Matrix<Rational> {
         if n == 0 {
             return reduce(&S(1), &S(1), None, order);
         }
-        let (mut m, multiples) = clear(&[self]);
+        if n == 2 && !self.as_slice().iter().all(Rational::is_integer) {
+            // Faster than the registers for fractions: 28 ns against 32 for parts below 100.
+            return two_by_two_det(self, order);
+        }
+        let (mut m, multiples) = match registers::run(Source::Rationals(&[self]), Op::Det, order) {
+            Outcome::Done(Out::Rational(d)) => return d,
+            _ if n == 2 => return two_by_two_det(self, order),
+            Outcome::Ints(m, l) => (m, l),
+            _ => clear(&[self]),
+        };
         let l = multiples.iter().fold(S(1), |l, x| mul(&l, x));
         reduce(&det_rows(&mut m, n), &l, None, order)
     }
@@ -1089,8 +1276,9 @@ impl Matrix<Rational> {
     /// when an integer passes 63 bits), with at most an eighth as many columns in `B`, Dixon's
     /// p-adic lifting instead: `A` factored once modulo a prime of 62 bits, the solution lifted
     /// to a power of it past Hadamard's bounds, and each element reconstructed as a fraction,
-    /// `O(n³)` operations on words. The result is in the byte order of the top left element of
-    /// `A`.
+    /// `O(n³)` operations on words. Up to 8 rows of rationals in words whose minors stay below
+    /// `2^61`, the elimination and the back substitution run in registers on the stack (Cramer's
+    /// rule for 2 rows). The result is in the byte order of the top left element of `A`.
     ///
     /// # Panics
     ///
@@ -1117,15 +1305,23 @@ impl Matrix<Rational> {
         if n == 0 {
             return Some(Matrix::zeros(0, b.cols()));
         }
-        let (m, _) = clear(&[self, b]);
+        let m = match registers::run(Source::Rationals(&[self, b]), Op::Solve, order) {
+            Outcome::Done(Out::Rationals(x)) => {
+                return x.map(|x| Matrix::from_column_major(n, b.cols(), x));
+            }
+            Outcome::Ints(m, _) => m,
+            _ => clear(&[self, b]).0,
+        };
         solve_rows(m, n, b.cols(), None, order)
     }
 
     /// The inverse `A⁻¹`, exactly, or `None` when the matrix is singular: with `L` the diagonal
     /// matrix of the least common multiples of the rows' denominators, `A⁻¹ = (L·A)⁻¹·L`, the
     /// inverse of the integers `L·A` by the elimination and back substitution of
-    /// [`solve`](Matrix::solve) on `[L·A | I]`, and one reduction of each element. The result is
-    /// in the byte order of the top left element.
+    /// [`solve`](Matrix::solve) on `[L·A | I]`, and one reduction of each element, in registers
+    /// as for `solve`; a `2 × 2` matrix beyond the registers is its adjugate times the reciprocal
+    /// of its determinant, by the rationals' arithmetic. The result is in the byte order of the
+    /// top left element.
     ///
     /// # Panics
     ///
@@ -1150,7 +1346,14 @@ impl Matrix<Rational> {
         if n == 0 {
             return Some(Matrix::zeros(0, 0));
         }
-        let (m, multiples) = clear(&[self]);
+        let (m, multiples) = match registers::run(Source::Rationals(&[self]), Op::Inverse, order) {
+            Outcome::Done(Out::Rationals(x)) => {
+                return x.map(|x| Matrix::from_column_major(n, n, x));
+            }
+            _ if n == 2 => return two_by_two_inverse(self, order),
+            Outcome::Ints(m, l) => (m, l),
+            _ => clear(&[self]),
+        };
         let scale = (!multiples.iter().all(Int::is_one)).then_some(multiples.as_slice());
         solve_rows(beside_identity(m, n), n, n, scale, order)
     }
@@ -1247,7 +1450,12 @@ pub(super) fn det_of_integers(a: &Matrix<Number>) -> Number {
     if n == 0 {
         return Number::new_from_u8(1, order);
     }
-    det_rows(&mut integers(&[a]), n).number(order)
+    let mut m = match registers::run(Source::Numbers(&[a]), Op::DetInteger, order) {
+        Outcome::Done(Out::Number(d)) => return d,
+        Outcome::Ints(m, _) => m,
+        _ => integers(&[a]),
+    };
+    det_rows(&mut m, n).number(order)
 }
 
 /// The rank of the matrix of integers `a`, by the elimination of this module.
@@ -1270,7 +1478,14 @@ pub(super) fn inverse_of_integers(a: &Matrix<Number>) -> Option<(Matrix<Number>,
     if n == 0 {
         return Some((Matrix::zeros(0, 0), Number::new_from_u8(1, order)));
     }
-    let mut m = beside_identity(integers(&[a]), n);
+    let m = match registers::run(Source::Numbers(&[a]), Op::Adjugate, order) {
+        Outcome::Done(Out::Adjugate(x)) => {
+            return x.map(|(adj, det)| (Matrix::from_column_major(n, n, adj), det));
+        }
+        Outcome::Ints(m, _) => m,
+        _ => integers(&[a]),
+    };
+    let mut m = beside_identity(m, n);
     let e = eliminate(&mut m, n, 2 * n, n, true)?;
     let odd = e.swaps % 2 == 1;
     let mut adj = Vec::with_capacity(n * n);
@@ -1355,7 +1570,14 @@ impl Matrix<Number> {
         if n == 0 {
             return Some(Matrix::zeros(0, b.cols()));
         }
-        solve_rows(integers(&[self, b]), n, b.cols(), None, order)
+        let m = match registers::run(Source::Numbers(&[self, b]), Op::Solve, order) {
+            Outcome::Done(Out::Rationals(x)) => {
+                return x.map(|x| Matrix::from_column_major(n, b.cols(), x));
+            }
+            Outcome::Ints(m, _) => m,
+            _ => integers(&[self, b]),
+        };
+        solve_rows(m, n, b.cols(), None, order)
     }
 
     /// The inverse `A⁻¹` as a matrix of rationals, exactly, or `None` when the matrix is
@@ -1386,6 +1608,13 @@ impl Matrix<Number> {
         if n == 0 {
             return Some(Matrix::zeros(0, 0));
         }
-        solve_rows(beside_identity(integers(&[self]), n), n, n, None, order)
+        let m = match registers::run(Source::Numbers(&[self]), Op::Inverse, order) {
+            Outcome::Done(Out::Rationals(x)) => {
+                return x.map(|x| Matrix::from_column_major(n, n, x));
+            }
+            Outcome::Ints(m, _) => m,
+            _ => integers(&[self]),
+        };
+        solve_rows(beside_identity(m, n), n, n, None, order)
     }
 }

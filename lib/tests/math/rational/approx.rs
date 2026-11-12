@@ -784,3 +784,373 @@ fn reconstruct_negative_modulus() {
         &Number::from(1),
     );
 }
+
+// Across the forms: parts in words, at the boundary of 64 bits, and in numbers, and results that
+// shrink to words or grow out of them. A value left in the wrong form is not equal to the same
+// value made by `Rational::new`, nor does it hash alike.
+
+/// The hash of `x` under the standard hasher.
+fn hash_of(x: &Rational) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// Asserts that `a` and `b` are the same number, both in the form, equal and hashing alike.
+#[track_caller]
+fn same(a: &Rational, b: &Rational) {
+    check(a);
+    check(b);
+    assert_eq!(a, b);
+    assert_eq!(hash_of(a), hash_of(b), "{a} hashes apart from itself");
+}
+
+/// Asserts that `t` is in the shortest form and the byte order `o`.
+#[track_caller]
+fn shortest(t: &Number, o: ByteOrder) {
+    assert!(t.byte_order() == o, "a term in another byte order: {t}");
+    let top = match o {
+        ByteOrder::BigEndian => t.value[0],
+        ByteOrder::LittleEndian => *t.value.last().unwrap(),
+    };
+    assert!(
+        top != 0 || t.value.len() == 1,
+        "a term not in the shortest form: {t}"
+    );
+    assert!(!(t.is_zero() && t.is_negative()), "a negative zero term");
+}
+
+/// A magnitude of exactly `bits` bits, its other bits random, as a number in the byte order `o`.
+fn of_bits(state: &mut u64, bits: usize, o: ByteOrder) -> Number {
+    let bytes = bits.div_ceil(8);
+    let mut v: Vec<u8> = (0..bytes).map(|_| xorshift(state) as u8).collect();
+    let top = bits - 8 * (bytes - 1);
+    v[bytes - 1] &= ((1u16 << top) - 1) as u8;
+    v[bytes - 1] |= 1 << (top - 1);
+    super::common::number(&v, false, o)
+}
+
+/// A length in bits about the forms' boundaries: short ones, 63 to 65 bits, 127 to 129, and long.
+fn edge_bits(state: &mut u64) -> usize {
+    const BITS: [usize; 14] = [1, 2, 5, 15, 16, 17, 32, 62, 63, 64, 65, 66, 128, 129];
+    match below(state, 8) {
+        0 => 130 + below(state, 300) as usize,
+        1 => 1 + below(state, 130) as usize,
+        _ => BITS[below(state, BITS.len() as u64) as usize],
+    }
+}
+
+/// A random rational of parts about the forms' boundaries, of a random sign and byte order.
+fn edge_rational(state: &mut u64) -> Rational {
+    let o = order(xorshift(state));
+    let (nb, db) = (edge_bits(state), edge_bits(state));
+    let mut n = of_bits(state, nb, o);
+    if below(state, 2) == 1 {
+        n = -n;
+    }
+    let d = if below(state, 10) == 0 {
+        Number::from(1u8)
+    } else {
+        of_bits(state, db, o)
+    };
+    let r = Rational::new(n, d);
+    check(&r);
+    r
+}
+
+/// The convergents of `terms` by the recurrence on numbers, each made by `Rational::new`.
+fn convergents_plain(terms: &[Number]) -> Vec<Rational> {
+    let (mut p0, mut q0) = (Number::from(0u8), Number::from(1u8));
+    let (mut p1, mut q1) = (Number::from(1u8), Number::from(0u8));
+    let mut out = Vec::new();
+    for t in terms {
+        let p2 = t * &p1 + &p0;
+        let q2 = t * &q1 + &q0;
+        out.push(Rational::new(p2.clone(), q2.clone()));
+        (p0, q0, p1, q1) = (p1, q1, p2, q2);
+    }
+    out
+}
+
+#[test]
+fn continued_fractions_across_the_forms() {
+    let mut s = 0xC0FF_EE00_1234_5678u64;
+    for _ in 0..size(3000, 12) {
+        let x = edge_rational(&mut s);
+        let o = x.byte_order();
+        let terms = x.continued_fraction();
+        assert_eq!(terms, cf_plain(&x), "the terms of {x}");
+        for t in &terms {
+            shortest(t, o);
+        }
+        canonical(&x, &terms);
+        same(&Rational::from_continued_fraction(&terms), &x);
+        let c = x.convergents();
+        let plain = convergents_plain(&terms);
+        assert_eq!(c.len(), plain.len());
+        for (a, b) in c.iter().zip(&plain) {
+            same(a, b);
+            assert!(a.byte_order() == o);
+        }
+    }
+    // Terms past 64 bits before, in and after the convergents' run on limbs, of both signs.
+    let mut s = 0xABCD_0123_4567_8899u64;
+    for _ in 0..size(300, 4) {
+        let o = order(xorshift(&mut s));
+        let len = 2 + below(&mut s, 60) as usize;
+        let mut terms = Vec::with_capacity(len);
+        for i in 0..len {
+            let b = match below(&mut s, 6) {
+                0 => 65 + below(&mut s, 200) as usize,
+                1 => 60 + below(&mut s, 10) as usize,
+                _ => 1 + below(&mut s, 8) as usize,
+            };
+            let mut t = of_bits(&mut s, b, o);
+            if i == 0 && below(&mut s, 2) == 1 {
+                t = -t;
+            }
+            terms.push(t);
+        }
+        if *terms.last().unwrap() == 1u8 {
+            *terms.last_mut().unwrap() = Number::from(2u8);
+        }
+        let x = Rational::from_continued_fraction(&terms);
+        assert_eq!(x.continued_fraction(), terms);
+        let c = x.convergents();
+        let plain = convergents_plain(&terms);
+        assert_eq!(c.len(), plain.len());
+        for (a, b) in c.iter().zip(&plain) {
+            same(a, b);
+            assert!(a.byte_order() == x.byte_order());
+        }
+    }
+    // Integers, zero and the extremes of the words.
+    for v in [
+        0i128,
+        1,
+        -1,
+        7,
+        -7,
+        i128::from(u64::MAX),
+        -i128::from(u64::MAX),
+        1 << 64,
+    ] {
+        for o in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            let n = super::common::number(
+                &v.unsigned_abs().to_le_bytes()
+                    [..16 - v.unsigned_abs().leading_zeros() as usize / 8],
+                v < 0,
+                o,
+            );
+            let x = Rational::from_integer(n.clone());
+            let terms = x.continued_fraction();
+            assert_eq!(terms, [n]);
+            shortest(&terms[0], o);
+            same(&Rational::from_continued_fraction(&terms), &x);
+            same(&x.convergents()[0], &x);
+        }
+    }
+    for (p, d) in [
+        (u64::MAX, u64::MAX - 1),
+        (u64::MAX - 1, u64::MAX),
+        (1, u64::MAX),
+    ] {
+        for negative in [false, true] {
+            let n = if negative {
+                -Number::from(p)
+            } else {
+                Number::from(p)
+            };
+            let x = Rational::new(n, Number::from(d));
+            let terms = x.continued_fraction();
+            assert_eq!(terms, cf_plain(&x));
+            canonical(&x, &terms);
+        }
+    }
+}
+
+#[test]
+fn from_continued_fraction_across_the_forms() {
+    let mut s = 0x0123_4567_89AB_CDEFu64;
+    for _ in 0..size(2000, 10) {
+        let o = order(xorshift(&mut s));
+        let len = 1 + below(&mut s, 70) as usize;
+        let first_bits = edge_bits(&mut s);
+        let mut first = of_bits(&mut s, first_bits, o);
+        if below(&mut s, 2) == 1 {
+            first = -first;
+        }
+        if below(&mut s, 8) == 0 {
+            first = super::common::number(&[], false, o);
+        }
+        let mut terms = vec![first];
+        for _ in 1..len {
+            let t = match below(&mut s, 6) {
+                0 => {
+                    let b = edge_bits(&mut s);
+                    let to = order(xorshift(&mut s));
+                    of_bits(&mut s, b, to)
+                }
+                _ => {
+                    let k = below(&mut s, 20);
+                    Number::from(1 + below(&mut s, 1 << k))
+                }
+            };
+            terms.push(t);
+        }
+        let mut x = Rational::from_integer(terms[len - 1].clone());
+        for t in terms[..len - 1].iter().rev() {
+            x = x.recip() + Rational::from_integer(t.clone());
+        }
+        let got = Rational::from_continued_fraction(&terms);
+        same(&got, &x);
+        assert!(got.byte_order() == terms[0].byte_order());
+    }
+}
+
+#[test]
+fn limit_denominator_across_the_forms() {
+    let mut s = 0xFEED_FACE_CAFE_BEEFu64;
+    let one = Number::from(1u8);
+    for _ in 0..size(2000, 10) {
+        let x = edge_rational(&mut s);
+        let max = match below(&mut s, 10) {
+            0 => one.clone(),
+            1 => Number::from(2u8),
+            2 => (&one << 63) - 1u8,
+            3 => &one << 63,
+            4 => Number::from(u64::MAX),
+            5 => &one << 64,
+            6 => (&one << 64) + 1u8,
+            _ => {
+                let b = edge_bits(&mut s);
+                let o = order(xorshift(&mut s));
+                of_bits(&mut s, b, o)
+            }
+        };
+        let got = x.limit_denominator(&max);
+        same(&got, &limit_reference(&x, &max));
+        assert!(got.byte_order() == x.byte_order());
+        assert!(*got.denom() <= max);
+    }
+    // Ties at a half with a bound of 1, in words.
+    for (p, d, r) in [
+        (5i64, 2i64, 2i64),
+        (7, 2, 4),
+        (-5, 2, -2),
+        (-7, 2, -4),
+        (1, 2, 0),
+        (-1, 2, 0),
+    ] {
+        same(&q(p, d).limit_denominator(&one), &q(r, 1));
+    }
+    let big = Number::from(u64::MAX);
+    same(
+        &Rational::new(big.clone(), Number::from(2u8)).limit_denominator(&one),
+        &Rational::from_integer(&big / 2u8 + 1u8),
+    );
+}
+
+#[test]
+fn simplest_between_across_the_forms() {
+    let mut s = 0x2468_1357_9BDF_ACE0u64;
+    for _ in 0..size(2000, 10) {
+        let x = edge_rational(&mut s);
+        let y = match below(&mut s, 4) {
+            0 => x.clone(),
+            1 => {
+                let b = edge_bits(&mut s) + 2;
+                &x + &Rational::new(Number::from(1u8), of_bits(&mut s, b, order(0)))
+            }
+            _ => edge_rational(&mut s),
+        };
+        let got = Rational::simplest_between(&x, &y);
+        let (lo, hi) = if x <= y { (&x, &y) } else { (&y, &x) };
+        let expected = if lo == hi {
+            lo.clone()
+        } else {
+            simplest_recursive(lo, hi)
+        };
+        same(&got, &expected);
+        assert!(got.byte_order() == x.byte_order());
+        same(&Rational::simplest_between(&y, &x), &expected);
+    }
+}
+
+/// Wang's reconstruction on numbers, one division a step: the reference.
+fn wang(r: &Number, m: &Number, n: &Number, d: &Number) -> Option<Rational> {
+    if n.is_negative() || !d.is_positive() {
+        return None;
+    }
+    let (mut r0, mut r1) = (m.clone(), r.rem_euclid(m));
+    let (mut t0, mut t1) = (Number::from(0u8), Number::from(1u8));
+    while r1 > *n {
+        let (qq, rr) = r0.div_rem(&r1);
+        let t2 = &t0 - &(&qq * &t1);
+        (r0, r1, t0, t1) = (r1, rr, t1, t2);
+    }
+    if t1.abs() > *d || r1.gcd(&t1) != 1u8 {
+        return None;
+    }
+    Some(Rational::new(r1, t1))
+}
+
+#[test]
+fn reconstruct_across_the_forms() {
+    let mut s = 0x7777_3333_1111_9999u64;
+    for _ in 0..size(2000, 10) {
+        let o = order(xorshift(&mut s));
+        let mb = edge_bits(&mut s).max(2);
+        let m = of_bits(&mut s, mb, o);
+        // A residue of a small p/q, or any number, of either sign, maybe past the modulus.
+        let r = match below(&mut s, 3) {
+            0 => {
+                let (pb, qb) = (1 + mb / 2 - mb / 4, 1 + mb / 2 - mb / 4);
+                let pb = 1 + below(&mut s, pb as u64) as usize;
+                let qb = 1 + below(&mut s, qb as u64) as usize;
+                let p = of_bits(&mut s, pb, o);
+                let qq = of_bits(&mut s, qb, o);
+                match qq.mod_inverse(&m) {
+                    Some(inv) => (&p * &inv).rem_euclid(&m),
+                    None => p,
+                }
+            }
+            _ => {
+                let b = edge_bits(&mut s);
+                of_bits(&mut s, b, o)
+            }
+        };
+        let r = if below(&mut s, 3) == 0 { -r } else { r };
+        let bound = |s: &mut u64| match below(s, 5) {
+            0 => Number::from(u64::MAX),
+            1 => Number::from(1u8) << 64,
+            2 => Number::from(1u8),
+            _ => {
+                let b = edge_bits(s);
+                let o = order(xorshift(s));
+                of_bits(s, b, o)
+            }
+        };
+        let (n, d) = (bound(&mut s), bound(&mut s));
+        let got = Rational::reconstruct_with_bounds(&r, &m, &n, &d);
+        let expected = wang(&r, &m, &n, &d);
+        assert_eq!(got.is_some(), expected.is_some(), "{r} mod {m}, {n}, {d}");
+        if let (Some(g), Some(e)) = (&got, &expected) {
+            same(g, e);
+            assert!(g.byte_order() == r.byte_order());
+        }
+        let b = ((&m - 1u8).div_floor(&Number::from(2u8))).isqrt();
+        let got = Rational::reconstruct(&r, &m);
+        let expected = if b.is_zero() {
+            None
+        } else {
+            wang(&r, &m, &b, &b)
+        };
+        assert_eq!(got.is_some(), expected.is_some(), "{r} mod {m}");
+        if let (Some(g), Some(e)) = (&got, &expected) {
+            same(g, e);
+            assert!(g.byte_order() == r.byte_order());
+        }
+    }
+}

@@ -977,3 +977,129 @@ fn two_limb_parts_against_cross_products() {
         every_form_verified(&x, &b, '*');
     }
 }
+
+/// A part of up to 64 bits made of factors that other parts share: powers of 2, small odd
+/// primes, primes near `2^16` and `2^32`, and a random cofactor, so that the gcds of the register
+/// paths meet every case: 1, a power of 2, an odd divisor, one past `2^32`, parts apart by 16 bits
+/// or more, and equal parts.
+fn factored(s: &mut u64) -> u64 {
+    const FACTORS: [u64; 12] = [
+        2,
+        4,
+        1 << 20,
+        3,
+        9,
+        5,
+        7,
+        65_521,
+        65_537,
+        4_294_967_291,
+        4_294_967_311,
+        1 << 33,
+    ];
+    let mut x: u64 = 1;
+    for _ in 0..below(s, 4) {
+        let f = FACTORS[below(s, FACTORS.len() as u64) as usize];
+        match x.checked_mul(f) {
+            Some(y) => x = y,
+            None => break,
+        }
+    }
+    match below(s, 4) {
+        0 => x,
+        1 => x.saturating_mul(1 + below(s, 1000)),
+        _ => {
+            let room = 64 - x.leading_zeros().min(63);
+            let c = xorshift(s) >> (room + below(s, 64 - room as u64 + 1) as u32).min(63);
+            x.checked_mul(c.max(1)).unwrap_or(x)
+        }
+    }
+}
+
+#[test]
+fn register_path_with_shared_factors() {
+    let mut s = 0x5EED_0027_u64;
+    for i in 0..size(20000, 300) {
+        let o = super::common::order(i as u64);
+        let part = |s: &mut u64| {
+            let m = factored(s).to_le_bytes();
+            let mut v = m.to_vec();
+            while v.last() == Some(&0) {
+                v.pop();
+            }
+            v
+        };
+        let (an, ad, bn, bd) = (part(&mut s), part(&mut s), part(&mut s), part(&mut s));
+        let (sa, sb) = (below(&mut s, 2) == 1, below(&mut s, 2) == 1);
+        let a = Rational::new(
+            super::common::number(&an, sa, o),
+            super::common::number(&ad, false, o),
+        );
+        let b = if below(&mut s, 8) == 0 {
+            // Equal denominators, and now and then the same number.
+            let n = if below(&mut s, 2) == 0 {
+                a.numer().clone()
+            } else {
+                super::common::number(&bn, sb, o)
+            };
+            Rational::new(n, a.denom().clone())
+        } else {
+            Rational::new(
+                super::common::number(&bn, sb, o),
+                super::common::number(&bd, false, o),
+            )
+        };
+        for op in ['+', '-', '*'] {
+            every_form_verified(&a, &b, op);
+        }
+        if !b.is_zero() {
+            every_form_verified(&a, &b, '/');
+        }
+        let (x, y) = (a.numer() * b.denom(), b.numer() * a.denom());
+        assert_eq!(a.cmp(&b), x.cmp(&y), "{a:?} cmp {b:?}");
+        assert_eq!(a == b, x == y, "{a:?} == {b:?}");
+    }
+}
+
+#[test]
+fn powers_of_words_across_the_boundary() {
+    // Parts of every length to 64 bits, raised so that the powers end on either side of 64 bits
+    // and of 512, in either byte order and sign; against the powers of the parts as numbers.
+    let mut s = 0x0909_2727_u64;
+    for i in 0..size(3000, 60) {
+        let o = super::common::order(i as u64);
+        let bits = |s: &mut u64| 1 + below(s, 64) as u32;
+        let part = |s: &mut u64, b: u32| (xorshift(s) >> (64 - b)) | (1u64 << (b - 1));
+        let (bn, bd) = (bits(&mut s), bits(&mut s));
+        let (n, d) = (part(&mut s, bn), part(&mut s, bd));
+        let negative = below(&mut s, 2) == 1;
+        let p = super::common::number(&n.to_le_bytes(), negative, o);
+        let q = super::common::number(&d.to_le_bytes(), false, o);
+        let r = Rational::new(p, q);
+        let k = match below(&mut s, 3) {
+            0 => below(&mut s, 4) as i32,
+            1 => (64 / bn.max(bd)) as i32 + below(&mut s, 2) as i32,
+            _ => 1 + below(&mut s, 12) as i32,
+        };
+        for e in [k, -k] {
+            if e < 0 && r.is_zero() {
+                continue;
+            }
+            let got = r.pow(e);
+            check(&got);
+            let (rn, rd) = (
+                r.numer().pow(e.unsigned_abs()),
+                r.denom().pow(e.unsigned_abs()),
+            );
+            let want = if e < 0 {
+                Rational::new(rd, rn)
+            } else {
+                Rational::new(rn, rd)
+            };
+            assert_eq!(got, want, "({r})^{e}");
+            assert!(got.byte_order() == r.byte_order(), "({r})^{e}: byte order");
+        }
+    }
+    assert_eq!(Rational::from(0u8).pow(0), 1u8);
+    assert_eq!((Rational::from(-2) / 3u8).pow(3).to_string(), "-8/27");
+}

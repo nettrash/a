@@ -197,39 +197,60 @@ Number theory, measured on an Apple M4 Max on one thread (the references too), a
 
 | Page | Contents |
 | --- | --- |
-| [Rational numbers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/rational.md) | `a::math::rational::Rational`, a fraction of numbers in lowest terms with a positive denominator: `+`, `-`, `*` and `/` reduced by Knuth's two gcds, with numbers and primitive integers on either side; comparisons bounded from the top bits; `floor`, `ceil`, `round`, `pow`; `Sum` and `Product` in a balanced tree; exact conversions from floats and correctly rounded ones to them, text in any radix and decimals with exponents; continued fractions and convergents, the best approximation with a bounded denominator, the simplest rational in an interval and rational reconstruction, on the half gcd; the Bernoulli numbers by the zeta function and Harvey's residues modulo primes, and the harmonic numbers by binary splitting; and the exact determinants, solutions and inverses of [matrices](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) of rationals, by Bareiss's elimination and Dixon's p-adic lifting |
+| [Rational numbers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/rational.md) | `a::math::rational::Rational`, a fraction of numbers in lowest terms with a positive denominator, held in two words when both parts fit in 64 bits: `+`, `-`, `*` and `/` reduced by Knuth's two gcds, with numbers and primitive integers on either side; comparisons bounded from the top bits; `floor`, `ceil`, `round`, `pow`; `Sum` and `Product` in a balanced tree; exact conversions from floats and correctly rounded ones to them, text in any radix and decimals with exponents; continued fractions and convergents, the best approximation with a bounded denominator, the simplest rational in an interval and rational reconstruction, on the half gcd; the Bernoulli numbers by the zeta function and Harvey's residues modulo primes, and the harmonic numbers by binary splitting; and the exact determinants, solutions and inverses of [matrices](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) of rationals, by Bareiss's elimination and Dixon's p-adic lifting |
 
-Measured on an Apple M4 Max on one thread, in cycles per call unless a time is given, over random parts of the limbs (64 bits) given, against the fastest of GMP 6.3 (`mpq_t`), FLINT 3.6 (`fmpq`), PARI 2.19, malachite-q 0.14 and num-rational 0.4 that has the function; the page has the conditions, more sizes and the other operations. For parts below 2¹⁶ FLINT is faster, 3.8 times for `+`, and malachite-q and GMP too, as FLINT and malachite-q keep small parts in a word and GMP writes into a variable that has room, where a `Rational` allocates two vectors ([#27](https://github.com/nettrash/a/issues/27)); so is GMP at one limb for `+`, by 4 %, and so are FLINT's continued fractions from 16 to 256 limbs, its products of matrices of small entries and its determinants of small matrices.
+Measured on an Apple M4 Max on one thread, in cycles per call unless a time is given, over random parts of the limbs (64 bits) given, against the fastest of GMP 6.3 (`mpq_t`), FLINT 3.6 (`fmpq`), PARI 2.19, malachite-q 0.14 and num-rational 0.4 that has the function; the page has the conditions, more sizes and the other operations. Parts that fit in 64 bits are kept in two words, as FLINT and malachite-q keep them, and their arithmetic, comparisons and conversions run in registers without allocating ([#27](https://github.com/nettrash/a/issues/27)): below 2¹⁶ `+` takes 0.48 of FLINT's time and a comparison a third of GMP's. FLINT is faster at `floor`, `ceil` and `trunc` of short parts (7 to 8 cycles against 32 to 36, as they give a `Number`, which allocates) and at `Rational::new` of short parts (89 against 122); GMP is faster for a fraction of short parts with a long one (1.1 to 1.7 times), and malachite-q at hashing and at `Number::try_from` of a small integer; FLINT's continued fractions are faster from 16 to 256 limbs, its products of matrices of fractions from 32 × 32 and its determinants of 64-bit parts from 3 × 3 to 8 × 8 (0.86 to 0.97 of the time).
 
 | Operation | Size | `a` | Fastest reference |
 | --- | --- | ---: | --- |
-| `&a + &b` | 1 limb | 341 | GMP 327 |
-| | 16 limbs | 12,028 | malachite 14,878 |
-| | 1024 limbs | 2.98 M | GMP 4.15 M |
-| `&a * &b` | 1 limb | 502 | GMP 514 |
-| | 1024 limbs | 5.44 M | GMP 7.14 M |
-| `a += &b` | 2 limbs | 679 | FLINT 840 |
-| `a.cmp(&b)` | 1024 limbs | 39 | num-rational 16,099 |
-| `Rational::new` | 64 limbs | 51,889 | malachite 61,367 |
-| `H_n` by `Iterator::sum` | n = 10⁵ | 1,259 a term | FLINT 1,502 (the same tree) |
-| `to_f64`, correctly rounded | 4096 bits | 13.1 ns | GMP 51.9 ns (truncated) |
-| `"p/q".parse::<Rational>()` | 10⁶ digits | 53.6 ms | FLINT 83.8 ms (with `fmpq_canonicalise`) |
-| `to_string` | 10⁶ digits | 14.5 ms | FLINT 18.4 ms |
-| `continued_fraction` | 64 limbs | 174,333 | FLINT 118,048 |
-| | 1024 limbs | 4.62 M | FLINT 5.10 M |
-| `limit_denominator`, a bound of half the length | 1024 limbs | 2.57 M | malachite 23.2 ms |
-| `reconstruct` | 1024 limbs | 1.22 M | PARI 1.76 M |
-| | 100,000 limbs | 107 ms | PARI 195 ms |
-| `Rational::bernoulli` | n = 10⁴ | 3.21 ms | FLINT 4.90 ms |
-| | n = 10⁶ | 7.51 s | FLINT 12.3 s |
-| `Rational::bernoulli_numbers` | up to 10⁴ | 384 ms | FLINT 513 ms |
-| `Rational::harmonic` | n = 10⁶ | 79.1 ms | malachite 257 ms |
-| `Matrix<Rational>::det`, integers in −99..=99 | 4 × 4 | 0.19 µs | FLINT 0.13 µs |
-| `Matrix<Rational>::det`, fractions of parts ≤ 99 | 128 × 128 | 73.1 ms | FLINT 106 ms |
-| `Matrix<Rational>::solve`, fractions of parts ≤ 99, one column | 64 × 64 | 6.89 ms | FLINT 8.38 ms |
-| `Matrix<Rational>::inverse`, 64-bit parts | 16 × 16 | 34.7 ms | FLINT 44.1 ms (Bareiss; its default 80.3 ms) |
-| `Matrix<Rational>::inverse`, integers in −99..=99 | 128 × 128 | 169 ms | PARI 96 ms |
-| `&a * &b`, `Matrix<Rational>`, fractions of parts ≤ 99 | 32 × 32 | 807 µs | FLINT 302 µs |
+| `&a + &b` | parts below 2¹⁶ | 40 | FLINT 84 |
+| | 1 limb | 318 | GMP 351 |
+| | 16 limbs | 12,598 | malachite 15,634 |
+| | 1024 limbs | 2.86 M | GMP 3.94 M |
+| `&a * &b` | parts below 2¹⁶ | 70 | FLINT 95 |
+| | 1 limb | 308 | GMP 538 |
+| | 1024 limbs | 5.06 M | GMP 6.76 M |
+| `a += &b` | parts below 2¹⁶ | 38 | FLINT 69 |
+| | 2 limbs | 742 | FLINT 863 |
+| `a.cmp(&b)` | parts below 2¹⁶ | 7.6 | GMP 23 |
+| | 1024 limbs | 38 | num-rational 19,037 |
+| `Rational::new` | 64 limbs | 52,390 | malachite 63,203 |
+| `H_n` by `Iterator::sum` | n = 10⁵ | 1,200 a term | FLINT 1,504 (the same tree) |
+| `Rational::try_from(f64)`, parts in words | floats in [2⁻¹¹, 2¹²) | 2.0 ns | malachite 6.4 ns (GMP into an existing `mpq_t` 10.7 ns) |
+| `to_f64`, correctly rounded | parts of 64 bits | 4.6 ns | GMP 19.3 ns (truncated) |
+| | 4096 bits | 13.9 ns | GMP 53.7 ns (truncated) |
+| `"p/q".parse::<Rational>()` | parts below 2¹⁶ | 16.5 ns | malachite 32.2 ns |
+| | parts of 64 bits | 75.4 ns | GMP 127.6 ns (with `mpq_canonicalize`) |
+| | 10⁶ digits | 55.5 ms | GMP 86.8 ms (with `mpq_canonicalize`) |
+| `to_string` | 10⁶ digits | 15.0 ms | FLINT 19.1 ms |
+| `to_str_radix(16)` | parts of 64 bits | 35.0 ns | GMP 55.0 ns |
+| `continued_fraction` | parts below 2¹⁶ | 535 | malachite 660 |
+| | 64 limbs | 179,418 | FLINT 129,629 |
+| | 1024 limbs | 4.79 M | FLINT 5.35 M |
+| `convergents` | 16 limbs | 160,518 | malachite 284,964 |
+| `limit_denominator`, a bound of half the length | 1024 limbs | 2.65 M | malachite 24.3 ms |
+| `simplest_between` | 1 limb | 34 | malachite 810 |
+| `reconstruct` | 1 limb | 145 | malachite 241 |
+| | 1024 limbs | 1.28 M | PARI 1.81 M |
+| | 100,000 limbs | 109 ms | PARI 198 ms |
+| `Rational::bernoulli`, from the table | n = 10 | 10 | PARI 9 (a pointer into its cache) |
+| `Rational::bernoulli` | n = 10⁴ | 3.43 ms | FLINT 5.23 ms |
+| | n = 10⁶ | 7.92 s | FLINT 13.1 s |
+| `Rational::bernoulli_numbers` | up to 10 | 183 | FLINT 292 (PARI 26 from its cache) |
+| | up to 10⁴ | 414 ms | FLINT 548 ms |
+| `Rational::harmonic`, from the table | n = 10 | 9 | FLINT 8 |
+| `Rational::harmonic` | n = 10⁶ | 84.4 ms | malachite 277 ms |
+| `Matrix<Rational>::det`, integers in −99..=99 | 4 × 4 | 0.05 µs | FLINT 0.15 µs |
+| `Matrix<Rational>::det`, fractions of parts ≤ 99 | 3 × 3 | 0.09 µs | FLINT 0.17 µs |
+| | 128 × 128 | 76.7 ms | FLINT 116 ms |
+| `Matrix<Rational>::det`, 64-bit parts | 4 × 4 | 5.06 µs | FLINT 4.38 µs |
+| `Matrix<Rational>::solve`, integers in −99..=99, one column | 8 × 8 | 0.67 µs | FLINT 1.90 µs (Bareiss) |
+| `Matrix<Rational>::solve`, fractions of parts ≤ 99, one column | 64 × 64 | 6.88 ms | FLINT 8.80 ms |
+| `Matrix<Rational>::inverse`, integers in −99..=99 | 4 × 4 | 0.29 µs | FLINT 0.89 µs |
+| | 128 × 128 | 175 ms | PARI 99.6 ms |
+| `Matrix<Rational>::inverse`, 64-bit parts | 16 × 16 | 34.8 ms | FLINT 45.2 ms (Bareiss; its default 81.7 ms) |
+| `&a * &b`, `Matrix<Rational>`, integers in −99..=99 | 8 × 8 | 0.52 µs | FLINT 1.35 µs |
+| `&a * &b`, `Matrix<Rational>`, fractions of parts ≤ 99 | 32 × 32 | 683 µs | FLINT 318 µs |
 
 ### Elliptic curves
 

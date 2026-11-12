@@ -10,17 +10,31 @@
 
 use super::arith::Primitive;
 use super::small::{self, Small};
-use super::{Rational, is_one};
-use crate::math::numbers::{Magnitude, Number};
+use super::{Rational, Repr, is_one};
+use crate::math::numbers::{ByteOrder, Magnitude, Number, cmp_magnitudes};
 use core::cmp::Ordering;
 use core::hash::{Hash, Hasher};
 
 impl PartialEq for Rational {
-    /// Whether the rationals are the same number: whether their parts are equal.
+    /// Whether the rationals are the same number: whether their parts are equal. A number in
+    /// words, both parts in 64 bits, is never equal to one in numbers.
     #[inline]
     fn eq(&self, other: &Rational) -> bool {
-        self.num == other.num && self.den == other.den
+        match (self.word(), other.word()) {
+            (Some(x), Some(y)) => (x.num == y.num) & (x.den == y.den) & (x.negative == y.negative),
+            (None, None) => {
+                let ((a, b), (c, d)) = (big(self), big(other));
+                a == c && b == d
+            }
+            _ => false,
+        }
     }
+}
+
+/// The numbers of a rational not in words.
+#[inline(always)]
+fn big(r: &Rational) -> (&Number, &Number) {
+    r.numbers().unwrap_or_else(|| unreachable!())
 }
 
 impl Eq for Rational {}
@@ -29,8 +43,29 @@ impl Hash for Rational {
     /// Hashes the number by value, so that equal rationals hash alike whatever their byte orders:
     /// the numerator, then the denominator, as [`Number`] hashes them.
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.num.hash(state);
-        self.den.hash(state);
+        match self.word() {
+            Some(x) => {
+                hash_word(state, x.negative, x.num);
+                hash_word(state, false, x.den);
+            }
+            None => {
+                let (a, b) = big(self);
+                a.hash(state);
+                b.hash(state);
+            }
+        }
+    }
+}
+
+/// Hashes the magnitude `m` with the sign `negative` as [`Number`] hashes a number of that value:
+/// the sign, the significant length, then the significant bytes, the least significant first.
+#[inline(always)]
+fn hash_word<H: Hasher>(state: &mut H, negative: bool, m: u64) {
+    let len = 8 - (m.leading_zeros() / 8) as usize;
+    state.write_u8(u8::from(negative));
+    state.write_usize(len);
+    if len > 0 {
+        state.write(&m.to_le_bytes()[..len]);
     }
 }
 
@@ -54,16 +89,35 @@ impl Ord for Rational {
     /// assert_eq!(v.iter().map(|r| r.to_string()).collect::<Vec<_>>(), ["-1/2", "1/4", "1/3"]);
     /// ```
     fn cmp(&self, other: &Rational) -> Ordering {
-        if let (Some(x), Some(y)) = (Small::of(self), Small::of(other)) {
-            return small::cmp(x, y);
+        match (&self.repr, &other.repr) {
+            (Repr::Big(x), Repr::Big(y)) => cross(
+                Magnitude::of(&x.num),
+                Magnitude::of(&x.den),
+                Magnitude::of(&y.num),
+                Some(Magnitude::of(&y.den)),
+            ),
+            _ => match (Small::of(self), Small::of(other)) {
+                (Some(x), Some(y)) => small::cmp(x, y),
+                _ => mixed(self, other),
+            },
         }
-        cross(&self.num, &self.den, &other.num, Some(&other.den))
     }
 }
 
-/// The order of `a/b` and `c/d`, for positive `b` and `d`, `d` given as `None` for 1.
-fn cross(a: &Number, b: &Number, c: &Number, d: Option<&Number>) -> Ordering {
-    let (x, y) = (Magnitude::of(a), Magnitude::of(c));
+/// The order of a rational in words and one in numbers, either way round.
+#[inline(never)]
+fn mixed(x: &Rational, y: &Rational) -> Ordering {
+    let ((a, b), (c, d)) = (x.magnitudes(), y.magnitudes());
+    cross(a, b, c, Some(d))
+}
+
+/// The order of `a/b` and `c/d`, given by the magnitudes of the parts with the numerators' signs,
+/// for positive `b` and `d`, `d` given as `None` for 1. Inlined, as the bounds of
+/// [`cross_magnitudes`] decide in a few dozen cycles, in which a call and the magnitudes passed on
+/// the stack took a fifth more.
+#[inline(always)]
+fn cross(a: Magnitude, b: Magnitude, c: Magnitude, d: Option<Magnitude>) -> Ordering {
+    let (x, y) = (a, c);
     if x.negative != y.negative {
         return if x.negative {
             Ordering::Less
@@ -76,7 +130,7 @@ fn cross(a: &Number, b: &Number, c: &Number, d: Option<&Number>) -> Ordering {
         // Zero against a number of the same sign, which is then positive.
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        (false, false) => cross_magnitudes(a, b, c, d, x, y),
+        (false, false) => cross_magnitudes(b, d, x, y),
     };
     if x.negative {
         magnitudes.reverse()
@@ -95,20 +149,13 @@ fn cross(a: &Number, b: &Number, c: &Number, d: Option<&Number>) -> Ordering {
 /// are computed. Measured on an Apple M4 Max on random positive rationals with parts of the same
 /// length, 2 limbs took 245 cycles a comparison by the products and 1,024 limbs 258,000, and 35 and
 /// 53 by the bounds; GMP 6.3's `mpq_cmp` 56 and 524,000.
-#[inline]
-fn cross_magnitudes(
-    a: &Number,
-    b: &Number,
-    c: &Number,
-    d: Option<&Number>,
-    x: Magnitude,
-    y: Magnitude,
-) -> Ordering {
+#[inline(always)]
+fn cross_magnitudes(b: Magnitude, d: Option<Magnitude>, x: Magnitude, y: Magnitude) -> Ordering {
     let (ha, hb, hc, hd) = (
         Head::of(x),
-        Head::of(Magnitude::of(b)),
+        Head::of(b),
         Head::of(y),
-        d.map_or(Head::ONE, |d| Head::of(Magnitude::of(d))),
+        d.map_or(Head::ONE, Head::of),
     );
     let (lo1, hi1, e1) = ha.times(hd);
     let (lo2, hi2, e2) = hc.times(hb);
@@ -118,25 +165,43 @@ fn cross_magnitudes(
     if scaled_cmp(hi1, e1, lo2, e2) == Ordering::Less {
         return Ordering::Less;
     }
-    exact(a, b, c, d)
+    exact(x, b, y, d)
 }
 
 /// The order of `|a|·d` and `|c|·b` by the products, out of line: the bounds decide nearly
-/// every comparison.
+/// every comparison. Equal fractions are told by their parts, with no product.
 #[cold]
 #[inline(never)]
-fn exact(a: &Number, b: &Number, c: &Number, d: Option<&Number>) -> Ordering {
-    let d = d.filter(|d| !is_one(d));
-    if a == c && d.map_or(is_one(b), |d| b == d) {
+fn exact(a: Magnitude, b: Magnitude, c: Magnitude, d: Option<Magnitude>) -> Ordering {
+    let one = |m: Magnitude| m.bytes == [1];
+    let d = d.filter(|&d| !one(d));
+    let same = |x: Magnitude, y: Magnitude| cmp_magnitudes(x, y) == Ordering::Equal;
+    if same(a, c) && d.map_or(one(b), |d| same(b, d)) {
         return Ordering::Equal;
     }
-    let b1 = is_one(b);
     let left = match d {
-        None => a.abs(),
-        Some(d) => &a.abs() * d,
+        None => positive(a),
+        Some(d) => &positive(a) * &positive(d),
     };
-    let right = if b1 { c.abs() } else { &c.abs() * b };
+    let right = if one(b) {
+        positive(c)
+    } else {
+        &positive(c) * &positive(b)
+    };
     left.cmp(&right)
+}
+
+/// The magnitude `m` as a positive number.
+fn positive(m: Magnitude) -> Number {
+    Number {
+        value: m.bytes.to_vec(),
+        negative: false,
+        byte_order: if m.big_endian {
+            ByteOrder::BigEndian
+        } else {
+            ByteOrder::LittleEndian
+        },
+    }
 }
 
 /// The top of a magnitude not zero: the magnitude lies in `[m, m + inexact]·2^exp`, with `m` below
@@ -223,7 +288,16 @@ impl PartialEq<Number> for Rational {
     /// Whether the rational is the integer `n`.
     #[inline]
     fn eq(&self, n: &Number) -> bool {
-        is_one(&self.den) && self.num == *n
+        match self.word() {
+            Some(x) => {
+                x.den == 1
+                    && Small::integer(n).is_some_and(|y| y.num == x.num && y.negative == x.negative)
+            }
+            None => {
+                let (a, b) = big(self);
+                is_one(b) && a == n
+            }
+        }
     }
 }
 
@@ -238,13 +312,16 @@ impl PartialEq<Rational> for Number {
 impl PartialOrd<Number> for Rational {
     /// Compares the rational with the integer `n` by value.
     fn partial_cmp(&self, n: &Number) -> Option<Ordering> {
-        if is_one(&self.den) {
-            return Some(self.num.cmp(n));
-        }
         if let (Some(x), Some(y)) = (Small::of(self), Small::integer(n)) {
             return Some(small::cmp(x, y));
         }
-        Some(cross(&self.num, &self.den, n, None))
+        if let Some((a, b)) = self.numbers()
+            && is_one(b)
+        {
+            return Some(a.cmp(n));
+        }
+        let (a, b) = self.magnitudes();
+        Some(cross(a, b, Magnitude::of(n), None))
     }
 }
 
@@ -262,7 +339,15 @@ macro_rules! primitive_cmp {
             #[doc = concat!("Whether the rational is the `", stringify!($t), "` `v`.")]
             #[inline]
             fn eq(&self, v: &$t) -> bool {
-                is_one(&self.den) && self.num == *v
+                let (negative, m) = v.parts();
+                match self.word() {
+                    Some(x) => (x.den == 1) & (u128::from(x.num) == m) & (x.negative == (negative && m != 0)),
+                    // A number in numbers has a part of more than 64 bits.
+                    None => {
+                        let (a, b) = big(self);
+                        is_one(b) && *a == *v
+                    }
+                }
             }
         }
 

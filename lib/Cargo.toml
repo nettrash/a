@@ -1,6 +1,6 @@
 [package]
 name = "nettrash-a"
-version = "0.2.34"
+version = "0.2.35"
 edition = "2024"
 description = "Algorithms in pure Rust with no dependencies: 23 sorting algorithms and a default sort; arbitrary-precision integers with Karatsuba, Toom-Cook and NTT multiplication, Newton division, GCD, roots, modular powers, primes and modular square roots; elliptic curves over prime fields with secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519; complex numbers; rational numbers in lowest terms with continued fractions, best approximations, rational reconstruction and Bernoulli and harmonic numbers; matrices of floats, complex numbers, integers or rationals with LU, QR, Cholesky, SVD, Schur and eigendecompositions, exp, sqrt and log, and exact determinants, solutions and inverses of integer and rational matrices. Not constant-time."
 license = "MIT"

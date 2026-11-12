@@ -55,8 +55,21 @@ const fn gcd(mut a: u128, mut b: u128) -> u128 {
     a
 }
 
-/// `H_n`, in the byte order `order`.
+/// `H_n`, in the byte order `order`: those in words from the table inline, in the caller, with
+/// nothing to save or allocate (`H_0` to `H_46`), and the rest by [`beyond_words`].
+#[inline]
 pub(super) fn harmonic(n: u64, order: ByteOrder) -> Rational {
+    if let Some(&(a, b)) = usize::try_from(n).ok().and_then(|i| TABLE.get(i))
+        && (a | b) >> 64 == 0
+    {
+        return Rational::from_word(false, a as u64, b as u64, order);
+    }
+    beyond_words(n, order)
+}
+
+/// `H_n` when it is not in words, out of line so that the lookups keep no registers for it.
+#[inline(never)]
+fn beyond_words(n: u64, order: ByteOrder) -> Rational {
     if n < TABLE.len() as u64 {
         let (a, b) = TABLE[n as usize];
         return Rational::from_reduced(number_u128(a, false, order), number_u128(b, false, order));

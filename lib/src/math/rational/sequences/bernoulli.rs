@@ -156,11 +156,15 @@ const LONG_DEN: [u64; 21] = [
 /// The last index of the tables.
 const TABLED: u64 = 100;
 
-/// `B_n` for an even `n` up to [`TABLED`], from the tables.
+/// `B_n` for an even `n` up to [`TABLED`], from the tables, as numbers (in words they are taken
+/// inline by [`bernoulli`]).
 fn tabled(n: u64, order: ByteOrder) -> Rational {
     if n / 2 < TABLE.len() as u64 {
         let (a, b) = TABLE[(n / 2) as usize];
-        return small(a, b, order);
+        return Rational::from_reduced(
+            number_u128(a.unsigned_abs(), a < 0, order),
+            number_u128(u128::from(b), false, order),
+        );
     }
     let i = ((n - 2 * TABLE.len() as u64) / 2) as usize;
     let start = if i == 0 {
@@ -178,14 +182,35 @@ fn tabled(n: u64, order: ByteOrder) -> Rational {
     )
 }
 
-/// `B_n`, in the byte order `order`.
+/// `B_n`, in the byte order `order`: those in words from the tables inline, in the caller, with
+/// nothing to save or allocate, and the rest by [`beyond_words`].
+#[inline]
 pub(super) fn bernoulli(n: u64, order: ByteOrder) -> Rational {
     if n == 1 {
-        return small(-1, 2, order);
+        return Rational::from_word(true, 1, 2, order);
     }
     if n & 1 == 1 {
-        return small(0, 1, order);
+        return Rational::from_word(false, 0, 1, order);
     }
+    match word_of(n) {
+        Some((negative, m, d)) => Rational::from_word(negative, m, d, order),
+        None => beyond_words(n, order),
+    }
+}
+
+/// The sign and the parts of an even `B_n` when it is in [`TABLE`] and they fit in 64 bits (all to
+/// `B_34`, and `B_38`).
+#[inline(always)]
+fn word_of(n: u64) -> Option<(bool, u64, u64)> {
+    let (a, b) = *TABLE.get(usize::try_from(n / 2).ok()?)?;
+    let m = a.unsigned_abs();
+    (m >> 64 == 0).then_some((a < 0, m as u64, b))
+}
+
+/// An even `B_n` that is not in words: from the tables up to [`TABLED`], and beyond by the zeta
+/// function, out of line so that the lookups keep no registers for it.
+#[inline(never)]
+fn beyond_words(n: u64, order: ByteOrder) -> Rational {
     if n <= TABLED {
         return tabled(n, order);
     }
@@ -201,14 +226,6 @@ pub(super) fn bernoulli(n: u64, order: ByteOrder) -> Rational {
 /// 142,000 cycles from the tangent numbers against 163,000, and `B_0, ..., B_200` 279,000 against
 /// 267,000.
 const TANGENT_TABLE: u64 = 150;
-
-/// The rational `a / b`, in lowest terms already.
-fn small(a: i128, b: u64, order: ByteOrder) -> Rational {
-    Rational::from_reduced(
-        number_u128(a.unsigned_abs(), a < 0, order),
-        number_u128(u128::from(b), false, order),
-    )
-}
 
 /// The denominator of `B_n` for an even `n >= 2`, by von Staudt and Clausen's theorem: the product
 /// of the primes `p` with `p - 1` dividing `n`.
@@ -624,17 +641,12 @@ pub(super) fn bernoulli_numbers(n: u64, order: ByteOrder) -> Vec<Rational> {
         .and_then(|n| n.checked_add(1))
         .expect("capacity overflow");
     let mut v: Vec<Rational> = Vec::with_capacity(len);
-    let zero = || small(0, 1, order);
-    for k in 0..=n {
-        v.push(if k == 1 {
-            small(-1, 2, order)
-        } else if k & 1 == 1 {
-            zero()
-        } else if k <= TABLED {
-            tabled(k, order)
-        } else {
-            zero()
-        });
+    // The tables', words written in place, and zeros where the others go.
+    for k in 0..=n.min(TABLED) {
+        v.push(bernoulli(k, order));
+    }
+    for _ in TABLED.min(n)..n {
+        v.push(Rational::from_word(false, 0, 1, order));
     }
     let top = n & !1;
     let low = TABLED + 2;

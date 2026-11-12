@@ -459,3 +459,288 @@ fn long_text() {
     assert_eq!(parse(&format!("{written}e-{zeros}")), q(7, 1));
     assert_eq!(parse(&format!("{written}.000e-{}", zeros + 1)), q(7, 10));
 }
+
+/// A word of a shape that the register paths find hard: just above or below a power of two, a run
+/// of ones, or random bits of a random length.
+fn hard_word(state: &mut u64) -> u64 {
+    let k = 1 + below(state, 64) as u32;
+    let x = super::common::xorshift(state) >> (64 - k);
+    match below(state, 4) {
+        0 => (1u64 << (k - 1))
+            .wrapping_add(below(state, 5))
+            .wrapping_sub(2),
+        1 => (u64::MAX >> (64 - k)) ^ below(state, 4),
+        _ => x,
+    }
+}
+
+/// The text of `r` in `radix` as the numbers write its parts.
+fn parts_text(r: &Rational, radix: u32) -> String {
+    if r.is_integer() {
+        r.numer().to_str_radix(radix)
+    } else {
+        format!(
+            "{}/{}",
+            r.numer().to_str_radix(radix),
+            r.denom().to_str_radix(radix)
+        )
+    }
+}
+
+#[test]
+fn words_in_every_radix() {
+    // Parts in words and just past them (63, 64 and 65 bits), written and read in every radix,
+    // against the text of the parts as numbers and against fractions reduced by `new`.
+    let mut state = 0x1F2E_3D4C_5B6A_7988u64;
+    for i in 0..size(3000, 60) {
+        let (p, q) = (hard_word(&mut state), hard_word(&mut state).max(1));
+        let negative = below(&mut state, 2) == 1;
+        let n = if negative {
+            -Number::from(p)
+        } else {
+            Number::from(p)
+        };
+        let mut n = n;
+        let mut d = Number::from(q);
+        if i % 4 == 0 {
+            // Past 64 bits: the numerator times 2, 4 or 8, or the denominator so and plus one.
+            let f = Number::from(1) << (1 + below(&mut state, 3) as usize);
+            if i % 8 == 0 {
+                n = &n * &f
+            } else {
+                d = &d * &f + Number::from(1)
+            }
+        }
+        let r = Rational::new(n, d);
+        check(&r);
+        for radix in 2..=36 {
+            let s = r.to_str_radix(radix);
+            assert_eq!(s, parts_text(&r, radix), "{r} in radix {radix}");
+            let back = Rational::from_str_radix(&s, radix).unwrap();
+            check(&back);
+            assert_eq!(back, r, "{s} in radix {radix}");
+            assert_eq!(
+                Rational::from_str_radix(&s.to_uppercase(), radix).unwrap(),
+                r
+            );
+            // Unreduced, and with zeros in front, which make the text longer than a word's.
+            let k = 2 + below(&mut state, 5);
+            let (un, ud) = (r.numer() * Number::from(k), r.denom() * Number::from(k));
+            let t = format!("{}/00{}", un.to_str_radix(radix), ud.to_str_radix(radix));
+            assert_eq!(Rational::from_str_radix(&t, radix).unwrap(), r, "{t}");
+        }
+        assert_eq!(r.to_string(), parts_text(&r, 10));
+        assert_eq!(parse(&r.to_string()), r);
+    }
+}
+
+#[test]
+fn the_largest_words_in_every_radix() {
+    // `2^64 - 1` is a word and `2^64` is not, in every radix, as an integer and in fractions,
+    // whatever the number of digits of the largest word.
+    let max = Number::from(u64::MAX);
+    let past = &max + Number::from(1);
+    for radix in 2..=36 {
+        for n in [
+            &max,
+            &past,
+            &(&past + Number::from(1)),
+            &(&max - Number::from(1)),
+        ] {
+            let t = n.to_str_radix(radix);
+            let r = Rational::from_str_radix(&t, radix).unwrap();
+            check(&r);
+            assert_eq!(r, Rational::from(n), "{t} in radix {radix}");
+            let f = Rational::from_str_radix(&format!("-1/{t}"), radix).unwrap();
+            assert_eq!(f, Rational::new(Number::from(-1), n.clone()));
+            let g = Rational::from_str_radix(&format!("{t}/{t}"), radix).unwrap();
+            assert_eq!(g, Rational::from(1));
+            if radix == 10 {
+                assert_eq!(parse(&t), r);
+                assert_eq!(parse(&format!("{t}.0")), r);
+                assert_eq!(parse(&format!("{t}e0")), r);
+                assert_eq!(
+                    parse(&format!("0.{t}")),
+                    Rational::new(n.clone(), ten(t.len() as u32))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn errors_at_every_place_of_a_word() {
+    // A wrong character at each place of a part of up to 20 digits, in the radices with the
+    // fastest paths, is an invalid digit, before the zero denominator.
+    let bad = [
+        '/', ':', '.', ' ', '\u{0}', 'é', '+', '-', 'G', 'g', '2', '8', '@', '`', '[', '{',
+    ];
+    let lens: &[usize] = if cfg!(miri) {
+        &[1, 9, 20]
+    } else {
+        &[1, 7, 8, 9, 16, 19, 20]
+    };
+    let bad = if cfg!(miri) { &bad[..6] } else { &bad[..] };
+    for radix in [2u32, 8, 10, 16, 36] {
+        for &len in lens {
+            let good: String = (0..len)
+                .map(|i| char::from_digit((i as u32 + 1) % radix, radix).unwrap())
+                .collect();
+            assert!(Rational::from_str_radix(&good, radix).is_ok());
+            for i in 0..len {
+                for &c in bad {
+                    // A digit of the radix is no error, a sign in front is a sign, and a `/` makes
+                    // a fraction.
+                    if c.is_digit(radix) || c == '/' || i == 0 && (c == '+' || c == '-') {
+                        continue;
+                    }
+                    let mut s: Vec<char> = good.chars().collect();
+                    s[i] = c;
+                    let s: String = s.into_iter().collect();
+                    for text in [
+                        s.clone(),
+                        format!("{s}/0"),
+                        format!("1/{s}"),
+                        format!("-{s}/1"),
+                    ] {
+                        let e = Rational::from_str_radix(&text, radix).unwrap_err();
+                        assert_eq!(*e.kind(), RationalErrorKind::InvalidDigit, "{text:?}");
+                    }
+                    if radix == 10 && c != '.' {
+                        assert_eq!(kind(&s), RationalErrorKind::InvalidDigit, "{s:?}");
+                        assert_eq!(kind(&format!("{s}/0")), RationalErrorKind::InvalidDigit);
+                    }
+                }
+            }
+            assert_eq!(
+                *Rational::from_str_radix(&format!("{good}/0"), radix)
+                    .unwrap_err()
+                    .kind(),
+                RationalErrorKind::ZeroDenominator
+            );
+            assert_eq!(
+                *Rational::from_str_radix(&format!("{good}/{}", "0".repeat(len)), radix)
+                    .unwrap_err()
+                    .kind(),
+                RationalErrorKind::ZeroDenominator
+            );
+        }
+    }
+}
+
+#[test]
+fn decimals_in_words() {
+    // Decimals whose value is a word, at the bounds of the register path: 19 and 20 digits, the
+    // 20 overflowing or not, exponents up to 19 either way, numerators of many twos and fives.
+    let cases = [
+        "18446744073709551615",
+        "18446744073709551616",
+        "1844674407370955161.5",
+        "1844674407370955161.6",
+        ".18446744073709551615",
+        ".18446744073709551616",
+        "99999999999999999999",
+        "9999999999999999999.9e-19",
+        "1e19",
+        "1e20",
+        "1e-19",
+        "1e-20",
+        "5e-19",
+        "0.390625",
+        "0.0000000000000000032",
+        "1953125e-19",
+        "9.765625e-4",
+        "12345678901234567890e-19",
+        "1.2e19",
+        "-0.00",
+        "000000000000000000000001.5",
+    ];
+    for text in cases {
+        let r = parse(text);
+        // The reference: digits and exponent read apart, reduced by `new`.
+        let (mantissa, exponent) = match text.find(['e', 'E']) {
+            Some(i) => (&text[..i], text[i + 1..].parse::<i64>().unwrap()),
+            None => (text, 0),
+        };
+        let (negative, mantissa) = match mantissa.strip_prefix('-') {
+            Some(m) => (true, m),
+            None => (false, mantissa),
+        };
+        let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let digits: Number = format!("0{int}{frac}").parse().unwrap();
+        let digits = if negative { -digits } else { digits };
+        let k = exponent - frac.len() as i64;
+        let expected = if k >= 0 {
+            Rational::from(&digits * &ten(k as u32))
+        } else {
+            Rational::new(digits, ten((-k) as u32))
+        };
+        assert_eq!(r, expected, "{text}");
+        assert_eq!(
+            parse(&format!("-{}", text.trim_start_matches('-'))),
+            -expected.clone()
+        );
+    }
+    let mut state = 0x0BAD_CAFE_F00D_1234u64;
+    for _ in 0..size(5000, 80) {
+        let v = hard_word(&mut state);
+        let k = below(&mut state, 41) as i64 - 20;
+        let s = format!("{v}e{k}");
+        let expected = if k >= 0 {
+            Rational::from(Number::from(v) * ten(k as u32))
+        } else {
+            Rational::new(Number::from(v), ten((-k) as u32))
+        };
+        assert_eq!(parse(&s), expected, "{s}");
+        let digits = v.to_string();
+        let split = below(&mut state, digits.len() as u64 + 1) as usize;
+        let s = format!("{}.{}", &digits[..split], &digits[split..]);
+        let f = (digits.len() - split) as u32;
+        assert_eq!(parse(&s), Rational::new(Number::from(v), ten(f)), "{s}");
+    }
+}
+
+#[test]
+fn integers_from_primitives_and_numbers() {
+    // Every primitive type at its bounds, and numbers of 63 to 65 bits in both byte orders: the
+    // same value as the parts read from text, and as `new` makes it.
+    macro_rules! bounds {
+        ($($t:ty),*) => {$(
+            for v in [<$t>::MIN, <$t>::MAX, 0 as $t, 1 as $t, <$t>::MAX / 3] {
+                let r = Rational::from(v);
+                check(&r);
+                assert_eq!(r.to_string(), v.to_string());
+                assert_eq!(r, parse(&v.to_string()));
+                assert_eq!(<$t>::try_from(&r), Ok(v));
+            }
+        )*};
+    }
+    bounds!(
+        u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize
+    );
+    for k in [62usize, 63, 64, 65, 100] {
+        for n in [
+            Number::from(1) << k,
+            (Number::from(1) << k) - Number::from(1),
+            -(Number::from(1) << k),
+        ] {
+            for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+                let mut v = n.value.clone();
+                if n.byte_order() != order {
+                    v.reverse();
+                }
+                // With zero bytes above the magnitude.
+                match order {
+                    ByteOrder::LittleEndian => v.extend([0, 0]),
+                    ByteOrder::BigEndian => v.splice(0..0, [0, 0]).for_each(drop),
+                }
+                let m = Number::new_signed(v, n.is_negative(), order);
+                let r = Rational::from(&m);
+                check(&r);
+                assert_eq!(r.byte_order(), order);
+                assert_eq!(r, Rational::new(n.clone(), Number::from(1)));
+                assert_eq!(r, Rational::from(m));
+            }
+        }
+    }
+}

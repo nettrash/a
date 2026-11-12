@@ -12,7 +12,7 @@
 use super::Rational;
 use super::small::{self, Small, Wide};
 use crate::math::numbers::fraction::{self, Fraction};
-use crate::math::numbers::{ByteOrder, Number};
+use crate::math::numbers::{ByteOrder, Magnitude, Number};
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// The operation of an operator.
@@ -54,78 +54,123 @@ fn general(x: Fraction, y: Fraction, op: Op, order: ByteOrder) -> (Number, Numbe
     }
 }
 
-/// `t = t op y` (`t = y op t` when `left` is not set), on limbs, in the vectors of `t` where they
-/// have room.
+/// `t = t op y` (`t = y op t` when `left` is not set), on limbs, in the vectors of `t` where it
+/// has them with room, and in words when the result fits in them.
 #[inline(never)]
 fn general_into(t: &mut Rational, y: Fraction, left: bool, op: Op, order: ByteOrder) {
-    let (tn, td) = (&mut t.num, &mut t.den);
+    let Some((tn, td)) = t.numbers_mut() else {
+        // `t` in words has no vectors to write in.
+        let x = parts(t);
+        let (num, den) = if left {
+            general(x, y, op, order)
+        } else {
+            general(y, x, op, order)
+        };
+        *t = Rational::from_reduced(num, den);
+        return;
+    };
     match op {
         Op::Add | Op::Sub => fraction::sum_assign(tn, td, y, left, op == Op::Sub, order),
         Op::Mul | Op::Div => fraction::product_assign(tn, td, y, left, op == Op::Div, order),
     }
+    t.settle();
 }
 
-/// The parts of `r` as a fraction.
+/// The parts of `r` as a fraction, read in place.
 #[inline(always)]
 fn parts(r: &Rational) -> Fraction<'_> {
+    let (num, den) = r.magnitudes();
     Fraction {
-        num: &r.num,
-        den: Some(&r.den),
+        num,
+        den: Some(den),
     }
 }
 
 /// The integer `n` as a fraction.
 #[inline(always)]
 fn integer(n: &Number) -> Fraction<'_> {
-    Fraction { num: n, den: None }
+    Fraction {
+        num: Magnitude::of(n),
+        den: None,
+    }
 }
 
 /// `a op b` in a new rational, in the byte order of `a`.
-#[inline]
+///
+/// Only the register path is inlined into each operator; the limbs' path, with the reading of
+/// the parts of numbers, is out of line.
+#[inline(always)]
 #[track_caller]
 pub(super) fn apply(a: &Rational, b: &Rational, op: Op) -> Rational {
-    let order = a.byte_order();
+    if let (Some(x), Some(y)) = (a.word(), b.word()) {
+        if op == Op::Div && y.num == 0 {
+            by_zero();
+        }
+        return small_op(x, y, op).rational(a.byte_order());
+    }
+    apply_long(a, b, op)
+}
+
+/// [`apply`] when a part does not fit in 64 bits.
+#[inline(never)]
+#[track_caller]
+fn apply_long(a: &Rational, b: &Rational, op: Op) -> Rational {
     if op == Op::Div && b.is_zero() {
         by_zero();
     }
-    if let (Some(x), Some(y)) = (Small::of(a), Small::of(b)) {
-        let w = small_op(x, y, op);
-        return w.rational(order);
-    }
-    let (num, den) = general(parts(a), parts(b), op, order);
+    let (num, den) = general(parts(a), parts(b), op, a.byte_order());
     Rational::from_reduced(num, den)
 }
 
-/// `a = a op b`, in the byte order of `a`, in its vectors where they have room.
-#[inline]
+/// `a = a op b`, in the byte order of `a`, in its words, or its vectors where they have room.
+#[inline(always)]
 #[track_caller]
 pub(super) fn apply_left(a: &mut Rational, b: &Rational, op: Op) {
-    let order = a.byte_order();
+    if let (Some(x), Some(y)) = (a.word(), b.word()) {
+        if op == Op::Div && y.num == 0 {
+            by_zero();
+        }
+        let order = a.byte_order();
+        small_op(x, y, op).write(a, order);
+        return;
+    }
+    apply_left_long(a, b, op);
+}
+
+/// [`apply_left`] when a part does not fit in 64 bits.
+#[inline(never)]
+#[track_caller]
+fn apply_left_long(a: &mut Rational, b: &Rational, op: Op) {
     if op == Op::Div && b.is_zero() {
         by_zero();
     }
-    if let (Some(x), Some(y)) = (Small::of(a), Small::of(b)) {
-        let w = small_op(x, y, op);
-        w.write(a, order);
-        return;
-    }
+    let order = a.byte_order();
     general_into(a, parts(b), true, op, order);
 }
 
-/// `b = a op b`, in the byte order of `a`, in the vectors of `b` where they have room.
-#[inline]
+/// `b = a op b`, in the byte order of `a`, in the words or the vectors of `b` where they have
+/// room.
+#[inline(always)]
 #[track_caller]
 pub(super) fn apply_right(a: &Rational, b: &mut Rational, op: Op) {
-    let order = a.byte_order();
+    if let (Some(x), Some(y)) = (a.word(), b.word()) {
+        if op == Op::Div && y.num == 0 {
+            by_zero();
+        }
+        small_op(x, y, op).write(b, a.byte_order());
+        return;
+    }
+    apply_right_long(a, b, op);
+}
+
+/// [`apply_right`] when a part does not fit in 64 bits.
+#[inline(never)]
+#[track_caller]
+fn apply_right_long(a: &Rational, b: &mut Rational, op: Op) {
     if op == Op::Div && b.is_zero() {
         by_zero();
     }
-    if let (Some(x), Some(y)) = (Small::of(a), Small::of(b)) {
-        let w = small_op(x, y, op);
-        w.write(b, order);
-        return;
-    }
-    general_into(b, parts(a), false, op, order);
+    general_into(b, parts(a), false, op, a.byte_order());
 }
 
 /// `a op n` for an integer `n`, in a new rational in the byte order of `a`.
@@ -376,7 +421,7 @@ pub(super) fn primitive_number(negative: bool, m: u128) -> Number {
 }
 
 /// `a op v` for a primitive integer `v`, in a new rational.
-#[inline]
+#[inline(always)]
 #[track_caller]
 fn prim_op<T: Primitive>(a: &Rational, v: T, op: Op) -> Rational {
     let (negative, m) = v.parts();
@@ -401,7 +446,7 @@ fn prim_op<T: Primitive>(a: &Rational, v: T, op: Op) -> Rational {
 }
 
 /// `a = a op v` for a primitive integer `v`.
-#[inline]
+#[inline(always)]
 #[track_caller]
 fn prim_op_left<T: Primitive>(a: &mut Rational, v: T, op: Op) {
     let (negative, m) = v.parts();
@@ -428,7 +473,7 @@ fn prim_op_left<T: Primitive>(a: &mut Rational, v: T, op: Op) {
 }
 
 /// `v op a` for a primitive integer `v`, in the byte order of `a`.
-#[inline]
+#[inline(always)]
 #[track_caller]
 fn prim_op_right<T: Primitive>(v: T, a: &Rational, op: Op) -> Rational {
     let (negative, m) = v.parts();
@@ -454,7 +499,7 @@ fn prim_op_right<T: Primitive>(v: T, a: &Rational, op: Op) -> Rational {
 }
 
 /// `a = v op a` for a primitive integer `v`, in the byte order of `a`.
-#[inline]
+#[inline(always)]
 #[track_caller]
 fn prim_op_right_into<T: Primitive>(v: T, a: &mut Rational, op: Op) {
     let (negative, m) = v.parts();
@@ -540,19 +585,22 @@ primitive_ops!(
 
 impl Neg for Rational {
     type Output = Rational;
-    /// `-x`, in the vectors of `x`.
+    /// `-x`, in the words or the vectors of `x`.
     #[inline]
     fn neg(mut self) -> Rational {
-        self.num.negative = !self.num.negative && !self.num.is_zero();
+        self.negate();
         self
     }
 }
 
 impl Neg for &Rational {
     type Output = Rational;
-    /// `-x`, in new vectors.
+    /// `-x`, in new words or vectors.
     #[inline]
     fn neg(self) -> Rational {
+        if let Some(x) = self.word() {
+            return Rational::from_word(!x.negative && x.num != 0, x.num, x.den, self.byte_order());
+        }
         -self.clone()
     }
 }

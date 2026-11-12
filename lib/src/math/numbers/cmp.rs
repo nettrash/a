@@ -146,7 +146,7 @@ fn eq_limbs<const ABE: bool, const BBE: bool>(a: &[u8], b: &[u8]) -> bool {
 
 /// Compares the magnitudes of `a` and `b`, whatever their byte orders.
 #[inline(always)]
-pub(super) fn cmp_magnitudes(a: Magnitude, b: Magnitude) -> Ordering {
+pub(crate) fn cmp_magnitudes(a: Magnitude, b: Magnitude) -> Ordering {
     let (x, y) = (a.bytes, b.bytes);
     match x.len().cmp(&y.len()) {
         Ordering::Equal => {}
