@@ -6,7 +6,7 @@
 use crate::math::numbers::{ByteOrder, Number, times};
 
 /// A magnitude: limbs, the least significant first, with no zero limb at the top.
-pub(super) type Limbs = Vec<u64>;
+pub(in crate::math::rational) type Limbs = Vec<u64>;
 
 /// Drops the zero limbs at the top of `v`.
 #[inline]
@@ -17,7 +17,7 @@ pub(super) fn normalize(v: &mut Limbs) {
 }
 
 /// The magnitude of `n`, read in its byte order.
-pub(super) fn of_number(n: &Number) -> Limbs {
+pub(in crate::math::rational) fn of_number(n: &Number) -> Limbs {
     let bytes = &n.value;
     let mut v: Limbs = Vec::with_capacity(bytes.len().div_ceil(8));
     match n.byte_order {
@@ -44,9 +44,15 @@ pub(super) fn of_number(n: &Number) -> Limbs {
     v
 }
 
-/// The number of the magnitude `v` with the sign `negative`, in the byte order `order`, in the
-/// shortest form, in a new vector of exactly its length.
-pub(super) fn to_number(v: &[u64], negative: bool, order: ByteOrder) -> Number {
+/// Up to this many limbs, [`to_number`] pushes the limbs one by one; beyond, it writes them into a
+/// zeroed vector. Measured on an Apple M4 Max, a numerator of 3 limbs (`B_60`) took 86 cycles
+/// pushed and 95 zeroed, and the convergents of parts of 256 limbs 0.67 of their time with the
+/// longer ones zeroed.
+const SHORT_NUMBER: usize = 8;
+
+/// The number of the magnitude `v`, without zero limbs at the top, with the sign `negative`, in
+/// the byte order `order`, in the shortest form, in a new vector of exactly its length.
+pub(in crate::math::rational) fn to_number(v: &[u64], negative: bool, order: ByteOrder) -> Number {
     let len = v.len();
     if len == 0 {
         return Number {
@@ -58,17 +64,22 @@ pub(super) fn to_number(v: &[u64], negative: bool, order: ByteOrder) -> Number {
     let top = v[len - 1];
     let top_bytes = 8 - top.leading_zeros() as usize / 8;
     let n = 8 * (len - 1) + top_bytes;
+    if len > SHORT_NUMBER {
+        return to_number_long(v, negative, order);
+    }
+    // Short: pushed limb by limb, which costs less than zeroing a new vector first.
     let mut value = Vec::with_capacity(n);
+    let body = &v[..len - 1];
     match order {
         ByteOrder::LittleEndian => {
-            for &l in &v[..len - 1] {
+            for &l in body {
                 value.extend_from_slice(&l.to_le_bytes());
             }
             value.extend_from_slice(&top.to_le_bytes()[..top_bytes]);
         }
         ByteOrder::BigEndian => {
             value.extend_from_slice(&top.to_be_bytes()[8 - top_bytes..]);
-            for &l in v[..len - 1].iter().rev() {
+            for &l in body.iter().rev() {
                 value.extend_from_slice(&l.to_be_bytes());
             }
         }
@@ -80,14 +91,55 @@ pub(super) fn to_number(v: &[u64], negative: bool, order: ByteOrder) -> Number {
     }
 }
 
+/// [`to_number`] for more than [`SHORT_NUMBER`] limbs: a zeroed vector, written limb by limb into
+/// arrays of 8 bytes, which the compiler turns into whole stores without a check of the capacity
+/// for each.
+#[inline(never)]
+fn to_number_long(v: &[u64], negative: bool, order: ByteOrder) -> Number {
+    let len = v.len();
+    let top = v[len - 1];
+    let top_bytes = 8 - top.leading_zeros() as usize / 8;
+    let rest = 8 * (len - 1);
+    let body = &v[..len - 1];
+    let mut value = vec![0u8; rest + top_bytes];
+    match order {
+        ByteOrder::LittleEndian => {
+            let (low, high) = value.split_at_mut(rest);
+            for (c, l) in low.as_chunks_mut::<8>().0.iter_mut().zip(body) {
+                c.copy_from_slice(&l.to_le_bytes());
+            }
+            high.copy_from_slice(&top.to_le_bytes()[..top_bytes]);
+        }
+        ByteOrder::BigEndian => {
+            let (high, low) = value.split_at_mut(top_bytes);
+            high.copy_from_slice(&top.to_be_bytes()[8 - top_bytes..]);
+            for (c, l) in low.as_chunks_mut::<8>().0.iter_mut().zip(body.iter().rev()) {
+                c.copy_from_slice(&l.to_be_bytes());
+            }
+        }
+    }
+    Number {
+        value,
+        negative,
+        byte_order: order,
+    }
+}
+
 /// The number of the magnitude `x < 2^128` with the sign `negative`, in the byte order `order`, in
-/// the shortest form, in one new vector of exactly its length.
+/// the shortest form: in a vector of room for 16 bytes, written by one store of all of them and
+/// cut to the significant ones, which costs less than a copy of a variable length (the allocator
+/// gives 16 bytes to any shorter request).
+#[inline]
 pub(super) fn number_u128(x: u128, negative: bool, order: ByteOrder) -> Number {
-    let len = (16 - (x | 1).leading_zeros() as usize / 8).max(1);
-    let value = match order {
-        ByteOrder::LittleEndian => x.to_le_bytes()[..len].to_vec(),
-        ByteOrder::BigEndian => x.to_be_bytes()[16 - len..].to_vec(),
+    let len = 16 - (x | 1).leading_zeros() as usize / 8;
+    let bytes = match order {
+        ByteOrder::LittleEndian => x.to_le_bytes(),
+        // The significant bytes first: shifted to the top.
+        ByteOrder::BigEndian => (x << (128 - 8 * len)).to_be_bytes(),
     };
+    let mut value = Vec::with_capacity(16);
+    value.extend_from_slice(&bytes);
+    value.truncate(len);
     Number {
         value,
         negative: negative && x != 0,
@@ -106,7 +158,7 @@ pub(super) fn bits(v: &[u64]) -> u64 {
 
 /// `x y`.
 #[inline]
-pub(super) fn mul(x: &[u64], y: &[u64]) -> Limbs {
+pub(in crate::math::rational) fn mul(x: &[u64], y: &[u64]) -> Limbs {
     if x.is_empty() || y.is_empty() {
         return Vec::new();
     }
@@ -145,7 +197,7 @@ pub(super) fn mul_1(x: &mut Limbs, c: u64) {
 
 /// `x + y` in place.
 #[inline]
-pub(super) fn add(x: &mut Limbs, y: &[u64]) {
+pub(in crate::math::rational) fn add(x: &mut Limbs, y: &[u64]) {
     if x.len() < y.len() {
         x.resize(y.len(), 0);
     }

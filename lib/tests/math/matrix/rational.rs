@@ -734,3 +734,236 @@ fn integer_solve_of_other_rows() {
 fn inverse_of_a_rectangle() {
     let _ = Matrix::<Rational>::zeros(3, 2).inverse();
 }
+
+/// The hash of `x` under the standard hasher.
+fn hash_of(x: &Rational) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// Asserts the form of `x` in the byte order `o`, and that it is in the one form of its value: equal
+/// to, and hashing as, the rational made from its parts (a value left in numbers when its parts
+/// fit in words, or the other way about, would not be).
+#[track_caller]
+fn one_form(x: &Rational, o: ByteOrder) {
+    check(x, o);
+    let y = Rational::new(x.numer().clone(), x.denom().clone());
+    assert_eq!(*x, y, "{x:?}");
+    assert_eq!(hash_of(x), hash_of(&y), "{x:?}");
+}
+
+/// [`one_form`] for every element of `m`.
+#[track_caller]
+fn one_form_all(m: &Matrix<Rational>, o: ByteOrder) {
+    for x in m.as_slice() {
+        one_form(x, o);
+    }
+}
+
+/// A random integer of exactly `bits` bits, of either sign, or zero now and then.
+fn bits(r: &mut Rng, bits: u32) -> i128 {
+    if r.next().is_multiple_of(16) {
+        return 0;
+    }
+    let m = (u128::from(r.next()) << 64 | u128::from(r.next())) >> (128 - bits);
+    let m = (m | 1 << (bits - 1)) as i128;
+    if r.next() & 1 == 1 { -m } else { m }
+}
+
+/// The number `x` in the byte order `o`.
+fn wide(x: i128, o: ByteOrder) -> Number {
+    Number::new_from_i128(x, o)
+}
+
+#[test]
+fn small_orders_in_registers_and_beyond() {
+    // From 1 × 1 to 8 × 8, the orders of the register paths, with integers and fractions whose
+    // cleared rows keep the minors in registers, reach Hadamard's bound of `2^61` or pass it, or
+    // whose parts pass the words: every result against Leibniz's formula or the defining
+    // identities, in the byte order of the top left element and in its one form.
+    let mut r = Rng(0x5EED_2701);
+    let top = size(9, 4);
+    for n in 1..top {
+        for b in [3u32, 12, 20, 28, 31, 40, 62, 63, 64, 65] {
+            if cfg!(miri) && b > 31 && n > 2 {
+                continue;
+            }
+            for fractions in [false, true] {
+                let o = order(r.next());
+                let a = Matrix::from_fn(n, n, |i, j| {
+                    let oe = if i == 0 && j == 0 { o } else { order(r.next()) };
+                    let p = wide(bits(&mut r, b), oe);
+                    if fractions {
+                        let q = wide(bits(&mut r, b.min(64)).abs().max(1), oe);
+                        Rational::new(p, q)
+                    } else {
+                        Rational::from_integer(p)
+                    }
+                });
+                let d = a.det();
+                one_form(&d, o);
+                if n <= 5 {
+                    assert_eq!(d, leibniz(&a), "{n} {b} {fractions}");
+                }
+                let bm = Matrix::from_fn(n, 2, |_, _| {
+                    Rational::from_integer(wide(bits(&mut r, b), o))
+                });
+                match a.solve(&bm) {
+                    Some(x) => {
+                        one_form_all(&x, o);
+                        assert_eq!(&a * &x, bm, "{n} {b} {fractions}");
+                    }
+                    None => assert!(d.is_zero()),
+                }
+                match a.inverse() {
+                    Some(inv) => {
+                        one_form_all(&inv, o);
+                        assert_eq!(&a * &inv, Matrix::identity(n), "{n} {b} {fractions}");
+                        assert_eq!(&d * &inv.det(), Rational::from(1));
+                    }
+                    None => assert!(d.is_zero()),
+                }
+                if fractions {
+                    continue;
+                }
+                // The same integers as a `Matrix<Number>`.
+                let z = a.map(|x| x.numer().clone());
+                let dz = z.det();
+                assert_eq!(dz.byte_order(), o);
+                assert_eq!(Rational::from(&dz), d);
+                match z.inverse() {
+                    Some((adj, det)) => {
+                        assert_eq!(det, dz);
+                        assert_eq!(adj, z.adjugate(), "{n} {b}");
+                        assert!(adj.as_slice().iter().all(|x| x.byte_order() == o));
+                    }
+                    None => assert!(dz.is_zero()),
+                }
+                let zb = bm.map(|x| x.numer().clone());
+                match (z.solve(&zb), z.inverse_rational()) {
+                    (Some(x), Some(inv)) => {
+                        one_form_all(&x, o);
+                        one_form_all(&inv, o);
+                        assert_eq!(&a * &x, bm);
+                        assert_eq!(&a * &inv, Matrix::identity(n));
+                    }
+                    (x, inv) => assert!(x.is_none() && inv.is_none() && dz.is_zero()),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn results_that_shrink_and_grow_across_the_words() {
+    // Long elements whose results are short: `U·2^70` for a unimodular `U`, whose inverse is
+    // `U⁻¹·2^-70`, and whose rows clear to the same integers; and short elements whose results
+    // are long: a determinant of 8 × 8 integers of 30 bits passes 64 bits.
+    let mut r = Rng(0x5EED_2702);
+    let u = Matrix::from_rows(&[[2, 3, 1], [1, 2, 1], [1, 1, 1]]).map(|&x| Rational::from(x));
+    assert_eq!(u.det(), 1);
+    let big = Rational::from_integer(Number::from(1u8) << 70usize);
+    for o in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+        let s = u.map(|x| {
+            let y = x * &big;
+            Rational::new(wide(0, o) + y.numer(), wide(1, o))
+        });
+        let inv = s.inverse().unwrap();
+        one_form_all(&inv, o);
+        assert_eq!(
+            &inv * &big,
+            u.inverse()
+                .unwrap()
+                .map(|x| Rational::new(wide(0, o) + x.numer(), wide(1, o)))
+        );
+        // Its rows over 2^70 again: short fractions.
+        let t = s.map(|x| x / &big);
+        assert_eq!(t, u);
+        assert_eq!(t.det(), 1);
+    }
+    let n = size(8, 4);
+    let a = Matrix::from_fn(n, n, |_, _| {
+        Rational::from_integer(wide(bits(&mut r, 30), ByteOrder::LittleEndian))
+    });
+    let d = a.det();
+    one_form(&d, ByteOrder::LittleEndian);
+    if !d.is_zero() {
+        let inv = a.inverse().unwrap();
+        one_form_all(&inv, ByteOrder::LittleEndian);
+        assert_eq!(&a * &inv, Matrix::identity(n));
+    }
+}
+
+#[test]
+fn products_in_registers_and_beyond() {
+    // The product of matrices in words, of every shape up to 9 (past the stack's 64 elements),
+    // with integers whose sums of products fit in 64 bits, in 128, or pass them, and parts at the
+    // boundary of the words: against the sums of products of rationals, in the one form.
+    let mut r = Rng(0x5EED_2703);
+    let top = size(10, 4);
+    for m in 1..top {
+        for k in 1..top {
+            for n in [1, m, top - 1] {
+                for b in [7u32, 31, 40, 60, 63, 64, 65] {
+                    if cfg!(miri) && b > 31 {
+                        continue;
+                    }
+                    let fractions = r.next() & 1 == 1;
+                    let el = |r: &mut Rng| {
+                        let o = order(r.next());
+                        let p = wide(bits(r, b), o);
+                        if fractions {
+                            Rational::new(p, wide(bits(r, b.min(64)).abs().max(1), o))
+                        } else {
+                            Rational::from_integer(p)
+                        }
+                    };
+                    let a = Matrix::from_fn(m, k, |_, _| el(&mut r));
+                    let c = Matrix::from_fn(k, n, |_, _| el(&mut r));
+                    let p = &a * &c;
+                    one_form_all(&p, ByteOrder::LittleEndian);
+                    let naive = Matrix::from_fn(m, n, |i, j| {
+                        (0..k).map(|q| &a[(i, q)] * &c[(q, j)]).sum::<Rational>()
+                    });
+                    assert_eq!(p, naive, "{m} {k} {n} {b} {fractions}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn two_by_two_beyond_the_registers() {
+    // Order 2 with parts of 63 to 65 bits, which take the rationals' arithmetic for the
+    // determinant and the inverse: against the formulas on numbers, in the byte order of the top
+    // left element.
+    let mut r = Rng(0x5EED_2704);
+    for _ in 0..size(200, 10) {
+        let o = order(r.next());
+        let a = Matrix::from_fn(2, 2, |i, j| {
+            let oe = if i == 0 && j == 0 { o } else { order(r.next()) };
+            let b = 63 + (r.next() % 3) as u32;
+            Rational::new(
+                wide(bits(&mut r, b), oe),
+                wide(bits(&mut r, b).abs().max(1), oe),
+            )
+        });
+        let d = a.det();
+        one_form(&d, o);
+        assert_eq!(d, &(&a[(0, 0)] * &a[(1, 1)]) - &(&a[(0, 1)] * &a[(1, 0)]));
+        let b = Matrix::from_fn(2, 3, |_, _| {
+            Rational::new(wide(bits(&mut r, 64), o), wide(1, o))
+        });
+        match (a.inverse(), a.solve(&b)) {
+            (Some(inv), Some(x)) => {
+                one_form_all(&inv, o);
+                one_form_all(&x, o);
+                assert_eq!(&a * &inv, Matrix::identity(2));
+                assert_eq!(&a * &x, b);
+            }
+            (inv, x) => assert!(inv.is_none() && x.is_none() && d.is_zero()),
+        }
+    }
+}

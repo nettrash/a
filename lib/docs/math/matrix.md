@@ -69,10 +69,11 @@ The floating-point algorithms are LAPACK's, arranged so that most of their work 
 - `hermitian_eigen()`, `svd()` and their value-only forms first scale a matrix whose largest element is near overflow or underflow, as LAPACK's drivers do.
 - `rank()`, `null_space()`, `norm(Norm::Two)`, `norm(Norm::Nuclear)` and `cond(Norm::Two)` from the singular values (and `V` for the null space); `cond` in the other norms from the inverse; `characteristic_polynomial()` by La Budde's recurrence on the Hessenberg form, about `n³` operations.
 - `exp()`: scaling and squaring, Higham's `expm` (2005): `A / 2^s` with a Padé approximant of degree 3, 5, 7, 9 or 13 chosen by its 1-norm (3, 5 or 7 in single precision), squared `s` times. `sqrt()`: the Schur method (Björck and Hammarling), `R² = T` solved element by element for the triangular `R`, then `Q·R·Q*`. `log()`: inverse scaling and squaring, Higham's `logm` (2001): square roots of the Schur form until it is within 0.264 of `I`, a Padé approximant of degree 7 in partial fractions by Gauss and Legendre's rule of 7 points, times `2^k`, with Al-Mohy and Higham's accurate diagonal. A real matrix's square root and logarithm are computed on its complex Schur form, and are real when they exist.
-- The product of matrices of numbers is the sums of the products of their elements. That of matrices of rationals clears the rows of `A` and the columns of `B` of their denominators, multiplying them by the least common multiples `l_i` and `r_j`, multiplies the integers, in 64-bit registers when the lengths of the elements and of the sums allow it, in 128 bits when they allow that, and then divides each element once, by `l_i·r_j`, with one greatest common divisor: about `n³` products of integers and `n²` greatest common divisors, where the products of rationals would take a gcd or two each. A product whose inner dimension is 2, or 4 with denominators of more than 32 bits, is the sums of the products of rationals, which are done in registers when their parts fit.
+- The product of matrices of numbers is the sums of the products of their elements. That of matrices of rationals clears the rows of `A` and the columns of `B` of their denominators, multiplying them by the least common multiples `l_i` and `r_j`, multiplies the integers, in 64-bit registers when the lengths of the elements and of the sums allow it, in 128 bits when they allow that, and then divides each element once, by `l_i·r_j`, with one greatest common divisor: about `n³` products of integers and `n²` greatest common divisors, where the products of rationals would take a gcd or two each. When every element is in words and the cleared integers fit in them, all of it runs on the stack, each rational's words read in place. Otherwise a product whose inner dimension is 2, or 4 with denominators of more than 32 bits, is the sums of the products of rationals, which are done in registers when their parts fit.
 - On `Number`: Bareiss's elimination, `a_ij ← (a_ij·a_kk − a_ik·a_kj) / p` with the previous pivot `p` dividing exactly, takes about `n³/3` steps, each two products and an exact division of numbers no longer than the determinant, the minors of the matrix; Berkowitz's method about `n⁴/2` products; the adjugate is `(−1)ⁿ⁻¹·(Aⁿ⁻¹ + c₁·Aⁿ⁻² + … + cₙ₋₁·I)` by Cayley and Hamilton, from the characteristic polynomial's coefficients `c`, for singular matrices too; the null space comes from the fraction-free echelon form, one vector for each column without a pivot.
 - Solutions, on `Number` and `Rational`: Bareiss's elimination of `[A | B]` to an echelon form whose last pivot is `D = ±det(A)`, then a fraction-free back substitution, `y_i = (D·b_i − Σ u_ij·y_j) / u_ii` from the bottom, whose integers `y = D·x` are Cramer's numerators, every division exact; then one reduction of each element `y_i / D` by a greatest common divisor. The inverse is the solution of `A·X = I`, whose integers `D·A⁻¹` are also the adjugate up to the sign of the row swaps, which `inverse()` of numbers returns. A matrix of rationals has each row multiplied by the least common multiple `l_i` of its denominators (of `A` and `B` together for `solve`), which leaves the solutions and the null space as they were and multiplies the determinant by `∏ l_i`; `A⁻¹` is then `(L·A)⁻¹·L`.
-- The integers of the elimination are held in registers while their magnitudes are below `2^63`: a step is then two products in 128 bits, a subtraction, and an exact division by a product with the inverse of the divisor's odd part modulo `2^64`, a comparison telling whether the quotient fits. Beyond, each element is a vector of limbs that the steps write over, the products go to two buffers of working memory, and the exact quotient is Hensel's, from the low end; from quotients of 150 limbs it is a product by the inverse of the divisor modulo a power of `2^64`, computed once for the elements that the same pivot divides. A step then allocates nothing once the vectors have grown.
+- Matrices of up to 8 rows, of integers of one limb or of rationals whose parts are in words, run on the stack, with nothing allocated but the result. The rows are cleared into an array of `i64`s, and one product of the squares of the rows' norms, Hadamard's bound, tells whether every minor stays below `2^61`. If it does, the elimination and the back substitution run with no check at all. A step is two products in 128 bits, a subtraction, and an exact division by the previous pivot: the processor's division when the pivot divides one or two elements, and otherwise a product by the inverse of its odd part modulo `2^64`. Order 2 is Cramer's rule in 128 bits.
+- Beyond that, the integers of the elimination are held in registers while their magnitudes are below `2^63`: a step is then two products in 128 bits, a subtraction, and an exact division by a product with the inverse of the divisor's odd part modulo `2^64`, with a comparison telling whether the quotient fits. Beyond the registers, each element is a vector of limbs that the steps write over, the products go to two buffers of working memory, and the exact quotient is Hensel's, from the low end. From quotients of 150 limbs it is a product by the inverse of the divisor modulo a power of `2^64`, computed once for the elements that the same pivot divides. A step then allocates nothing once the vectors have grown.
 - Large systems, on `Number` and `Rational`: from 24 rows (16 when an integer of the cleared matrix passes 63 bits), a system with at most an eighth as many right-hand sides as rows is solved by Dixon's p-adic lifting. `A` is factored once modulo a prime `p` just below `2^62`, in Montgomery's form, the products of the substitutions summed four at a time before a reduction; each step solves `A·x ≡ r (mod p)` and lifts the right-hand side, `r ← (r − A·x) / p`, exactly, the rows of `A` multiplied by the digits limb by limb; after `L` steps, `p^L` past twice the product of Hadamard's bounds on Cramer's numerators and on the determinant, the digits are joined by halves into `X mod p^L`, and each element is the one fraction within the bounds that is congruent to it, found by the extended Euclidean algorithm (Wang's rational reconstruction) with Lehmer's steps in registers, as a rule for the first element alone: the others are their product by the common denominator so far, when that is within the bounds. A matrix singular modulo the prime goes to the next one, and after four to Bareiss's elimination. The work is `O(n³ + L·n²)` operations on words instead of `n³/3` products of numbers as long as the minors.
 - Large determinants: from 28 rows (22 when an integer passes 63 bits), the least common multiple `l` of the denominators of the solution of `A·x = b` for a fixed pseudorandom `b` by the lifting, which divides `det(A)` and is most of it as a rule, then `det(A) / l` from the determinants modulo primes, the product of the factors' diagonal, by the Chinese remainder theorem, until the primes' product passes twice Hadamard's bound over `l`: one prime, as a rule. This is FLINT's `fmpz_mat_det_modular_accelerated`.
 
@@ -149,78 +150,96 @@ Measured on an Apple M4 Max, one core, for `f64`, against faer 0.24.4 (`Par::Seq
 
 ### Exactly
 
-Measured on an Apple M4 Max on 2026-11-11, one core, with nothing else running (load average 1.3 to 3.6), in µs (or ms and s), the median of 5 rounds of fresh random matrices, interleaved in one process, against FLINT 3.6's defaults (`fmpz_mat_det`, `fmpq_mat_solve_fmpz_mat`, `fmpz_mat_inv` then `fmpq_mat_set_fmpz_mat_div_fmpz`), FLINT's Bareiss alone (`fmpz_mat_det_bareiss`, `fmpz_mat_solve_fflu`), PARI 2.19 (`det`, `RgM_solve`, `RgM_inv`) and this crate's 0.2.33 (its Bareiss elimination on numbers, and `inverse()` by Berkowitz's polynomial), with each one's time over `a`'s in brackets. The tables for matrices of rationals are on the [rational numbers](rational.md) page.
+Measured on an Apple M4 Max on 2026-11-12, one thread, with nothing else running (load average 2.2 to 5.9), `env -u MallocNanoZone`, fat LTO, in µs (or ms and s), the median of 5 rounds of fresh random matrices, interleaved in one process. The references are FLINT 3.6's defaults (`fmpz_mat_det`, `fmpq_mat_solve_fmpz_mat`, `fmpz_mat_inv` then `fmpq_mat_set_fmpz_mat_div_fmpz`), FLINT's Bareiss alone (`fmpz_mat_det_bareiss`, `fmpz_mat_solve_fflu`), PARI 2.19 (`det`, `RgM_solve`, `RgM_inv`), and this crate's 0.2.34, before matrices of up to 8 rows ran on the stack. Each one's time over `a`'s is in brackets. The tables for matrices of rationals are on the [rational numbers](rational.md) page.
 
 `Matrix<Number>::det()`, integers in −99..=99 (median, and the time over `a`'s):
 
-| n | `a` | `a` 0.2.33 | FLINT | FLINT, Bareiss | PARI |
+| n | `a` | `a` 0.2.34 | FLINT | FLINT, Bareiss | PARI |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.05 µs | 0.13 µs (2.46) | 0.01 µs (0.10) | 0.09 µs (1.78) | 0.02 µs (0.37) |
-| 4 | 0.13 µs | 0.93 µs (7.32) | 0.04 µs (0.28) | 0.22 µs (1.72) | 0.67 µs (5.31) |
-| 8 | 0.50 µs | 6.99 µs (14.01) | 0.84 µs (1.68) | 0.99 µs (1.98) | 3.05 µs (6.10) |
-| 16 | 6.79 µs | 64.1 µs (9.44) | 7.63 µs (1.12) | 8.19 µs (1.21) | 36.4 µs (5.36) |
-| 32 | 109.8 µs | 664.6 µs (6.05) | 68.4 µs (0.62) | 175.7 µs (1.60) | 216.4 µs (1.97) |
-| 64 | 492.9 µs | 7.15 ms (14.50) | 559.6 µs (1.14) | 2.86 ms (5.80) | 1.87 ms (3.79) |
-| 128 | 3.17 ms | 87.2 ms (27.51) | 3.56 ms (1.12) | 39.3 ms (12.40) | 18.3 ms (5.77) |
+| 2 | 0.02 µs | 0.05 µs (2.13) | 0.01 µs (0.22) | 0.09 µs (3.70) | 0.02 µs (0.79) |
+| 3 | 0.05 µs | 0.08 µs (1.86) | 0.01 µs (0.33) | 0.15 µs (3.26) | 0.08 µs (1.69) |
+| 4 | 0.07 µs | 0.13 µs (1.98) | 0.04 µs (0.54) | 0.23 µs (3.47) | 0.70 µs (10.44) |
+| 5 | 0.11 µs | 0.19 µs (1.77) | 0.26 µs (2.47) | 0.33 µs (3.05) | 0.96 µs (9.00) |
+| 6 | 0.16 µs | 0.28 µs (1.77) | 0.41 µs (2.63) | 0.52 µs (3.36) | 1.47 µs (9.50) |
+| 8 | 0.25 µs | 0.51 µs (1.99) | 0.88 µs (3.47) | 1.05 µs (4.12) | 3.10 µs (12.17) |
+| 16 | 6.86 µs | 6.92 µs (1.01) | 7.80 µs (1.14) | 8.38 µs (1.22) | 37.1 µs (5.42) |
+| 32 | 109.4 µs | 109.6 µs (1.00) | 69.3 µs (0.63) | 178.3 µs (1.63) | 222.2 µs (2.03) |
+| 64 | 472.6 µs | 480.8 µs (1.02) | 575.3 µs (1.22) | 2.91 ms (6.16) | 1.89 ms (4.01) |
+| 128 | 3.11 ms | 3.15 ms (1.02) | 3.67 ms (1.18) | 40.2 ms (12.93) | 18.8 ms (6.05) |
 
 `Matrix<Number>::det()`, 64-bit integers (median, and the time over `a`'s):
 
-| n | `a` | `a` 0.2.33 | FLINT | FLINT, Bareiss | PARI |
+| n | `a` | `a` 0.2.34 | FLINT | FLINT, Bareiss | PARI |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.12 µs | 0.12 µs (1.08) | 0.02 µs (0.19) | 0.15 µs (1.28) | 0.02 µs (0.17) |
-| 4 | 0.74 µs | 1.01 µs (1.36) | 0.22 µs (0.29) | 0.62 µs (0.83) | 5.17 µs (6.98) |
-| 8 | 7.13 µs | 11.5 µs (1.61) | 5.61 µs (0.79) | 6.14 µs (0.86) | 27.6 µs (3.87) |
-| 16 | 87.9 µs | 153.1 µs (1.74) | 80.7 µs (0.92) | 81.4 µs (0.93) | 162.4 µs (1.85) |
-| 32 | 554.8 µs | 2.27 ms (4.10) | 511.4 µs (0.92) | 1.32 ms (2.38) | 1.5 ms (2.70) |
-| 64 | 2.92 ms | 38 ms (13.02) | 3.19 ms (1.09) | 27.6 ms (9.45) | 13.4 ms (4.59) |
+| 2 | 0.13 µs | 0.12 µs (0.98) | 0.02 µs (0.17) | 0.16 µs (1.25) | 0.02 µs (0.15) |
+| 3 | 0.37 µs | 0.32 µs (0.86) | 0.07 µs (0.19) | 0.32 µs (0.87) | 0.09 µs (0.25) |
+| 4 | 0.78 µs | 0.75 µs (0.95) | 0.22 µs (0.28) | 0.65 µs (0.83) | 5.45 µs (6.96) |
+| 5 | 1.62 µs | 1.59 µs (0.98) | 1.05 µs (0.65) | 1.27 µs (0.79) | 8.49 µs (5.25) |
+| 6 | 2.87 µs | 2.82 µs (0.98) | 2.01 µs (0.70) | 2.37 µs (0.83) | 12.5 µs (4.34) |
+| 8 | 7.40 µs | 7.33 µs (0.99) | 5.82 µs (0.79) | 6.37 µs (0.86) | 28.4 µs (3.83) |
+| 16 | 89.2 µs | 89.2 µs (1.00) | 81.0 µs (0.91) | 83.8 µs (0.94) | 166.8 µs (1.87) |
+| 32 | 574.5 µs | 569.7 µs (0.99) | 525.4 µs (0.91) | 1.34 ms (2.33) | 1.54 ms (2.67) |
+| 64 | 3.02 ms | 3.01 ms (1.00) | 3.28 ms (1.08) | 27.9 ms (9.23) | 13.6 ms (4.50) |
 
 `Matrix<Number>::solve(&b)`, one column, integers in −99..=99 (median, and the time over `a`'s):
 
-| n | `a` | `a`, `map(Rational::from)` first | FLINT | FLINT, Bareiss | PARI |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.16 µs | 0.29 µs (1.84) | 0.06 µs (0.36) | 0.20 µs (1.28) | 1.36 µs (8.63) |
-| 4 | 0.37 µs | 0.75 µs (2.05) | 0.37 µs (1.01) | 0.45 µs (1.22) | 2.50 µs (6.82) |
-| 8 | 1.23 µs | 2.52 µs (2.05) | 1.46 µs (1.19) | 1.65 µs (1.34) | 12.5 µs (10.15) |
-| 16 | 12.2 µs | 17.0 µs (1.39) | 29.1 µs (2.38) | 15.5 µs (1.27) | 53.8 µs (4.41) |
-| 32 | 96.9 µs | 121.7 µs (1.26) | 120.3 µs (1.24) | 218.5 µs (2.26) | 321.9 µs (3.32) |
-| 64 | 447.5 µs | 531.0 µs (1.19) | 590.2 µs (1.32) | 3.17 ms (7.08) | 5.14 ms (11.49) |
-| 128 | 2.47 ms | 2.84 ms (1.15) | 3.62 ms (1.46) | 41.7 ms (16.88) | 49.9 ms (20.21) |
+| n | `a` | `a` 0.2.34 | `a`, `map(Rational::from)` first | FLINT | FLINT, Bareiss | PARI |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 0.04 µs | 0.16 µs (4.09) | 0.08 µs (2.01) | 0.06 µs (1.49) | 0.21 µs (5.37) | 1.45 µs (36.45) |
+| 3 | 0.09 µs | 0.26 µs (2.79) | 0.15 µs (1.65) | 0.11 µs (1.21) | 0.32 µs (3.49) | 1.74 µs (18.78) |
+| 4 | 0.15 µs | 0.37 µs (2.53) | 0.24 µs (1.63) | 0.39 µs (2.64) | 0.45 µs (3.08) | 2.42 µs (16.52) |
+| 5 | 0.23 µs | 0.53 µs (2.27) | 0.35 µs (1.52) | 0.55 µs (2.39) | 0.64 µs (2.75) | 5.51 µs (23.76) |
+| 6 | 0.36 µs | 0.73 µs (2.04) | 0.51 µs (1.42) | 0.80 µs (2.24) | 0.96 µs (2.67) | 7.66 µs (21.32) |
+| 8 | 0.67 µs | 1.27 µs (1.90) | 0.94 µs (1.41) | 1.54 µs (2.30) | 1.74 µs (2.60) | 13.1 µs (19.49) |
+| 16 | 12.8 µs | 13.0 µs (1.01) | 13.5 µs (1.06) | 31.5 µs (2.47) | 16.2 µs (1.27) | 57.3 µs (4.48) |
+| 32 | 99.9 µs | 100.3 µs (1.00) | 103.1 µs (1.03) | 127.0 µs (1.27) | 231.3 µs (2.32) | 341.2 µs (3.42) |
+| 64 | 454.6 µs | 458.0 µs (1.01) | 468.4 µs (1.03) | 640.4 µs (1.41) | 3.35 ms (7.37) | 5.43 ms (11.95) |
+| 128 | 2.52 ms | 2.63 ms (1.05) | 2.58 ms (1.03) | 3.91 ms (1.56) | 43.5 ms (17.27) | 53 ms (21.05) |
 
 `Matrix<Number>::solve(&b)`, one column, 64-bit integers (median, and the time over `a`'s):
 
-| n | `a` | `a`, `map(Rational::from)` first | FLINT | FLINT, Bareiss | PARI |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.55 µs | 0.70 µs (1.27) | 0.35 µs (0.63) | 0.63 µs (1.15) | 17.7 µs (32.05) |
-| 4 | 3.40 µs | 3.73 µs (1.10) | 3.14 µs (0.92) | 3.33 µs (0.98) | 45.6 µs (13.39) |
-| 8 | 18.3 µs | 19.2 µs (1.05) | 18.3 µs (1.00) | 18.9 µs (1.03) | 228.5 µs (12.47) |
-| 16 | 148.8 µs | 154.8 µs (1.04) | 244.7 µs (1.64) | 146.5 µs (0.98) | 1.12 ms (7.56) |
-| 32 | 682.9 µs | 703.8 µs (1.03) | 904.3 µs (1.32) | 1.76 ms (2.58) | 6.59 ms (9.66) |
-| 64 | 3.65 ms | 3.73 ms (1.02) | 5.34 ms (1.46) | 31.3 ms (8.57) | 47.6 ms (13.03) |
+| n | `a` | `a` 0.2.34 | `a`, `map(Rational::from)` first | FLINT | FLINT, Bareiss | PARI |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 0.59 µs | 0.57 µs (0.97) | 0.63 µs (1.07) | 0.38 µs (0.65) | 0.69 µs (1.17) | 18.9 µs (31.98) |
+| 3 | 1.76 µs | 1.83 µs (1.04) | 1.93 µs (1.10) | 1.32 µs (0.75) | 1.86 µs (1.05) | 23.3 µs (13.23) |
+| 4 | 3.64 µs | 3.43 µs (0.94) | 3.72 µs (1.02) | 3.36 µs (0.92) | 3.53 µs (0.97) | 48.0 µs (13.18) |
+| 5 | 6.11 µs | 6.15 µs (1.01) | 6.28 µs (1.03) | 5.92 µs (0.97) | 6.25 µs (1.02) | 67.7 µs (11.08) |
+| 6 | 9.40 µs | 9.32 µs (0.99) | 9.40 µs (1.00) | 9.16 µs (0.97) | 9.65 µs (1.03) | 63.3 µs (6.74) |
+| 8 | 19.5 µs | 19.2 µs (0.99) | 19.6 µs (1.00) | 19.3 µs (0.99) | 20.0 µs (1.03) | 244.2 µs (12.53) |
+| 16 | 158.0 µs | 157.3 µs (1.00) | 159.8 µs (1.01) | 252.4 µs (1.60) | 155.6 µs (0.98) | 1.24 ms (7.84) |
+| 32 | 725.0 µs | 724.6 µs (1.00) | 718.6 µs (0.99) | 973.0 µs (1.34) | 1.84 ms (2.54) | 7.09 ms (9.78) |
+| 64 | 3.78 ms | 3.78 ms (1.00) | 3.71 ms (0.98) | 5.72 ms (1.51) | 32.1 ms (8.48) | 49.8 ms (13.16) |
 
 `Matrix<Number>::inverse_rational()` (`inverse()`: the adjugate and the determinant), integers in −99..=99 (median, and the time over `a`'s):
 
-| n | `a` | `a`, `map(Rational::from)` first | `a`, `inverse()` | `a` 0.2.33 | FLINT | FLINT, Bareiss | PARI |
+| n | `a` | `a` 0.2.34 | `a`, `map(Rational::from)` first | `a`, `inverse()` | FLINT | FLINT, Bareiss | PARI |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.21 µs | 0.31 µs (1.43) | 0.16 µs (0.74) | 0.55 µs (2.57) | 0.08 µs (0.37) | 0.25 µs (1.16) | 0.43 µs (2.03) |
-| 4 | 0.85 µs | 1.16 µs (1.37) | 0.51 µs (0.60) | 5.33 µs (6.29) | 0.79 µs (0.93) | 0.85 µs (1.00) | 11.2 µs (13.26) |
-| 8 | 5.75 µs | 6.77 µs (1.18) | 2.29 µs (0.40) | 77.8 µs (13.53) | 5.22 µs (0.91) | 5.39 µs (0.94) | 18.5 µs (3.21) |
-| 16 | 86.3 µs | 89.3 µs (1.03) | 55.3 µs (0.64) | 1.25 ms (14.51) | 207.6 µs (2.41) | 109.6 µs (1.27) | 107.3 µs (1.24) |
-| 32 | 1.08 ms | 1.08 ms (1.01) | 637.0 µs (0.59) | 25.2 ms (23.33) | 2.01 ms (1.86) | 1.42 ms (1.31) | 1.13 ms (1.05) |
-| 64 | 13.3 ms | 13.3 ms (1.00) | 7.92 ms (0.60) | 507 ms (38.28) | 23.7 ms (1.79) | 18.6 ms (1.41) | 9.25 ms (0.70) |
-| 128 | 169 ms | 170 ms (1.00) | 121 ms (0.72) | 10 s (59.31) | 236 ms (1.40) | 232 ms (1.38) | 93.7 ms (0.56) |
+| 2 | 0.04 µs | 0.21 µs (4.74) | 0.06 µs (1.46) | 0.08 µs (1.76) | 0.08 µs (1.76) | 0.26 µs (5.75) | 0.44 µs (9.94) |
+| 3 | 0.15 µs | 0.47 µs (3.14) | 0.19 µs (1.30) | 0.18 µs (1.22) | 0.27 µs (1.80) | 0.51 µs (3.42) | 5.78 µs (38.75) |
+| 4 | 0.31 µs | 0.85 µs (2.79) | 0.38 µs (1.23) | 0.29 µs (0.96) | 0.79 µs (2.58) | 0.84 µs (2.75) | 11.5 µs (37.63) |
+| 5 | 0.61 µs | 1.49 µs (2.45) | 0.69 µs (1.13) | 0.48 µs (0.79) | 1.45 µs (2.37) | 1.46 µs (2.40) | 13.2 µs (21.59) |
+| 6 | 1.08 µs | 2.60 µs (2.40) | 1.19 µs (1.10) | 0.70 µs (0.65) | 2.58 µs (2.38) | 2.72 µs (2.51) | 8.88 µs (8.19) |
+| 8 | 2.62 µs | 5.94 µs (2.26) | 2.83 µs (1.08) | 1.28 µs (0.49) | 5.66 µs (2.16) | 5.86 µs (2.23) | 18.7 µs (7.14) |
+| 16 | 87.8 µs | 87.2 µs (0.99) | 88.2 µs (1.00) | 55.4 µs (0.63) | 214.7 µs (2.45) | 115.2 µs (1.31) | 109.5 µs (1.25) |
+| 32 | 1.14 ms | 1.11 ms (0.98) | 1.11 ms (0.97) | 644.6 µs (0.57) | 2.14 ms (1.88) | 1.49 ms (1.31) | 1.19 ms (1.04) |
+| 64 | 13.9 ms | 13.8 ms (0.99) | 13.9 ms (1.00) | 8.16 ms (0.59) | 24.9 ms (1.79) | 19.7 ms (1.41) | 9.61 ms (0.69) |
+| 128 | 177 ms | 177 ms (1.00) | 178 ms (1.00) | 127 ms (0.72) | 259 ms (1.46) | 251 ms (1.42) | 98.5 ms (0.56) |
 
 `Matrix<Number>::inverse_rational()` (`inverse()`: the adjugate and the determinant), 64-bit integers (median, and the time over `a`'s):
 
-| n | `a` | `a`, `map(Rational::from)` first | `a`, `inverse()` | `a` 0.2.33 | FLINT | FLINT, Bareiss | PARI |
+| n | `a` | `a` 0.2.34 | `a`, `map(Rational::from)` first | `a`, `inverse()` | FLINT | FLINT, Bareiss | PARI |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.81 µs | 0.90 µs (1.11) | 0.37 µs (0.46) | 0.56 µs (0.70) | 0.37 µs (0.46) | 0.73 µs (0.91) | 0.86 µs (1.07) |
-| 4 | 8.00 µs | 8.34 µs (1.04) | 2.66 µs (0.33) | 7.43 µs (0.93) | 8.28 µs (1.04) | 8.30 µs (1.04) | 35.0 µs (4.38) |
-| 8 | 81.2 µs | 81.9 µs (1.01) | 23.0 µs (0.28) | 163.0 µs (2.01) | 90.4 µs (1.11) | 91.3 µs (1.12) | 172.6 µs (2.13) |
-| 16 | 884.4 µs | 882.7 µs (1.00) | 280.6 µs (0.32) | 2.65 ms (3.00) | 2.64 ms (2.99) | 1.1 ms (1.25) | 1.03 ms (1.16) |
-| 32 | 10.9 ms | 10.9 ms (1.00) | 5.12 ms (0.47) | 47.3 ms (4.35) | 27 ms (2.48) | 14.1 ms (1.29) | 9.27 ms (0.85) |
+| 2 | 0.73 µs | 0.82 µs (1.12) | 0.52 µs (0.71) | 0.39 µs (0.53) | 0.38 µs (0.52) | 0.75 µs (1.03) | 0.87 µs (1.19) |
+| 3 | 2.84 µs | 2.73 µs (0.96) | 2.86 µs (1.01) | 1.23 µs (0.43) | 1.94 µs (0.68) | 2.73 µs (0.96) | 18.9 µs (6.63) |
+| 4 | 8.72 µs | 8.52 µs (0.98) | 8.78 µs (1.01) | 2.78 µs (0.32) | 9.02 µs (1.03) | 9.21 µs (1.06) | 36.8 µs (4.22) |
+| 5 | 18.4 µs | 18.3 µs (0.99) | 18.5 µs (1.01) | 5.41 µs (0.29) | 19.6 µs (1.07) | 20.0 µs (1.09) | 52.1 µs (2.83) |
+| 6 | 33.4 µs | 33.6 µs (1.01) | 33.7 µs (1.01) | 9.19 µs (0.28) | 37.5 µs (1.12) | 37.6 µs (1.13) | 85.4 µs (2.56) |
+| 8 | 87.6 µs | 85.5 µs (0.98) | 86.1 µs (0.98) | 24.4 µs (0.28) | 99.4 µs (1.13) | 98.3 µs (1.12) | 182.6 µs (2.09) |
+| 16 | 942.6 µs | 940.4 µs (1.00) | 915.2 µs (0.97) | 294.0 µs (0.31) | 2.86 ms (3.04) | 1.19 ms (1.27) | 1.08 ms (1.15) |
+| 32 | 11.2 ms | 11.4 ms (1.01) | 11.3 ms (1.00) | 5.24 ms (0.47) | 28.5 ms (2.53) | 14.9 ms (1.32) | 9.63 ms (0.86) |
 
-- The determinant, the inverse as the adjugate and the solutions run on registers and limbs rather than numbers, 1.08 to 27.5 times as fast as 0.2.33's determinant, and `inverse()` 7 to 83 times as fast as by Berkowitz's polynomial from 8 × 8 (and faster at every size, 1.5 times at 2 × 2).
-- FLINT is faster at 2 × 2 and for determinants at 4 × 4, by cofactors in words, for determinants of small integers at 32 × 32 (0.62 of the time) and of 64-bit ones from 8 × 8 to 32 × 32 (0.79 to 0.92); from 64 × 64 the determinant and the solutions, by Dixon's lifting here and in FLINT, are 1.09 to 1.46 times as fast as FLINT's. PARI's multimodular inverse is faster from 64 × 64 for small integers (0.56 to 0.70 of the time) and at 32 × 32 for 64-bit ones (0.85).
+- Up to 8 × 8 the matrices of small integers run on the stack: determinants 1.8 to 2.1 times as fast as in 0.2.34, solutions 1.9 to 4.1 times and inverses 2.3 to 4.7 times. From 16 × 16 the times are 0.2.34's, within the noise. So are those of 64-bit integers, which pass Hadamard's bound at once: from 2 × 2 to 4 × 4 the check that turns them away costs up to 14 ns, 2 to 3 % of the time when measured alone (0.2.34 takes 0.86 to 1.12 times as long in the table, the noise of a single pass). Against 0.2.33, measured in #16: the determinant, the inverse as the adjugate and the solutions run on registers and limbs rather than numbers, 1.08 to 27.5 times as fast as 0.2.33's determinant, and `inverse()` is 7 to 83 times as fast as by Berkowitz's polynomial from 8 × 8 (and faster at every size, 1.5 times at 2 × 2).
+- FLINT is faster for determinants of small integers up to 4 × 4 (0.22 to 0.54 of the time), by cofactors in words, where the work takes a few nanoseconds and writing the result as a `Number` costs more than that. It is also faster for small integers at 32 × 32 (0.63) and for 64-bit integers from 2 × 2 to 32 × 32 (0.17 to 0.91 for determinants, 0.65 to 0.92 for solutions up to 4 × 4, 0.52 and 0.68 for the inverse at 2 × 2 and 3 × 3), where the integers pass a word and its arithmetic on them is GMP's. From 64 × 64 the determinant and the solutions, by Dixon's lifting here and in FLINT, are 1.08 to 1.56 times as fast as FLINT's. Solutions of small integers are 1.2 to 2.6 times as fast as FLINT's at every size from 3 × 3. PARI's multimodular inverse is faster from 64 × 64 for small integers (0.56 to 0.69 of the time) and at 32 × 32 for 64-bit ones (0.86).
 
 ## Examples
 

@@ -3,19 +3,31 @@
 //! [`Rational::limit_denominator`], [`Rational::simplest_between`], and rational reconstruction,
 //! [`Rational::reconstruct`] and [`Rational::reconstruct_with_bounds`].
 //!
-//! Each is Euclid's algorithm on the parts. When they fit in 64 or 128 bits it runs in registers;
-//! otherwise on the limbs of the greatest common divisor's own reductions (see
-//! `numbers::gcd::euclid`): hgcd2's matrices from the top two limbs, and Möller's half gcd for the
-//! long parts, so that a continued fraction, a best approximation and a reconstruction take
-//! `O(M(n) log n)` for parts of `n` limbs, as the greatest common divisor does. The simplest
-//! rational between two follows both ends' expansions together by hgcd2's matrices.
+//! Each is Euclid's algorithm on the parts. When they fit in 64 or 128 bits it runs in registers,
+//! the parts of a rational in words read in place and a result in words written as words, with
+//! nothing allocated but the vectors of the terms a continued fraction returns; otherwise on the
+//! limbs of the greatest common divisor's own reductions (see `numbers::gcd::euclid`): hgcd2's
+//! matrices from the top two limbs, and Möller's half gcd for the long parts, so that a continued
+//! fraction, a best approximation and a reconstruction take `O(M(n) log n)` for parts of `n`
+//! limbs, as the greatest common divisor does. The simplest rational between two follows both
+//! ends' expansions together by hgcd2's matrices.
 
-use super::small::number;
+use super::sequences::limbs::{Limbs, add, mul, of_number, to_number};
+use super::small::{Small, number};
 use super::{Rational, in_order, is_one, one, trim};
+use crate::math::numbers::nat::addmul_1;
 use crate::math::numbers::{
     Bound, ByteOrder, Magnitude, Number, common_prefix, partial, quotients,
 };
 use core::cmp::Ordering;
+use std::borrow::Cow;
+
+/// The parts of `r`, sign apart, when they fit in 128 bits.
+#[inline(always)]
+fn wides(r: &Rational) -> Option<(u128, u128)> {
+    let (n, d) = r.magnitudes();
+    (n.bytes.len() <= 16 && d.bytes.len() <= 16).then(|| (n.small(), d.small()))
+}
 
 /// The magnitude of `n` when it fits in 64 bits.
 #[inline(always)]
@@ -39,21 +51,81 @@ fn wide(n: &Number) -> Option<u128> {
     }
 }
 
-/// A term of a continued fraction: the magnitude `q` in the byte order `order`, in one vector of
-/// exactly its length.
+/// A term of a continued fraction: the magnitude `q` in the byte order `order`, in the shortest
+/// form.
 #[inline(always)]
 fn term(order: ByteOrder, q: u64) -> Number {
+    signed_term(order, false, q)
+}
+
+/// The integer `±q` as a number in the byte order `order`, in the shortest form, `-0` as 0: in a
+/// vector of room for a limb, written by one store of the whole limb and cut to its significant
+/// bytes. The allocator gives a vector of 8 bytes the block of one of fewer (16 bytes for the
+/// system's allocators), and a store of 8 bytes costs less than a copy of a variable length.
+#[inline(always)]
+fn signed_term(order: ByteOrder, negative: bool, q: u64) -> Number {
     let len = 8 - (q | 1).leading_zeros() as usize / 8;
-    let mut v = Vec::with_capacity(len);
-    match order {
-        ByteOrder::BigEndian => v.extend_from_slice(&q.to_be_bytes()[8 - len..]),
-        ByteOrder::LittleEndian => v.extend_from_slice(&q.to_le_bytes()[..len]),
-    }
+    let bytes = match order {
+        // The significant bytes first: shifted to the top of the limb.
+        ByteOrder::BigEndian => (q << (64 - 8 * len)).to_be_bytes(),
+        ByteOrder::LittleEndian => q.to_le_bytes(),
+    };
+    let mut v = Vec::with_capacity(8);
+    v.extend_from_slice(&bytes);
+    v.truncate(len);
     Number {
         value: v,
-        negative: false,
+        negative: negative && q != 0,
         byte_order: order,
     }
+}
+
+/// The integer `±q` as a number in the byte order `order`, in the shortest form: by
+/// [`signed_term`] when it fits in 64 bits, as it nearly always does.
+#[inline(always)]
+fn wide_term(order: ByteOrder, negative: bool, q: u128) -> Number {
+    if q >> 64 == 0 {
+        signed_term(order, negative, q as u64)
+    } else {
+        number(order, negative, q)
+    }
+}
+
+/// The integer `n` as a rational over 1 in its byte order, read in place when it fits in 64 bits.
+#[inline]
+fn integer(n: &Number) -> Rational {
+    let m = Magnitude::of(n);
+    if m.bytes.len() <= 8 {
+        return Rational::from_word(m.negative, m.small() as u64, 1, n.byte_order());
+    }
+    Rational::from_integer(n.clone())
+}
+
+/// `r` in the byte order `order`: a copy when it is in it, and otherwise its parts turned around,
+/// the words of a short one rewritten with nothing allocated.
+fn in_order_of(r: &Rational, order: ByteOrder) -> Rational {
+    if r.byte_order() == order {
+        return r.clone();
+    }
+    match r.word() {
+        Some(w) => Rational::from_word(w.negative, w.num, w.den, order),
+        None => reduced(r.numer().clone(), r.denom().clone(), order),
+    }
+}
+
+/// The parts of `r` as numbers: borrowed from a rational in numbers, and new ones, not kept, for
+/// one in words, whose own would be made and kept for the rest of its life by
+/// [`numer`](Rational::numer) and [`denom`](Rational::denom).
+fn parts(r: &Rational) -> (Cow<'_, Number>, Cow<'_, Number>) {
+    if let Some(w) = r.word() {
+        let order = r.byte_order();
+        return (
+            Cow::Owned(signed_term(order, w.negative, w.num)),
+            Cow::Owned(term(order, w.den)),
+        );
+    }
+    // In numbers: `numer` and `denom` borrow them.
+    (Cow::Borrowed(r.numer()), Cow::Borrowed(r.denom()))
 }
 
 /// A rational from parts in lowest terms, the denominator positive, put in the byte order `order`
@@ -66,10 +138,11 @@ fn reduced(num: Number, den: Number, order: ByteOrder) -> Rational {
     Rational::from_reduced(num, den)
 }
 
-/// The rational `±m / d` from magnitudes, `d` positive, in lowest terms, in the byte order `order`.
-#[inline]
+/// The rational `±m / d` from magnitudes, `d` positive, in lowest terms, in the byte order `order`:
+/// in words when both fit in 64 bits; `-0` is 0.
+#[inline(always)]
 fn small_rational(order: ByteOrder, negative: bool, m: u128, d: u128) -> Rational {
-    Rational::from_reduced(number(order, negative, m), number(order, false, d))
+    Rational::from_u128(negative && m != 0, m, d, order)
 }
 
 /// The floor of `±n / d` for magnitudes, `d` not zero, `n / d` not an integer: its sign and
@@ -93,9 +166,8 @@ fn split_u128(negative: bool, n: u128, d: u128) -> (bool, u128, u128) {
 #[inline]
 fn push_terms(order: ByteOrder, mut x: u128, mut y: u128, out: &mut Vec<Number>) {
     while (x | y) >> 64 != 0 {
-        let q = x / y;
-        let r = x - q * y;
-        out.push(number(order, false, q));
+        let (q, r) = div_rem_wide(x, y);
+        out.push(wide_term(order, false, q));
         if r == 0 {
             return;
         }
@@ -140,7 +212,10 @@ impl Rational {
     /// common divisor's reductions, which keep the quotients that they find (hgcd2's from the top
     /// two limbs, the half gcd's for long parts). So it takes the time of a greatest common
     /// divisor of the parts, `O(M(n) log n)` for parts of `n` limbs, and that of writing the
-    /// terms, about `0.58` a bit of the denominator for random numbers.
+    /// terms, about `0.58` a bit of the denominator for random numbers. Each term is a [`Number`]
+    /// with a vector of its own, whose allocation and release take most of the time for parts of
+    /// a limb and about half of it from 16 to 256 limbs: measured on an Apple M4 Max, 33 cycles a
+    /// term, the same as a bare allocation and release of 8 bytes.
     ///
     /// # Examples
     ///
@@ -158,24 +233,28 @@ impl Rational {
     /// ```
     pub fn continued_fraction(&self) -> Vec<Number> {
         let order = self.byte_order();
-        if is_one(&self.den) {
-            return vec![self.num.clone()];
+        if let Some(w) = self.word() {
+            return continued_fraction_small(w.negative, w.num, w.den, order);
         }
-        let negative = self.num.is_negative();
-        if let (Some(n), Some(d)) = (wide(&self.num), wide(&self.den)) {
+        // In numbers from here: `numer` and `denom` borrow them.
+        if self.is_integer() {
+            return vec![self.numer().clone()];
+        }
+        let negative = self.is_negative();
+        if let Some((n, d)) = wides(self) {
             let (neg0, a0, r) = split_u128(negative, n, d);
             let mut out = Vec::with_capacity(planned_terms(128 - u64::from(d.leading_zeros())));
-            out.push(number(order, neg0, a0));
+            out.push(wide_term(order, neg0, a0));
             push_terms(order, d, r, &mut out);
             return out;
         }
-        let a0 = self.num.div_floor(&self.den);
-        let r = self.num.rem_euclid(&self.den);
-        let mut out = Vec::with_capacity(planned_terms(self.den.bits()));
+        let a0 = self.numer().div_floor(self.denom());
+        let r = self.numer().rem_euclid(self.denom());
+        let mut out = Vec::with_capacity(planned_terms(self.denom().bits()));
         let mut a0 = in_order(a0, order);
         trim(&mut a0);
         out.push(a0);
-        quotients(&self.den, &r, order, &mut out);
+        quotients(self.denom(), &r, order, &mut out);
         out
     }
 
@@ -210,28 +289,25 @@ impl Rational {
         };
         let order = first.byte_order();
         let tail = &terms[1..];
-        if tail.iter().any(|t| !t.is_positive()) {
+        if tail.is_empty() {
+            return integer(first);
+        }
+        // The tail's matrix `(P, P'; Q, Q')`, `[a1; …, an] = P / Q`, and `x = a0 + Q / P`: its first
+        // run in registers, which is all of it for short terms.
+        let (run, at) = first_run(tail);
+        if at == tail.len() {
+            let [p, _, q, _] = run;
+            return value_small(first, p, q)
+                .unwrap_or_else(|| general_value(first, &term(order, p), &term(order, q), order));
+        }
+        if tail[at..].iter().any(|t| !t.is_positive()) {
             panic!("a term of a continued fraction after the first is not positive");
         }
-        if tail.is_empty() {
-            return Rational::from_integer(first.clone());
-        }
-        // The tail's matrix `(P, P'; Q, Q')`, `[a1; …, an] = P / Q`, and `x = a0 + Q / P`.
-        let m = tail_matrix(tail);
-        let [p, _, q, _] = m;
-        if let (Some(a0), Some(pw), Some(qw)) = (wide(first), word(&p), word(&q)) {
-            // x = (a0 P + Q) / P, in 128 bits when it fits; Q <= P.
-            let (pw, qw) = (u128::from(pw), u128::from(qw));
-            if let Some(ap) = a0.checked_mul(pw) {
-                let value = if first.is_negative() {
-                    Some((ap > qw, ap.abs_diff(qw)))
-                } else {
-                    ap.checked_add(qw).map(|m| (false, m))
-                };
-                if let Some((negative, m)) = value {
-                    return small_rational(order, negative, m, pw);
-                }
-            }
+        let [p, _, q, _] = tail_matrix(tail, run, at);
+        if let (Some(pw), Some(qw)) = (word(&p), word(&q))
+            && let Some(r) = value_small(first, pw, qw)
+        {
+            return r;
         }
         general_value(first, &p, &q, order)
     }
@@ -239,6 +315,11 @@ impl Rational {
     /// The convergents `p0/q0, p1/q1, …` of the continued fraction of the number, in its byte
     /// order: `pk/qk = [a0; a1, …, ak]`, by `pk = ak·pk-1 + pk-2` and `qk = ak·qk-1 + qk-2`, each in
     /// lowest terms. The last one is the number itself.
+    ///
+    /// For parts of up to 128 bits the terms are found and used in registers, never written, and
+    /// the convergents in words are written as words; for longer ones the recurrence runs in
+    /// registers while it fits in 127 bits and then on limbs in place, over the vectors of
+    /// `pk-2`, so that each convergent costs the two vectors of its own parts.
     ///
     /// # Examples
     ///
@@ -251,8 +332,13 @@ impl Rational {
     /// ```
     pub fn convergents(&self) -> Vec<Rational> {
         let order = self.byte_order();
-        if let (Some(n), Some(d)) = (word(&self.num), word(&self.den)) {
-            return convergents_small(self.num.is_negative(), n, d, order);
+        if let Some(w) = self.word() {
+            return convergents_small(w.negative, w.num, w.den, order);
+        }
+        if let Some((n, d)) = wides(self)
+            && let Some(out) = convergents_wide(self.is_negative(), n, d, order)
+        {
+            return out;
         }
         let terms = self.continued_fraction();
         let mut out = Vec::with_capacity(terms.len());
@@ -278,7 +364,12 @@ impl Rational {
             (p2, q2, p1, q1) = (p1, q1, p, q);
             k += 1;
         }
-        if k < terms.len() {
+        if k == terms.len() {
+            return out;
+        }
+        if k == 0 || (p1 < 0 && p2 > 0) || (p1 > 0 && p2 < 0) {
+            // The first term, which may be negative, or numerators of two signs, which only the
+            // first two can have: on numbers.
             let num = |x: i128| number(order, x < 0, x.unsigned_abs());
             let (mut pa, mut qa, mut pb, mut qb) = (num(p1), num(q1), num(p2), num(q2));
             for t in &terms[k..] {
@@ -287,6 +378,38 @@ impl Rational {
                 out.push(reduced(p.clone(), q.clone(), order));
                 (pb, qb, pa, qa) = (pa, qa, p, q);
             }
+            return out;
+        }
+        // The rest on limbs in place, `pk = ak·pk-1 + pk-2` over the vectors of `pk-2`, the
+        // magnitudes adding as the numerators keep one sign: two vectors a convergent, its own.
+        let negative = p1 < 0 || p2 < 0;
+        let limbs = |x: u128| -> Limbs {
+            let mut v = vec![x as u64, (x >> 64) as u64];
+            while v.last() == Some(&0) {
+                v.pop();
+            }
+            v
+        };
+        let (mut pa, mut qa) = (limbs(p1.unsigned_abs()), limbs(q1 as u128));
+        let (mut pb, mut qb) = (limbs(p2.unsigned_abs()), limbs(q2 as u128));
+        for t in &terms[k..] {
+            match word(t) {
+                Some(a) => {
+                    add_times(&mut pb, &pa, a);
+                    add_times(&mut qb, &qa, a);
+                }
+                None => {
+                    let a = of_number(t);
+                    add(&mut pb, &mul(&pa, &a));
+                    add(&mut qb, &mul(&qa, &a));
+                }
+            }
+            core::mem::swap(&mut pa, &mut pb);
+            core::mem::swap(&mut qa, &mut qb);
+            out.push(Rational::from_reduced(
+                to_number(&pa, negative, order),
+                to_number(&qa, false, order),
+            ));
         }
         out
     }
@@ -301,8 +424,9 @@ impl Rational {
     /// qk)` of the largest `j` that keeps the denominator at most `max_denom`, whichever is the
     /// closer, as Python's `Fraction.limit_denominator` chooses. Euclid's algorithm runs on the
     /// parts with the cofactors of the convergents' denominators until the next one would pass
-    /// `max_denom`: in registers for parts of 64 bits, by the half gcd to the length the bound
-    /// allows for long ones, `O(M(n) log n)` for parts of `n` limbs.
+    /// `max_denom`: in registers for parts of up to 128 bits (a rational in words read in place,
+    /// with nothing allocated), by the half gcd to the length the bound allows for long ones,
+    /// `O(M(n) log n)` for parts of `n` limbs.
     ///
     /// # Panics
     ///
@@ -328,21 +452,28 @@ impl Rational {
         if !max_denom.is_positive() {
             panic!("the largest denominator of an approximation is not positive");
         }
-        if self.den <= *max_denom {
+        let order = self.byte_order();
+        if let Some(w) = self.word() {
+            // A bound past 64 bits is above any denominator in words.
+            let max = match word(max_denom) {
+                Some(max) if max < w.den => max,
+                _ => return self.clone(),
+            };
+            if max == 1 {
+                return round_ties_even_small(w.negative, w.num, w.den, order);
+            }
+            return limit_small(w.negative, w.num, w.den, max, order);
+        }
+        // In numbers from here: `denom` borrows it.
+        if *self.denom() <= *max_denom {
             return self.clone();
         }
-        let order = self.byte_order();
         if is_one(max_denom) {
             return Rational::from_integer(self.round_ties_even());
         }
-        if let (Some(n), Some(d)) = (word(&self.num), word(&self.den)) {
-            // `max_denom < d` fits too.
-            let dmax = word(max_denom).unwrap_or(u64::MAX);
-            return limit_small(self.num.is_negative(), n, d, dmax, order);
-        }
-        if let (Some(n), Some(d)) = (wide(&self.num), wide(&self.den)) {
+        if let Some((n, d)) = wides(self) {
             let dmax = wide(max_denom).unwrap_or(u128::MAX);
-            return limit_wide(self.num.is_negative(), n, d, dmax, order);
+            return limit_wide(self.is_negative(), n, d, dmax, order);
         }
         limit_general(self, max_denom, order)
     }
@@ -381,33 +512,24 @@ impl Rational {
     /// ```
     pub fn simplest_between(a: &Rational, b: &Rational) -> Rational {
         let order = a.byte_order();
-        let fits = |x: &Rational| wide(&x.num).is_some() && wide(&x.den).is_some();
-        if !(fits(a) && fits(b)) {
+        if let (Some(x), Some(y)) = (a.word(), b.word()) {
+            return simplest_words(x, y, order);
+        }
+        let (Some(x), Some(y)) = (wides(a), wides(b)) else {
             return simplest_general(a, b, order);
-        }
-        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        };
+        let (lo, hi, x, y) = if a <= b { (a, b, x, y) } else { (b, a, y, x) };
         if lo == hi {
-            return reduced(lo.num.clone(), lo.den.clone(), order);
+            return in_order_of(lo, order);
         }
-        let c = lo.ceil();
-        let f = hi.floor();
-        if c <= f {
-            return smallest_integer(c, f, order);
+        // The smallest integer at least `lo` and the largest at most `hi`, signed magnitudes.
+        let c = ceil_wide(lo.is_negative(), x.0, x.1);
+        let f = floor_wide(hi.is_negative(), y.0, y.1);
+        if signed_le(c, f) {
+            let (negative, m) = smallest_integer_wide(c, f);
+            return small_rational(order, negative, m, 1);
         }
-        if let (Some(ln), Some(ld), Some(hn), Some(hd)) =
-            (word(&lo.num), word(&lo.den), word(&hi.num), word(&hi.den))
-        {
-            return simplest_small(lo.num.is_negative(), ln, ld, hn, hd, order);
-        }
-        let w = |n: &Number| wide(n).unwrap_or(0);
-        simplest_wide(
-            lo.num.is_negative(),
-            w(&lo.num),
-            w(&lo.den),
-            w(&hi.num),
-            w(&hi.den),
-            order,
-        )
+        simplest_wide(lo.is_negative(), x.0, x.1, y.0, y.1, order)
     }
 
     /// Rational reconstruction with the bounds `n = d = ⌊√((m - 1) / 2)⌋`:
@@ -436,11 +558,7 @@ impl Rational {
             panic!("the modulus of a rational reconstruction is not positive");
         }
         if let (Some(mw), Some(rw)) = (word(m), word(r)) {
-            let rw = if r.is_negative() {
-                (mw - rw % mw) % mw
-            } else {
-                rw % mw
-            };
+            let rw = residue(r.is_negative(), rw, mw);
             let b = ((mw - 1) / 2).isqrt();
             if b == 0 {
                 return None;
@@ -469,7 +587,8 @@ impl Rational {
     /// is none, and the one found is not always the one of the smallest denominator.
     ///
     /// The remainders are reduced as the extended greatest common divisor reduces them, in
-    /// registers for a modulus of 64 bits, and for long ones by the half gcd to the length of `n`,
+    /// registers for a modulus of up to 128 bits, the result in words when it fits, and for long
+    /// ones by the half gcd to the length of `n`,
     /// then by hgcd2's matrices and divisions to the exact stop: `O(M(n) log n)` for a modulus of
     /// `n` limbs. `n < 0` or `d < 1` allow no rational, and give `None`.
     ///
@@ -498,26 +617,36 @@ impl Rational {
         n: &Number,
         d: &Number,
     ) -> Option<Rational> {
-        if !m.is_positive() {
+        // The four read once, in place.
+        let (mm, rm) = (Magnitude::of(m), Magnitude::of(r));
+        let (nm, dm) = (Magnitude::of(n), Magnitude::of(d));
+        if mm.negative || mm.bytes.is_empty() {
             panic!("the modulus of a rational reconstruction is not positive");
         }
-        if n.is_negative() || !d.is_positive() {
+        if nm.negative || dm.negative || dm.bytes.is_empty() {
             return None;
         }
         let order = r.byte_order();
-        if let (Some(mw), Some(rw)) = (word(m), word(r)) {
-            let rw = if r.is_negative() {
-                (mw - rw % mw) % mw
-            } else {
-                rw % mw
+        if mm.bytes.len() <= 8 && rm.bytes.len() <= 8 {
+            let mw = mm.small() as u64;
+            let rw = residue(rm.negative, rm.small() as u64, mw);
+            // A bound past 64 bits is past any remainder or cofactor too.
+            let fit = |x: Magnitude<'_>| {
+                if x.bytes.len() <= 8 {
+                    x.small() as u64
+                } else {
+                    u64::MAX
+                }
             };
-            let nw = word(n).unwrap_or(u64::MAX);
-            let dw = word(d).unwrap_or(u64::MAX);
-            return reconstruct_small(rw, mw, nw, dw, order);
+            return reconstruct_small(rw, mw, fit(nm), fit(dm), order);
         }
         if let Some(mw) = wide(m) {
-            let x = r.rem_euclid(m);
-            let xw = wide(&x).unwrap_or(0);
+            // `r mod m` in registers when `r` fits too.
+            let xw = match wide(r) {
+                Some(rw) if r.is_negative() => (mw - rw % mw) % mw,
+                Some(rw) => rw % mw,
+                None => wide(&r.rem_euclid(m)).unwrap_or(0),
+            };
             let nw = wide(n).unwrap_or(u128::MAX);
             let dw = wide(d).unwrap_or(u128::MAX);
             return reconstruct_wide(xw, mw, nw, dw, order);
@@ -539,6 +668,36 @@ impl Rational {
         p.negative = negative && !p.is_zero();
         Some(reduced(p, t.abs(), order))
     }
+}
+
+/// [`Rational::continued_fraction`] of `±n/d` for parts of 64 bits: the floor and Euclid's
+/// algorithm on `d` and the floor's remainder in registers, each term written as it is found.
+fn continued_fraction_small(negative: bool, n: u64, d: u64, order: ByteOrder) -> Vec<Number> {
+    if d == 1 {
+        return vec![signed_term(order, negative, n)];
+    }
+    // `n/d` is not an integer, so `0 < r < d`; the floor of a negative one is `-(q + 1)`, which
+    // fits as `q < 2^63`.
+    let (q, r) = div_rem_any(n, d);
+    let (a0, mut y) = if negative { (q + 1, d - r) } else { (q, r) };
+    let mut out = Vec::with_capacity(planned_terms(64 - u64::from(d.leading_zeros())));
+    out.push(signed_term(order, negative, a0));
+    let mut x = d;
+    loop {
+        let (q, r) = div_rem(x, y);
+        out.push(term(order, q));
+        if r == 0 {
+            return out;
+        }
+        (x, y) = (y, r);
+    }
+}
+
+/// The quotient and the remainder of `x` by `y > 0`, any `x`.
+#[inline(always)]
+fn div_rem_any(x: u64, y: u64) -> (u64, u64) {
+    let q = x / y;
+    (q, x - q * y)
 }
 
 /// [`Rational::convergents`] of `±n/d` for parts of 64 bits: the terms by Euclid's algorithm in
@@ -567,19 +726,125 @@ fn convergents_small(negative: bool, n: u64, d: u64, order: ByteOrder) -> Vec<Ra
     out
 }
 
+/// The first run of the positive terms `tail` in registers: the matrix `(p, p'; q, q')` of the
+/// terms before `at`, `[a1; …, a_at] = p / q`, multiplied while the terms and the entries fit in 64
+/// bits, and `at`, where a term or an entry would not, or the length of the tail. A term that
+/// is not positive in the run panics, as the caller's check of the rest does.
+#[inline]
+#[track_caller]
+fn first_run(tail: &[Number]) -> ([u64; 4], usize) {
+    let (mut p, mut p1, mut q, mut q1) = (1u64, 0u64, 0u64, 1u64);
+    for (i, t) in tail.iter().enumerate() {
+        let m = Magnitude::of(t);
+        if m.bytes.len() > 8 {
+            return ([p, p1, q, q1], i);
+        }
+        let a = m.small() as u64;
+        if m.negative || a == 0 {
+            panic!("a term of a continued fraction after the first is not positive");
+        }
+        // (p, p'; q, q') (a, 1; 1, 0) = (a p + p', p; a q + q', q).
+        let np = u128::from(a) * u128::from(p) + u128::from(p1);
+        let nq = u128::from(a) * u128::from(q) + u128::from(q1);
+        if (np | nq) >> 64 != 0 {
+            return ([p, p1, q, q1], i);
+        }
+        (p, p1, q, q1) = (np as u64, p, nq as u64, q);
+    }
+    ([p, p1, q, q1], tail.len())
+}
+
+/// `a0 + Q / P` for the first term `a0` and the tail's `P / Q` in 64 bits, `Q <= P` and `gcd(P, Q)
+/// = 1`: `(a0 P + Q) / P` in registers when `a0` and the numerator fit in 128 bits, in words when
+/// they fit in 64, and otherwise `None`.
+#[inline]
+fn value_small(first: &Number, p: u64, q: u64) -> Option<Rational> {
+    let f = Magnitude::of(first);
+    if f.bytes.len() > 16 {
+        return None;
+    }
+    let (pw, qw) = (u128::from(p), u128::from(q));
+    let ap = f.small().checked_mul(pw)?;
+    let (negative, m) = if f.negative {
+        (ap > qw, ap.abs_diff(qw))
+    } else {
+        (false, ap.checked_add(qw)?)
+    };
+    Some(small_rational(first.byte_order(), negative, m, pw))
+}
+
+/// `x += y·c` in place for magnitudes as limbs, the least significant first, without zero limbs at
+/// the top; `c > 0`.
+#[inline]
+fn add_times(x: &mut Limbs, y: &[u64], c: u64) {
+    let n = y.len();
+    if n == 0 {
+        return;
+    }
+    if x.len() < n {
+        x.resize(n, 0);
+    }
+    // By the multiplication's kernel, then the carry through the rest of `x`.
+    let mut carry = addmul_1(&mut x[..n], y, c);
+    let mut i = n;
+    while carry != 0 {
+        if i == x.len() {
+            x.push(carry);
+            return;
+        }
+        let (s, c) = x[i].overflowing_add(carry);
+        x[i] = s;
+        carry = u64::from(c);
+        i += 1;
+    }
+}
+
+/// [`Rational::convergents`] of `±n/d` for parts of 128 bits, none of them in words: the terms by
+/// Euclid's algorithm in registers and the convergents by the recurrence in `i128`s, none of the
+/// terms written. `None` when an entry would pass 127 bits, which parts below `2^126` never let
+/// happen (`|pk| <= |n| + d`).
+fn convergents_wide(negative: bool, n: u128, d: u128, order: ByteOrder) -> Option<Vec<Rational>> {
+    let mut out = Vec::with_capacity(planned_terms(128 - u64::from(d.leading_zeros())));
+    if d == 1 {
+        out.push(small_rational(order, negative, n, 1));
+        return Some(out);
+    }
+    let (neg0, a0, r) = split_u128(negative, n, d);
+    // a0 <= 2^127: -2^127 is an `i128`, +2^127 is not.
+    let a0 = if neg0 {
+        0i128.checked_sub_unsigned(a0)?
+    } else {
+        i128::try_from(a0).ok()?
+    };
+    let (mut p1, mut q1, mut p2, mut q2) = (a0, 1i128, 1i128, 0i128);
+    out.push(small_rational(order, a0 < 0, a0.unsigned_abs(), 1));
+    let (mut x, mut y) = (d, r);
+    while y != 0 {
+        let (a, r) = div_rem_wide(x, y);
+        (x, y) = (y, r);
+        let a = i128::try_from(a).ok()?;
+        let p = a.checked_mul(p1)?.checked_add(p2)?;
+        let q = a.checked_mul(q1)?.checked_add(q2)?;
+        out.push(small_rational(order, p < 0, p.unsigned_abs(), q as u128));
+        (p2, q2, p1, q1) = (p1, q1, p, q);
+    }
+    Some(out)
+}
+
 /// The matrix `(P, P'; Q, Q')` of the positive terms `tail`, `[a1; …, an] = P / Q`, as numbers in
 /// the byte order of the first: runs of terms of 64 bits multiplied in registers while the entries
-/// fit, and the runs' matrices by a balanced tree.
-fn tail_matrix(tail: &[Number]) -> [Number; 4] {
+/// fit, and the runs' matrices by a balanced tree. `run` is the matrix of the terms before `at`,
+/// from [`first_run`].
+fn tail_matrix(tail: &[Number], run: [u64; 4], at: usize) -> [Number; 4] {
     let order = tail[0].byte_order();
     let mut leaves: Vec<[Number; 4]> = Vec::new();
     // The run in registers: `(p, p'; q, q')`.
-    let (mut p, mut p1, mut q, mut q1) = (1u64, 0u64, 0u64, 1u64);
-    let mut open = false;
+    let [mut p, mut p1, mut q, mut q1] = run;
+    let mut open = at > 0;
     let close = |leaves: &mut Vec<[Number; 4]>, m: [u64; 4]| {
         leaves.push(m.map(|x| term(order, x)));
     };
-    for t in tail {
+    for t in &tail[at..] {
         if let Some(a) = word(t) {
             // (p, p'; q, q') (a, 1; 1, 0) = (a p + p', p; a q + q', q).
             let np = u128::from(a) * u128::from(p) + u128::from(p1);
@@ -678,9 +943,9 @@ fn with_floor(neg0: bool, a0: u64, p: u64, q: u64, order: ByteOrder) -> Rational
 /// numerator's remainder with the cofactors, stopped by [`partial`] at the last one at most
 /// `max`.
 fn limit_general(x: &Rational, max: &Number, order: ByteOrder) -> Rational {
-    let a0 = x.num.div_floor(&x.den);
-    let r = x.num.rem_euclid(&x.den);
-    let den = &x.den;
+    let a0 = x.numer().div_floor(x.denom());
+    let r = x.numer().rem_euclid(x.denom());
+    let den = x.denom();
     let st = partial(den, &r, Bound::Cofactor(max), order);
     // The fraction `P/Q` of `r/den` of a remainder `R` of cofactor `t`: `R = s den + t r`, `P =
     // -s sgn(t)`, `Q = |t|`.
@@ -752,6 +1017,79 @@ fn simplest_small(
     small_rational(order, neg, m, pn)
 }
 
+/// [`Rational::simplest_between`] for ends in words, in registers.
+fn simplest_words(a: Small, b: Small, order: ByteOrder) -> Rational {
+    let (lo, hi) = if super::small::cmp(a, b) == Ordering::Greater {
+        (b, a)
+    } else {
+        (a, b)
+    };
+    if (lo.negative, lo.num, lo.den) == (hi.negative, hi.num, hi.den) {
+        return Rational::from_word(lo.negative, lo.num, lo.den, order);
+    }
+    let c = ceil_wide(lo.negative, u128::from(lo.num), u128::from(lo.den));
+    let f = floor_wide(hi.negative, u128::from(hi.num), u128::from(hi.den));
+    if signed_le(c, f) {
+        let (negative, m) = smallest_integer_wide(c, f);
+        return small_rational(order, negative, m, 1);
+    }
+    simplest_small(lo.negative, lo.num, lo.den, hi.num, hi.den, order)
+}
+
+/// The floor of `±n / d`, `d >= 1`, as a sign and a magnitude, 0 not negative.
+#[inline]
+fn floor_wide(negative: bool, n: u128, d: u128) -> (bool, u128) {
+    let q = div_wide(n, d);
+    if negative {
+        // -⌈n / d⌉; `q + 1 <= 2^127` when `d >= 2`, and `d = 1` leaves no remainder.
+        (true, q + u128::from(q * d != n))
+    } else {
+        (false, q)
+    }
+}
+
+/// The ceiling of `±n / d`, `d >= 1`, as a sign and a magnitude, 0 not negative.
+#[inline]
+fn ceil_wide(negative: bool, n: u128, d: u128) -> (bool, u128) {
+    let q = div_wide(n, d);
+    if negative {
+        (q != 0, q)
+    } else {
+        (false, q + u128::from(q * d != n))
+    }
+}
+
+/// `x <= y` for integers as signs and magnitudes, 0 not negative.
+#[inline]
+fn signed_le(x: (bool, u128), y: (bool, u128)) -> bool {
+    match (x.0, y.0) {
+        (false, false) => x.1 <= y.1,
+        (true, true) => x.1 >= y.1,
+        (negative, _) => negative,
+    }
+}
+
+/// The integer of the smallest magnitude from `c` to `f`, `c <= f`, signs and magnitudes.
+#[inline]
+fn smallest_integer_wide(c: (bool, u128), f: (bool, u128)) -> (bool, u128) {
+    if !c.0 && c.1 != 0 {
+        c
+    } else if f.0 {
+        f
+    } else {
+        (false, 0)
+    }
+}
+
+/// `±n/d` rounded to the nearest integer, a half to the even one, as a rational, for `d >= 2`.
+fn round_ties_even_small(negative: bool, n: u64, d: u64, order: ByteOrder) -> Rational {
+    let (q, r) = div_rem_any(n, d);
+    // `2 r` against `d` without passing 64 bits.
+    let up = r > d - r || r == d - r && q & 1 == 1;
+    let m = q + u64::from(up);
+    Rational::from_word(negative && m != 0, m, 1, order)
+}
+
 /// [`Rational::simplest_between`] for long parts, by the expansions of both ends taken together
 /// without ordering them first: the floors `x = q + r/d` by one division each, then the terms of
 /// the fractional parts, two on numbers, then the steps they share by [`common_prefix`]
@@ -759,16 +1097,19 @@ fn simplest_small(
 /// smaller, or whose expansion ends, is the lower; the result goes through the matrix of the shared
 /// steps. Both expansions in full when more than a batch of terms are left to share.
 fn simplest_general(a: &Rational, b: &Rational, order: ByteOrder) -> Rational {
-    let split = |x: &Rational| {
-        let (mut q, mut r) = x.num.div_rem(&x.den);
+    // One end may be in words: its parts as numbers here, not kept.
+    let (an, ad) = parts(a);
+    let (bn, bd) = parts(b);
+    let split = |n: &Number, d: &Number| {
+        let (mut q, mut r) = n.div_rem(d);
         if r.is_negative() {
             q -= 1u8;
-            r += &x.den;
+            r += d;
         }
         (q, r)
     };
-    let (qa, ra) = split(a);
-    let (qb, rb) = split(b);
+    let (qa, ra) = split(&an, &ad);
+    let (qb, rb) = split(&bn, &bd);
     match qa.cmp(&qb) {
         Ordering::Less => {
             let c = if ra.is_zero() { qa } else { qa + 1u8 };
@@ -788,17 +1129,17 @@ fn simplest_general(a: &Rational, b: &Rational, order: ByteOrder) -> Rational {
     // Euclid's pairs (d, r) of the fractional parts r/d; the tails at the first depth are d/r.
     let mut terms = vec![a0.clone()];
     if let Some(t) = part(
-        a.den.clone(),
+        ad.as_ref().clone(),
         ra.clone(),
-        b.den.clone(),
+        bd.as_ref().clone(),
         rb.clone(),
         2,
         &mut terms,
     ) {
         terms.push(t);
-        return reduced_cf(&terms, order);
+        return in_order_of(&Rational::from_continued_fraction(&terms), order);
     }
-    let c = common_prefix(&a.den, &ra, &b.den, &rb, order);
+    let c = common_prefix(&ad, &ra, &bd, &rb, order);
     if c.exhausted {
         return simplest_full(a, b, order);
     }
@@ -850,16 +1191,6 @@ fn part(
     None
 }
 
-/// The value of the terms, in the byte order `order`.
-fn reduced_cf(terms: &[Number], order: ByteOrder) -> Rational {
-    let r = Rational::from_continued_fraction(terms);
-    if r.byte_order() == order {
-        r
-    } else {
-        reduced(r.num, r.den, order)
-    }
-}
-
 /// The integer of the smallest magnitude from `c` to `f`, `c <= f`, as a rational.
 fn smallest_integer(c: Number, f: Number, order: ByteOrder) -> Rational {
     let n = if c.is_positive() {
@@ -891,8 +1222,14 @@ fn simplest_full(a: &Rational, b: &Rational, order: ByteOrder) -> Rational {
     } else {
         out.push(&lower[k] + 1u8);
     }
-    let r = Rational::from_continued_fraction(&out);
-    reduced(r.num, r.den, order)
+    in_order_of(&Rational::from_continued_fraction(&out), order)
+}
+
+/// `±r mod m` for `m > 0`, without a division when `r < m`, as residues usually are.
+#[inline(always)]
+fn residue(negative: bool, r: u64, m: u64) -> u64 {
+    let r = if r < m { r } else { r % m };
+    if negative && r != 0 { m - r } else { r }
 }
 
 /// [`Rational::reconstruct_with_bounds`] for a modulus of 64 bits, `0 <= r < m`.
@@ -902,7 +1239,8 @@ fn reconstruct_small(r: u64, m: u64, n: u64, d: u64, order: ByteOrder) -> Option
     let (mut t0, mut t1) = (0u64, 1u64);
     let mut positive = true;
     while r1 > n {
-        let (q, r) = div_rem(r0, r1);
+        let s = r0 - r1;
+        let (q, r) = if s < r1 { (1, s) } else { div_rem(r0, r1) };
         (r0, r1) = (r1, r);
         // |t_i+1| = |t_i-1| + q |t_i|, at most m.
         (t0, t1) = (t1, t0 + q * t1);
@@ -931,6 +1269,33 @@ fn mul_wide(x: u128, y: u128) -> (u128, u128) {
     let lo = (p00 as u64 as u128) | (mid << 64);
     let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
     (hi, lo)
+}
+
+/// The quotient and the remainder of `x` by `y`, `x >= y > 0`, for `u128`s: by the hardware's
+/// division when both fit in 64 bits, by at most three subtractions for the quotients up to 3,
+/// which are two thirds of Euclid's (41.5 %, 17 % and 9.3 % by Gauss and Kuzmin's law), and by the
+/// library's division of `u128`s, which takes some 40 cycles, for the others.
+#[inline(always)]
+fn div_rem_wide(x: u128, y: u128) -> (u128, u128) {
+    debug_assert!(x >= y && y > 0);
+    if (x | y) >> 64 == 0 {
+        let (q, r) = div_rem(x as u64, y as u64);
+        return (u128::from(q), u128::from(r));
+    }
+    let r = x - y;
+    if r < y {
+        return (1, r);
+    }
+    let r = r - y;
+    if r < y {
+        return (2, r);
+    }
+    let r = r - y;
+    if r < y {
+        return (3, r);
+    }
+    let q = x / y;
+    (q, x - q * y)
 }
 
 /// `x / y` for `u128`s, by the hardware's division when both fit in 64 bits.
@@ -969,14 +1334,14 @@ fn limit_wide(negative: bool, n: u128, d: u128, max: u128, order: ByteOrder) -> 
     let (mut l, mut s) = (d, r);
     let (mut pl, mut ql, mut ps, mut qs) = (1u128, 0u128, 0u128, 1u128);
     while s != 0 {
-        let a = div_wide(l, s);
+        let (a, r) = div_rem_wide(l, s);
         let next = a.checked_mul(qs).and_then(|x| x.checked_add(ql));
         let Some(next) = next.filter(|&x| x <= max) else {
             break;
         };
         let np = pl + a * ps;
         (pl, ql, ps, qs) = (ps, qs, np, next);
-        (l, s) = (s, l - a * s);
+        (l, s) = (s, r);
     }
     // The convergent when `(j Q_S + Q_L) S <= Q_S (L - j S)`, `L > j S`.
     let j = (max - ql) / qs;
@@ -1003,18 +1368,16 @@ fn simplest_wide(
     let (mut xn, mut xd, mut yn, mut yd) = (hd, hr, ld, lr);
     let (mut p, mut q, mut p1, mut q1) = (1u128, 0u128, 0u128, 1u128);
     let last = loop {
-        let x = div_wide(xn, xd);
-        let xr = xn - x * xd;
+        let (x, xr) = div_rem_wide(xn, xd);
         if xr == 0 {
             break x;
         }
-        let y = div_wide(yn, yd);
+        let (y, yr) = div_rem_wide(yn, yd);
         if y > x {
             break x + 1;
         }
         (p, p1) = (x * p + p1, p);
         (q, q1) = (x * q + q1, q);
-        let yr = yn - y * yd;
         (xn, xd, yn, yd) = (yd, yr, xd, xr);
     };
     let (pn, qn) = (last * p + p1, last * q + q1);
@@ -1047,8 +1410,8 @@ fn reconstruct_wide(r: u128, m: u128, n: u128, d: u128, order: ByteOrder) -> Opt
     let (mut t0, mut t1) = (0u128, 1u128);
     let mut positive = true;
     while r1 > n {
-        let q = div_wide(r0, r1);
-        (r0, r1) = (r1, r0 - q * r1);
+        let (q, r) = div_rem_wide(r0, r1);
+        (r0, r1) = (r1, r);
         (t0, t1) = (t1, t0 + q * t1);
         positive = !positive;
     }

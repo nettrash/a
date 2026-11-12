@@ -20,7 +20,7 @@ use super::super::div::{divide_2by1, reciprocal, rem_1 as rem_powers};
 use super::super::mul::limbs::{add_1, add_n, cmp_n, mul, mul_itch, sub_1, sub_n};
 use super::super::mul::{Operand, Product, to_limbs};
 use super::super::scratch::Scratch;
-use super::super::{ByteOrder, Number};
+use super::super::{ByteOrder, Magnitude, Number};
 use super::limbs::{
     divexact, divexact_itch, gcd_u64, gcd_u128, lshift, normalized, tdiv_itch, tdiv_qr,
 };
@@ -29,14 +29,14 @@ use core::cmp::Ordering;
 use core::mem::MaybeUninit;
 use core::ptr;
 
-/// A fraction given by its parts: the numerator, not zero, and the denominator, positive, or 1 for
-/// `None`.
+/// A fraction given by the magnitudes of its parts, which may be read from numbers or from words in
+/// place: the numerator, not zero, with its sign, and the denominator, positive, or 1 for `None`.
 #[derive(Clone, Copy)]
 pub(crate) struct Fraction<'a> {
     /// The numerator.
-    pub(crate) num: &'a Number,
+    pub(crate) num: Magnitude<'a>,
     /// The denominator, or 1.
-    pub(crate) den: Option<&'a Number>,
+    pub(crate) den: Option<Magnitude<'a>>,
 }
 
 /// A part read for the operation: its vector's operand and its sign.
@@ -48,10 +48,15 @@ struct Part {
 
 impl Part {
     #[inline(always)]
-    fn of(n: &Number) -> Part {
+    fn of(m: Magnitude) -> Part {
         Part {
-            op: Operand::of(n),
-            negative: n.negative,
+            op: Operand {
+                ptr: m.bytes.as_ptr(),
+                len: m.bytes.len(),
+                big_endian: m.big_endian,
+                significant: m.bytes.len(),
+            },
+            negative: m.negative,
         }
     }
 
@@ -133,8 +138,8 @@ pub(crate) fn sum_assign(
     order: ByteOrder,
 ) {
     let t = Fraction {
-        num: tn,
-        den: Some(td),
+        num: Magnitude::of(tn),
+        den: Some(Magnitude::of(td)),
     };
     let ops = if left {
         Operands::of(t, y)
@@ -195,8 +200,8 @@ pub(crate) fn product_assign(
     order: ByteOrder,
 ) {
     let t = Fraction {
-        num: tn,
-        den: Some(td),
+        num: Magnitude::of(tn),
+        den: Some(Magnitude::of(td)),
     };
     let ops = if left {
         Operands::of(t, y)
@@ -797,7 +802,7 @@ unsafe fn gcd(v: &mut Values, x: Limbs, y: Limbs) -> Limbs {
     // SAFETY: as the caller guarantees.
     unsafe {
         if x.n <= 2 && y.n <= 2 {
-            let g = gcd_u128(wide(x), wide(y));
+            let g = gcd_wide(wide(x), wide(y));
             return from_wide(v, g);
         }
         if x.n == 1 || y.n == 1 {
@@ -1053,7 +1058,7 @@ pub(crate) fn inverse_word(d: u64) -> u64 {
 /// once, the gcd computed on them, and when it is not 1 both quotients written back into their own
 /// vectors, which hold them.
 pub(crate) fn reduce(num: &mut Number, den: &mut Number) {
-    let (xn, xd) = (Part::of(num), Part::of(den));
+    let (xn, xd) = (Part::of(Magnitude::of(num)), Part::of(Magnitude::of(den)));
     let need = values_need(xn.limbs() + xd.limbs());
     // SAFETY: both parts are read into limbs before either vector is written; the quotients are
     // no longer than the parts, so they fit the vectors.
@@ -1095,11 +1100,41 @@ pub(crate) fn reduce(num: &mut Number, den: &mut Number) {
     }
 }
 
-/// The greatest common divisor of two numbers of up to two limbs, either of which may be zero, as
-/// `Number::gcd` takes it: the binary method on two limbs, then on one.
+/// The greatest common divisor of two numbers of up to two limbs, either of which may be zero:
+/// the binary method on two limbs, then on one, as `Number::gcd` takes it, but for a number of
+/// one limb with one of two longer by 16 bits or more, which is first replaced by its remainder by
+/// it (as GMP's `mpz_gcd` does), as the binary method takes a step for about each bit of the
+/// difference. Measured on an Apple M4 Max, `&a + &b` of a fraction of parts below `2^16` and
+/// one of two limbs took 585 cycles before (GMP 6.3: 265).
 #[inline(always)]
 pub(crate) fn gcd_wide(x: u128, y: u128) -> u128 {
+    let (long, short) = if x >= y { (x, y) } else { (y, x) };
+    if long >> 64 != 0
+        && short != 0
+        && short >> 64 == 0
+        && long.leading_zeros() + 16 <= short.leading_zeros()
+    {
+        return u128::from(gcd_by_limb(long, short as u64));
+    }
     gcd_u128(x, y)
+}
+
+/// `gcd(x, d)` for an `x` of two limbs and a limb `d`, not zero: the remainder, then the gcd of two
+/// limbs.
+#[inline(never)]
+fn gcd_by_limb(x: u128, d: u64) -> u64 {
+    let limbs = [x as u64, (x >> 64) as u64];
+    // SAFETY: the two limbs are in `limbs`, the top one not zero.
+    let r = unsafe {
+        rem_limb(
+            Limbs {
+                p: limbs.as_ptr(),
+                n: 2,
+            },
+            d,
+        )
+    };
+    gcd_u64(r, d)
 }
 
 /// The nearest integer to `num/den`, for a positive `den` of at most [`NEAREST_LIMBS`] limbs that
@@ -1108,7 +1143,7 @@ pub(crate) fn gcd_wide(x: u128, y: u128) -> u128 {
 /// the quotient, one more when it rounds up, written once, of the sign of `num`, in the byte order
 /// `order`.
 pub(crate) fn nearest(num: &Number, den: &Number, even: bool, order: ByteOrder) -> Number {
-    let (xn, xd) = (Part::of(num), Part::of(den));
+    let (xn, xd) = (Part::of(Magnitude::of(num)), Part::of(Magnitude::of(den)));
     let (nn, dn) = (xn.limbs(), xd.limbs());
     debug_assert!((1..=NEAREST_LIMBS).contains(&dn));
     let need = 2 * (nn + 4) + 2 * (dn + 4) + tdiv_itch(nn.max(dn), dn);
@@ -1365,7 +1400,7 @@ fn sum_wide(parts: [(bool, u128); 4], subtract: bool) -> Option<WideResult> {
     if c == 0 {
         return Some(over(na, a, b));
     }
-    let g = gcd_u128(b, d);
+    let g = gcd_wide(b, d);
     if g == 1 {
         let (negative, num) = signed_wide(na, mul_wide(a, d), nc, mul_wide(c, b));
         return Some(wide_result(negative, num, mul_wide(b, d)));
@@ -1427,7 +1462,7 @@ fn product_wide(parts: [(bool, u128); 4], divide: bool) -> WideResult {
     let (a, d) = if d == 1 {
         (a, d)
     } else {
-        let g1 = gcd_u128(a, d);
+        let g1 = gcd_wide(a, d);
         if g1 == 1 {
             (a, d)
         } else {
@@ -1437,7 +1472,7 @@ fn product_wide(parts: [(bool, u128); 4], divide: bool) -> WideResult {
     let (c, b) = if b == 1 {
         (c, b)
     } else {
-        let g2 = gcd_u128(c, b);
+        let g2 = gcd_wide(c, b);
         if g2 == 1 {
             (c, b)
         } else {

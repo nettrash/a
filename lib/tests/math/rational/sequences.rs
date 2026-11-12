@@ -404,3 +404,69 @@ fn harmonic_byte_orders_agree() {
         assert_eq!(le, be, "H_{n}");
     }
 }
+
+/// The hash of `x` under the standard hasher.
+fn hash_of(x: &Rational) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// Asserts that `r` has the one form of its value: equal to, and hashing as, the rational made by
+/// `Rational::new` from its parts, in the byte order `o`. A value in words left in numbers, or the
+/// other way, would be neither.
+#[track_caller]
+fn in_its_form(r: &Rational, o: ByteOrder) {
+    in_order(r, o);
+    let made = Rational::new(r.numer().clone(), r.denom().clone());
+    assert_eq!(*r, made);
+    assert_eq!(hash_of(r), hash_of(&made), "{r} hashes apart from itself");
+}
+
+#[test]
+fn sequences_across_the_forms() {
+    // About the boundary of the words: B_34 and B_38 are in words, B_36 and from B_40 not; H_46
+    // is the last harmonic number in words, H_88 the last of the table, H_124 the last summed
+    // term by term.
+    let top = if cfg!(miri) { 64 } else { 130 };
+    for o in ORDERS {
+        let table = Rational::bernoulli_numbers(top, o);
+        for n in 0..=top {
+            let b = Rational::bernoulli(n, o);
+            in_its_form(&b, o);
+            in_its_form(&table[n as usize], o);
+            assert_eq!(table[n as usize], b);
+            let h = Rational::harmonic(n, o);
+            in_its_form(&h, o);
+            if n > 0 {
+                let last = Rational::harmonic(n - 1, o);
+                assert_eq!(&h - &last, Rational::from(1) / n, "H_{n}");
+            }
+        }
+        for n in [33u64, 34, 35, 36, 37, 38, 39, 40] {
+            let b = Rational::bernoulli(n, o);
+            let fits = |x: &Number| x.bits() <= 64;
+            assert_eq!(
+                fits(b.numer()) && fits(b.denom()),
+                n % 2 == 1 || n <= 34 || n == 38,
+                "B_{n}"
+            );
+        }
+        let h = Rational::harmonic(46, o);
+        assert!(h.numer().bits() <= 64 && h.denom().bits() <= 64);
+        let h = Rational::harmonic(47, o);
+        assert!(h.numer().bits() > 64 || h.denom().bits() > 64);
+    }
+    // Short vectors, each length, against the numbers one by one.
+    for n in 0..size(40, 8) as u64 {
+        for o in ORDERS {
+            let v = Rational::bernoulli_numbers(n, o);
+            assert_eq!(v.len() as u64, n + 1);
+            for (k, b) in v.iter().enumerate() {
+                in_its_form(b, o);
+                assert_eq!(*b, Rational::bernoulli(k as u64, o));
+            }
+        }
+    }
+}

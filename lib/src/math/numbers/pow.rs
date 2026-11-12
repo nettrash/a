@@ -107,22 +107,8 @@ impl Number {
         if self.value.len() <= SMALL {
             // SAFETY: the vector holds at most 16 bytes.
             let x = unsafe { read_small(&self.value, order) };
-            if x == 0 {
-                return small_number(order, 0, false);
-            }
-            if let Some(p) = small_power(x, exp) {
-                return small_number(order, p, negative);
-            }
-            let z = x.trailing_zeros();
-            let o = x >> z;
-            if o == 1 || u64::from(128 - o.leading_zeros()) * u64::from(exp) <= 512 {
-                return register_power(
-                    [o as u64, (o >> 64) as u64],
-                    u64::from(z),
-                    exp,
-                    negative,
-                    order,
-                );
+            if let Some(p) = Number::power_of_small(x, exp, negative, order) {
+                return p;
             }
         }
         let x = Operand::of(self);
@@ -130,6 +116,37 @@ impl Number {
             return small_number(order, 0, false);
         }
         power_of(x, exp, negative, order)
+    }
+
+    /// `±x^exp` for `exp` at least 1, as [`pow`](Number::pow) makes it, when the magnitude `x` of
+    /// up to 128 bits makes it in registers (always for a power of up to 512 bits): `None`
+    /// otherwise. For the register paths of rationals, whose parts are words and not numbers.
+    #[inline]
+    pub(crate) fn power_of_small(
+        x: u128,
+        exp: u32,
+        negative: bool,
+        order: ByteOrder,
+    ) -> Option<Number> {
+        debug_assert!(exp >= 1);
+        if x == 0 {
+            return Some(small_number(order, 0, false));
+        }
+        if let Some(p) = small_power(x, exp) {
+            return Some(small_number(order, p, negative));
+        }
+        let z = x.trailing_zeros();
+        let o = x >> z;
+        if o == 1 || u64::from(128 - o.leading_zeros()) * u64::from(exp) <= 512 {
+            return Some(register_power(
+                [o as u64, (o >> 64) as u64],
+                u64::from(z),
+                exp,
+                negative,
+                order,
+            ));
+        }
+        None
     }
 
     /// Returns `self` raised to the power `exp` modulo `modulus`: the `r` with `0 <= r < |modulus|`

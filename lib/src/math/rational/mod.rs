@@ -47,12 +47,18 @@ pub use convert::{TryFromFloatError, TryFromRationalError};
 pub use text::{ParseRationalError, RationalErrorKind};
 
 use crate::math::numbers::{ByteOrder, Magnitude, Number, fraction};
+use small::Small;
+use std::sync::OnceLock;
 
 /// The rational number `numer/denom`, in lowest terms with a positive denominator.
 ///
 /// Zero is `0/1`, and an integer `n` is `n/1`. The parts are kept private, so that the form
 /// holds: [`Rational::new`] reduces any fraction to it, and [`numer`](Rational::numer),
 /// [`denom`](Rational::denom) and [`into_parts`](Rational::into_parts) give the parts back.
+///
+/// A rational whose parts both fit in 64 bits holds them in two words, with no allocation, and
+/// makes the [`Number`]s that `numer` and `denom` return the first time they are asked for; a
+/// longer one holds two `Number`s.
 ///
 /// # Examples
 ///
@@ -68,13 +74,88 @@ use crate::math::numbers::{ByteOrder, Magnitude, Number, fraction};
 /// assert_eq!(&a + &b, Rational::new(Number::from(-5), Number::from(12)));
 /// assert_eq!((a * b).to_string(), "-1/4");
 /// ```
-#[derive(Clone)]
 pub struct Rational {
-    /// The numerator, of the sign of the number, in the shortest form.
+    repr: Repr,
+}
+
+/// The two forms of a rational: a value whose parts both fit in 64 bits is always in words, and
+/// any other in numbers, so that each value has one form whatever made it.
+enum Repr {
+    /// Both parts of at most 64 bits.
+    Word(Word),
+    /// A part of more than 64 bits.
+    Big(Big),
+}
+
+/// A rational in numbers: at least one part of more than 64 bits, both in the shortest form and
+/// in one byte order.
+struct Big {
+    /// The numerator, of the sign of the number.
     num: Number,
-    /// The denominator: positive, prime to the numerator, in the shortest form and the byte order
-    /// of the numerator.
+    /// The denominator: positive and prime to the numerator.
     den: Number,
+}
+
+/// A rational in words.
+struct Word {
+    /// The magnitude of the numerator.
+    num: u64,
+    /// The denominator: positive and prime to the numerator; 1 for zero.
+    den: u64,
+    /// Whether the number is below zero; never for zero.
+    negative: bool,
+    /// The byte order of the parts as numbers.
+    order: ByteOrder,
+    /// The parts as numbers, made the first time they are asked for.
+    numbers: OnceLock<Box<(Number, Number)>>,
+}
+
+impl Word {
+    /// The rational `±num/den`, with nothing made yet.
+    #[inline(always)]
+    fn new(negative: bool, num: u64, den: u64, order: ByteOrder) -> Word {
+        debug_assert!(den != 0 && (num != 0 || den == 1 && !negative));
+        Word {
+            num,
+            den,
+            negative,
+            order,
+            numbers: OnceLock::new(),
+        }
+    }
+
+    /// The parts as numbers.
+    #[inline]
+    fn numbers(&self) -> &(Number, Number) {
+        self.numbers.get_or_init(|| Box::new(self.make_numbers()))
+    }
+
+    /// The parts as new numbers.
+    #[cold]
+    #[inline(never)]
+    fn make_numbers(&self) -> (Number, Number) {
+        (
+            small::number(self.order, self.negative, u128::from(self.num)),
+            small::number(self.order, false, u128::from(self.den)),
+        )
+    }
+}
+
+impl Clone for Rational {
+    /// A copy: the words of a short rational, without the numbers made for it, or the two numbers
+    /// of a long one.
+    #[inline]
+    fn clone(&self) -> Rational {
+        Rational {
+            repr: match &self.repr {
+                Repr::Word(w) => Repr::Word(Word::new(w.negative, w.num, w.den, w.order)),
+                Repr::Big(b) => Repr::Big(Big {
+                    num: b.num.clone(),
+                    den: b.den.clone(),
+                }),
+            },
+        }
+    }
 }
 
 impl Rational {
@@ -101,16 +182,23 @@ impl Rational {
     /// ```
     #[track_caller]
     pub fn new(numer: Number, denom: Number) -> Rational {
-        if denom.is_zero() {
-            panic!("the denominator of a rational is zero");
-        }
         let order = numer.byte_order();
-        let mut r = Rational {
-            num: numer,
-            den: in_order(denom, order),
-        };
-        r.normalize();
-        r
+        if numer.value.len() <= 8 && denom.value.len() <= 8 {
+            // Both in words, read straight from their vectors, each in its own byte order.
+            let (x, y) = (small::short_vector(&numer), small::short_vector(&denom));
+            if y == 0 {
+                zero_denominator();
+            }
+            if x == 0 {
+                return Rational::from_word(false, 0, 1, order);
+            }
+            let g = small::gcd(x, y);
+            return Rational::from_word(numer.negative != denom.negative, x / g, y / g, order);
+        }
+        if denom.is_zero() {
+            zero_denominator();
+        }
+        normalize(numer, in_order(denom, order))
     }
 
     /// The integer `n` as the rational `n/1`, in the byte order of `n`.
@@ -127,60 +215,92 @@ impl Rational {
     /// ```
     pub fn from_integer(n: Number) -> Rational {
         let order = n.byte_order();
+        if n.value.len() <= 8 {
+            let m = small::short_vector(&n);
+            return Rational::from_word(n.negative && m != 0, m, 1, order);
+        }
+        let m = Magnitude::of(&n);
+        if m.bytes.len() <= 8 {
+            return Rational::from_word(m.negative, m.small() as u64, 1, order);
+        }
         let mut num = n;
         trim(&mut num);
-        Rational {
-            num,
-            den: one(order),
-        }
+        Rational::big(num, one(order))
     }
 
     /// The numerator, of the sign of the number.
     #[inline]
     pub fn numer(&self) -> &Number {
-        &self.num
+        match &self.repr {
+            Repr::Word(w) => &w.numbers().0,
+            Repr::Big(b) => &b.num,
+        }
     }
 
     /// The denominator, positive and prime to the numerator.
     #[inline]
     pub fn denom(&self) -> &Number {
-        &self.den
+        match &self.repr {
+            Repr::Word(w) => &w.numbers().1,
+            Repr::Big(b) => &b.den,
+        }
     }
 
     /// The numerator and the denominator, taken out of the rational.
     #[inline]
     pub fn into_parts(self) -> (Number, Number) {
-        (self.num, self.den)
+        match self.repr {
+            Repr::Word(w) => match w.numbers.into_inner() {
+                Some(parts) => *parts,
+                None => Word::new(w.negative, w.num, w.den, w.order).make_numbers(),
+            },
+            Repr::Big(b) => (b.num, b.den),
+        }
     }
 
     /// The byte order of both parts.
     #[inline]
     pub fn byte_order(&self) -> ByteOrder {
-        self.num.byte_order()
+        match &self.repr {
+            Repr::Word(w) => w.order,
+            Repr::Big(b) => b.num.byte_order(),
+        }
     }
 
     /// Whether the number is zero.
     #[inline]
     pub fn is_zero(&self) -> bool {
-        self.num.is_zero()
+        match &self.repr {
+            Repr::Word(w) => w.num == 0,
+            Repr::Big(b) => b.num.is_zero(),
+        }
     }
 
     /// Whether the number is below zero.
     #[inline]
     pub fn is_negative(&self) -> bool {
-        self.num.is_negative()
+        match &self.repr {
+            Repr::Word(w) => w.negative,
+            Repr::Big(b) => b.num.is_negative(),
+        }
     }
 
     /// Whether the number is above zero.
     #[inline]
     pub fn is_positive(&self) -> bool {
-        self.num.is_positive()
+        match &self.repr {
+            Repr::Word(w) => !w.negative && w.num != 0,
+            Repr::Big(b) => b.num.is_positive(),
+        }
     }
 
     /// Whether the number is an integer: whether its denominator is 1.
     #[inline]
     pub fn is_integer(&self) -> bool {
-        is_one(&self.den)
+        match &self.repr {
+            Repr::Word(w) => w.den == 1,
+            Repr::Big(b) => is_one(&b.den),
+        }
     }
 
     /// The absolute value.
@@ -193,14 +313,21 @@ impl Rational {
     /// assert_eq!((Rational::from(-3) / 4u32).abs().to_string(), "3/4");
     /// ```
     pub fn abs(&self) -> Rational {
-        let mut r = self.clone();
-        r.num.negative = false;
-        r
+        match &self.repr {
+            Repr::Word(w) => Rational::from_word(false, w.num, w.den, w.order),
+            Repr::Big(b) => {
+                let mut num = b.num.clone();
+                num.negative = false;
+                Rational::big(num, b.den.clone())
+            }
+        }
     }
 
     /// `-1`, `0` or `1`, as the number is below zero, zero or above it, in its byte order.
     pub fn signum(&self) -> Rational {
-        Rational::from_integer(self.num.signum())
+        let order = self.byte_order();
+        let m = u64::from(!self.is_zero());
+        Rational::from_word(self.is_negative(), m, 1, order)
     }
 
     /// The reciprocal `1/x`.
@@ -219,6 +346,11 @@ impl Rational {
     /// ```
     #[track_caller]
     pub fn recip(&self) -> Rational {
+        if let Repr::Word(w) = &self.repr
+            && w.num != 0
+        {
+            return Rational::from_word(w.negative, w.den, w.num, w.order);
+        }
         self.clone().into_recip()
     }
 
@@ -254,109 +386,266 @@ impl Rational {
     #[track_caller]
     pub fn pow(&self, exp: i32) -> Rational {
         let k = exp.unsigned_abs();
-        let r = Rational {
-            num: self.num.pow(k),
-            den: self.den.pow(k),
+        let r = match &self.repr {
+            Repr::Word(w) => {
+                let negative = w.negative && k % 2 == 1 && w.num != 0;
+                // The bits of the parts: a power of `x` of `b` bits lies in `[2^((b-1)k), 2^(bk))`.
+                let (bn, bd) = (64 - w.num.leading_zeros(), 64 - w.den.leading_zeros());
+                let (k64, short) = (u64::from(k), |b: u32| u64::from(b) * u64::from(k) <= 64);
+                if short(bn) && short(bd) {
+                    let (n, d) = (w.num.wrapping_pow(k), w.den.wrapping_pow(k));
+                    Rational::from_word(negative, n, d, w.order)
+                } else {
+                    // Straight from the words when the powers take up to 512 bits.
+                    let power = |m: u64, negative: bool| {
+                        Number::power_of_small(u128::from(m), k, negative, w.order)
+                            .unwrap_or_else(|| small::number(w.order, negative, m.into()).pow(k))
+                    };
+                    let (n, d) = (power(w.num, negative), power(w.den, false));
+                    if u64::from(bn.max(bd) - 1) * k64 >= 64 {
+                        // A part of at least `2^64`: in numbers.
+                        Rational::big(n, d)
+                    } else {
+                        Rational::from_reduced(n, d)
+                    }
+                }
+            }
+            Repr::Big(b) => Rational::from_reduced(b.num.pow(k), b.den.pow(k)),
         };
         if exp < 0 { r.into_recip() } else { r }
+    }
+
+    /// Turns the sign of the number over in place; zero stays as it is.
+    #[inline]
+    pub(crate) fn negate(&mut self) {
+        match &mut self.repr {
+            Repr::Word(w) => {
+                w.negative = !w.negative && w.num != 0;
+                if let Some(parts) = w.numbers.get_mut() {
+                    parts.0.negative = w.negative;
+                }
+            }
+            Repr::Big(b) => b.num.negative = !b.num.negative,
+        }
     }
 
     /// Turns the number into its reciprocal in place, the sign moved to the new numerator.
     #[track_caller]
     pub(crate) fn invert(&mut self) {
-        if self.num.is_zero() {
+        if self.is_zero() {
             panic!("attempt to divide by zero");
         }
-        let negative = self.num.negative;
-        core::mem::swap(&mut self.num, &mut self.den);
-        self.num.negative = negative;
-        self.den.negative = false;
+        match &mut self.repr {
+            Repr::Word(w) => *w = Word::new(w.negative, w.den, w.num, w.order),
+            Repr::Big(b) => {
+                let negative = b.num.negative;
+                core::mem::swap(&mut b.num, &mut b.den);
+                b.num.negative = negative;
+                b.den.negative = false;
+            }
+        }
     }
 
-    /// Brings a fraction with a non-zero denominator, both parts in one byte order, to lowest terms
-    /// with a positive denominator, in the vectors of the parts.
-    ///
-    /// Parts of up to 8 bytes each are reduced in registers by the greatest common divisor of two
-    /// limbs, parts of up to 16 by that of two `u128`s and Hensel's exact division modulo `2^128`;
-    /// longer ones on limbs (see [`fraction::reduce`]). A divisor of 1, the common case of random
-    /// parts, leaves the parts as they are. Measured on an Apple M4 Max, `Rational::new` of random
-    /// 64-bit parts took 260 cycles so against 341 on numbers.
-    fn normalize(&mut self) {
-        trim(&mut self.num);
-        trim(&mut self.den);
-        if self.den.negative {
-            self.den.negative = false;
-            self.num.negative = !self.num.negative && !self.num.is_zero();
+    /// The numerator as a new number, without making the numbers of a rational in words.
+    #[inline]
+    pub(crate) fn numer_number(&self) -> Number {
+        match &self.repr {
+            Repr::Word(w) => small::number(w.order, w.negative, u128::from(w.num)),
+            Repr::Big(b) => b.num.clone(),
         }
-        if self.num.is_zero() {
-            self.num.negative = false;
-            let v = &mut self.den.value;
-            v.clear();
-            v.push(1);
-            return;
+    }
+
+    /// The parts when they fit in 64 bits: the sign, the numerator's magnitude and the
+    /// denominator.
+    #[inline(always)]
+    pub(crate) fn word(&self) -> Option<Small> {
+        match &self.repr {
+            Repr::Word(w) => Some(Small {
+                negative: w.negative,
+                num: w.num,
+                den: w.den,
+            }),
+            Repr::Big(_) => None,
         }
-        if is_one(&self.den) {
-            return;
+    }
+
+    /// The parts as numbers when one of them does not fit in 64 bits.
+    #[inline(always)]
+    pub(crate) fn numbers(&self) -> Option<(&Number, &Number)> {
+        match &self.repr {
+            Repr::Word(_) => None,
+            Repr::Big(b) => Some((&b.num, &b.den)),
         }
-        let (ln, ld) = (self.num.value.len(), self.den.value.len());
-        if ln <= 16 && ld <= 16 {
-            let order = self.num.byte_order;
-            let (x, y) = (magnitude(&self.num), magnitude(&self.den));
-            if ln <= 8 && ld <= 8 {
-                let (x, y) = (x as u64, y as u64);
-                let g = fraction::gcd_words(x, y);
-                if g != 1 {
-                    let negative = self.num.negative;
-                    small::put(&mut self.num, order, negative, u128::from(x / g));
-                    small::put(&mut self.den, order, false, u128::from(y / g));
+    }
+
+    /// The parts as numbers, to be written in place, when one of them does not fit in 64 bits;
+    /// [`settle`](Rational::settle) must follow when they may have become short.
+    #[inline(always)]
+    pub(crate) fn numbers_mut(&mut self) -> Option<(&mut Number, &mut Number)> {
+        match &mut self.repr {
+            Repr::Word(_) => None,
+            Repr::Big(b) => Some((&mut b.num, &mut b.den)),
+        }
+    }
+
+    /// The magnitudes of the parts, the sign on the numerator's: of the words of a short rational
+    /// in place, with nothing allocated, or of the numbers of a long one.
+    #[inline(always)]
+    pub(crate) fn magnitudes(&self) -> (Magnitude<'_>, Magnitude<'_>) {
+        match &self.repr {
+            Repr::Word(w) => (
+                small::magnitude(&w.num, w.negative),
+                small::magnitude(&w.den, false),
+            ),
+            Repr::Big(b) => (Magnitude::of(&b.num), Magnitude::of(&b.den)),
+        }
+    }
+
+    /// The rational `±num/den` in words: in lowest terms, `den` not zero, and zero as `0/1`, not
+    /// negative.
+    #[inline(always)]
+    pub(crate) fn from_word(negative: bool, num: u64, den: u64, order: ByteOrder) -> Rational {
+        Rational {
+            repr: Repr::Word(Word::new(negative, num, den, order)),
+        }
+    }
+
+    /// Sets the number to `±num/den` in words (in lowest terms, `den` not zero, and zero as `0/1`,
+    /// not negative): in the words of a rational in words, with no drop but of the numbers made
+    /// for the old value, if any.
+    #[inline(always)]
+    pub(crate) fn set_word(&mut self, negative: bool, num: u64, den: u64, order: ByteOrder) {
+        debug_assert!(den != 0 && (num != 0 || den == 1 && !negative));
+        match &mut self.repr {
+            Repr::Word(w) => {
+                w.num = num;
+                w.den = den;
+                w.negative = negative;
+                w.order = order;
+                if w.numbers.get().is_some() {
+                    w.numbers = OnceLock::new();
                 }
-                return;
             }
-            let g = fraction::gcd_wide(x, y);
-            if g != 1 {
-                let negative = self.num.negative;
-                let (p, q) = exact_pair(x, y, g);
-                small::put(&mut self.num, order, negative, p);
-                small::put(&mut self.den, order, false, q);
-            }
-            return;
+            Repr::Big(_) => *self = Rational::from_word(negative, num, den, order),
         }
-        fraction::reduce(&mut self.num, &mut self.den);
+    }
+
+    /// The rational `±num/den` from parts of up to 128 bits in lowest terms, `den` not zero, and
+    /// zero as `0/1`, not negative: in words when both fit in 64 bits.
+    #[inline]
+    pub(crate) fn from_u128(negative: bool, num: u128, den: u128, order: ByteOrder) -> Rational {
+        if (num | den) >> 64 == 0 {
+            return Rational::from_word(negative, num as u64, den as u64, order);
+        }
+        Rational::big(
+            small::number(order, negative, num),
+            small::number(order, false, den),
+        )
+    }
+
+    /// A rational in numbers, of parts with one of more than 64 bits.
+    #[inline(always)]
+    pub(crate) fn big(num: Number, den: Number) -> Rational {
+        debug_assert!(num.value.len() > 8 || den.value.len() > 8);
+        Rational {
+            repr: Repr::Big(Big { num, den }),
+        }
     }
 
     /// A rational from parts already in lowest terms, with a positive denominator, both in the
-    /// shortest form and in one byte order.
+    /// shortest form and in one byte order: in words when both fit in 64 bits.
     #[inline]
     pub(crate) fn from_reduced(num: Number, den: Number) -> Rational {
         debug_assert!(!den.is_zero() && !den.is_negative());
         debug_assert!(num.byte_order() == den.byte_order());
-        Rational { num, den }
+        let (x, y) = (Magnitude::of(&num), Magnitude::of(&den));
+        if x.bytes.len() <= 8 && y.bytes.len() <= 8 {
+            return Rational::from_word(
+                x.negative,
+                x.small() as u64,
+                y.small() as u64,
+                num.byte_order,
+            );
+        }
+        Rational::big(num, den)
     }
-}
 
-impl Default for Rational {
-    /// Zero, `0/1`, little-endian.
-    fn default() -> Rational {
-        Rational {
-            num: Number {
-                value: vec![0],
-                negative: false,
-                byte_order: ByteOrder::LittleEndian,
-            },
-            den: one(ByteOrder::LittleEndian),
+    /// Brings a rational in numbers to words when its parts have become short, after they were
+    /// written in place.
+    #[inline]
+    pub(crate) fn settle(&mut self) {
+        if let Repr::Big(b) = &self.repr {
+            let (x, y) = (Magnitude::of(&b.num), Magnitude::of(&b.den));
+            if x.bytes.len() <= 8 && y.bytes.len() <= 8 {
+                *self = Rational::from_word(
+                    x.negative,
+                    x.small() as u64,
+                    y.small() as u64,
+                    b.num.byte_order,
+                );
+            }
         }
     }
 }
 
-/// The magnitude of `n`, in the shortest form and of at most 16 bytes.
-#[inline(always)]
-fn magnitude(n: &Number) -> u128 {
-    Magnitude {
-        bytes: &n.value,
-        big_endian: n.byte_order == ByteOrder::BigEndian,
-        negative: false,
+/// Brings a fraction with a non-zero denominator, both parts in one byte order, to lowest terms
+/// with a positive denominator.
+///
+/// Parts of up to 8 bytes each are reduced in registers by the greatest common divisor of two
+/// limbs into words, parts of up to 16 by that of two `u128`s and Hensel's exact division modulo
+/// `2^128`; longer ones on limbs (see [`fraction::reduce`]), in the vectors of the parts. A divisor
+/// of 1, the common case of random parts, leaves the parts as they are. Measured on an Apple M4
+/// Max, `Rational::new` of random 64-bit parts took 260 cycles so against 341 on numbers.
+fn normalize(mut num: Number, mut den: Number) -> Rational {
+    let order = num.byte_order;
+    let (x, y) = (Magnitude::of(&num), Magnitude::of(&den));
+    // The sign of the fraction, on the numerator; zero is `0/1`.
+    let negative = x.negative != y.negative;
+    if x.bytes.is_empty() {
+        return Rational::from_word(false, 0, 1, order);
     }
-    .small()
+    let (ln, ld) = (x.bytes.len(), y.bytes.len());
+    if ln <= 16 && ld <= 16 {
+        let (x, y) = (x.small(), y.small());
+        if ln <= 8 && ld <= 8 {
+            let (x, y) = (x as u64, y as u64);
+            let g = small::gcd(x, y);
+            return Rational::from_word(negative, x / g, y / g, order);
+        }
+        let g = fraction::gcd_wide(x, y);
+        let (p, q) = if g == 1 { (x, y) } else { exact_pair(x, y, g) };
+        if (p | q) >> 64 == 0 {
+            return Rational::from_word(negative, p as u64, q as u64, order);
+        }
+        // Still long: in the vectors given.
+        small::put(&mut num, order, negative, p);
+        small::put(&mut den, order, false, q);
+        return Rational::big(num, den);
+    }
+    trim(&mut num);
+    trim(&mut den);
+    num.negative = negative;
+    den.negative = false;
+    if !is_one(&den) {
+        fraction::reduce(&mut num, &mut den);
+    }
+    Rational::from_reduced(num, den)
+}
+
+/// Panics for a zero denominator.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn zero_denominator() -> ! {
+    panic!("the denominator of a rational is zero")
+}
+
+impl Default for Rational {
+    /// Zero, `0/1`, little-endian.
+    #[inline]
+    fn default() -> Rational {
+        Rational::from_word(false, 0, 1, ByteOrder::LittleEndian)
+    }
 }
 
 /// `x / g` and `y / g` for a `g` that divides both, by Hensel's method: the quotients of `x` and

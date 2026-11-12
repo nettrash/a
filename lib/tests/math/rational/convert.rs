@@ -435,3 +435,169 @@ fn rationals_to_integers() {
         }
     }
 }
+
+/// A word of a shape that the register paths find hard: just above or below a power of two, a run
+/// of ones, an odd number, or random bits of a random length; never zero.
+fn hard_word(state: &mut u64) -> u64 {
+    let k = 1 + below(state, 64) as u32;
+    let x = xorshift(state) >> (64 - k);
+    let w = match below(state, 5) {
+        0 => (1u64 << (k - 1))
+            .wrapping_add(below(state, 5))
+            .wrapping_sub(2),
+        1 => (u64::MAX >> (64 - k)) ^ below(state, 4),
+        2 => x | 1,
+        _ => x,
+    };
+    w.max(1)
+}
+
+#[test]
+fn word_quotients_round_correctly() {
+    // Parts in words of hard shapes, both signs, and the same fractions at 65 bits and beyond.
+    let mut state = 0x7777_1111_9999_3333u64;
+    for _ in 0..size(20000, 300) {
+        let (p, q) = (hard_word(&mut state), hard_word(&mut state));
+        let q = if below(&mut state, 8) == 0 { 1 } else { q };
+        let r = Rational::new(Number::from(p), Number::from(q));
+        assert_both(&r);
+        assert_both(&-r.clone());
+        // Twice the fraction, past 64 bits when a part has 64: rounded alike but for the exponent.
+        let s = &r * Rational::from(2);
+        assert_eq!(s.to_f64(), 2.0 * r.to_f64(), "{r}");
+        assert_eq!(s.to_f32(), 2.0 * r.to_f32(), "{r}");
+    }
+}
+
+#[test]
+fn word_quotients_at_halfway_points() {
+    // For each format, significands at both ends of a binade and in it: the halfway points
+    // `(2m + 1)/2` between two floats, scaled by powers of two (ties, to the even one), and
+    // fractions with an odd denominator `b` within `1/2b` of them on either side.
+    let mut state = 0x2468_ACE0_1357_9BDFu64;
+    for p in [24u32, 53] {
+        let low = 1u64 << (p - 1);
+        let high = (1u64 << p) - 1;
+        let mut significands = vec![low, low + 1, low + 2, high - 1, high];
+        for _ in 0..size(30, 3) {
+            significands.push(low + below(&mut state, low));
+        }
+        for &m in &significands {
+            let odd = 2 * m + 1;
+            let room = odd.leading_zeros();
+            for s in 0..=room {
+                // `odd·2^s / 2^t`: a tie at every scale, both parts in words.
+                for t in [0u32, 1, 2, 20, 62, 63] {
+                    let r = Rational::new(Number::from(odd << s), Number::from(1u64 << t));
+                    assert_both(&r);
+                }
+            }
+            for _ in 0..size(20, 2) {
+                // `(odd·b ± 1)/(2b)` for an odd `b` that keeps the numerator in a word.
+                let b = (2 * below(&mut state, 1 << (room.saturating_sub(2)).min(20)) + 1).max(3);
+                let x = odd as u128 * b as u128;
+                if x >> 64 != 0 {
+                    continue;
+                }
+                for y in [x - 1, x + 1] {
+                    let r = Rational::new(Number::from(y as u64), Number::from(2 * b));
+                    assert_both(&r);
+                    assert_both(&-r);
+                }
+            }
+        }
+    }
+    // The largest and smallest values in words, and integers at the boundaries of the formats.
+    for (p, q) in [
+        (u64::MAX, 1),
+        (1, u64::MAX),
+        (u64::MAX, u64::MAX - 1),
+        (u64::MAX - 1, u64::MAX),
+        ((1 << 53) + 1, 1),
+        ((1 << 53) + 3, 1),
+        ((1 << 24) + 1, 1),
+        ((1 << 24) + 3, 1),
+        (u64::MAX, 3),
+        (3, u64::MAX),
+    ] {
+        assert_both(&Rational::new(Number::from(p), Number::from(q)));
+    }
+}
+
+#[test]
+fn floats_in_words_and_beyond() {
+    // Floats whose parts are just within words and just past them, both ways.
+    for k in [
+        -66i64, -65, -64, -63, -62, -1, 0, 1, 10, 52, 53, 62, 63, 64, 65,
+    ] {
+        for m in [1u64, 3, (1 << 52) + 1, (1 << 53) - 1] {
+            let x = m as f64 * pow2(k);
+            let r = exact(x);
+            let expected = if k >= 0 {
+                Rational::from(Number::from(m) << k as usize)
+            } else {
+                Rational::new(Number::from(m), Number::from(1) << (-k) as usize)
+            };
+            assert_eq!(r, expected, "{m}·2^{k}");
+            assert_eq!(r.to_f64(), x);
+            assert_eq!(exact(-x), -expected.clone());
+            assert_eq!(r.to_string(), expected.to_string());
+            if m < 1 << 24 && (-149..=104).contains(&k) {
+                let y = m as f32 * pow2_32(k);
+                assert_eq!(exact32(y), expected, "{m}·2^{k} as f32");
+            }
+        }
+    }
+    assert_eq!(
+        exact(f64::MIN_POSITIVE / 4.0).denom(),
+        &(Number::from(1) << 1024usize)
+    );
+    assert_eq!(
+        exact(f64::MAX).numer(),
+        &((Number::from(1) << 1024usize) - (Number::from(1) << 971usize))
+    );
+}
+
+#[test]
+fn integers_out_of_both_forms() {
+    // Integers of 63, 64 and 65 bits and their negatives, into numbers and every primitive type.
+    for v in [
+        0i128,
+        1,
+        -1,
+        i64::MAX as i128,
+        i64::MIN as i128,
+        u64::MAX as i128,
+        -(u64::MAX as i128),
+        u64::MAX as i128 + 1,
+        -(u64::MAX as i128) - 1,
+        i128::MAX,
+        i128::MIN,
+    ] {
+        let r = Rational::from(v);
+        check(&r);
+        assert_eq!(Number::try_from(&r), Ok(Number::from(v)));
+        assert_eq!(Number::try_from(r.clone()), Ok(Number::from(v)));
+        assert_eq!(i128::try_from(&r), Ok(v));
+        assert_eq!(i64::try_from(&r).ok(), i64::try_from(v).ok());
+        assert_eq!(u64::try_from(&r).ok(), u64::try_from(v).ok());
+        assert_eq!(u128::try_from(&r).ok(), u128::try_from(v).ok());
+        assert_eq!(i8::try_from(r.clone()).ok(), i8::try_from(v).ok());
+        assert_eq!(usize::try_from(&r).ok(), usize::try_from(v).ok());
+        // The cached parts of a short value, asked for first, change nothing.
+        let s = Rational::from(v);
+        let _ = s.numer();
+        assert_eq!(Number::try_from(s), Ok(Number::from(v)));
+        // A fraction near it is no integer.
+        let f = Rational::new(
+            Number::from(v) * Number::from(2) + Number::from(1),
+            Number::from(2),
+        );
+        assert!(Number::try_from(&f).is_err());
+        assert!(Number::try_from(f.clone()).is_err());
+        assert!(i128::try_from(&f).is_err());
+    }
+    assert_eq!(u128::try_from(&Rational::from(u128::MAX)), Ok(u128::MAX));
+    assert!(i128::try_from(&Rational::from(u128::MAX)).is_err());
+    assert!(i128::try_from(&(Rational::from(i128::MIN) - 1u32)).is_err());
+}

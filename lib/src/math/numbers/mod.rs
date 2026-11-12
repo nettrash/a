@@ -120,7 +120,7 @@ mod sieve;
 mod sign;
 mod sub;
 
-pub(crate) use cmp::Magnitude;
+pub(crate) use cmp::{Magnitude, cmp_magnitudes};
 pub(crate) use div::{divide_2by1, reciprocal};
 pub(crate) use factorial::product::times;
 pub(crate) use gcd::fraction;
