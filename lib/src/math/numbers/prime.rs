@@ -155,7 +155,7 @@ const TRIAL_64_END: usize = {
 };
 
 /// Whether `n` is a probable prime, exactly as it is below `2^64`.
-pub(super) fn is_prime_u64(n: u64) -> bool {
+pub(crate) fn is_prime_u64(n: u64) -> bool {
     if n < 4 {
         return n >= 2;
     }

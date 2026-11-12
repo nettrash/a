@@ -238,6 +238,23 @@ pub(super) unsafe fn mul_basecase(r: *mut u64, x: *const u64, nx: usize, y: *con
     }
 }
 
+/// [`addmul_1`] when the CPU has BMI2, the portable kernel's otherwise.
+///
+/// # Safety
+///
+/// As for [`addmul_1`], but for BMI2.
+#[inline]
+pub(super) unsafe fn addmul_1_any(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+    // SAFETY: as the caller guarantees, and BMI2 is checked before its kernel runs.
+    unsafe {
+        if bmi2() {
+            addmul_1(r, x, n, y)
+        } else {
+            portable::addmul_1(r, x, n, y)
+        }
+    }
+}
+
 /// Sets the `2n` limbs at `r` to the square of the `n` limbs at `x`: the products of two
 /// different limbs once, by rows, then doubled with the squares added.
 ///

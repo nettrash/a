@@ -84,7 +84,7 @@ pub(super) mod limbs;
 mod newton;
 mod rem1;
 
-pub(super) use limbs::{div_2by1 as divide_2by1, invert_limb as reciprocal};
+pub(crate) use limbs::{div_2by1 as divide_2by1, invert_limb as reciprocal};
 pub(super) use rem1::{
     Powers, REM_1_BYTES, REM_1_BYTES_WIDE, REM_1_MAX, REM_1_PREPARED, limb_of, rem_1,
 };

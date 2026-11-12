@@ -100,6 +100,50 @@ pub(crate) mod basecase {
         // SAFETY: as the caller guarantees.
         unsafe { kernels::sqr_basecase(r, x, n) }
     }
+
+    /// Below this many limbs in the shorter operand, a product is computed by the schoolbook
+    /// method, as [`mul_unbalanced`] does.
+    pub(crate) const SCHOOLBOOK: usize = super::limbs::KARATSUBA_MUL;
+
+    /// Adds the `n` limbs at `x` times `y` to the `n` limbs at `r`, and returns the limb that
+    /// carries out of them.
+    ///
+    /// # Safety
+    ///
+    /// `n >= 1`; the `n` limbs at `x` must be valid for reads and those at `r` for reads and
+    /// writes, and apart from them.
+    #[inline(always)]
+    pub(crate) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+        // SAFETY: as the caller guarantees.
+        #[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(miri)))]
+        unsafe {
+            kernels::addmul_1_any(r, x, n, y)
+        }
+        // SAFETY: as the caller guarantees.
+        #[cfg(not(all(target_arch = "x86_64", target_pointer_width = "64", not(miri))))]
+        unsafe {
+            kernels::addmul_1(r, x, n, y)
+        }
+    }
+
+    /// Sets the `nx + ny` limbs at `r` to the product of the `nx` limbs at `x` and the `ny` at
+    /// `y`, by the schoolbook method.
+    ///
+    /// # Safety
+    ///
+    /// `nx >= ny >= 1`; the limbs of `x` and `y` must be valid for reads and those of `r` for
+    /// writes, and `r` apart from both.
+    #[inline(always)]
+    pub(crate) unsafe fn mul_unbalanced(
+        r: *mut u64,
+        x: *const u64,
+        nx: usize,
+        y: *const u64,
+        ny: usize,
+    ) {
+        // SAFETY: as the caller guarantees.
+        unsafe { kernels::mul_basecase(r, x, nx, y, ny) }
+    }
 }
 mod toom;
 

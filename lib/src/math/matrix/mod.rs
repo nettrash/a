@@ -1,6 +1,7 @@
 //! Matrices: a [`Matrix<T>`] is a rectangular array of elements of the type `T`, which is `f32`,
 //! `f64`, [`Complex<f32>`](crate::math::complex::Complex),
-//! [`Complex<f64>`](crate::math::complex::Complex) or [`Number`](crate::math::numbers::Number).
+//! [`Complex<f64>`](crate::math::complex::Complex), [`Number`](crate::math::numbers::Number) or
+//! [`Rational`](crate::math::rational::Rational).
 
 mod basic;
 mod blas;
@@ -16,6 +17,7 @@ mod lu;
 mod ops;
 mod properties;
 mod qr;
+mod rational;
 mod schur;
 mod svd;
 mod tridiagonal;
