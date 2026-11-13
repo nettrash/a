@@ -21,6 +21,7 @@
 
 pub mod complex;
 pub mod ec;
+pub mod float;
 pub mod matrix;
 pub mod numbers;
 pub mod rational;
