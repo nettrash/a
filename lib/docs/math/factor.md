@@ -47,6 +47,14 @@ The primes `q` from `B1` to `B2`, by the one of three continuations whose estima
 - The products of polynomials modulo `n` are those of numbers (Kronecker's substitution): the coefficients, residues of `k` limbs, are laid `2k + 1` limbs apart, so that each coefficient of the product, a sum of products below `4n²`, fits its place; the crate's multiplication takes them, by its number-theoretic transforms when long; each coefficient wanted is reduced by REDC over `k + 1` limbs. That is the exact product of the coefficients in Montgomery's form for `R' = B^(k + 1)`, the form the curves' polynomials use (their roots taken to it by a product with the residue of `B`), so that monic polynomials stay monic; for `p ± 1` the factor `B^(−1)` it leaves is a unit, as are the others the values carry. Products of at most 6 coefficients in the shorter polynomial are made coefficient by coefficient, the products of limbs summed before one REDC each.
 - When the product of a block, an evaluation or a curve's values is 0 modulo `n`, the baby-step giant-step continuation goes over the block again a product at a time; Montgomery and Kruppa's goes over the evaluation's values one at a time, and a value that is 0 over its factors, and when the first factor that is not a unit is 0 (its exponent can be a multiple of the orders of several primes, as `q_1·q_2` up to `B2`), hands the stage to the baby-step giant-step continuation, which goes up the primes; the FFT continuation hands the curve to the baby-step giant-step one, as it does when its baby steps or a block of its giant steps cannot be taken to affine modulo any prime of `n` (its blocks are of `d` giant steps, up to 77,760, against 128, and its greatest common divisor comes at the end, so that the other may still tell the primes apart).
 - The parameters of the continuations by polynomials are chosen when first asked for and kept with the plan, by the limbs of the modulus, so that the stages the factorisation keeps for its levels choose them once.
+- The estimates are those measured. For the curves, a prime of the baby-step giant-step continuation costs 0.25 of a product of residues at one limb, 0.38 at two, 0.6 at three to eight, 0.52 at 9 to 16 and 0.8 from 17 (the four chains overlap, and a pair serves two primes; from 17 limbs a product in memory takes longer than its estimate), its share of the sieve (0.17 ns a number, once a plan) is counted for eight curves, and the FFT continuation costs 0.85 of the sum of its parts. Measured on 2026-11-14 on an Apple M4 Max, each continuation forced, stage 2 alone, on 428 cells of 1 to 32 limbs, `B1` from 2000 to 250,000 and `B2` from `5·10^4` to `5·10^8`, the choice now takes the faster in all but 15, at most 9 % slower (two limbs about `B2 = 10^8`, where the lazily reduced residues cross later than the others); before, it took the polynomials 2 to 8 times too early in `B2` at 3 to 16 limbs and more than 5 times at one and two, the slower in 114 cells and up to 2.7 times slower. The crossovers measured, for `B1` from 11,000 (from 17 limbs, for `B1 = 2000`):
+
+| Limbs | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 and 10 | 12 | 14 | 16 | 17 and 18 | 20 | 24 | 28 | 32 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `B2` | above `5·10^7` | `5·10^7` (`1.2·10^8` lazily reduced) | `1.5·10^7` to `1.9·10^7` | `1.3·10^7` to `1.5·10^7` | `7·10^6` | `6·10^6` | `5·10^6` | `4·10^6` | `4.5·10^6` | `2.5·10^6` | `1.8·10^6` | `1.1·10^6` to `2.1·10^6` | `4.6·10^5` | `3.7·10^5` | `2.6·10^5` | `2.1·10^5` | `1.7·10^5` |
+| before | `7·10^6` | `8·10^6` | `7·10^6` | `5.5·10^6` | `3.5·10^6` | `2·10^6` to `3·10^6` | `1.2·10^6` | `10^6` | below `10^6` | below `6.5·10^5` | below `5·10^5` | `5·10^5` to `10^6` | `4·10^5` | `3.4·10^5` | `2.8·10^5` | `2.2·10^5` | `1.8·10^5` |
+
+- For `p − 1` and `p + 1` the products of the baby-step giant-step continuation also cost less than their estimate and the sieve more, which a call makes once; the two cancel near the crossovers, where the choice takes the faster in 607 of 620 such cells (at most 1.37 times slower, `p + 1` at one to four limbs about `B2 = 10^6`), as well as estimates made true to the measurements do, so that choice is unchanged.
 
 ## Perfect powers
 
@@ -85,7 +93,7 @@ Stage 1 of one curve of this version (GMP-ECM's `-param 2` curves, `x = 2`, curv
 | 190 | 11,000 | 0.747 ms | 1.08 ms | 3.69 ms | 2.62 ms | 1.34 ms | 1.80 ms |
 | 256 | 11,000 | 1.67 ms | 2.33 ms | 5.42 ms | 3.91 ms | 2.60 ms | 3.67 ms |
 | 380 | 11,000 | 2.29 ms | 4.51 ms | 6.41 ms | 5.09 ms | 4.08 ms | 7.09 ms |
-| 512 | 11,000 | 4.31 ms | 8.78 ms | 9.61 ms | 7.70 ms | 8.03 ms | 13.3 ms |
+| 512 | 11,000 | 4.31 ms | 8.78 ms | 9.61 ms | 7.70 ms | 7.06 ms | 13.3 ms |
 | 1024 | 11,000 | 14.6 ms | 23.3 ms | 27.0 ms | 22.9 ms | 23.0 ms | 35.1 ms |
 | 124 | 50,000 | 1.17 ms | 1.86 ms | 14.4 ms | 9.30 ms | 2.00 ms | 2.87 ms |
 | 256 | 50,000 | 7.73 ms | 10.4 ms | 23.7 ms | 16.9 ms | 11.2 ms | 15.5 ms |
@@ -115,12 +123,12 @@ The second stage, on the stage 1 of this version (GMP-ECM's `-param 2` curves fr
 | 190 | 11,000 | 0.684 ms | 3.61 ms | 0.56 ms | 0.66 ms | 3.01 ms |
 | 256 | 11,000 | 1.56 ms | 5.15 ms | 0.861 ms | 1.27 ms | 3.53 ms |
 | 380 | 11,000 | 2.27 ms | 6.30 ms | 1.70 ms | 2.32 ms | 3.99 ms |
-| 512 | 11,000 | 4.05 ms | 9.53 ms | 3.91 ms | 4.76 ms | 6.07 ms |
-| 1024 | 11,000 | 14.6 ms | 26.8 ms | 8.11 ms | 11.8 ms | 13.3 ms |
+| 512 | 11,000 | 4.05 ms | 9.53 ms | 2.79 ms | 4.76 ms | 6.07 ms |
+| 1024 | 11,000 | 14.6 ms | 26.8 ms | 8.69 ms | 11.8 ms | 13.3 ms |
 | 124 | 50,000 | 1.09 ms | 14.4 ms | 0.943 ms | 1.05 ms | 5.30 ms |
 | 190 | 50,000 | 3.53 ms | 16.5 ms | 2.25 ms | 2.67 ms | 7.52 ms |
 | 256 | 50,000 | 7.37 ms | 22.3 ms | 3.25 ms | 5.04 ms | 8.34 ms |
-| 380 | 50,000 | 10.5 ms | 28.4 ms | 7.72 ms | 9.27 ms | 10.5 ms |
+| 380 | 50,000 | 10.5 ms | 28.4 ms | 6.59 ms | 9.27 ms | 10.5 ms |
 | 512 | 50,000 | 19.6 ms | 41.4 ms | 10.7 ms | 16.7 ms | 14.9 ms |
 | 1024 | 50,000 | 65.7 ms | 121 ms | 23.3 ms | 46.8 ms | 31.7 ms |
 | 256 | 250,000 | 37.0 ms | 116 ms | 11.2 ms | 23.5 ms | 23.9 ms |
@@ -130,7 +138,8 @@ The second stage, on the stage 1 of this version (GMP-ECM's `-param 2` curves fr
 | 512 | 10^6 | 386 ms | 837 ms | 50.3 ms | 289 ms | 95.8 ms |
 
 - Stage 1: from 12 and 13 times faster than GMP-ECM's `-param 0` curve at 124 bits to 2.1 to 2.4 times at 512 bits and 1.83 and 1.84 times at 1024, against GMP-ECM's PRAC chain for each prime with `mpz` calls; and 1.34 to 2.07 times faster than 0.2.32's.
-- Stage 2 to the same `B2`: up to 256 bits at `B1` to 50,000, and at 380 bits and 11,000, the baby-step giant-step continuation is the one chosen, 2.3 to 9.2 times faster than GMP-ECM, and from as fast as 0.2.32's (0.99 times at 124 bits and 11,000, a microsecond and a half) to 1.55 times faster, the same continuation on the arithmetic above; at 380 bits from `B1 = 50,000`, from 512 bits, and at 256 bits from `B1 = 250,000`, the FFT continuation, 1.2 to 5.7 times faster than 0.2.32's baby-step giant-step one and 1.36 to 2.1 times faster than GMP-ECM, which was up to 3.0 times faster than 0.2.32 (512 bits, `B1 = 10^6`).
+- Stage 2 to the same `B2`: at `B1 = 11,000` up to 1024 bits and at 50,000 up to 380 bits, the baby-step giant-step continuation is the one chosen, 1.5 to 9.2 times faster than GMP-ECM, and from as fast as 0.2.32's (0.99 times at 124 bits and 11,000, a microsecond and a half) to 1.71 times faster, the same continuation on the arithmetic above; from 512 bits at `B1 = 50,000` and from 256 bits at 250,000, the FFT continuation, 1.56 to 5.7 times faster than 0.2.32's baby-step giant-step one and 1.36 to 2.1 times faster than GMP-ECM, which was up to 3.0 times faster than 0.2.32 (512 bits, `B1 = 10^6`).
+- The rows of 512 and 1024 bits at `B1 = 11,000` and of 380 bits at 50,000, which now take the baby-step giant-step continuation (see the second stage, above), were measured again on 2026-11-14 (load 1.5 to 1.7, the same conditions, the medians of 9 rounds, interleaved with 0.2.37, whose FFT continuation took 3.55, 8.26 and 7.45 ms there): 0.79, 1.05 and 0.89 times its time; the column "both stages" of the first table at 512 bits and 11,000 likewise (0.2.37: 7.85 ms).
 
 Against FLINT's `fmpz_factor_ecm`, which takes its own random curves, a curve with both stages to `100·B1` (here four curves less two, there ten less five), on semiprimes that four curves of this version and of 0.2.32 and GMP-ECM's `-param 0` curve do not factor, measured on 2026-11-11 on the quiet machine (load 1.5 to 1.8, the same conditions as above), interleaved with 0.2.32:
 

@@ -743,3 +743,37 @@ fn ecm_continuation_when_every_prime_is_caught_at_once() {
         }
     }
 }
+
+/// `(n of 3 limbs, n of 16 limbs, p)`: products of the prime `p` of 37 bits, whose point on the
+/// curve `σ = 2` has the order `2³ 3 331 8075219` (PARI/GP 2.19, by the curves' definition), with
+/// primes the curve cannot find (that of 3 limbs checked: its point's order has a prime of 128
+/// bits). At `B1 = 3000` and `B2 = 8·10^6`, the prime 8,075,219 is past the reach of the
+/// baby-step giant-step continuation (`D = 4620`, its last pair 8,004,150) and within that of the
+/// continuation by polynomials (`D = 4620`, giant steps 1 to 1920, to 8,872,709).
+const ECM_CHOICE: (&str, &str, &str) = (
+    "1848354322333718672283757210355613511736288977431410665687",
+    "53138639672484390243307230095906068597732076665828937424174465322135728431602797717171946407648560686869648514181929215799319692794787476950535493167831426975957619569431991533965015210709480909222014075578000928350434698072813991682519716200045835832933651540629619846909679995373157991096831555508120441009",
+    "128299767433",
+);
+
+#[test]
+fn ecm_continuation_chosen_by_the_measured_crossover() {
+    // Under Miri the continuation by polynomials is taken whenever it applies.
+    if cfg!(miri) {
+        return;
+    }
+    let (s3, s16, p) = ECM_CHOICE;
+    for (i, &order) in ORDERS.iter().enumerate() {
+        // Three limbs, `B2 = 8·10^6`: below the measured crossover (about `2·10^7`), the
+        // baby-step giant-step continuation, which stops short of the prime.
+        let n = num(s3, order, i == 1);
+        assert!(
+            factor::ecm(&n, 3000, 8_000_000, 1).is_none(),
+            "ecm(n3) at 8e6"
+        );
+        is(&factor::ecm(&n, 3000, 8_100_000, 1), p, &n);
+        // Sixteen limbs: past it (about `1.2·10^6`), the polynomials, which reach the prime.
+        let n = num(s16, order, i == 0);
+        is(&factor::ecm(&n, 3000, 8_000_000, 1), p, &n);
+    }
+}
