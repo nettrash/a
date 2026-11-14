@@ -134,7 +134,14 @@ fn once_more(q: u64, r: u64, d: u64) -> (u64, u64) {
 ///
 /// `u2 B + u1 < d1 B + d0`, so that the quotient is one limb.
 #[inline(always)]
-pub(super) fn div_3by2(u2: u64, u1: u64, u0: u64, d1: u64, d0: u64, v: u64) -> (u64, u64, u64) {
+pub(in super::super) fn div_3by2(
+    u2: u64,
+    u1: u64,
+    u0: u64,
+    d1: u64,
+    d0: u64,
+    v: u64,
+) -> (u64, u64, u64) {
     let p = (u128::from(v) * u128::from(u2)).wrapping_add((u128::from(u2) << 64) | u128::from(u1));
     let (q, q0) = ((p >> 64) as u64, p as u64);
     let d = (u128::from(d1) << 64) | u128::from(d0);
@@ -607,7 +614,7 @@ unsafe fn sb_div_q(
 ///
 /// As for `div_qr`, with the [`q_itch`] limbs at `t`.
 #[inline(always)]
-pub(super) unsafe fn div_q(
+pub(in super::super) unsafe fn div_q(
     q: *mut u64,
     n: *mut u64,
     nn: usize,
@@ -631,7 +638,7 @@ pub(super) unsafe fn div_q(
 
 /// The limbs of scratch space that [`div_q`] needs for a dividend of `nn` limbs and a divisor of
 /// `dn`.
-pub(super) fn q_itch(nn: usize, dn: usize) -> usize {
+pub(in super::super) fn q_itch(nn: usize, dn: usize) -> usize {
     qr_itch(nn - shrink_m(nn, dn), dn)
 }
 

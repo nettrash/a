@@ -20,7 +20,7 @@ mod partitions;
 mod primorial;
 mod small;
 
-pub(crate) use partitions::{PI_TABLE, pi};
+pub(crate) use partitions::{LN2_TABLE, PI_FULL, PI_TABLE, pi};
 
 use super::{ByteOrder, Number};
 

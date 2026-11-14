@@ -37,6 +37,39 @@ use super::rho::{Gcd, gcd};
 /// The candidates for `D`: the products of the first primes, and their doubles.
 const DS: [u64; 9] = [6, 30, 60, 210, 420, 2310, 4620, 30030, 60060];
 
+/// The time of the elliptic curve method's product for a prime in this continuation, in products of
+/// [`product_ns`](super::mk::product_ns), for a modulus of `k` limbs: the four chains of products
+/// overlap, and the pairs serve two primes, so that a prime costs a share of a product, the more so
+/// in fewer limbs; from 17 limbs, where a product of residues in memory takes more than
+/// [`product_ns`](super::mk::product_ns) says (this continuation takes 1.6 times as long at 17
+/// limbs as at 16, the other 1.1 times), a larger share. Measured on an Apple M4 Max on 2026-11-14
+/// (load 2 to 6), each continuation forced, stage 2 alone (its plan made), the medians of 5 to 7
+/// rounds on moduli of 1 to 32 limbs, `B1` from 2000 to 250,000 and `B2` from `5·10^4` to `5·10^8`
+/// (428 cells): this continuation took 0.18 to 0.23 of the former estimate (a product and 0.5 ns a
+/// prime) at one limb, 0.30 (top limb below `2^62`, residues lazily reduced) to 0.52 at two, 0.53
+/// to 0.68 at 3 to 8, 0.45 to 0.69 at 9 to 16 and 0.84 to 0.97 from 17, much the same at every
+/// bound; the continuation by polynomials 0.69 to 0.97 of its estimate, 0.80 to 0.97 from two limbs
+/// (see [`FftPlan::new`]). The measured crossovers, in `B2`, for `B1` from 11,000: above `5·10^7`
+/// at one limb, `5·10^7` at two (`1.2·10^8` lazily reduced), `1.5·10^7` to `1.9·10^7` at three and
+/// `1.3·10^7` to `1.5·10^7` at four (`2·10^7` to `2.5·10^7` lazily reduced), `7·10^6` at five,
+/// `6·10^6` at six, `5·10^6` at seven, `4·10^6` at eight, `4.5·10^6` at 9 and 10, `2.5·10^6` at 12,
+/// `1.8·10^6` at 14 and `1.1·10^6` to `2.1·10^6` at 16 (a little later at `B1 = 2000`, whose `D` is
+/// smaller); for `B1 = 2000`, `4.6·10^5` at 17 and 18, `3.7·10^5` at 20, `2.6·10^5` at 24,
+/// `2.1·10^5` at 28 and `1.7·10^5` at 32. With these shares the choice took the faster of the two
+/// in every cell but 15, at most 9 % slower (two limbs about `10^8`, between the lazy residues'
+/// crossover and the others'); the former took the slower in 114, up to 2.7 times slower (one limb,
+/// `B2 = 5·10^7`), switching to the polynomials 2 to 8 times too early in `B2` at 3 to 16 limbs and
+/// more than 5 times at one and two (from 17 it was right).
+const fn ecm_per_prime(k: usize) -> f64 {
+    match k {
+        0 | 1 => 0.25,
+        2 => 0.38,
+        3..=8 => 0.6,
+        9..=16 => 0.52,
+        _ => 0.8,
+    }
+}
+
 /// The bytes up to which the plan's bitmaps are kept for the whole of `(B1, B2]`.
 const CACHE_BYTES: u64 = 32 << 20;
 
@@ -191,23 +224,37 @@ impl Plan {
     }
 
     /// The time of this continuation for the elliptic curve method with a modulus of `k` limbs:
-    /// about a product for each prime, the baby steps and the giant steps, an addition of points
-    /// and its share of the normalisation each, and the sieve.
+    /// a share of a product for each prime (see [`ecm_per_prime`]), the baby steps and the giant
+    /// steps, an addition of points and its share of the normalisation each, and a share of the
+    /// sieve, which is made once a plan, at about 0.17 ns a number, for all its curves (counted as
+    /// eight: the factorisation keeps its plans for every cofactor, and a call takes its curves
+    /// from one).
     pub(super) fn ecm_cost(&self, k: usize) -> f64 {
         let (b1, b2) = (self.b1 as f64, self.b2 as f64);
         let primes = (b2 / b2.ln() - b1 / b1.max(3.0).ln()).max(0.0);
         let giants = (self.k_last - self.k_first + 1) as f64;
         let mm = super::mk::product_ns(k);
-        primes * (mm + 0.5)
+        primes * ecm_per_prime(k) * mm
             + (giants + self.js.len() as f64) * 9.0 * mm
             + self.d as f64 * 1.5 * mm
-            + 0.05 * (b2 - b1)
+            + 0.02 * (b2 - b1)
     }
 
     /// The time of the continuation for `p - 1` and `p + 1` for a modulus of `k` limbs, in the
     /// nanoseconds of [`product_ns`](super::mk::product_ns): about a product for each prime of
     /// `(B1, B2]` (fewer as pairs serve two, but with the time of the sieve and the bitmaps), the
     /// steps, and the sieve, made once a plan, at about 0.05 ns a number.
+    ///
+    /// Measured on an Apple M4 Max on 2026-11-14 (load 3 to 5), each continuation forced, the stage
+    /// alone, on moduli of 1 to 16 limbs, `B1` from 1000 to `10^6` and `B2` from `2·10^5` to `10^8`
+    /// (620 cells of `p - 1` and `p + 1`): the products took 0.22 to 0.28 of this estimate at one
+    /// limb, 0.47 to 0.52 at two and 0.48 to 0.76 beyond, as in [`ecm_per_prime`], but the sieve
+    /// 0.17 ns a number, once a call (shared by the three starting values of `p + 1`); Montgomery
+    /// and Kruppa's continuation 0.71 to 1.06 of its estimate for `p - 1` and 0.59 to 0.91 for
+    /// `p + 1`. The errors cancel near the crossovers: with the sieve counted once a call, the
+    /// choice took the faster in all but 13 cells, at most 1.37 times slower (`p + 1`, one to four
+    /// limbs, `B2` from `10^6` to `2·10^6`) and 0.3 % on the mean, and estimates made true to the
+    /// measurements did no better (13 cells, at most 1.34 times), so these constants stay.
     pub(super) fn lucas_cost(&self, k: usize) -> f64 {
         let (b1, b2) = (self.b1 as f64, self.b2 as f64);
         let primes = (b2 / b2.ln() - b1 / b1.max(3.0).ln()).max(0.0);

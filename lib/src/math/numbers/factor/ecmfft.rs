@@ -110,7 +110,10 @@ impl FftPlan {
                 let product = product_poly_ns(k, n);
                 let once = 3.5 * tree + 3.0 * product;
                 let block = 9.0 * n as f64 * mm + tree + 3.0 * product;
-                let cost = babies + once + blocks as f64 * block - 3.0 * product + 60_000.0;
+                // Measured against stage 2's time on 2026-11-14 (see `ecm_per_prime` in
+                // `stage2`), 0.69 to 0.97 of the sum, 0.80 to 0.97 from two limbs: 0.85 of it.
+                let cost =
+                    0.85 * (babies + once + blocks as f64 * block - 3.0 * product + 60_000.0);
                 if best.is_none_or(|b| cost < b.0) {
                     best = Some((cost, d, k_first, blocks));
                 }

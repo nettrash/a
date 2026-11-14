@@ -85,7 +85,7 @@ fn logk(k: u32) -> u64 {
 
 /// The limbs of working memory that [`root`] needs for the root of degree `k >= 3` of a magnitude
 /// of `un` limbs: the root and eight numbers of the steps.
-pub(super) fn root_itch(un: usize, k: u32) -> usize {
+pub(in super::super) fn root_itch(un: usize, k: u32) -> usize {
     let plan = Plan::of(64 * un as u64, un, k);
     plan.sn + 8 * (plan.cap + 2)
 }
@@ -112,7 +112,7 @@ struct Buffers {
 ///
 /// The limbs at `u` must be valid for reads, and the [`root_itch`]`(un, k)` at `w` for reads and
 /// writes, apart from them; the root is written in the first limbs of `w`.
-pub(super) unsafe fn root(u: *const u64, un: usize, k: u32, w: Scratch) -> usize {
+pub(in super::super) unsafe fn root(u: *const u64, un: usize, k: u32, w: Scratch) -> usize {
     need!(w, root_itch(un, k));
     // SAFETY: as the caller guarantees: the root takes the first `sn` limbs of the working memory,
     // and each buffer `cap + 2` after them.

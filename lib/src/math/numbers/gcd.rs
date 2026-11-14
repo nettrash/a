@@ -63,7 +63,7 @@ mod kernels;
 )))]
 #[path = "gcd/portable.rs"]
 mod kernels;
-mod limbs;
+pub(super) mod limbs;
 
 pub(crate) use euclid::{Bound, common_prefix, partial, quotients};
 

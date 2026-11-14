@@ -147,8 +147,10 @@ pub(crate) mod sealed {
     }
 }
 
-/// A type a [`Matrix`](super::Matrix) can hold and compute with exactly: `f32`, `f64`,
-/// [`Complex<f32>`], [`Complex<f64>`], [`Number`] and [`Rational`]. The trait is sealed.
+/// A type a [`Matrix`](super::Matrix) can hold and compute with: `f32`, `f64`,
+/// [`Complex<f32>`], [`Complex<f64>`], [`Number`], [`Rational`],
+/// [`BigFloat`](crate::math::float::BigFloat) and [`BigComplex`](crate::math::float::BigComplex).
+/// The trait is sealed.
 pub trait Element: sealed::Element {}
 
 /// An element whose matrices have the numerical algorithms, the decompositions, the eigenvalues

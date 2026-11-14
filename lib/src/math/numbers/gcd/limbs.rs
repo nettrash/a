@@ -488,7 +488,7 @@ pub(super) unsafe fn rshift(r: *mut u64, x: *const u64, n: usize, s: u32) {
 
 /// The limbs of scratch space that [`tdiv_qr`] needs for a dividend of `nn` limbs and a divisor of
 /// `dn`.
-pub(super) fn tdiv_itch(nn: usize, dn: usize) -> usize {
+pub(in super::super) fn tdiv_itch(nn: usize, dn: usize) -> usize {
     if dn <= 2 {
         nn + 1
     } else {
@@ -505,7 +505,7 @@ pub(super) fn tdiv_itch(nn: usize, dn: usize) -> usize {
 ///
 /// `nn >= dn >= 1`; the limbs at `n` must be valid for reads and writes, those at `d` for reads,
 /// those at `q` for writes and the [`tdiv_itch`] limbs at `t` for reads and writes, all apart.
-pub(super) unsafe fn tdiv_qr(
+pub(in super::super) unsafe fn tdiv_qr(
     q: *mut u64,
     n: *mut u64,
     nn: usize,

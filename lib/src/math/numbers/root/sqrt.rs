@@ -373,7 +373,7 @@ pub(super) unsafe fn dc_sqrtrem(
 
 /// The limbs of working memory that [`sqrtrem`] needs for a magnitude of `an` limbs: the magnitude
 /// shifted, a limb above it, and the scratch of [`dc_sqrtrem`].
-pub(super) fn sqrtrem_itch(an: usize) -> usize {
+pub(in super::super) fn sqrtrem_itch(an: usize) -> usize {
     // The root takes `an.div_ceil(2)` limbs, or a limb more for a root alone (see `sqrtrem`). The
     // plan covers both, as `dc_itch` is not monotone: a shorter root can divide by a method that
     // needs more (on aarch64, 759 limbs 496 more than 760).
@@ -406,7 +406,7 @@ pub(super) const PAD: usize = 12;
 ///
 /// The limbs at `a` must be valid for reads, those at `s` for writes, with `REM` those at `r` for
 /// writes, and the [`sqrtrem_itch`]`(an)` at `w` for reads and writes, all apart.
-pub(super) unsafe fn sqrtrem<const REM: bool>(
+pub(in super::super) unsafe fn sqrtrem<const REM: bool>(
     s: *mut u64,
     r: *mut u64,
     a: *const u64,

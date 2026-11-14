@@ -15,7 +15,7 @@
 //! (see [`nth`]). The results are written in the byte order of `self`, in the shortest form.
 
 mod nth;
-mod sqrt;
+pub(super) mod sqrt;
 
 use super::add::{SMALL, read_small, write_small};
 use super::mul::{Operand, Product, STACK_LIMBS, WIDE, on_heap, on_stack, read_wide, to_limbs};
@@ -24,7 +24,8 @@ use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 
 pub(super) use nth::quotient;
-pub(super) use sqrt::sqrt_rem_u128;
+pub(super) use nth::{root as root_limbs, root_itch};
+pub(super) use sqrt::{sqrt_rem_u128, sqrt_rem_wide, sqrtrem, sqrtrem_itch};
 
 impl Number {
     /// Returns the square root of `self` rounded down, `floor(sqrt(self))`: the largest integer
