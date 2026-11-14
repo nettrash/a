@@ -544,6 +544,12 @@ pub(super) const LN2_LIMBS: [u64; 256] = [
 /// The fraction of `π`, [`PI_LIMBS`] without its integer part.
 pub(crate) const PI_TABLE: &[u64] = PI_LIMBS.split_last().expect("not empty").1;
 
+/// `floor(π 2^16384)`, [`PI_LIMBS`].
+pub(crate) const PI_FULL: &[u64] = &PI_LIMBS;
+
+/// `floor(ln 2 2^16384)`, [`LN2_LIMBS`].
+pub(crate) const LN2_TABLE: &[u64] = &LN2_LIMBS;
+
 /// The bits of [`PI_LIMBS`] below the point.
 const PI_BITS: u64 = 16384;
 
@@ -567,90 +573,14 @@ pub(super) fn shift(x: &Number, k: i64) -> Number {
     }
 }
 
-/// The longest precision of `π` that [`PI_CACHE`] keeps: `2^22` bits, 512 KiB, the series of `n` up
-/// to about `10^12`.
-const PI_CACHE_BITS: u64 = 1 << 22;
-
-/// `π` beyond the table, for the series of `n` above about `2 10^7`: the longest computed so far, as
-/// `(f, floor(π 2^f) less at most 4)`, for the process; filled by [`pi`] at its first precision
-/// above the table and replaced by a longer one, never past [`PI_CACHE_BITS`]. The partition
-/// numbers do not depend on it: a value cut from a longer one stays within the same bound.
-static PI_CACHE: std::sync::Mutex<Option<(u64, Number)>> = std::sync::Mutex::new(None);
-
-/// `floor(π 2^f)` less at most 4: from the table up to 16,384 bits, by Chudnovsky's series beyond,
-/// kept in [`PI_CACHE`] and cut from there for shorter precisions (`floor(x 2^-d)` of a value within
-/// 4 below is within `1 + 4 2^-d <= 3` below for `d >= 1`).
+/// `floor(π 2^f)` less at most 4: from the table up to 16,384 bits, beyond from the constants of
+/// the floats (`floor(π 2^f)` less at most 1, by the Chudnovskys' series, cached for the process:
+/// [`pi_below`](crate::math::float::consts::pi_below)).
 pub(crate) fn pi(f: u64) -> Number {
     if f <= PI_BITS {
         return of_limbs(&PI_LIMBS) >> shift_count(PI_BITS - f);
     }
-    if let Ok(cache) = PI_CACHE.lock()
-        && let Some((bits, v)) = cache.as_ref()
-        && *bits >= f
-    {
-        return v >> shift_count(bits - f);
-    }
-    let v = chudnovsky(f);
-    if f <= PI_CACHE_BITS
-        && let Ok(mut cache) = PI_CACHE.lock()
-        && cache.as_ref().is_none_or(|(bits, _)| *bits < f)
-    {
-        *cache = Some((f, v.clone()));
-    }
-    v
-}
-
-/// `π 2^f` within 4 below, by the Chudnovskys' series (1988)
-/// `1/π = 12 Σ (-1)^j (6j)! (13591409 + 545140134 j) / ((3j)! (j!)^3 640320^(3j + 3/2))`, summed by
-/// binary splitting: each term adds more than 47.11 bits, so `f / 47 + 2` terms leave a tail below
-/// `2^-f`; then `π = 426880 √10005 Q / (13591409 Q + R)`, a square root and a quotient rounded down.
-fn chudnovsky(f: u64) -> Number {
-    let terms = f / 47 + 2;
-    let (_, q, r) = split(1, terms + 1, false);
-    let g = f + 8;
-    let root = (Number::new_from_u64(10005, LE) << shift_count(2 * g)).isqrt();
-    let den = &(&q * 13_591_409u32) + &r;
-    // `Q` and the denominator have nearly twice the bits that the quotient needs: both cut to
-    // `f + 64` bits, which moves it by less than `2^-(f + 62)` relatively.
-    let cut = shift_count(den.bits().saturating_sub(f + 64));
-    let (q, den) = (&q >> cut, &den >> cut);
-    let num = &(&root * &q) * 426_880u32;
-    (&num / &den) >> 8usize
-}
-
-/// The binary splitting of Chudnovsky's series: `(P, Q, R)` of the terms from `a` to `b - 1`, `P`
-/// only when `need_p` (the whole series does not need it).
-fn split(a: u64, b: u64, need_p: bool) -> (Number, Number, Number) {
-    if b - a == 1 {
-        // `p = -(6a - 5)(2a - 1)(6a - 1)`, `q = 10939058860032000 a^3`, `r = p (545140134 a +
-        // 13591409)`: in `i128`s for `a < 2^20`, below `2^67`, `2^114` and `2^117`.
-        if a < 1 << 20 {
-            let x = i128::from(a);
-            let p = -(6 * x - 5) * (2 * x - 1) * (6 * x - 1);
-            let q = 10_939_058_860_032_000 * x * x * x;
-            let r = p * (545_140_134 * x + 13_591_409);
-            return (
-                Number::new_from_i128(p, LE),
-                Number::new_from_i128(q, LE),
-                Number::new_from_i128(r, LE),
-            );
-        }
-        let a = Number::new_from_u64(a, LE);
-        let p = -(&(&(&(&a * 6u32) - 5u32) * &(&(&a * 2u32) - 1u32)) * &(&(&a * 6u32) - 1u32));
-        let q = &(&(&a * &a) * &a) * 10_939_058_860_032_000u64;
-        let r = &p * &(&(&a * 545_140_134u32) + 13_591_409u32);
-        return (p, q, r);
-    }
-    let m = a + (b - a) / 2;
-    let (p1, q1, r1) = split(a, m, true);
-    let (p2, q2, r2) = split(m, b, need_p);
-    let r = &(&q2 * &r1) + &(&p1 * &r2);
-    let p = if need_p {
-        &p1 * &p2
-    } else {
-        Number::new_from_u8(0, LE)
-    };
-    (p, &q1 * &q2, r)
+    crate::math::float::consts::pi_below(f)
 }
 
 /// A positive floating number `m 2^e`.

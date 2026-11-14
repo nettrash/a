@@ -128,7 +128,7 @@ pub(crate) use gcd::{Bound, common_prefix, partial, quotients};
 pub(crate) use mul::basecase;
 pub(crate) use pow::montgomery::{redc_inverse, redc_limbs};
 pub(crate) use prime::is_prime_u64;
-pub(crate) use sequences::{PI_TABLE, pi};
+pub(crate) use sequences::{LN2_TABLE, PI_FULL, PI_TABLE, pi};
 
 pub use byte_order::ByteOrder;
 pub use convert::TryFromNumberError;

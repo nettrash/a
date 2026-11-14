@@ -15,20 +15,75 @@
 //! a result beyond is rounded to an infinity or the largest finite number, and one below to zero or
 //! the smallest positive number, by the mode, as MPFR does with its exponent range. There are no
 //! subnormal numbers.
+//!
+//! Floats add, subtract, multiply and divide with the `_round` methods, the operators and their
+//! assigning forms, with primitive numbers and [`Number`]s on either side too;
+//! [`BigFloat::set_add`] and the other `set_` methods write a result into a number that exists,
+//! and [`BigFloat::sum_round`] and [`BigFloat::dot_round`] round an exact sum or dot product
+//! once. [`BigFloat::sqrt_round`], [`BigFloat::rec_sqrt_round`],
+//! [`BigFloat::nth_root_round`], [`BigFloat::powi_round`], [`BigFloat::pow_number_round`] and
+//! [`BigFloat::pow_rational_round`] give roots and powers.
+//!
+//! They convert to and from `f64` and `f32` ([`BigFloat::to_f64_round`],
+//! [`BigFloat::from_f64_round`]), to integers ([`BigFloat::floor`], [`BigFloat::rint_round`],
+//! [`BigFloat::to_number_round`], [`BigFloat::to_i64_round`]) and exactly to and from
+//! [`Rational`](crate::math::rational::Rational)s, and compare exactly with integers, floats,
+//! numbers and rationals. `Display` writes the shortest decimal that reads back, as `f64`'s does;
+//! [`BigFloat::to_digits`] and [`BigFloat::to_string_radix`] write the digits of MPFR's
+//! `mpfr_get_str` in a radix from 2 to 36, and [`BigFloat::from_str_radix`] and `FromStr` read
+//! any number of digits, rounded once.
+//!
+//! The exponentials and logarithms ([`BigFloat::exp_round`], [`BigFloat::ln_round`] and their
+//! kind), [`BigFloat::pow_round`], the hyperbolic functions and their inverses, the circular
+//! functions and their inverses ([`BigFloat::sin_round`], [`BigFloat::atan2_round`] and their
+//! kind) and the constants π, `e`, `ln 2`, `ln 10`, `γ` and Catalan's `G`
+//! ([`BigFloat::pi_round`] and the others, kept per process once computed) are correctly rounded
+//! in every mode, with MPFR's special values.
+//!
+//! A [`BigComplex`] is a complex number of two floats, as GNU MPC's `mpc_t`: each part of each
+//! result is rounded once in a mode of its own, for the arithmetic, the square root, the norm and
+//! the absolute value, and for the elementary functions, with MPC's branch cuts and special
+//! values. Both are elements of matrices, [`Matrix`](crate::math::matrix::Matrix), whose products
+//! round each element once.
 
 mod arith;
+mod atan;
+mod ball;
 mod cmp;
-mod consts;
+mod compare;
+mod complex;
+pub(crate) mod consts;
 mod convert;
+mod exp;
+mod fix;
+mod general;
+mod hyper;
+mod integer;
 pub(crate) mod limbs;
+mod log;
+mod pow;
+mod power;
+mod prim;
 mod round;
+mod same;
+pub(crate) mod scale;
+mod short;
+mod sincos;
+mod small;
+mod small_fix;
+mod split;
+pub(crate) mod sum;
+mod text;
+mod trig;
 pub(crate) mod ziv;
 
 use crate::math::numbers::{ByteOrder, Number};
 use core::cmp::Ordering;
 use core::fmt;
 
+pub use complex::BigComplex;
 pub use convert::TryFromBigFloatError;
+pub use text::{BigFloatErrorKind, ParseBigFloatError};
 
 /// A rounding mode: the direction in which a result that is not exact is rounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]

@@ -1,9 +1,11 @@
 //! Matrices: a [`Matrix<T>`] is a rectangular array of elements of the type `T`, which is `f32`,
 //! `f64`, [`Complex<f32>`](crate::math::complex::Complex),
-//! [`Complex<f64>`](crate::math::complex::Complex), [`Number`](crate::math::numbers::Number) or
-//! [`Rational`](crate::math::rational::Rational).
+//! [`Complex<f64>`](crate::math::complex::Complex), [`Number`](crate::math::numbers::Number),
+//! [`Rational`](crate::math::rational::Rational), [`BigFloat`](crate::math::float::BigFloat) or
+//! [`BigComplex`](crate::math::float::BigComplex).
 
 mod basic;
+mod bigfloat;
 mod blas;
 mod cholesky;
 mod eigen;

@@ -6,6 +6,10 @@
 //! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, whose
 //!   points add with `+`, subtract with `-` and multiply by a number with `*`, and the curves in
 //!   common use; on numbers, and not constant-time.
+//! * [`float`]: binary floats of any precision, each result correctly rounded in four modes as
+//!   MPFR rounds it: their arithmetic, roots and powers, conversions and text, exponentials,
+//!   logarithms, hyperbolic and circular functions and constants; and complex numbers of two
+//!   such parts, as GNU MPC's, with their elementary functions.
 //! * [`matrix`]: matrices of floats, complex numbers, numbers or rationals, their arithmetic with
 //!   `+`, `-` and `*`, transposes, row and column operations, determinants, decompositions,
 //!   eigenvalues and functions of matrices, and the exact determinants, solutions and inverses of

@@ -37,7 +37,7 @@ use real::{
     Float, cos_pi, cos_pi_algebraic, cos_pi_newton, exp, inverse_root, log2_above, pow2, shift,
     sqrt,
 };
-pub(crate) use real::{PI_TABLE, pi};
+pub(crate) use real::{LN2_TABLE, PI_FULL, PI_TABLE, pi};
 
 /// `p(n)` for `n` up to 416, the last below `2^64`, by Euler's pentagonal recurrence
 /// `p(n) = Σ_(k>=1) (-1)^(k+1) (p(n - k(3k-1)/2) + p(n - k(3k+1)/2))`.

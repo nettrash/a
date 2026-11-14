@@ -1,0 +1,4733 @@
+exp nn | NN:nn DD:nn
+exp nI | NN:nn DD:nn
+exp nJ | NN:nn DD:nn
+exp n0 | NN:n0 DD:n0
+exp nz | NN:nz DD:nz
+exp n1 | NN:nn DD:nn
+exp nm | NN:nn DD:nn
+exp nh | NN:nn DD:nn
+exp In | NN:In DD:In
+exp II | NN:In DD:In
+exp IJ | NN:In DD:In
+exp I0 | NN:I0 DD:I0
+exp Iz | NN:Iz DD:Iz
+exp I1 | NN:II DD:II
+exp Im | NN:JJ DD:JJ
+exp Ih | NN:II DD:II
+exp Jn | NN:00 DD:00
+exp JI | NN:00 DD:00
+exp JJ | NN:00 DD:00
+exp J0 | NN:00 DD:00
+exp Jz | NN:0z DD:0z
+exp J1 | NN:00 DD:00
+exp Jm | NN:zz DD:zz
+exp Jh | NN:00 DD:00
+exp 0n | NN:nn DD:nn
+exp 0I | NN:nn DD:nn
+exp 0J | NN:nn DD:nn
+exp 00 | NN:p0 DD:p0
+exp 0z | NN:pz DD:pz
+exp 01 | NN:pp DD:pp
+exp 0m | NN:qq DD:qq
+exp 0h | NN:pp DD:pp
+exp zn | NN:nn DD:nn
+exp zI | NN:nn DD:nn
+exp zJ | NN:nn DD:nn
+exp z0 | NN:p0 DD:p0
+exp zz | NN:pz DD:pz
+exp z1 | NN:pp DD:pp
+exp zm | NN:qq DD:qq
+exp zh | NN:pp DD:pp
+exp 1n | NN:nn DD:nn
+exp 1I | NN:nn DD:nn
+exp 1J | NN:nn DD:nn
+exp 10 | NN:p0 DD:p0
+exp 1z | NN:pz DD:pz
+exp 11 | NN:pp DD:pp
+exp 1m | NN:qq DD:qq
+exp 1h | NN:pp DD:pp
+exp mn | NN:nn DD:nn
+exp mI | NN:nn DD:nn
+exp mJ | NN:nn DD:nn
+exp m0 | NN:p0 DD:p0
+exp mz | NN:pz DD:pz
+exp m1 | NN:pp DD:pp
+exp mm | NN:qq DD:qq
+exp mh | NN:pp DD:pp
+exp hn | NN:nn DD:nn
+exp hI | NN:nn DD:nn
+exp hJ | NN:nn DD:nn
+exp h0 | NN:p0 DD:p0
+exp hz | NN:pz DD:pz
+exp h1 | NN:pp DD:pp
+exp hm | NN:qq DD:qq
+exp hh | NN:pp DD:pp
+ln nn | NN:nn DD:nn
+ln nI | NN:In DD:In
+ln nJ | NN:In DD:In
+ln n0 | NN:nn DD:nn
+ln nz | NN:nn DD:nn
+ln n1 | NN:nn DD:nn
+ln nm | NN:nn DD:nn
+ln nh | NN:nn DD:nn
+ln In | NN:In DD:In
+ln II | NN:Ip DD:Ip
+ln IJ | NN:Iq DD:Iq
+ln I0 | NN:I0 DD:I0
+ln Iz | NN:Iz DD:Iz
+ln I1 | NN:I0 DD:I0
+ln Im | NN:Iz DD:Iz
+ln Ih | NN:I0 DD:I0
+ln Jn | NN:In DD:In
+ln JI | NN:Ip DD:Ip
+ln JJ | NN:Iq DD:Iq
+ln J0 | NN:Ip DD:Ip
+ln Jz | NN:Iq DD:Iq
+ln J1 | NN:Ip DD:Ip
+ln Jm | NN:Iq DD:Iq
+ln Jh | NN:Ip DD:Ip
+ln 0n | NN:nn DD:nn
+ln 0I | NN:Ip DD:Ip
+ln 0J | NN:Iq DD:Iq
+ln 00 | NN:J0 DD:J0
+ln 0z | NN:Jz DD:Jz
+ln 01 | NN:0p DD:0p
+ln 0m | NN:pq DD:pq
+ln 0h | NN:qp DD:qp
+ln zn | NN:nn DD:nn
+ln zI | NN:Ip DD:Ip
+ln zJ | NN:Iq DD:Iq
+ln z0 | NN:Jp DD:Jp
+ln zz | NN:Jq DD:Jq
+ln z1 | NN:0p DD:0p
+ln zm | NN:pq DD:pq
+ln zh | NN:qp DD:qp
+ln 1n | NN:nn DD:nn
+ln 1I | NN:Ip DD:Ip
+ln 1J | NN:Iq DD:Iq
+ln 10 | NN:00 DD:00
+ln 1z | NN:0z DD:0z
+ln 11 | NN:pp DD:pp
+ln 1m | NN:pq DD:pq
+ln 1h | NN:pp DD:pp
+ln mn | NN:nn DD:nn
+ln mI | NN:Ip DD:Ip
+ln mJ | NN:Iq DD:Iq
+ln m0 | NN:pp DD:pp
+ln mz | NN:pq DD:pq
+ln m1 | NN:pp DD:pp
+ln mm | NN:pq DD:pq
+ln mh | NN:pp DD:pp
+ln hn | NN:nn DD:nn
+ln hI | NN:Ip DD:Ip
+ln hJ | NN:Iq DD:Iq
+ln h0 | NN:q0 DD:q0
+ln hz | NN:qz DD:qz
+ln h1 | NN:pp DD:pp
+ln hm | NN:pq DD:pq
+ln hh | NN:qp DD:qp
+log10 nn | NN:nn DD:nn
+log10 nI | NN:In DD:In
+log10 nJ | NN:In DD:In
+log10 n0 | NN:nn DD:nn
+log10 nz | NN:nn DD:nn
+log10 n1 | NN:nn DD:nn
+log10 nm | NN:nn DD:nn
+log10 nh | NN:nn DD:nn
+log10 In | NN:In DD:In
+log10 II | NN:Ip DD:Ip
+log10 IJ | NN:Iq DD:Iq
+log10 I0 | NN:I0 DD:I0
+log10 Iz | NN:Iz DD:Iz
+log10 I1 | NN:I0 DD:I0
+log10 Im | NN:Iz DD:Iz
+log10 Ih | NN:I0 DD:I0
+log10 Jn | NN:In DD:In
+log10 JI | NN:Ip DD:Ip
+log10 JJ | NN:Iq DD:Iq
+log10 J0 | NN:Ip DD:Ip
+log10 Jz | NN:Iq DD:Iq
+log10 J1 | NN:Ip DD:Ip
+log10 Jm | NN:Iq DD:Iq
+log10 Jh | NN:Ip DD:Ip
+log10 0n | NN:nn DD:nn
+log10 0I | NN:Ip DD:Ip
+log10 0J | NN:Iq DD:Iq
+log10 00 | NN:J0 DD:J0
+log10 0z | NN:Jz DD:Jz
+log10 01 | NN:0p DD:0p
+log10 0m | NN:pq DD:pq
+log10 0h | NN:qp DD:qp
+log10 zn | NN:nn DD:nn
+log10 zI | NN:Ip DD:Ip
+log10 zJ | NN:Iq DD:Iq
+log10 z0 | NN:Jp DD:Jp
+log10 zz | NN:Jq DD:Jq
+log10 z1 | NN:0p DD:0p
+log10 zm | NN:pq DD:pq
+log10 zh | NN:qp DD:qp
+log10 1n | NN:nn DD:nn
+log10 1I | NN:Ip DD:Ip
+log10 1J | NN:Iq DD:Iq
+log10 10 | NN:00 DD:00
+log10 1z | NN:0z DD:0z
+log10 11 | NN:pp DD:pp
+log10 1m | NN:pq DD:pq
+log10 1h | NN:pp DD:pp
+log10 mn | NN:nn DD:nn
+log10 mI | NN:Ip DD:Ip
+log10 mJ | NN:Iq DD:Iq
+log10 m0 | NN:pp DD:pp
+log10 mz | NN:pq DD:pq
+log10 m1 | NN:pp DD:pp
+log10 mm | NN:pq DD:pq
+log10 mh | NN:pp DD:pp
+log10 hn | NN:nn DD:nn
+log10 hI | NN:Ip DD:Ip
+log10 hJ | NN:Iq DD:Iq
+log10 h0 | NN:q0 DD:q0
+log10 hz | NN:qz DD:qz
+log10 h1 | NN:pp DD:pp
+log10 hm | NN:pq DD:pq
+log10 hh | NN:qp DD:qp
+proj nn | NN:nn DD:nn
+proj nI | NN:I0 DD:I0
+proj nJ | NN:Iz DD:Iz
+proj n0 | NN:n0 DD:n0
+proj nz | NN:nz DD:nz
+proj n1 | NN:np DD:np
+proj nm | NN:nq DD:nq
+proj nh | NN:np DD:np
+proj In | NN:I0 DD:I0
+proj II | NN:I0 DD:I0
+proj IJ | NN:Iz DD:Iz
+proj I0 | NN:I0 DD:I0
+proj Iz | NN:Iz DD:Iz
+proj I1 | NN:I0 DD:I0
+proj Im | NN:Iz DD:Iz
+proj Ih | NN:I0 DD:I0
+proj Jn | NN:I0 DD:I0
+proj JI | NN:I0 DD:I0
+proj JJ | NN:Iz DD:Iz
+proj J0 | NN:I0 DD:I0
+proj Jz | NN:Iz DD:Iz
+proj J1 | NN:I0 DD:I0
+proj Jm | NN:Iz DD:Iz
+proj Jh | NN:I0 DD:I0
+proj 0n | NN:0n DD:0n
+proj 0I | NN:I0 DD:I0
+proj 0J | NN:Iz DD:Iz
+proj 00 | NN:00 DD:00
+proj 0z | NN:0z DD:0z
+proj 01 | NN:0p DD:0p
+proj 0m | NN:0q DD:0q
+proj 0h | NN:0p DD:0p
+proj zn | NN:zn DD:zn
+proj zI | NN:I0 DD:I0
+proj zJ | NN:Iz DD:Iz
+proj z0 | NN:z0 DD:z0
+proj zz | NN:zz DD:zz
+proj z1 | NN:zp DD:zp
+proj zm | NN:zq DD:zq
+proj zh | NN:zp DD:zp
+proj 1n | NN:pn DD:pn
+proj 1I | NN:I0 DD:I0
+proj 1J | NN:Iz DD:Iz
+proj 10 | NN:p0 DD:p0
+proj 1z | NN:pz DD:pz
+proj 11 | NN:pp DD:pp
+proj 1m | NN:pq DD:pq
+proj 1h | NN:pp DD:pp
+proj mn | NN:qn DD:qn
+proj mI | NN:I0 DD:I0
+proj mJ | NN:Iz DD:Iz
+proj m0 | NN:q0 DD:q0
+proj mz | NN:qz DD:qz
+proj m1 | NN:qp DD:qp
+proj mm | NN:qq DD:qq
+proj mh | NN:qp DD:qp
+proj hn | NN:pn DD:pn
+proj hI | NN:I0 DD:I0
+proj hJ | NN:Iz DD:Iz
+proj h0 | NN:p0 DD:p0
+proj hz | NN:pz DD:pz
+proj h1 | NN:pp DD:pp
+proj hm | NN:pq DD:pq
+proj hh | NN:pp DD:pp
+sin nn | NN:nn DD:nn
+sin nI | NN:nI DD:nI
+sin nJ | NN:nJ DD:nJ
+sin n0 | NN:n0 DD:n0
+sin nz | NN:nz DD:nz
+sin n1 | NN:nn DD:nn
+sin nm | NN:nn DD:nn
+sin nh | NN:nn DD:nn
+sin In | NN:nn DD:nn
+sin II | NN:nI DD:nI
+sin IJ | NN:nJ DD:nJ
+sin I0 | NN:n0 DD:n0
+sin Iz | NN:nz DD:nz
+sin I1 | NN:nn DD:nn
+sin Im | NN:nn DD:nn
+sin Ih | NN:nn DD:nn
+sin Jn | NN:nn DD:nn
+sin JI | NN:nI DD:nI
+sin JJ | NN:nJ DD:nJ
+sin J0 | NN:n0 DD:n0
+sin Jz | NN:nz DD:nz
+sin J1 | NN:nn DD:nn
+sin Jm | NN:nn DD:nn
+sin Jh | NN:nn DD:nn
+sin 0n | NN:0n DD:0n
+sin 0I | NN:0I DD:0I
+sin 0J | NN:0J DD:0J
+sin 00 | NN:00 DD:00
+sin 0z | NN:0z DD:0z
+sin 01 | NN:0p DD:0p
+sin 0m | NN:0q DD:0q
+sin 0h | NN:0p DD:0p
+sin zn | NN:zn DD:zn
+sin zI | NN:zI DD:zI
+sin zJ | NN:zJ DD:zJ
+sin z0 | NN:z0 DD:z0
+sin zz | NN:zz DD:zz
+sin z1 | NN:zp DD:zp
+sin zm | NN:zq DD:zq
+sin zh | NN:zp DD:zp
+sin 1n | NN:nn DD:nn
+sin 1I | NN:II DD:II
+sin 1J | NN:IJ DD:IJ
+sin 10 | NN:p0 DD:p0
+sin 1z | NN:pz DD:pz
+sin 11 | NN:pp DD:pp
+sin 1m | NN:pq DD:pq
+sin 1h | NN:pp DD:pp
+sin mn | NN:nn DD:nn
+sin mI | NN:JJ DD:JJ
+sin mJ | NN:JI DD:JI
+sin m0 | NN:qz DD:qz
+sin mz | NN:q0 DD:q0
+sin m1 | NN:qq DD:qq
+sin mm | NN:qp DD:qp
+sin mh | NN:qq DD:qq
+sin hn | NN:nn DD:nn
+sin hI | NN:II DD:II
+sin hJ | NN:IJ DD:IJ
+sin h0 | NN:p0 DD:p0
+sin hz | NN:pz DD:pz
+sin h1 | NN:pp DD:pp
+sin hm | NN:pq DD:pq
+sin hh | NN:pp DD:pp
+cos nn | NN:nn DD:nn
+cos nI | NN:In DD:In
+cos nJ | NN:In DD:In
+cos n0 | NN:n0 DD:n0
+cos nz | NN:nz DD:nz
+cos n1 | NN:nn DD:nn
+cos nm | NN:nn DD:nn
+cos nh | NN:nn DD:nn
+cos In | NN:nn DD:nn
+cos II | NN:Jn DD:Jn
+cos IJ | NN:In DD:In
+cos I0 | NN:nz DD:nz
+cos Iz | NN:n0 DD:n0
+cos I1 | NN:nn DD:nn
+cos Im | NN:nn DD:nn
+cos Ih | NN:nn DD:nn
+cos Jn | NN:nn DD:nn
+cos JI | NN:In DD:In
+cos JJ | NN:Jn DD:Jn
+cos J0 | NN:n0 DD:n0
+cos Jz | NN:nz DD:nz
+cos J1 | NN:nn DD:nn
+cos Jm | NN:nn DD:nn
+cos Jh | NN:nn DD:nn
+cos 0n | NN:n0 DD:n0
+cos 0I | NN:Iz DD:Iz
+cos 0J | NN:I0 DD:I0
+cos 00 | NN:pz DD:pz
+cos 0z | NN:p0 DD:p0
+cos 01 | NN:pz DD:pz
+cos 0m | NN:p0 DD:p0
+cos 0h | NN:pz DD:pz
+cos zn | NN:nz DD:nz
+cos zI | NN:I0 DD:I0
+cos zJ | NN:Iz DD:Iz
+cos z0 | NN:p0 DD:p0
+cos zz | NN:pz DD:pz
+cos z1 | NN:p0 DD:p0
+cos zm | NN:pz DD:pz
+cos zh | NN:p0 DD:p0
+cos 1n | NN:nn DD:nn
+cos 1I | NN:IJ DD:IJ
+cos 1J | NN:II DD:II
+cos 10 | NN:pz DD:pz
+cos 1z | NN:p0 DD:p0
+cos 11 | NN:pq DD:pq
+cos 1m | NN:pp DD:pp
+cos 1h | NN:pq DD:pq
+cos mn | NN:nn DD:nn
+cos mI | NN:JI DD:JI
+cos mJ | NN:JJ DD:JJ
+cos m0 | NN:q0 DD:q0
+cos mz | NN:qz DD:qz
+cos m1 | NN:qp DD:qp
+cos mm | NN:qq DD:qq
+cos mh | NN:qp DD:qp
+cos hn | NN:nn DD:nn
+cos hI | NN:IJ DD:IJ
+cos hJ | NN:II DD:II
+cos h0 | NN:pz DD:pz
+cos hz | NN:p0 DD:p0
+cos h1 | NN:pq DD:pq
+cos hm | NN:pp DD:pp
+cos hh | NN:pq DD:pq
+tan nn | NN:nn DD:nn
+tan nI | NN:0p DD:0p
+tan nJ | NN:0q DD:0q
+tan n0 | NN:nn DD:nn
+tan nz | NN:nn DD:nn
+tan n1 | NN:nn DD:nn
+tan nm | NN:nn DD:nn
+tan nh | NN:nn DD:nn
+tan In | NN:nn DD:nn
+tan II | NN:0p DD:0p
+tan IJ | NN:0q DD:0q
+tan I0 | NN:nn DD:nn
+tan Iz | NN:nn DD:nn
+tan I1 | NN:nn DD:nn
+tan Im | NN:nn DD:nn
+tan Ih | NN:nn DD:nn
+tan Jn | NN:nn DD:nn
+tan JI | NN:zp DD:zp
+tan JJ | NN:zq DD:zq
+tan J0 | NN:nn DD:nn
+tan Jz | NN:nn DD:nn
+tan J1 | NN:nn DD:nn
+tan Jm | NN:nn DD:nn
+tan Jh | NN:nn DD:nn
+tan 0n | NN:0n DD:0n
+tan 0I | NN:0p DD:0p
+tan 0J | NN:0q DD:0q
+tan 00 | NN:00 DD:00
+tan 0z | NN:0z DD:0z
+tan 01 | NN:0p DD:0p
+tan 0m | NN:0q DD:0q
+tan 0h | NN:0p DD:0p
+tan zn | NN:zn DD:zn
+tan zI | NN:zp DD:zp
+tan zJ | NN:zq DD:zq
+tan z0 | NN:z0 DD:z0
+tan zz | NN:zz DD:zz
+tan z1 | NN:zp DD:zp
+tan zm | NN:zq DD:zq
+tan zh | NN:zp DD:zp
+tan 1n | NN:nn DD:nn
+tan 1I | NN:0p DD:0p
+tan 1J | NN:0q DD:0q
+tan 10 | NN:p0 DD:p0
+tan 1z | NN:pz DD:pz
+tan 11 | NN:pp DD:pp
+tan 1m | NN:pq DD:pq
+tan 1h | NN:pp DD:pp
+tan mn | NN:nn DD:nn
+tan mI | NN:0p DD:0p
+tan mJ | NN:0q DD:0q
+tan m0 | NN:p0 DD:p0
+tan mz | NN:pz DD:pz
+tan m1 | NN:pp DD:pp
+tan mm | NN:pq DD:pq
+tan mh | NN:pp DD:pp
+tan hn | NN:nn DD:nn
+tan hI | NN:0p DD:0p
+tan hJ | NN:0q DD:0q
+tan h0 | NN:p0 DD:p0
+tan hz | NN:pz DD:pz
+tan h1 | NN:pp DD:pp
+tan hm | NN:pq DD:pq
+tan hh | NN:pp DD:pp
+sinh nn | NN:nn DD:nn
+sinh nI | NN:nn DD:nn
+sinh nJ | NN:nn DD:nn
+sinh n0 | NN:n0 DD:n0
+sinh nz | NN:nz DD:nz
+sinh n1 | NN:nn DD:nn
+sinh nm | NN:nn DD:nn
+sinh nh | NN:nn DD:nn
+sinh In | NN:In DD:In
+sinh II | NN:In DD:In
+sinh IJ | NN:In DD:In
+sinh I0 | NN:I0 DD:I0
+sinh Iz | NN:Iz DD:Iz
+sinh I1 | NN:II DD:II
+sinh Im | NN:JJ DD:JJ
+sinh Ih | NN:II DD:II
+sinh Jn | NN:Jn DD:Jn
+sinh JI | NN:Jn DD:Jn
+sinh JJ | NN:Jn DD:Jn
+sinh J0 | NN:J0 DD:J0
+sinh Jz | NN:Jz DD:Jz
+sinh J1 | NN:JI DD:JI
+sinh Jm | NN:IJ DD:IJ
+sinh Jh | NN:JI DD:JI
+sinh 0n | NN:0n DD:0n
+sinh 0I | NN:0n DD:0n
+sinh 0J | NN:0n DD:0n
+sinh 00 | NN:00 DD:00
+sinh 0z | NN:0z DD:0z
+sinh 01 | NN:0p DD:0p
+sinh 0m | NN:zq DD:zq
+sinh 0h | NN:0p DD:0p
+sinh zn | NN:zn DD:zn
+sinh zI | NN:zn DD:zn
+sinh zJ | NN:zn DD:zn
+sinh z0 | NN:z0 DD:z0
+sinh zz | NN:zz DD:zz
+sinh z1 | NN:zp DD:zp
+sinh zm | NN:0q DD:0q
+sinh zh | NN:zp DD:zp
+sinh 1n | NN:nn DD:nn
+sinh 1I | NN:nn DD:nn
+sinh 1J | NN:nn DD:nn
+sinh 10 | NN:p0 DD:p0
+sinh 1z | NN:pz DD:pz
+sinh 11 | NN:pp DD:pp
+sinh 1m | NN:qq DD:qq
+sinh 1h | NN:pp DD:pp
+sinh mn | NN:nn DD:nn
+sinh mI | NN:nn DD:nn
+sinh mJ | NN:nn DD:nn
+sinh m0 | NN:q0 DD:q0
+sinh mz | NN:qz DD:qz
+sinh m1 | NN:qp DD:qp
+sinh mm | NN:pq DD:pq
+sinh mh | NN:qp DD:qp
+sinh hn | NN:nn DD:nn
+sinh hI | NN:nn DD:nn
+sinh hJ | NN:nn DD:nn
+sinh h0 | NN:p0 DD:p0
+sinh hz | NN:pz DD:pz
+sinh h1 | NN:pp DD:pp
+sinh hm | NN:qq DD:qq
+sinh hh | NN:pp DD:pp
+cosh nn | NN:nn DD:nn
+cosh nI | NN:nn DD:nn
+cosh nJ | NN:nn DD:nn
+cosh n0 | NN:nz DD:nz
+cosh nz | NN:n0 DD:n0
+cosh n1 | NN:nn DD:nn
+cosh nm | NN:nn DD:nn
+cosh nh | NN:nn DD:nn
+cosh In | NN:In DD:In
+cosh II | NN:In DD:In
+cosh IJ | NN:Jn DD:Jn
+cosh I0 | NN:I0 DD:I0
+cosh Iz | NN:Iz DD:Iz
+cosh I1 | NN:II DD:II
+cosh Im | NN:JJ DD:JJ
+cosh Ih | NN:II DD:II
+cosh Jn | NN:In DD:In
+cosh JI | NN:Jn DD:Jn
+cosh JJ | NN:In DD:In
+cosh J0 | NN:Iz DD:Iz
+cosh Jz | NN:I0 DD:I0
+cosh J1 | NN:IJ DD:IJ
+cosh Jm | NN:JI DD:JI
+cosh Jh | NN:IJ DD:IJ
+cosh 0n | NN:n0 DD:n0
+cosh 0I | NN:n0 DD:n0
+cosh 0J | NN:nz DD:nz
+cosh 00 | NN:p0 DD:p0
+cosh 0z | NN:pz DD:pz
+cosh 01 | NN:p0 DD:p0
+cosh 0m | NN:qz DD:qz
+cosh 0h | NN:p0 DD:p0
+cosh zn | NN:nz DD:nz
+cosh zI | NN:nz DD:nz
+cosh zJ | NN:n0 DD:n0
+cosh z0 | NN:pz DD:pz
+cosh zz | NN:p0 DD:p0
+cosh z1 | NN:pz DD:pz
+cosh zm | NN:q0 DD:q0
+cosh zh | NN:pz DD:pz
+cosh 1n | NN:nn DD:nn
+cosh 1I | NN:nn DD:nn
+cosh 1J | NN:nn DD:nn
+cosh 10 | NN:p0 DD:p0
+cosh 1z | NN:pz DD:pz
+cosh 11 | NN:pp DD:pp
+cosh 1m | NN:qq DD:qq
+cosh 1h | NN:pp DD:pp
+cosh mn | NN:nn DD:nn
+cosh mI | NN:nn DD:nn
+cosh mJ | NN:nn DD:nn
+cosh m0 | NN:pz DD:pz
+cosh mz | NN:p0 DD:p0
+cosh m1 | NN:pq DD:pq
+cosh mm | NN:qp DD:qp
+cosh mh | NN:pq DD:pq
+cosh hn | NN:nn DD:nn
+cosh hI | NN:nn DD:nn
+cosh hJ | NN:nn DD:nn
+cosh h0 | NN:p0 DD:p0
+cosh hz | NN:pz DD:pz
+cosh h1 | NN:pp DD:pp
+cosh hm | NN:qq DD:qq
+cosh hh | NN:pp DD:pp
+tanh nn | NN:nn DD:nn
+tanh nI | NN:nn DD:nn
+tanh nJ | NN:nn DD:nn
+tanh n0 | NN:n0 DD:n0
+tanh nz | NN:nz DD:nz
+tanh n1 | NN:nn DD:nn
+tanh nm | NN:nn DD:nn
+tanh nh | NN:nn DD:nn
+tanh In | NN:p0 DD:p0
+tanh II | NN:p0 DD:p0
+tanh IJ | NN:pz DD:pz
+tanh I0 | NN:p0 DD:p0
+tanh Iz | NN:pz DD:pz
+tanh I1 | NN:p0 DD:p0
+tanh Im | NN:p0 DD:p0
+tanh Ih | NN:p0 DD:p0
+tanh Jn | NN:q0 DD:q0
+tanh JI | NN:q0 DD:q0
+tanh JJ | NN:qz DD:qz
+tanh J0 | NN:q0 DD:q0
+tanh Jz | NN:qz DD:qz
+tanh J1 | NN:q0 DD:q0
+tanh Jm | NN:q0 DD:q0
+tanh Jh | NN:q0 DD:q0
+tanh 0n | NN:nn DD:nn
+tanh 0I | NN:nn DD:nn
+tanh 0J | NN:nn DD:nn
+tanh 00 | NN:00 DD:00
+tanh 0z | NN:0z DD:0z
+tanh 01 | NN:0p DD:0p
+tanh 0m | NN:0p DD:0p
+tanh 0h | NN:0p DD:0p
+tanh zn | NN:nn DD:nn
+tanh zI | NN:nn DD:nn
+tanh zJ | NN:nn DD:nn
+tanh z0 | NN:z0 DD:z0
+tanh zz | NN:zz DD:zz
+tanh z1 | NN:zp DD:zp
+tanh zm | NN:zp DD:zp
+tanh zh | NN:zp DD:zp
+tanh 1n | NN:nn DD:nn
+tanh 1I | NN:nn DD:nn
+tanh 1J | NN:nn DD:nn
+tanh 10 | NN:p0 DD:p0
+tanh 1z | NN:pz DD:pz
+tanh 11 | NN:pp DD:pp
+tanh 1m | NN:pp DD:pp
+tanh 1h | NN:pp DD:pp
+tanh mn | NN:nn DD:nn
+tanh mI | NN:nn DD:nn
+tanh mJ | NN:nn DD:nn
+tanh m0 | NN:q0 DD:q0
+tanh mz | NN:qz DD:qz
+tanh m1 | NN:qp DD:qp
+tanh mm | NN:qp DD:qp
+tanh mh | NN:qp DD:qp
+tanh hn | NN:nn DD:nn
+tanh hI | NN:nn DD:nn
+tanh hJ | NN:nn DD:nn
+tanh h0 | NN:p0 DD:p0
+tanh hz | NN:pz DD:pz
+tanh h1 | NN:pp DD:pp
+tanh hm | NN:pp DD:pp
+tanh hh | NN:pp DD:pp
+asin nn | NN:nn DD:nn
+asin nI | NN:nI DD:nI
+asin nJ | NN:nJ DD:nJ
+asin n0 | NN:nn DD:nn
+asin nz | NN:nn DD:nn
+asin n1 | NN:nn DD:nn
+asin nm | NN:nn DD:nn
+asin nh | NN:nn DD:nn
+asin In | NN:nI DD:nI
+asin II | NN:pI DD:pI
+asin IJ | NN:pJ DD:pJ
+asin I0 | NN:pI DD:pI
+asin Iz | NN:pJ DD:pJ
+asin I1 | NN:pI DD:pI
+asin Im | NN:pJ DD:pJ
+asin Ih | NN:pI DD:pI
+asin Jn | NN:nI DD:nI
+asin JI | NN:qI DD:qI
+asin JJ | NN:qJ DD:qJ
+asin J0 | NN:qI DD:qI
+asin Jz | NN:qJ DD:qJ
+asin J1 | NN:qI DD:qI
+asin Jm | NN:qJ DD:qJ
+asin Jh | NN:qI DD:qI
+asin 0n | NN:0n DD:0n
+asin 0I | NN:0I DD:0I
+asin 0J | NN:0J DD:0J
+asin 00 | NN:00 DD:00
+asin 0z | NN:0z DD:0z
+asin 01 | NN:0p DD:0p
+asin 0m | NN:0q DD:0q
+asin 0h | NN:0p DD:0p
+asin zn | NN:zn DD:zn
+asin zI | NN:zI DD:zI
+asin zJ | NN:zJ DD:zJ
+asin z0 | NN:z0 DD:z0
+asin zz | NN:zz DD:zz
+asin z1 | NN:zp DD:zp
+asin zm | NN:zq DD:zq
+asin zh | NN:zp DD:zp
+asin 1n | NN:nn DD:nn
+asin 1I | NN:0I DD:0I
+asin 1J | NN:0J DD:0J
+asin 10 | NN:p0 DD:p0
+asin 1z | NN:pz DD:pz
+asin 11 | NN:pp DD:pp
+asin 1m | NN:pq DD:pq
+asin 1h | NN:pp DD:pp
+asin mn | NN:nn DD:nn
+asin mI | NN:zI DD:zI
+asin mJ | NN:zJ DD:zJ
+asin m0 | NN:qp DD:qp
+asin mz | NN:qq DD:qq
+asin m1 | NN:qp DD:qp
+asin mm | NN:qq DD:qq
+asin mh | NN:qp DD:qp
+asin hn | NN:nn DD:nn
+asin hI | NN:0I DD:0I
+asin hJ | NN:0J DD:0J
+asin h0 | NN:p0 DD:p0
+asin hz | NN:pz DD:pz
+asin h1 | NN:pp DD:pp
+asin hm | NN:pq DD:pq
+asin hh | NN:pp DD:pp
+acos nn | NN:nn DD:nn
+acos nI | NN:nJ DD:nJ
+acos nJ | NN:nI DD:nI
+acos n0 | NN:nn DD:nn
+acos nz | NN:nn DD:nn
+acos n1 | NN:nn DD:nn
+acos nm | NN:nn DD:nn
+acos nh | NN:nn DD:nn
+acos In | NN:nJ DD:nJ
+acos II | NN:pJ DD:pJ
+acos IJ | NN:pI DD:pI
+acos I0 | NN:0J DD:0J
+acos Iz | NN:0I DD:0I
+acos I1 | NN:0J DD:0J
+acos Im | NN:0I DD:0I
+acos Ih | NN:0J DD:0J
+acos Jn | NN:nJ DD:nJ
+acos JI | NN:pJ DD:pJ
+acos JJ | NN:pI DD:pI
+acos J0 | NN:pJ DD:pJ
+acos Jz | NN:pI DD:pI
+acos J1 | NN:pJ DD:pJ
+acos Jm | NN:pI DD:pI
+acos Jh | NN:pJ DD:pJ
+acos 0n | NN:pn DD:pn
+acos 0I | NN:pJ DD:pJ
+acos 0J | NN:pI DD:pI
+acos 00 | NN:pz DD:pz
+acos 0z | NN:p0 DD:p0
+acos 01 | NN:pq DD:pq
+acos 0m | NN:pp DD:pp
+acos 0h | NN:pq DD:pq
+acos zn | NN:pn DD:pn
+acos zI | NN:pJ DD:pJ
+acos zJ | NN:pI DD:pI
+acos z0 | NN:pz DD:pz
+acos zz | NN:p0 DD:p0
+acos z1 | NN:pq DD:pq
+acos zm | NN:pp DD:pp
+acos zh | NN:pq DD:pq
+acos 1n | NN:nn DD:nn
+acos 1I | NN:pJ DD:pJ
+acos 1J | NN:pI DD:pI
+acos 10 | NN:0z DD:0z
+acos 1z | NN:00 DD:00
+acos 11 | NN:pq DD:pq
+acos 1m | NN:pp DD:pp
+acos 1h | NN:pq DD:pq
+acos mn | NN:nn DD:nn
+acos mI | NN:pJ DD:pJ
+acos mJ | NN:pI DD:pI
+acos m0 | NN:pq DD:pq
+acos mz | NN:pp DD:pp
+acos m1 | NN:pq DD:pq
+acos mm | NN:pp DD:pp
+acos mh | NN:pq DD:pq
+acos hn | NN:nn DD:nn
+acos hI | NN:pJ DD:pJ
+acos hJ | NN:pI DD:pI
+acos h0 | NN:pz DD:pz
+acos hz | NN:p0 DD:p0
+acos h1 | NN:pq DD:pq
+acos hm | NN:pp DD:pp
+acos hh | NN:pq DD:pq
+atan nn | NN:nn DD:nn
+atan nI | NN:n0 DD:n0
+atan nJ | NN:nz DD:nz
+atan n0 | NN:n0 DD:n0
+atan nz | NN:nz DD:nz
+atan n1 | NN:nn DD:nn
+atan nm | NN:nn DD:nn
+atan nh | NN:nn DD:nn
+atan In | NN:p0 DD:p0
+atan II | NN:p0 DD:p0
+atan IJ | NN:pz DD:pz
+atan I0 | NN:p0 DD:p0
+atan Iz | NN:pz DD:pz
+atan I1 | NN:p0 DD:p0
+atan Im | NN:pz DD:pz
+atan Ih | NN:p0 DD:p0
+atan Jn | NN:q0 DD:q0
+atan JI | NN:q0 DD:q0
+atan JJ | NN:qz DD:qz
+atan J0 | NN:q0 DD:q0
+atan Jz | NN:qz DD:qz
+atan J1 | NN:q0 DD:q0
+atan Jm | NN:qz DD:qz
+atan Jh | NN:q0 DD:q0
+atan 0n | NN:nn DD:nn
+atan 0I | NN:p0 DD:p0
+atan 0J | NN:pz DD:pz
+atan 00 | NN:00 DD:00
+atan 0z | NN:0z DD:0z
+atan 01 | NN:0I DD:0I
+atan 0m | NN:pq DD:pq
+atan 0h | NN:0p DD:0p
+atan zn | NN:nn DD:nn
+atan zI | NN:q0 DD:q0
+atan zJ | NN:qz DD:qz
+atan z0 | NN:z0 DD:z0
+atan zz | NN:zz DD:zz
+atan z1 | NN:zI DD:zI
+atan zm | NN:qq DD:qq
+atan zh | NN:zp DD:zp
+atan 1n | NN:nn DD:nn
+atan 1I | NN:p0 DD:p0
+atan 1J | NN:pz DD:pz
+atan 10 | NN:p0 DD:p0
+atan 1z | NN:pz DD:pz
+atan 11 | NN:pp DD:pp
+atan 1m | NN:pq DD:pq
+atan 1h | NN:pp DD:pp
+atan mn | NN:nn DD:nn
+atan mI | NN:q0 DD:q0
+atan mJ | NN:qz DD:qz
+atan m0 | NN:q0 DD:q0
+atan mz | NN:qz DD:qz
+atan m1 | NN:qp DD:qp
+atan mm | NN:qq DD:qq
+atan mh | NN:qp DD:qp
+atan hn | NN:nn DD:nn
+atan hI | NN:p0 DD:p0
+atan hJ | NN:pz DD:pz
+atan h0 | NN:p0 DD:p0
+atan hz | NN:pz DD:pz
+atan h1 | NN:pp DD:pp
+atan hm | NN:pq DD:pq
+atan hh | NN:pp DD:pp
+asinh nn | NN:nn DD:nn
+asinh nI | NN:In DD:In
+asinh nJ | NN:In DD:In
+asinh n0 | NN:n0 DD:n0
+asinh nz | NN:nz DD:nz
+asinh n1 | NN:nn DD:nn
+asinh nm | NN:nn DD:nn
+asinh nh | NN:nn DD:nn
+asinh In | NN:In DD:In
+asinh II | NN:Ip DD:Ip
+asinh IJ | NN:Iq DD:Iq
+asinh I0 | NN:I0 DD:I0
+asinh Iz | NN:Iz DD:Iz
+asinh I1 | NN:I0 DD:I0
+asinh Im | NN:Iz DD:Iz
+asinh Ih | NN:I0 DD:I0
+asinh Jn | NN:Jn DD:Jn
+asinh JI | NN:Jp DD:Jp
+asinh JJ | NN:Jq DD:Jq
+asinh J0 | NN:J0 DD:J0
+asinh Jz | NN:Jz DD:Jz
+asinh J1 | NN:J0 DD:J0
+asinh Jm | NN:Jz DD:Jz
+asinh Jh | NN:J0 DD:J0
+asinh 0n | NN:nn DD:nn
+asinh 0I | NN:Ip DD:Ip
+asinh 0J | NN:Iq DD:Iq
+asinh 00 | NN:00 DD:00
+asinh 0z | NN:0z DD:0z
+asinh 01 | NN:0p DD:0p
+asinh 0m | NN:pq DD:pq
+asinh 0h | NN:0p DD:0p
+asinh zn | NN:nn DD:nn
+asinh zI | NN:Jp DD:Jp
+asinh zJ | NN:Jq DD:Jq
+asinh z0 | NN:z0 DD:z0
+asinh zz | NN:zz DD:zz
+asinh z1 | NN:zp DD:zp
+asinh zm | NN:qq DD:qq
+asinh zh | NN:zp DD:zp
+asinh 1n | NN:nn DD:nn
+asinh 1I | NN:Ip DD:Ip
+asinh 1J | NN:Iq DD:Iq
+asinh 10 | NN:p0 DD:p0
+asinh 1z | NN:pz DD:pz
+asinh 11 | NN:pp DD:pp
+asinh 1m | NN:pq DD:pq
+asinh 1h | NN:pp DD:pp
+asinh mn | NN:nn DD:nn
+asinh mI | NN:Jp DD:Jp
+asinh mJ | NN:Jq DD:Jq
+asinh m0 | NN:q0 DD:q0
+asinh mz | NN:qz DD:qz
+asinh m1 | NN:qp DD:qp
+asinh mm | NN:qq DD:qq
+asinh mh | NN:qp DD:qp
+asinh hn | NN:nn DD:nn
+asinh hI | NN:Ip DD:Ip
+asinh hJ | NN:Iq DD:Iq
+asinh h0 | NN:p0 DD:p0
+asinh hz | NN:pz DD:pz
+asinh h1 | NN:pp DD:pp
+asinh hm | NN:pq DD:pq
+asinh hh | NN:pp DD:pp
+acosh nn | NN:nn DD:nn
+acosh nI | NN:In DD:In
+acosh nJ | NN:In DD:In
+acosh n0 | NN:nn DD:nn
+acosh nz | NN:nn DD:nn
+acosh n1 | NN:nn DD:nn
+acosh nm | NN:nn DD:nn
+acosh nh | NN:nn DD:nn
+acosh In | NN:In DD:In
+acosh II | NN:Ip DD:Ip
+acosh IJ | NN:Iq DD:Iq
+acosh I0 | NN:I0 DD:I0
+acosh Iz | NN:Iz DD:Iz
+acosh I1 | NN:I0 DD:I0
+acosh Im | NN:Iz DD:Iz
+acosh Ih | NN:I0 DD:I0
+acosh Jn | NN:In DD:In
+acosh JI | NN:Ip DD:Ip
+acosh JJ | NN:Iq DD:Iq
+acosh J0 | NN:Ip DD:Ip
+acosh Jz | NN:Iq DD:Iq
+acosh J1 | NN:Ip DD:Ip
+acosh Jm | NN:Iq DD:Iq
+acosh Jh | NN:Ip DD:Ip
+acosh 0n | NN:nn DD:nn
+acosh 0I | NN:Ip DD:Ip
+acosh 0J | NN:Iq DD:Iq
+acosh 00 | NN:0p DD:0p
+acosh 0z | NN:0q DD:0q
+acosh 01 | NN:pp DD:pp
+acosh 0m | NN:pq DD:pq
+acosh 0h | NN:pp DD:pp
+acosh zn | NN:nn DD:nn
+acosh zI | NN:Ip DD:Ip
+acosh zJ | NN:Iq DD:Iq
+acosh z0 | NN:0p DD:0p
+acosh zz | NN:0q DD:0q
+acosh z1 | NN:pp DD:pp
+acosh zm | NN:pq DD:pq
+acosh zh | NN:pp DD:pp
+acosh 1n | NN:nn DD:nn
+acosh 1I | NN:Ip DD:Ip
+acosh 1J | NN:Iq DD:Iq
+acosh 10 | NN:00 DD:00
+acosh 1z | NN:0z DD:0z
+acosh 11 | NN:pp DD:pp
+acosh 1m | NN:pq DD:pq
+acosh 1h | NN:pp DD:pp
+acosh mn | NN:nn DD:nn
+acosh mI | NN:Ip DD:Ip
+acosh mJ | NN:Iq DD:Iq
+acosh m0 | NN:pp DD:pp
+acosh mz | NN:pq DD:pq
+acosh m1 | NN:pp DD:pp
+acosh mm | NN:pq DD:pq
+acosh mh | NN:pp DD:pp
+acosh hn | NN:nn DD:nn
+acosh hI | NN:Ip DD:Ip
+acosh hJ | NN:Iq DD:Iq
+acosh h0 | NN:0p DD:0p
+acosh hz | NN:0q DD:0q
+acosh h1 | NN:pp DD:pp
+acosh hm | NN:pq DD:pq
+acosh hh | NN:pp DD:pp
+atanh nn | NN:nn DD:nn
+atanh nI | NN:0p DD:0p
+atanh nJ | NN:0q DD:0q
+atanh n0 | NN:nn DD:nn
+atanh nz | NN:nn DD:nn
+atanh n1 | NN:nn DD:nn
+atanh nm | NN:nn DD:nn
+atanh nh | NN:nn DD:nn
+atanh In | NN:0n DD:0n
+atanh II | NN:0p DD:0p
+atanh IJ | NN:0q DD:0q
+atanh I0 | NN:0p DD:0p
+atanh Iz | NN:0q DD:0q
+atanh I1 | NN:0p DD:0p
+atanh Im | NN:0q DD:0q
+atanh Ih | NN:0p DD:0p
+atanh Jn | NN:zn DD:zn
+atanh JI | NN:zp DD:zp
+atanh JJ | NN:zq DD:zq
+atanh J0 | NN:zp DD:zp
+atanh Jz | NN:zq DD:zq
+atanh J1 | NN:zp DD:zp
+atanh Jm | NN:zq DD:zq
+atanh Jh | NN:zp DD:zp
+atanh 0n | NN:0n DD:0n
+atanh 0I | NN:0p DD:0p
+atanh 0J | NN:0q DD:0q
+atanh 00 | NN:00 DD:00
+atanh 0z | NN:0z DD:0z
+atanh 01 | NN:0p DD:0p
+atanh 0m | NN:0q DD:0q
+atanh 0h | NN:0p DD:0p
+atanh zn | NN:zn DD:zn
+atanh zI | NN:zp DD:zp
+atanh zJ | NN:zq DD:zq
+atanh z0 | NN:z0 DD:z0
+atanh zz | NN:zz DD:zz
+atanh z1 | NN:zp DD:zp
+atanh zm | NN:zq DD:zq
+atanh zh | NN:zp DD:zp
+atanh 1n | NN:nn DD:nn
+atanh 1I | NN:0p DD:0p
+atanh 1J | NN:0q DD:0q
+atanh 10 | NN:I0 DD:I0
+atanh 1z | NN:Iz DD:Iz
+atanh 11 | NN:pp DD:pp
+atanh 1m | NN:pq DD:pq
+atanh 1h | NN:pp DD:pp
+atanh mn | NN:nn DD:nn
+atanh mI | NN:zp DD:zp
+atanh mJ | NN:zq DD:zq
+atanh m0 | NN:qp DD:qp
+atanh mz | NN:qq DD:qq
+atanh m1 | NN:qp DD:qp
+atanh mm | NN:qq DD:qq
+atanh mh | NN:qp DD:qp
+atanh hn | NN:nn DD:nn
+atanh hI | NN:0p DD:0p
+atanh hJ | NN:0q DD:0q
+atanh h0 | NN:p0 DD:p0
+atanh hz | NN:pz DD:pz
+atanh h1 | NN:pp DD:pp
+atanh hm | NN:pq DD:pq
+atanh hh | NN:pp DD:pp
+arg nn | NN:n DD:n
+arg nI | NN:n DD:n
+arg nJ | NN:n DD:n
+arg n0 | NN:n DD:n
+arg nz | NN:n DD:n
+arg n1 | NN:n DD:n
+arg nm | NN:n DD:n
+arg nh | NN:n DD:n
+arg In | NN:n DD:n
+arg II | NN:p DD:p
+arg IJ | NN:q DD:q
+arg I0 | NN:0 DD:0
+arg Iz | NN:z DD:z
+arg I1 | NN:0 DD:0
+arg Im | NN:z DD:z
+arg Ih | NN:0 DD:0
+arg Jn | NN:n DD:n
+arg JI | NN:p DD:p
+arg JJ | NN:q DD:q
+arg J0 | NN:p DD:p
+arg Jz | NN:q DD:q
+arg J1 | NN:p DD:p
+arg Jm | NN:q DD:q
+arg Jh | NN:p DD:p
+arg 0n | NN:n DD:n
+arg 0I | NN:p DD:p
+arg 0J | NN:q DD:q
+arg 00 | NN:0 DD:0
+arg 0z | NN:z DD:z
+arg 01 | NN:p DD:p
+arg 0m | NN:q DD:q
+arg 0h | NN:p DD:p
+arg zn | NN:n DD:n
+arg zI | NN:p DD:p
+arg zJ | NN:q DD:q
+arg z0 | NN:p DD:p
+arg zz | NN:q DD:q
+arg z1 | NN:p DD:p
+arg zm | NN:q DD:q
+arg zh | NN:p DD:p
+arg 1n | NN:n DD:n
+arg 1I | NN:p DD:p
+arg 1J | NN:q DD:q
+arg 10 | NN:0 DD:0
+arg 1z | NN:z DD:z
+arg 11 | NN:p DD:p
+arg 1m | NN:q DD:q
+arg 1h | NN:p DD:p
+arg mn | NN:n DD:n
+arg mI | NN:p DD:p
+arg mJ | NN:q DD:q
+arg m0 | NN:p DD:p
+arg mz | NN:q DD:q
+arg m1 | NN:p DD:p
+arg mm | NN:q DD:q
+arg mh | NN:p DD:p
+arg hn | NN:n DD:n
+arg hI | NN:p DD:p
+arg hJ | NN:q DD:q
+arg h0 | NN:0 DD:0
+arg hz | NN:z DD:z
+arg h1 | NN:p DD:p
+arg hm | NN:q DD:q
+arg hh | NN:p DD:p
+pow nn nn | NN:nn DD:nn
+pow nn nI | NN:nn DD:nn
+pow nn nJ | NN:nn DD:nn
+pow nn n0 | NN:nn DD:nn
+pow nn nz | NN:nn DD:nn
+pow nn n1 | NN:nn DD:nn
+pow nn nm | NN:nn DD:nn
+pow nn In | NN:nn DD:nn
+pow nn II | NN:nn DD:nn
+pow nn IJ | NN:nn DD:nn
+pow nn I0 | NN:nn DD:nn
+pow nn Iz | NN:nn DD:nn
+pow nn I1 | NN:nn DD:nn
+pow nn Im | NN:nn DD:nn
+pow nn Jn | NN:nn DD:nn
+pow nn JI | NN:nn DD:nn
+pow nn JJ | NN:nn DD:nn
+pow nn J0 | NN:nn DD:nn
+pow nn Jz | NN:nn DD:nn
+pow nn J1 | NN:nn DD:nn
+pow nn Jm | NN:nn DD:nn
+pow nn 0n | NN:nn DD:nn
+pow nn 0I | NN:nn DD:nn
+pow nn 0J | NN:nn DD:nn
+pow nn 00 | NN:p0 DD:pz
+pow nn 0z | NN:p0 DD:pz
+pow nn 01 | NN:nn DD:nn
+pow nn 0m | NN:nn DD:nn
+pow nn zn | NN:nn DD:nn
+pow nn zI | NN:nn DD:nn
+pow nn zJ | NN:nn DD:nn
+pow nn z0 | NN:pz DD:pz
+pow nn zz | NN:pz DD:pz
+pow nn z1 | NN:nn DD:nn
+pow nn zm | NN:nn DD:nn
+pow nn 1n | NN:nn DD:nn
+pow nn 1I | NN:nn DD:nn
+pow nn 1J | NN:nn DD:nn
+pow nn 10 | NN:nn DD:nn
+pow nn 1z | NN:nn DD:nn
+pow nn 11 | NN:nn DD:nn
+pow nn 1m | NN:nn DD:nn
+pow nn mn | NN:nn DD:nn
+pow nn mI | NN:nn DD:nn
+pow nn mJ | NN:nn DD:nn
+pow nn m0 | NN:nn DD:nn
+pow nn mz | NN:nn DD:nn
+pow nn m1 | NN:nn DD:nn
+pow nn mm | NN:nn DD:nn
+pow nI nn | NN:nn DD:nn
+pow nI nI | NN:nn DD:nn
+pow nI nJ | NN:nn DD:nn
+pow nI n0 | NN:nn DD:nn
+pow nI nz | NN:nn DD:nn
+pow nI n1 | NN:nn DD:nn
+pow nI nm | NN:nn DD:nn
+pow nI In | NN:In DD:In
+pow nI II | NN:In DD:In
+pow nI IJ | NN:In DD:In
+pow nI I0 | NN:In DD:In
+pow nI Iz | NN:In DD:In
+pow nI I1 | NN:In DD:In
+pow nI Im | NN:In DD:In
+pow nI Jn | NN:00 DD:00
+pow nI JI | NN:00 DD:00
+pow nI JJ | NN:00 DD:00
+pow nI J0 | NN:00 DD:00
+pow nI Jz | NN:00 DD:00
+pow nI J1 | NN:00 DD:00
+pow nI Jm | NN:00 DD:00
+pow nI 0n | NN:nn DD:nn
+pow nI 0I | NN:nn DD:nn
+pow nI 0J | NN:nn DD:nn
+pow nI 00 | NN:p0 DD:pz
+pow nI 0z | NN:pz DD:pz
+pow nI 01 | NN:nn DD:nn
+pow nI 0m | NN:nn DD:nn
+pow nI zn | NN:nn DD:nn
+pow nI zI | NN:nn DD:nn
+pow nI zJ | NN:nn DD:nn
+pow nI z0 | NN:p0 DD:pz
+pow nI zz | NN:pz DD:pz
+pow nI z1 | NN:nn DD:nn
+pow nI zm | NN:nn DD:nn
+pow nI 1n | NN:In DD:In
+pow nI 1I | NN:nn DD:nn
+pow nI 1J | NN:nn DD:nn
+pow nI 10 | NN:In DD:In
+pow nI 1z | NN:In DD:In
+pow nI 11 | NN:In DD:In
+pow nI 1m | NN:In DD:In
+pow nI mn | NN:00 DD:00
+pow nI mI | NN:nn DD:nn
+pow nI mJ | NN:nn DD:nn
+pow nI m0 | NN:00 DD:00
+pow nI mz | NN:00 DD:00
+pow nI m1 | NN:00 DD:00
+pow nI mm | NN:00 DD:00
+pow nJ nn | NN:nn DD:nn
+pow nJ nI | NN:nn DD:nn
+pow nJ nJ | NN:nn DD:nn
+pow nJ n0 | NN:nn DD:nn
+pow nJ nz | NN:nn DD:nn
+pow nJ n1 | NN:nn DD:nn
+pow nJ nm | NN:nn DD:nn
+pow nJ In | NN:In DD:In
+pow nJ II | NN:In DD:In
+pow nJ IJ | NN:In DD:In
+pow nJ I0 | NN:In DD:In
+pow nJ Iz | NN:In DD:In
+pow nJ I1 | NN:In DD:In
+pow nJ Im | NN:In DD:In
+pow nJ Jn | NN:00 DD:00
+pow nJ JI | NN:00 DD:00
+pow nJ JJ | NN:00 DD:00
+pow nJ J0 | NN:00 DD:00
+pow nJ Jz | NN:00 DD:00
+pow nJ J1 | NN:00 DD:00
+pow nJ Jm | NN:00 DD:00
+pow nJ 0n | NN:nn DD:nn
+pow nJ 0I | NN:nn DD:nn
+pow nJ 0J | NN:nn DD:nn
+pow nJ 00 | NN:p0 DD:pz
+pow nJ 0z | NN:pz DD:pz
+pow nJ 01 | NN:nn DD:nn
+pow nJ 0m | NN:nn DD:nn
+pow nJ zn | NN:nn DD:nn
+pow nJ zI | NN:nn DD:nn
+pow nJ zJ | NN:nn DD:nn
+pow nJ z0 | NN:p0 DD:pz
+pow nJ zz | NN:pz DD:pz
+pow nJ z1 | NN:nn DD:nn
+pow nJ zm | NN:nn DD:nn
+pow nJ 1n | NN:In DD:In
+pow nJ 1I | NN:nn DD:nn
+pow nJ 1J | NN:nn DD:nn
+pow nJ 10 | NN:In DD:In
+pow nJ 1z | NN:In DD:In
+pow nJ 11 | NN:In DD:In
+pow nJ 1m | NN:In DD:In
+pow nJ mn | NN:00 DD:00
+pow nJ mI | NN:nn DD:nn
+pow nJ mJ | NN:nn DD:nn
+pow nJ m0 | NN:00 DD:00
+pow nJ mz | NN:00 DD:00
+pow nJ m1 | NN:00 DD:00
+pow nJ mm | NN:00 DD:00
+pow n0 nn | NN:nn DD:nn
+pow n0 nI | NN:nn DD:nn
+pow n0 nJ | NN:nn DD:nn
+pow n0 n0 | NN:nn DD:nn
+pow n0 nz | NN:nn DD:nn
+pow n0 n1 | NN:nn DD:nn
+pow n0 nm | NN:nn DD:nn
+pow n0 In | NN:nn DD:nn
+pow n0 II | NN:nn DD:nn
+pow n0 IJ | NN:nn DD:nn
+pow n0 I0 | NN:nn DD:nn
+pow n0 Iz | NN:nn DD:nn
+pow n0 I1 | NN:nn DD:nn
+pow n0 Im | NN:nn DD:nn
+pow n0 Jn | NN:nn DD:nn
+pow n0 JI | NN:nn DD:nn
+pow n0 JJ | NN:nn DD:nn
+pow n0 J0 | NN:nn DD:nn
+pow n0 Jz | NN:nn DD:nn
+pow n0 J1 | NN:nn DD:nn
+pow n0 Jm | NN:nn DD:nn
+pow n0 0n | NN:nn DD:nn
+pow n0 0I | NN:nn DD:nn
+pow n0 0J | NN:nn DD:nn
+pow n0 00 | NN:p0 DD:pz
+pow n0 0z | NN:p0 DD:pz
+pow n0 01 | NN:nn DD:nn
+pow n0 0m | NN:nn DD:nn
+pow n0 zn | NN:nn DD:nn
+pow n0 zI | NN:nn DD:nn
+pow n0 zJ | NN:nn DD:nn
+pow n0 z0 | NN:pz DD:pz
+pow n0 zz | NN:pz DD:pz
+pow n0 z1 | NN:nn DD:nn
+pow n0 zm | NN:nn DD:nn
+pow n0 1n | NN:nn DD:nn
+pow n0 1I | NN:nn DD:nn
+pow n0 1J | NN:nn DD:nn
+pow n0 10 | NN:nn DD:nn
+pow n0 1z | NN:nn DD:nn
+pow n0 11 | NN:nn DD:nn
+pow n0 1m | NN:nn DD:nn
+pow n0 mn | NN:nn DD:nn
+pow n0 mI | NN:nn DD:nn
+pow n0 mJ | NN:nn DD:nn
+pow n0 m0 | NN:nn DD:nn
+pow n0 mz | NN:nn DD:nn
+pow n0 m1 | NN:nn DD:nn
+pow n0 mm | NN:nn DD:nn
+pow nz nn | NN:nn DD:nn
+pow nz nI | NN:nn DD:nn
+pow nz nJ | NN:nn DD:nn
+pow nz n0 | NN:nn DD:nn
+pow nz nz | NN:nn DD:nn
+pow nz n1 | NN:nn DD:nn
+pow nz nm | NN:nn DD:nn
+pow nz In | NN:nn DD:nn
+pow nz II | NN:nn DD:nn
+pow nz IJ | NN:nn DD:nn
+pow nz I0 | NN:nn DD:nn
+pow nz Iz | NN:nn DD:nn
+pow nz I1 | NN:nn DD:nn
+pow nz Im | NN:nn DD:nn
+pow nz Jn | NN:nn DD:nn
+pow nz JI | NN:nn DD:nn
+pow nz JJ | NN:nn DD:nn
+pow nz J0 | NN:nn DD:nn
+pow nz Jz | NN:nn DD:nn
+pow nz J1 | NN:nn DD:nn
+pow nz Jm | NN:nn DD:nn
+pow nz 0n | NN:nn DD:nn
+pow nz 0I | NN:nn DD:nn
+pow nz 0J | NN:nn DD:nn
+pow nz 00 | NN:pz DD:pz
+pow nz 0z | NN:pz DD:pz
+pow nz 01 | NN:nn DD:nn
+pow nz 0m | NN:nn DD:nn
+pow nz zn | NN:nn DD:nn
+pow nz zI | NN:nn DD:nn
+pow nz zJ | NN:nn DD:nn
+pow nz z0 | NN:p0 DD:pz
+pow nz zz | NN:p0 DD:pz
+pow nz z1 | NN:nn DD:nn
+pow nz zm | NN:nn DD:nn
+pow nz 1n | NN:nn DD:nn
+pow nz 1I | NN:nn DD:nn
+pow nz 1J | NN:nn DD:nn
+pow nz 10 | NN:nn DD:nn
+pow nz 1z | NN:nn DD:nn
+pow nz 11 | NN:nn DD:nn
+pow nz 1m | NN:nn DD:nn
+pow nz mn | NN:nn DD:nn
+pow nz mI | NN:nn DD:nn
+pow nz mJ | NN:nn DD:nn
+pow nz m0 | NN:nn DD:nn
+pow nz mz | NN:nn DD:nn
+pow nz m1 | NN:nn DD:nn
+pow nz mm | NN:nn DD:nn
+pow n1 nn | NN:nn DD:nn
+pow n1 nI | NN:nn DD:nn
+pow n1 nJ | NN:nn DD:nn
+pow n1 n0 | NN:nn DD:nn
+pow n1 nz | NN:nn DD:nn
+pow n1 n1 | NN:nn DD:nn
+pow n1 nm | NN:nn DD:nn
+pow n1 In | NN:nn DD:nn
+pow n1 II | NN:nn DD:nn
+pow n1 IJ | NN:nn DD:nn
+pow n1 I0 | NN:nn DD:nn
+pow n1 Iz | NN:nn DD:nn
+pow n1 I1 | NN:nn DD:nn
+pow n1 Im | NN:nn DD:nn
+pow n1 Jn | NN:nn DD:nn
+pow n1 JI | NN:nn DD:nn
+pow n1 JJ | NN:nn DD:nn
+pow n1 J0 | NN:nn DD:nn
+pow n1 Jz | NN:nn DD:nn
+pow n1 J1 | NN:nn DD:nn
+pow n1 Jm | NN:nn DD:nn
+pow n1 0n | NN:nn DD:nn
+pow n1 0I | NN:nn DD:nn
+pow n1 0J | NN:nn DD:nn
+pow n1 00 | NN:p0 DD:pz
+pow n1 0z | NN:p0 DD:pz
+pow n1 01 | NN:nn DD:nn
+pow n1 0m | NN:nn DD:nn
+pow n1 zn | NN:nn DD:nn
+pow n1 zI | NN:nn DD:nn
+pow n1 zJ | NN:nn DD:nn
+pow n1 z0 | NN:pz DD:pz
+pow n1 zz | NN:pz DD:pz
+pow n1 z1 | NN:nn DD:nn
+pow n1 zm | NN:nn DD:nn
+pow n1 1n | NN:nn DD:nn
+pow n1 1I | NN:nn DD:nn
+pow n1 1J | NN:nn DD:nn
+pow n1 10 | NN:nn DD:nn
+pow n1 1z | NN:nn DD:nn
+pow n1 11 | NN:nn DD:nn
+pow n1 1m | NN:nn DD:nn
+pow n1 mn | NN:nn DD:nn
+pow n1 mI | NN:nn DD:nn
+pow n1 mJ | NN:nn DD:nn
+pow n1 m0 | NN:nn DD:nn
+pow n1 mz | NN:nn DD:nn
+pow n1 m1 | NN:nn DD:nn
+pow n1 mm | NN:nn DD:nn
+pow nm nn | NN:nn DD:nn
+pow nm nI | NN:nn DD:nn
+pow nm nJ | NN:nn DD:nn
+pow nm n0 | NN:nn DD:nn
+pow nm nz | NN:nn DD:nn
+pow nm n1 | NN:nn DD:nn
+pow nm nm | NN:nn DD:nn
+pow nm In | NN:nn DD:nn
+pow nm II | NN:nn DD:nn
+pow nm IJ | NN:nn DD:nn
+pow nm I0 | NN:nn DD:nn
+pow nm Iz | NN:nn DD:nn
+pow nm I1 | NN:nn DD:nn
+pow nm Im | NN:nn DD:nn
+pow nm Jn | NN:nn DD:nn
+pow nm JI | NN:nn DD:nn
+pow nm JJ | NN:nn DD:nn
+pow nm J0 | NN:nn DD:nn
+pow nm Jz | NN:nn DD:nn
+pow nm J1 | NN:nn DD:nn
+pow nm Jm | NN:nn DD:nn
+pow nm 0n | NN:nn DD:nn
+pow nm 0I | NN:nn DD:nn
+pow nm 0J | NN:nn DD:nn
+pow nm 00 | NN:pz DD:pz
+pow nm 0z | NN:pz DD:pz
+pow nm 01 | NN:nn DD:nn
+pow nm 0m | NN:nn DD:nn
+pow nm zn | NN:nn DD:nn
+pow nm zI | NN:nn DD:nn
+pow nm zJ | NN:nn DD:nn
+pow nm z0 | NN:p0 DD:pz
+pow nm zz | NN:p0 DD:pz
+pow nm z1 | NN:nn DD:nn
+pow nm zm | NN:nn DD:nn
+pow nm 1n | NN:nn DD:nn
+pow nm 1I | NN:nn DD:nn
+pow nm 1J | NN:nn DD:nn
+pow nm 10 | NN:nn DD:nn
+pow nm 1z | NN:nn DD:nn
+pow nm 11 | NN:nn DD:nn
+pow nm 1m | NN:nn DD:nn
+pow nm mn | NN:nn DD:nn
+pow nm mI | NN:nn DD:nn
+pow nm mJ | NN:nn DD:nn
+pow nm m0 | NN:nn DD:nn
+pow nm mz | NN:nn DD:nn
+pow nm m1 | NN:nn DD:nn
+pow nm mm | NN:nn DD:nn
+pow nh nn | NN:nn DD:nn
+pow nh nI | NN:nn DD:nn
+pow nh nJ | NN:nn DD:nn
+pow nh n0 | NN:nn DD:nn
+pow nh nz | NN:nn DD:nn
+pow nh n1 | NN:nn DD:nn
+pow nh nm | NN:nn DD:nn
+pow nh In | NN:nn DD:nn
+pow nh II | NN:nn DD:nn
+pow nh IJ | NN:nn DD:nn
+pow nh I0 | NN:nn DD:nn
+pow nh Iz | NN:nn DD:nn
+pow nh I1 | NN:nn DD:nn
+pow nh Im | NN:nn DD:nn
+pow nh Jn | NN:nn DD:nn
+pow nh JI | NN:nn DD:nn
+pow nh JJ | NN:nn DD:nn
+pow nh J0 | NN:nn DD:nn
+pow nh Jz | NN:nn DD:nn
+pow nh J1 | NN:nn DD:nn
+pow nh Jm | NN:nn DD:nn
+pow nh 0n | NN:nn DD:nn
+pow nh 0I | NN:nn DD:nn
+pow nh 0J | NN:nn DD:nn
+pow nh 00 | NN:p0 DD:pz
+pow nh 0z | NN:p0 DD:pz
+pow nh 01 | NN:nn DD:nn
+pow nh 0m | NN:nn DD:nn
+pow nh zn | NN:nn DD:nn
+pow nh zI | NN:nn DD:nn
+pow nh zJ | NN:nn DD:nn
+pow nh z0 | NN:pz DD:pz
+pow nh zz | NN:pz DD:pz
+pow nh z1 | NN:nn DD:nn
+pow nh zm | NN:nn DD:nn
+pow nh 1n | NN:nn DD:nn
+pow nh 1I | NN:nn DD:nn
+pow nh 1J | NN:nn DD:nn
+pow nh 10 | NN:nn DD:nn
+pow nh 1z | NN:nn DD:nn
+pow nh 11 | NN:nn DD:nn
+pow nh 1m | NN:nn DD:nn
+pow nh mn | NN:nn DD:nn
+pow nh mI | NN:nn DD:nn
+pow nh mJ | NN:nn DD:nn
+pow nh m0 | NN:nn DD:nn
+pow nh mz | NN:nn DD:nn
+pow nh m1 | NN:nn DD:nn
+pow nh mm | NN:nn DD:nn
+pow In nn | NN:nn DD:nn
+pow In nI | NN:nn DD:nn
+pow In nJ | NN:nn DD:nn
+pow In n0 | NN:nn DD:nn
+pow In nz | NN:nn DD:nn
+pow In n1 | NN:nn DD:nn
+pow In nm | NN:nn DD:nn
+pow In In | NN:In DD:In
+pow In II | NN:In DD:In
+pow In IJ | NN:In DD:In
+pow In I0 | NN:In DD:In
+pow In Iz | NN:In DD:In
+pow In I1 | NN:In DD:In
+pow In Im | NN:In DD:In
+pow In Jn | NN:00 DD:00
+pow In JI | NN:00 DD:00
+pow In JJ | NN:00 DD:00
+pow In J0 | NN:00 DD:00
+pow In Jz | NN:00 DD:00
+pow In J1 | NN:00 DD:00
+pow In Jm | NN:00 DD:00
+pow In 0n | NN:nn DD:nn
+pow In 0I | NN:nn DD:nn
+pow In 0J | NN:nn DD:nn
+pow In 00 | NN:p0 DD:pz
+pow In 0z | NN:pz DD:pz
+pow In 01 | NN:nn DD:nn
+pow In 0m | NN:nn DD:nn
+pow In zn | NN:nn DD:nn
+pow In zI | NN:nn DD:nn
+pow In zJ | NN:nn DD:nn
+pow In z0 | NN:p0 DD:pz
+pow In zz | NN:pz DD:pz
+pow In z1 | NN:nn DD:nn
+pow In zm | NN:nn DD:nn
+pow In 1n | NN:In DD:In
+pow In 1I | NN:nn DD:nn
+pow In 1J | NN:nn DD:nn
+pow In 10 | NN:In DD:In
+pow In 1z | NN:In DD:In
+pow In 11 | NN:In DD:In
+pow In 1m | NN:In DD:In
+pow In mn | NN:00 DD:00
+pow In mI | NN:nn DD:nn
+pow In mJ | NN:nn DD:nn
+pow In m0 | NN:00 DD:00
+pow In mz | NN:00 DD:00
+pow In m1 | NN:00 DD:00
+pow In mm | NN:00 DD:00
+pow II nn | NN:nn DD:nn
+pow II nI | NN:nn DD:nn
+pow II nJ | NN:nn DD:nn
+pow II n0 | NN:nn DD:nn
+pow II nz | NN:nn DD:nn
+pow II n1 | NN:nn DD:nn
+pow II nm | NN:nn DD:nn
+pow II In | NN:In DD:In
+pow II II | NN:nn DD:nn
+pow II IJ | NN:In DD:In
+pow II I0 | NN:In DD:In
+pow II Iz | NN:In DD:In
+pow II I1 | NN:In DD:In
+pow II Im | NN:In DD:In
+pow II Jn | NN:00 DD:00
+pow II JI | NN:00 DD:00
+pow II JJ | NN:nn DD:nn
+pow II J0 | NN:00 DD:00
+pow II Jz | NN:00 DD:00
+pow II J1 | NN:00 DD:00
+pow II Jm | NN:00 DD:00
+pow II 0n | NN:nn DD:nn
+pow II 0I | NN:nn DD:nn
+pow II 0J | NN:nn DD:nn
+pow II 00 | NN:p0 DD:pz
+pow II 0z | NN:pz DD:pz
+pow II 01 | NN:nn DD:nn
+pow II 0m | NN:nn DD:nn
+pow II zn | NN:nn DD:nn
+pow II zI | NN:nn DD:nn
+pow II zJ | NN:nn DD:nn
+pow II z0 | NN:p0 DD:pz
+pow II zz | NN:pz DD:pz
+pow II z1 | NN:nn DD:nn
+pow II zm | NN:nn DD:nn
+pow II 1n | NN:In DD:In
+pow II 1I | NN:nn DD:nn
+pow II 1J | NN:In DD:In
+pow II 10 | NN:In DD:In
+pow II 1z | NN:In DD:In
+pow II 11 | NN:In DD:In
+pow II 1m | NN:In DD:In
+pow II mn | NN:00 DD:00
+pow II mI | NN:00 DD:00
+pow II mJ | NN:nn DD:nn
+pow II m0 | NN:00 DD:00
+pow II mz | NN:00 DD:00
+pow II m1 | NN:00 DD:00
+pow II mm | NN:00 DD:00
+pow IJ nn | NN:nn DD:nn
+pow IJ nI | NN:nn DD:nn
+pow IJ nJ | NN:nn DD:nn
+pow IJ n0 | NN:nn DD:nn
+pow IJ nz | NN:nn DD:nn
+pow IJ n1 | NN:nn DD:nn
+pow IJ nm | NN:nn DD:nn
+pow IJ In | NN:In DD:In
+pow IJ II | NN:In DD:In
+pow IJ IJ | NN:nn DD:nn
+pow IJ I0 | NN:In DD:In
+pow IJ Iz | NN:In DD:In
+pow IJ I1 | NN:In DD:In
+pow IJ Im | NN:In DD:In
+pow IJ Jn | NN:00 DD:00
+pow IJ JI | NN:nn DD:nn
+pow IJ JJ | NN:00 DD:00
+pow IJ J0 | NN:00 DD:00
+pow IJ Jz | NN:00 DD:00
+pow IJ J1 | NN:00 DD:00
+pow IJ Jm | NN:00 DD:00
+pow IJ 0n | NN:nn DD:nn
+pow IJ 0I | NN:nn DD:nn
+pow IJ 0J | NN:nn DD:nn
+pow IJ 00 | NN:p0 DD:pz
+pow IJ 0z | NN:pz DD:pz
+pow IJ 01 | NN:nn DD:nn
+pow IJ 0m | NN:nn DD:nn
+pow IJ zn | NN:nn DD:nn
+pow IJ zI | NN:nn DD:nn
+pow IJ zJ | NN:nn DD:nn
+pow IJ z0 | NN:p0 DD:pz
+pow IJ zz | NN:pz DD:pz
+pow IJ z1 | NN:nn DD:nn
+pow IJ zm | NN:nn DD:nn
+pow IJ 1n | NN:In DD:In
+pow IJ 1I | NN:In DD:In
+pow IJ 1J | NN:nn DD:nn
+pow IJ 10 | NN:In DD:In
+pow IJ 1z | NN:In DD:In
+pow IJ 11 | NN:In DD:In
+pow IJ 1m | NN:In DD:In
+pow IJ mn | NN:00 DD:00
+pow IJ mI | NN:nn DD:nn
+pow IJ mJ | NN:00 DD:00
+pow IJ m0 | NN:00 DD:00
+pow IJ mz | NN:00 DD:00
+pow IJ m1 | NN:00 DD:00
+pow IJ mm | NN:00 DD:00
+pow I0 nn | NN:nn DD:nn
+pow I0 nI | NN:nn DD:nn
+pow I0 nJ | NN:nn DD:nn
+pow I0 n0 | NN:nn DD:nn
+pow I0 nz | NN:nn DD:nn
+pow I0 n1 | NN:nn DD:nn
+pow I0 nm | NN:nn DD:nn
+pow I0 In | NN:In DD:In
+pow I0 II | NN:In DD:In
+pow I0 IJ | NN:In DD:In
+pow I0 I0 | NN:In DD:In
+pow I0 Iz | NN:In DD:In
+pow I0 I1 | NN:In DD:In
+pow I0 Im | NN:In DD:In
+pow I0 Jn | NN:00 DD:00
+pow I0 JI | NN:00 DD:00
+pow I0 JJ | NN:00 DD:00
+pow I0 J0 | NN:00 DD:00
+pow I0 Jz | NN:00 DD:00
+pow I0 J1 | NN:00 DD:00
+pow I0 Jm | NN:00 DD:00
+pow I0 0n | NN:nn DD:nn
+pow I0 0I | NN:nn DD:nn
+pow I0 0J | NN:nn DD:nn
+pow I0 00 | NN:p0 DD:pz
+pow I0 0z | NN:pz DD:pz
+pow I0 01 | NN:nn DD:nn
+pow I0 0m | NN:nn DD:nn
+pow I0 zn | NN:nn DD:nn
+pow I0 zI | NN:nn DD:nn
+pow I0 zJ | NN:nn DD:nn
+pow I0 z0 | NN:p0 DD:pz
+pow I0 zz | NN:pz DD:pz
+pow I0 z1 | NN:nn DD:nn
+pow I0 zm | NN:nn DD:nn
+pow I0 1n | NN:In DD:In
+pow I0 1I | NN:nn DD:nn
+pow I0 1J | NN:nn DD:nn
+pow I0 10 | NN:In DD:In
+pow I0 1z | NN:In DD:In
+pow I0 11 | NN:In DD:In
+pow I0 1m | NN:In DD:In
+pow I0 mn | NN:00 DD:00
+pow I0 mI | NN:nn DD:nn
+pow I0 mJ | NN:nn DD:nn
+pow I0 m0 | NN:00 DD:00
+pow I0 mz | NN:00 DD:00
+pow I0 m1 | NN:00 DD:00
+pow I0 mm | NN:00 DD:00
+pow Iz nn | NN:nn DD:nn
+pow Iz nI | NN:nn DD:nn
+pow Iz nJ | NN:nn DD:nn
+pow Iz n0 | NN:nn DD:nn
+pow Iz nz | NN:nn DD:nn
+pow Iz n1 | NN:nn DD:nn
+pow Iz nm | NN:nn DD:nn
+pow Iz In | NN:In DD:In
+pow Iz II | NN:In DD:In
+pow Iz IJ | NN:In DD:In
+pow Iz I0 | NN:In DD:In
+pow Iz Iz | NN:In DD:In
+pow Iz I1 | NN:In DD:In
+pow Iz Im | NN:In DD:In
+pow Iz Jn | NN:00 DD:00
+pow Iz JI | NN:00 DD:00
+pow Iz JJ | NN:00 DD:00
+pow Iz J0 | NN:00 DD:00
+pow Iz Jz | NN:00 DD:00
+pow Iz J1 | NN:00 DD:00
+pow Iz Jm | NN:00 DD:00
+pow Iz 0n | NN:nn DD:nn
+pow Iz 0I | NN:nn DD:nn
+pow Iz 0J | NN:nn DD:nn
+pow Iz 00 | NN:p0 DD:pz
+pow Iz 0z | NN:pz DD:pz
+pow Iz 01 | NN:nn DD:nn
+pow Iz 0m | NN:nn DD:nn
+pow Iz zn | NN:nn DD:nn
+pow Iz zI | NN:nn DD:nn
+pow Iz zJ | NN:nn DD:nn
+pow Iz z0 | NN:p0 DD:pz
+pow Iz zz | NN:pz DD:pz
+pow Iz z1 | NN:nn DD:nn
+pow Iz zm | NN:nn DD:nn
+pow Iz 1n | NN:In DD:In
+pow Iz 1I | NN:nn DD:nn
+pow Iz 1J | NN:nn DD:nn
+pow Iz 10 | NN:In DD:In
+pow Iz 1z | NN:In DD:In
+pow Iz 11 | NN:In DD:In
+pow Iz 1m | NN:In DD:In
+pow Iz mn | NN:00 DD:00
+pow Iz mI | NN:nn DD:nn
+pow Iz mJ | NN:nn DD:nn
+pow Iz m0 | NN:00 DD:00
+pow Iz mz | NN:00 DD:00
+pow Iz m1 | NN:00 DD:00
+pow Iz mm | NN:00 DD:00
+pow I1 nn | NN:nn DD:nn
+pow I1 nI | NN:nn DD:nn
+pow I1 nJ | NN:nn DD:nn
+pow I1 n0 | NN:nn DD:nn
+pow I1 nz | NN:nn DD:nn
+pow I1 n1 | NN:nn DD:nn
+pow I1 nm | NN:nn DD:nn
+pow I1 In | NN:In DD:In
+pow I1 II | NN:In DD:In
+pow I1 IJ | NN:In DD:In
+pow I1 I0 | NN:In DD:In
+pow I1 Iz | NN:In DD:In
+pow I1 I1 | NN:In DD:In
+pow I1 Im | NN:In DD:In
+pow I1 Jn | NN:00 DD:00
+pow I1 JI | NN:00 DD:00
+pow I1 JJ | NN:00 DD:00
+pow I1 J0 | NN:00 DD:00
+pow I1 Jz | NN:00 DD:00
+pow I1 J1 | NN:00 DD:00
+pow I1 Jm | NN:00 DD:00
+pow I1 0n | NN:nn DD:nn
+pow I1 0I | NN:nn DD:nn
+pow I1 0J | NN:nn DD:nn
+pow I1 00 | NN:p0 DD:pz
+pow I1 0z | NN:pz DD:pz
+pow I1 01 | NN:nn DD:nn
+pow I1 0m | NN:nn DD:nn
+pow I1 zn | NN:nn DD:nn
+pow I1 zI | NN:nn DD:nn
+pow I1 zJ | NN:nn DD:nn
+pow I1 z0 | NN:p0 DD:pz
+pow I1 zz | NN:pz DD:pz
+pow I1 z1 | NN:nn DD:nn
+pow I1 zm | NN:nn DD:nn
+pow I1 1n | NN:In DD:In
+pow I1 1I | NN:nn DD:nn
+pow I1 1J | NN:nn DD:nn
+pow I1 10 | NN:In DD:In
+pow I1 1z | NN:In DD:In
+pow I1 11 | NN:In DD:In
+pow I1 1m | NN:In DD:In
+pow I1 mn | NN:00 DD:00
+pow I1 mI | NN:nn DD:nn
+pow I1 mJ | NN:nn DD:nn
+pow I1 m0 | NN:00 DD:00
+pow I1 mz | NN:00 DD:00
+pow I1 m1 | NN:00 DD:00
+pow I1 mm | NN:00 DD:00
+pow Im nn | NN:nn DD:nn
+pow Im nI | NN:nn DD:nn
+pow Im nJ | NN:nn DD:nn
+pow Im n0 | NN:nn DD:nn
+pow Im nz | NN:nn DD:nn
+pow Im n1 | NN:nn DD:nn
+pow Im nm | NN:nn DD:nn
+pow Im In | NN:In DD:In
+pow Im II | NN:In DD:In
+pow Im IJ | NN:In DD:In
+pow Im I0 | NN:In DD:In
+pow Im Iz | NN:In DD:In
+pow Im I1 | NN:In DD:In
+pow Im Im | NN:In DD:In
+pow Im Jn | NN:00 DD:00
+pow Im JI | NN:00 DD:00
+pow Im JJ | NN:00 DD:00
+pow Im J0 | NN:00 DD:00
+pow Im Jz | NN:00 DD:00
+pow Im J1 | NN:00 DD:00
+pow Im Jm | NN:00 DD:00
+pow Im 0n | NN:nn DD:nn
+pow Im 0I | NN:nn DD:nn
+pow Im 0J | NN:nn DD:nn
+pow Im 00 | NN:p0 DD:pz
+pow Im 0z | NN:pz DD:pz
+pow Im 01 | NN:nn DD:nn
+pow Im 0m | NN:nn DD:nn
+pow Im zn | NN:nn DD:nn
+pow Im zI | NN:nn DD:nn
+pow Im zJ | NN:nn DD:nn
+pow Im z0 | NN:p0 DD:pz
+pow Im zz | NN:pz DD:pz
+pow Im z1 | NN:nn DD:nn
+pow Im zm | NN:nn DD:nn
+pow Im 1n | NN:In DD:In
+pow Im 1I | NN:nn DD:nn
+pow Im 1J | NN:nn DD:nn
+pow Im 10 | NN:In DD:In
+pow Im 1z | NN:In DD:In
+pow Im 11 | NN:In DD:In
+pow Im 1m | NN:In DD:In
+pow Im mn | NN:00 DD:00
+pow Im mI | NN:nn DD:nn
+pow Im mJ | NN:nn DD:nn
+pow Im m0 | NN:00 DD:00
+pow Im mz | NN:00 DD:00
+pow Im m1 | NN:00 DD:00
+pow Im mm | NN:00 DD:00
+pow Ih nn | NN:nn DD:nn
+pow Ih nI | NN:nn DD:nn
+pow Ih nJ | NN:nn DD:nn
+pow Ih n0 | NN:nn DD:nn
+pow Ih nz | NN:nn DD:nn
+pow Ih n1 | NN:nn DD:nn
+pow Ih nm | NN:nn DD:nn
+pow Ih In | NN:In DD:In
+pow Ih II | NN:In DD:In
+pow Ih IJ | NN:In DD:In
+pow Ih I0 | NN:In DD:In
+pow Ih Iz | NN:In DD:In
+pow Ih I1 | NN:In DD:In
+pow Ih Im | NN:In DD:In
+pow Ih Jn | NN:00 DD:00
+pow Ih JI | NN:00 DD:00
+pow Ih JJ | NN:00 DD:00
+pow Ih J0 | NN:00 DD:00
+pow Ih Jz | NN:00 DD:00
+pow Ih J1 | NN:00 DD:00
+pow Ih Jm | NN:00 DD:00
+pow Ih 0n | NN:nn DD:nn
+pow Ih 0I | NN:nn DD:nn
+pow Ih 0J | NN:nn DD:nn
+pow Ih 00 | NN:p0 DD:pz
+pow Ih 0z | NN:pz DD:pz
+pow Ih 01 | NN:nn DD:nn
+pow Ih 0m | NN:nn DD:nn
+pow Ih zn | NN:nn DD:nn
+pow Ih zI | NN:nn DD:nn
+pow Ih zJ | NN:nn DD:nn
+pow Ih z0 | NN:p0 DD:pz
+pow Ih zz | NN:pz DD:pz
+pow Ih z1 | NN:nn DD:nn
+pow Ih zm | NN:nn DD:nn
+pow Ih 1n | NN:In DD:In
+pow Ih 1I | NN:nn DD:nn
+pow Ih 1J | NN:nn DD:nn
+pow Ih 10 | NN:In DD:In
+pow Ih 1z | NN:In DD:In
+pow Ih 11 | NN:In DD:In
+pow Ih 1m | NN:In DD:In
+pow Ih mn | NN:00 DD:00
+pow Ih mI | NN:nn DD:nn
+pow Ih mJ | NN:nn DD:nn
+pow Ih m0 | NN:00 DD:00
+pow Ih mz | NN:00 DD:00
+pow Ih m1 | NN:00 DD:00
+pow Ih mm | NN:00 DD:00
+pow Jn nn | NN:nn DD:nn
+pow Jn nI | NN:nn DD:nn
+pow Jn nJ | NN:nn DD:nn
+pow Jn n0 | NN:nn DD:nn
+pow Jn nz | NN:nn DD:nn
+pow Jn n1 | NN:nn DD:nn
+pow Jn nm | NN:nn DD:nn
+pow Jn In | NN:In DD:In
+pow Jn II | NN:In DD:In
+pow Jn IJ | NN:In DD:In
+pow Jn I0 | NN:In DD:In
+pow Jn Iz | NN:In DD:In
+pow Jn I1 | NN:In DD:In
+pow Jn Im | NN:In DD:In
+pow Jn Jn | NN:00 DD:00
+pow Jn JI | NN:00 DD:00
+pow Jn JJ | NN:00 DD:00
+pow Jn J0 | NN:00 DD:00
+pow Jn Jz | NN:00 DD:00
+pow Jn J1 | NN:00 DD:00
+pow Jn Jm | NN:00 DD:00
+pow Jn 0n | NN:nn DD:nn
+pow Jn 0I | NN:nn DD:nn
+pow Jn 0J | NN:nn DD:nn
+pow Jn 00 | NN:p0 DD:pz
+pow Jn 0z | NN:pz DD:pz
+pow Jn 01 | NN:nn DD:nn
+pow Jn 0m | NN:nn DD:nn
+pow Jn zn | NN:nn DD:nn
+pow Jn zI | NN:nn DD:nn
+pow Jn zJ | NN:nn DD:nn
+pow Jn z0 | NN:p0 DD:pz
+pow Jn zz | NN:pz DD:pz
+pow Jn z1 | NN:nn DD:nn
+pow Jn zm | NN:nn DD:nn
+pow Jn 1n | NN:In DD:In
+pow Jn 1I | NN:nn DD:nn
+pow Jn 1J | NN:nn DD:nn
+pow Jn 10 | NN:In DD:In
+pow Jn 1z | NN:In DD:In
+pow Jn 11 | NN:In DD:In
+pow Jn 1m | NN:In DD:In
+pow Jn mn | NN:00 DD:00
+pow Jn mI | NN:nn DD:nn
+pow Jn mJ | NN:nn DD:nn
+pow Jn m0 | NN:00 DD:00
+pow Jn mz | NN:00 DD:00
+pow Jn m1 | NN:00 DD:00
+pow Jn mm | NN:00 DD:00
+pow JI nn | NN:nn DD:nn
+pow JI nI | NN:nn DD:nn
+pow JI nJ | NN:nn DD:nn
+pow JI n0 | NN:nn DD:nn
+pow JI nz | NN:nn DD:nn
+pow JI n1 | NN:nn DD:nn
+pow JI nm | NN:nn DD:nn
+pow JI In | NN:In DD:In
+pow JI II | NN:nn DD:nn
+pow JI IJ | NN:In DD:In
+pow JI I0 | NN:In DD:In
+pow JI Iz | NN:In DD:In
+pow JI I1 | NN:In DD:In
+pow JI Im | NN:In DD:In
+pow JI Jn | NN:00 DD:00
+pow JI JI | NN:00 DD:00
+pow JI JJ | NN:nn DD:nn
+pow JI J0 | NN:00 DD:00
+pow JI Jz | NN:00 DD:00
+pow JI J1 | NN:00 DD:00
+pow JI Jm | NN:00 DD:00
+pow JI 0n | NN:nn DD:nn
+pow JI 0I | NN:nn DD:nn
+pow JI 0J | NN:nn DD:nn
+pow JI 00 | NN:p0 DD:pz
+pow JI 0z | NN:pz DD:pz
+pow JI 01 | NN:nn DD:nn
+pow JI 0m | NN:nn DD:nn
+pow JI zn | NN:nn DD:nn
+pow JI zI | NN:nn DD:nn
+pow JI zJ | NN:nn DD:nn
+pow JI z0 | NN:p0 DD:pz
+pow JI zz | NN:pz DD:pz
+pow JI z1 | NN:nn DD:nn
+pow JI zm | NN:nn DD:nn
+pow JI 1n | NN:In DD:In
+pow JI 1I | NN:nn DD:nn
+pow JI 1J | NN:In DD:In
+pow JI 10 | NN:In DD:In
+pow JI 1z | NN:In DD:In
+pow JI 11 | NN:In DD:In
+pow JI 1m | NN:In DD:In
+pow JI mn | NN:00 DD:00
+pow JI mI | NN:00 DD:00
+pow JI mJ | NN:nn DD:nn
+pow JI m0 | NN:00 DD:00
+pow JI mz | NN:00 DD:00
+pow JI m1 | NN:00 DD:00
+pow JI mm | NN:00 DD:00
+pow JJ nn | NN:nn DD:nn
+pow JJ nI | NN:nn DD:nn
+pow JJ nJ | NN:nn DD:nn
+pow JJ n0 | NN:nn DD:nn
+pow JJ nz | NN:nn DD:nn
+pow JJ n1 | NN:nn DD:nn
+pow JJ nm | NN:nn DD:nn
+pow JJ In | NN:In DD:In
+pow JJ II | NN:In DD:In
+pow JJ IJ | NN:nn DD:nn
+pow JJ I0 | NN:In DD:In
+pow JJ Iz | NN:In DD:In
+pow JJ I1 | NN:In DD:In
+pow JJ Im | NN:In DD:In
+pow JJ Jn | NN:00 DD:00
+pow JJ JI | NN:nn DD:nn
+pow JJ JJ | NN:00 DD:00
+pow JJ J0 | NN:00 DD:00
+pow JJ Jz | NN:00 DD:00
+pow JJ J1 | NN:00 DD:00
+pow JJ Jm | NN:00 DD:00
+pow JJ 0n | NN:nn DD:nn
+pow JJ 0I | NN:nn DD:nn
+pow JJ 0J | NN:nn DD:nn
+pow JJ 00 | NN:p0 DD:pz
+pow JJ 0z | NN:pz DD:pz
+pow JJ 01 | NN:nn DD:nn
+pow JJ 0m | NN:nn DD:nn
+pow JJ zn | NN:nn DD:nn
+pow JJ zI | NN:nn DD:nn
+pow JJ zJ | NN:nn DD:nn
+pow JJ z0 | NN:p0 DD:pz
+pow JJ zz | NN:pz DD:pz
+pow JJ z1 | NN:nn DD:nn
+pow JJ zm | NN:nn DD:nn
+pow JJ 1n | NN:In DD:In
+pow JJ 1I | NN:In DD:In
+pow JJ 1J | NN:nn DD:nn
+pow JJ 10 | NN:In DD:In
+pow JJ 1z | NN:In DD:In
+pow JJ 11 | NN:In DD:In
+pow JJ 1m | NN:In DD:In
+pow JJ mn | NN:00 DD:00
+pow JJ mI | NN:nn DD:nn
+pow JJ mJ | NN:00 DD:00
+pow JJ m0 | NN:00 DD:00
+pow JJ mz | NN:00 DD:00
+pow JJ m1 | NN:00 DD:00
+pow JJ mm | NN:00 DD:00
+pow J0 nn | NN:nn DD:nn
+pow J0 nI | NN:nn DD:nn
+pow J0 nJ | NN:nn DD:nn
+pow J0 n0 | NN:nn DD:nn
+pow J0 nz | NN:nn DD:nn
+pow J0 n1 | NN:nn DD:nn
+pow J0 nm | NN:nn DD:nn
+pow J0 In | NN:In DD:In
+pow J0 II | NN:nn DD:nn
+pow J0 IJ | NN:In DD:In
+pow J0 I0 | NN:In DD:In
+pow J0 Iz | NN:In DD:In
+pow J0 I1 | NN:In DD:In
+pow J0 Im | NN:In DD:In
+pow J0 Jn | NN:00 DD:00
+pow J0 JI | NN:00 DD:00
+pow J0 JJ | NN:nn DD:nn
+pow J0 J0 | NN:00 DD:00
+pow J0 Jz | NN:00 DD:00
+pow J0 J1 | NN:00 DD:00
+pow J0 Jm | NN:00 DD:00
+pow J0 0n | NN:nn DD:nn
+pow J0 0I | NN:nn DD:nn
+pow J0 0J | NN:nn DD:nn
+pow J0 00 | NN:p0 DD:pz
+pow J0 0z | NN:pz DD:pz
+pow J0 01 | NN:nn DD:nn
+pow J0 0m | NN:nn DD:nn
+pow J0 zn | NN:nn DD:nn
+pow J0 zI | NN:nn DD:nn
+pow J0 zJ | NN:nn DD:nn
+pow J0 z0 | NN:p0 DD:pz
+pow J0 zz | NN:pz DD:pz
+pow J0 z1 | NN:nn DD:nn
+pow J0 zm | NN:nn DD:nn
+pow J0 1n | NN:In DD:In
+pow J0 1I | NN:nn DD:nn
+pow J0 1J | NN:In DD:In
+pow J0 10 | NN:In DD:In
+pow J0 1z | NN:In DD:In
+pow J0 11 | NN:In DD:In
+pow J0 1m | NN:In DD:In
+pow J0 mn | NN:00 DD:00
+pow J0 mI | NN:00 DD:00
+pow J0 mJ | NN:nn DD:nn
+pow J0 m0 | NN:00 DD:00
+pow J0 mz | NN:00 DD:00
+pow J0 m1 | NN:00 DD:00
+pow J0 mm | NN:00 DD:00
+pow Jz nn | NN:nn DD:nn
+pow Jz nI | NN:nn DD:nn
+pow Jz nJ | NN:nn DD:nn
+pow Jz n0 | NN:nn DD:nn
+pow Jz nz | NN:nn DD:nn
+pow Jz n1 | NN:nn DD:nn
+pow Jz nm | NN:nn DD:nn
+pow Jz In | NN:In DD:In
+pow Jz II | NN:In DD:In
+pow Jz IJ | NN:nn DD:nn
+pow Jz I0 | NN:In DD:In
+pow Jz Iz | NN:In DD:In
+pow Jz I1 | NN:In DD:In
+pow Jz Im | NN:In DD:In
+pow Jz Jn | NN:00 DD:00
+pow Jz JI | NN:nn DD:nn
+pow Jz JJ | NN:00 DD:00
+pow Jz J0 | NN:00 DD:00
+pow Jz Jz | NN:00 DD:00
+pow Jz J1 | NN:00 DD:00
+pow Jz Jm | NN:00 DD:00
+pow Jz 0n | NN:nn DD:nn
+pow Jz 0I | NN:nn DD:nn
+pow Jz 0J | NN:nn DD:nn
+pow Jz 00 | NN:p0 DD:pz
+pow Jz 0z | NN:pz DD:pz
+pow Jz 01 | NN:nn DD:nn
+pow Jz 0m | NN:nn DD:nn
+pow Jz zn | NN:nn DD:nn
+pow Jz zI | NN:nn DD:nn
+pow Jz zJ | NN:nn DD:nn
+pow Jz z0 | NN:p0 DD:pz
+pow Jz zz | NN:pz DD:pz
+pow Jz z1 | NN:nn DD:nn
+pow Jz zm | NN:nn DD:nn
+pow Jz 1n | NN:In DD:In
+pow Jz 1I | NN:In DD:In
+pow Jz 1J | NN:nn DD:nn
+pow Jz 10 | NN:In DD:In
+pow Jz 1z | NN:In DD:In
+pow Jz 11 | NN:In DD:In
+pow Jz 1m | NN:In DD:In
+pow Jz mn | NN:00 DD:00
+pow Jz mI | NN:nn DD:nn
+pow Jz mJ | NN:00 DD:00
+pow Jz m0 | NN:00 DD:00
+pow Jz mz | NN:00 DD:00
+pow Jz m1 | NN:00 DD:00
+pow Jz mm | NN:00 DD:00
+pow J1 nn | NN:nn DD:nn
+pow J1 nI | NN:nn DD:nn
+pow J1 nJ | NN:nn DD:nn
+pow J1 n0 | NN:nn DD:nn
+pow J1 nz | NN:nn DD:nn
+pow J1 n1 | NN:nn DD:nn
+pow J1 nm | NN:nn DD:nn
+pow J1 In | NN:In DD:In
+pow J1 II | NN:nn DD:nn
+pow J1 IJ | NN:In DD:In
+pow J1 I0 | NN:In DD:In
+pow J1 Iz | NN:In DD:In
+pow J1 I1 | NN:In DD:In
+pow J1 Im | NN:In DD:In
+pow J1 Jn | NN:00 DD:00
+pow J1 JI | NN:00 DD:00
+pow J1 JJ | NN:nn DD:nn
+pow J1 J0 | NN:00 DD:00
+pow J1 Jz | NN:00 DD:00
+pow J1 J1 | NN:00 DD:00
+pow J1 Jm | NN:00 DD:00
+pow J1 0n | NN:nn DD:nn
+pow J1 0I | NN:nn DD:nn
+pow J1 0J | NN:nn DD:nn
+pow J1 00 | NN:p0 DD:pz
+pow J1 0z | NN:pz DD:pz
+pow J1 01 | NN:nn DD:nn
+pow J1 0m | NN:nn DD:nn
+pow J1 zn | NN:nn DD:nn
+pow J1 zI | NN:nn DD:nn
+pow J1 zJ | NN:nn DD:nn
+pow J1 z0 | NN:p0 DD:pz
+pow J1 zz | NN:pz DD:pz
+pow J1 z1 | NN:nn DD:nn
+pow J1 zm | NN:nn DD:nn
+pow J1 1n | NN:In DD:In
+pow J1 1I | NN:nn DD:nn
+pow J1 1J | NN:In DD:In
+pow J1 10 | NN:In DD:In
+pow J1 1z | NN:In DD:In
+pow J1 11 | NN:In DD:In
+pow J1 1m | NN:In DD:In
+pow J1 mn | NN:00 DD:00
+pow J1 mI | NN:00 DD:00
+pow J1 mJ | NN:nn DD:nn
+pow J1 m0 | NN:00 DD:00
+pow J1 mz | NN:00 DD:00
+pow J1 m1 | NN:00 DD:00
+pow J1 mm | NN:00 DD:00
+pow Jm nn | NN:nn DD:nn
+pow Jm nI | NN:nn DD:nn
+pow Jm nJ | NN:nn DD:nn
+pow Jm n0 | NN:nn DD:nn
+pow Jm nz | NN:nn DD:nn
+pow Jm n1 | NN:nn DD:nn
+pow Jm nm | NN:nn DD:nn
+pow Jm In | NN:In DD:In
+pow Jm II | NN:In DD:In
+pow Jm IJ | NN:nn DD:nn
+pow Jm I0 | NN:In DD:In
+pow Jm Iz | NN:In DD:In
+pow Jm I1 | NN:In DD:In
+pow Jm Im | NN:In DD:In
+pow Jm Jn | NN:00 DD:00
+pow Jm JI | NN:nn DD:nn
+pow Jm JJ | NN:00 DD:00
+pow Jm J0 | NN:00 DD:00
+pow Jm Jz | NN:00 DD:00
+pow Jm J1 | NN:00 DD:00
+pow Jm Jm | NN:00 DD:00
+pow Jm 0n | NN:nn DD:nn
+pow Jm 0I | NN:nn DD:nn
+pow Jm 0J | NN:nn DD:nn
+pow Jm 00 | NN:p0 DD:pz
+pow Jm 0z | NN:pz DD:pz
+pow Jm 01 | NN:nn DD:nn
+pow Jm 0m | NN:nn DD:nn
+pow Jm zn | NN:nn DD:nn
+pow Jm zI | NN:nn DD:nn
+pow Jm zJ | NN:nn DD:nn
+pow Jm z0 | NN:p0 DD:pz
+pow Jm zz | NN:pz DD:pz
+pow Jm z1 | NN:nn DD:nn
+pow Jm zm | NN:nn DD:nn
+pow Jm 1n | NN:In DD:In
+pow Jm 1I | NN:In DD:In
+pow Jm 1J | NN:nn DD:nn
+pow Jm 10 | NN:In DD:In
+pow Jm 1z | NN:In DD:In
+pow Jm 11 | NN:In DD:In
+pow Jm 1m | NN:In DD:In
+pow Jm mn | NN:00 DD:00
+pow Jm mI | NN:nn DD:nn
+pow Jm mJ | NN:00 DD:00
+pow Jm m0 | NN:00 DD:00
+pow Jm mz | NN:00 DD:00
+pow Jm m1 | NN:00 DD:00
+pow Jm mm | NN:00 DD:00
+pow Jh nn | NN:nn DD:nn
+pow Jh nI | NN:nn DD:nn
+pow Jh nJ | NN:nn DD:nn
+pow Jh n0 | NN:nn DD:nn
+pow Jh nz | NN:nn DD:nn
+pow Jh n1 | NN:nn DD:nn
+pow Jh nm | NN:nn DD:nn
+pow Jh In | NN:In DD:In
+pow Jh II | NN:nn DD:nn
+pow Jh IJ | NN:In DD:In
+pow Jh I0 | NN:In DD:In
+pow Jh Iz | NN:In DD:In
+pow Jh I1 | NN:In DD:In
+pow Jh Im | NN:In DD:In
+pow Jh Jn | NN:00 DD:00
+pow Jh JI | NN:00 DD:00
+pow Jh JJ | NN:nn DD:nn
+pow Jh J0 | NN:00 DD:00
+pow Jh Jz | NN:00 DD:00
+pow Jh J1 | NN:00 DD:00
+pow Jh Jm | NN:00 DD:00
+pow Jh 0n | NN:nn DD:nn
+pow Jh 0I | NN:nn DD:nn
+pow Jh 0J | NN:nn DD:nn
+pow Jh 00 | NN:p0 DD:pz
+pow Jh 0z | NN:pz DD:pz
+pow Jh 01 | NN:nn DD:nn
+pow Jh 0m | NN:nn DD:nn
+pow Jh zn | NN:nn DD:nn
+pow Jh zI | NN:nn DD:nn
+pow Jh zJ | NN:nn DD:nn
+pow Jh z0 | NN:p0 DD:pz
+pow Jh zz | NN:pz DD:pz
+pow Jh z1 | NN:nn DD:nn
+pow Jh zm | NN:nn DD:nn
+pow Jh 1n | NN:In DD:In
+pow Jh 1I | NN:nn DD:nn
+pow Jh 1J | NN:In DD:In
+pow Jh 10 | NN:In DD:In
+pow Jh 1z | NN:In DD:In
+pow Jh 11 | NN:In DD:In
+pow Jh 1m | NN:In DD:In
+pow Jh mn | NN:00 DD:00
+pow Jh mI | NN:00 DD:00
+pow Jh mJ | NN:nn DD:nn
+pow Jh m0 | NN:00 DD:00
+pow Jh mz | NN:00 DD:00
+pow Jh m1 | NN:00 DD:00
+pow Jh mm | NN:00 DD:00
+pow 0n nn | NN:nn DD:nn
+pow 0n nI | NN:nn DD:nn
+pow 0n nJ | NN:nn DD:nn
+pow 0n n0 | NN:nn DD:nn
+pow 0n nz | NN:nn DD:nn
+pow 0n n1 | NN:nn DD:nn
+pow 0n nm | NN:nn DD:nn
+pow 0n In | NN:nn DD:nn
+pow 0n II | NN:nn DD:nn
+pow 0n IJ | NN:nn DD:nn
+pow 0n I0 | NN:nn DD:nn
+pow 0n Iz | NN:nn DD:nn
+pow 0n I1 | NN:nn DD:nn
+pow 0n Im | NN:nn DD:nn
+pow 0n Jn | NN:nn DD:nn
+pow 0n JI | NN:nn DD:nn
+pow 0n JJ | NN:nn DD:nn
+pow 0n J0 | NN:nn DD:nn
+pow 0n Jz | NN:nn DD:nn
+pow 0n J1 | NN:nn DD:nn
+pow 0n Jm | NN:nn DD:nn
+pow 0n 0n | NN:nn DD:nn
+pow 0n 0I | NN:nn DD:nn
+pow 0n 0J | NN:nn DD:nn
+pow 0n 00 | NN:p0 DD:pz
+pow 0n 0z | NN:p0 DD:pz
+pow 0n 01 | NN:nn DD:nn
+pow 0n 0m | NN:nn DD:nn
+pow 0n zn | NN:nn DD:nn
+pow 0n zI | NN:nn DD:nn
+pow 0n zJ | NN:nn DD:nn
+pow 0n z0 | NN:pz DD:pz
+pow 0n zz | NN:pz DD:pz
+pow 0n z1 | NN:nn DD:nn
+pow 0n zm | NN:nn DD:nn
+pow 0n 1n | NN:nn DD:nn
+pow 0n 1I | NN:nn DD:nn
+pow 0n 1J | NN:nn DD:nn
+pow 0n 10 | NN:nn DD:nn
+pow 0n 1z | NN:nn DD:nn
+pow 0n 11 | NN:nn DD:nn
+pow 0n 1m | NN:nn DD:nn
+pow 0n mn | NN:nn DD:nn
+pow 0n mI | NN:nn DD:nn
+pow 0n mJ | NN:nn DD:nn
+pow 0n m0 | NN:nn DD:nn
+pow 0n mz | NN:nn DD:nn
+pow 0n m1 | NN:nn DD:nn
+pow 0n mm | NN:nn DD:nn
+pow 0I nn | NN:nn DD:nn
+pow 0I nI | NN:nn DD:nn
+pow 0I nJ | NN:nn DD:nn
+pow 0I n0 | NN:nn DD:nn
+pow 0I nz | NN:nn DD:nn
+pow 0I n1 | NN:nn DD:nn
+pow 0I nm | NN:nn DD:nn
+pow 0I In | NN:In DD:In
+pow 0I II | NN:nn DD:nn
+pow 0I IJ | NN:In DD:In
+pow 0I I0 | NN:In DD:In
+pow 0I Iz | NN:In DD:In
+pow 0I I1 | NN:In DD:In
+pow 0I Im | NN:In DD:In
+pow 0I Jn | NN:00 DD:00
+pow 0I JI | NN:00 DD:00
+pow 0I JJ | NN:nn DD:nn
+pow 0I J0 | NN:00 DD:00
+pow 0I Jz | NN:00 DD:00
+pow 0I J1 | NN:00 DD:00
+pow 0I Jm | NN:00 DD:00
+pow 0I 0n | NN:nn DD:nn
+pow 0I 0I | NN:nn DD:nn
+pow 0I 0J | NN:nn DD:nn
+pow 0I 00 | NN:p0 DD:pz
+pow 0I 0z | NN:pz DD:pz
+pow 0I 01 | NN:nn DD:nn
+pow 0I 0m | NN:nn DD:nn
+pow 0I zn | NN:nn DD:nn
+pow 0I zI | NN:nn DD:nn
+pow 0I zJ | NN:nn DD:nn
+pow 0I z0 | NN:p0 DD:pz
+pow 0I zz | NN:pz DD:pz
+pow 0I z1 | NN:nn DD:nn
+pow 0I zm | NN:nn DD:nn
+pow 0I 1n | NN:In DD:In
+pow 0I 1I | NN:nn DD:nn
+pow 0I 1J | NN:In DD:In
+pow 0I 10 | NN:In DD:In
+pow 0I 1z | NN:In DD:In
+pow 0I 11 | NN:In DD:In
+pow 0I 1m | NN:In DD:In
+pow 0I mn | NN:00 DD:00
+pow 0I mI | NN:00 DD:00
+pow 0I mJ | NN:nn DD:nn
+pow 0I m0 | NN:00 DD:00
+pow 0I mz | NN:00 DD:00
+pow 0I m1 | NN:00 DD:00
+pow 0I mm | NN:00 DD:00
+pow 0J nn | NN:nn DD:nn
+pow 0J nI | NN:nn DD:nn
+pow 0J nJ | NN:nn DD:nn
+pow 0J n0 | NN:nn DD:nn
+pow 0J nz | NN:nn DD:nn
+pow 0J n1 | NN:nn DD:nn
+pow 0J nm | NN:nn DD:nn
+pow 0J In | NN:In DD:In
+pow 0J II | NN:In DD:In
+pow 0J IJ | NN:nn DD:nn
+pow 0J I0 | NN:In DD:In
+pow 0J Iz | NN:In DD:In
+pow 0J I1 | NN:In DD:In
+pow 0J Im | NN:In DD:In
+pow 0J Jn | NN:00 DD:00
+pow 0J JI | NN:nn DD:nn
+pow 0J JJ | NN:00 DD:00
+pow 0J J0 | NN:00 DD:00
+pow 0J Jz | NN:00 DD:00
+pow 0J J1 | NN:00 DD:00
+pow 0J Jm | NN:00 DD:00
+pow 0J 0n | NN:nn DD:nn
+pow 0J 0I | NN:nn DD:nn
+pow 0J 0J | NN:nn DD:nn
+pow 0J 00 | NN:p0 DD:pz
+pow 0J 0z | NN:pz DD:pz
+pow 0J 01 | NN:nn DD:nn
+pow 0J 0m | NN:nn DD:nn
+pow 0J zn | NN:nn DD:nn
+pow 0J zI | NN:nn DD:nn
+pow 0J zJ | NN:nn DD:nn
+pow 0J z0 | NN:p0 DD:pz
+pow 0J zz | NN:pz DD:pz
+pow 0J z1 | NN:nn DD:nn
+pow 0J zm | NN:nn DD:nn
+pow 0J 1n | NN:In DD:In
+pow 0J 1I | NN:In DD:In
+pow 0J 1J | NN:nn DD:nn
+pow 0J 10 | NN:In DD:In
+pow 0J 1z | NN:In DD:In
+pow 0J 11 | NN:In DD:In
+pow 0J 1m | NN:In DD:In
+pow 0J mn | NN:00 DD:00
+pow 0J mI | NN:nn DD:nn
+pow 0J mJ | NN:00 DD:00
+pow 0J m0 | NN:00 DD:00
+pow 0J mz | NN:00 DD:00
+pow 0J m1 | NN:00 DD:00
+pow 0J mm | NN:00 DD:00
+pow 00 nn | NN:nn DD:nn
+pow 00 nI | NN:nn DD:nn
+pow 00 nJ | NN:nn DD:nn
+pow 00 n0 | NN:nn DD:nn
+pow 00 nz | NN:nn DD:nn
+pow 00 n1 | NN:nn DD:nn
+pow 00 nm | NN:nn DD:nn
+pow 00 In | NN:00 DD:00
+pow 00 II | NN:00 DD:00
+pow 00 IJ | NN:00 DD:00
+pow 00 I0 | NN:00 DD:00
+pow 00 Iz | NN:00 DD:00
+pow 00 I1 | NN:00 DD:00
+pow 00 Im | NN:00 DD:00
+pow 00 Jn | NN:In DD:In
+pow 00 JI | NN:In DD:In
+pow 00 JJ | NN:In DD:In
+pow 00 J0 | NN:In DD:In
+pow 00 Jz | NN:In DD:In
+pow 00 J1 | NN:In DD:In
+pow 00 Jm | NN:In DD:In
+pow 00 0n | NN:nn DD:nn
+pow 00 0I | NN:nn DD:nn
+pow 00 0J | NN:nn DD:nn
+pow 00 00 | NN:p0 DD:p0
+pow 00 0z | NN:p0 DD:p0
+pow 00 01 | NN:nn DD:nn
+pow 00 0m | NN:nn DD:nn
+pow 00 zn | NN:nn DD:nn
+pow 00 zI | NN:nn DD:nn
+pow 00 zJ | NN:nn DD:nn
+pow 00 z0 | NN:p0 DD:p0
+pow 00 zz | NN:p0 DD:p0
+pow 00 z1 | NN:nn DD:nn
+pow 00 zm | NN:nn DD:nn
+pow 00 1n | NN:00 DD:00
+pow 00 1I | NN:nn DD:nn
+pow 00 1J | NN:nn DD:nn
+pow 00 10 | NN:00 DD:00
+pow 00 1z | NN:00 DD:00
+pow 00 11 | NN:00 DD:00
+pow 00 1m | NN:00 DD:00
+pow 00 mn | NN:In DD:In
+pow 00 mI | NN:nn DD:nn
+pow 00 mJ | NN:nn DD:nn
+pow 00 m0 | NN:In DD:In
+pow 00 mz | NN:In DD:In
+pow 00 m1 | NN:In DD:In
+pow 00 mm | NN:In DD:In
+pow 0z nn | NN:nn DD:nn
+pow 0z nI | NN:nn DD:nn
+pow 0z nJ | NN:nn DD:nn
+pow 0z n0 | NN:nn DD:nn
+pow 0z nz | NN:nn DD:nn
+pow 0z n1 | NN:nn DD:nn
+pow 0z nm | NN:nn DD:nn
+pow 0z In | NN:00 DD:00
+pow 0z II | NN:00 DD:00
+pow 0z IJ | NN:00 DD:00
+pow 0z I0 | NN:00 DD:00
+pow 0z Iz | NN:00 DD:00
+pow 0z I1 | NN:00 DD:00
+pow 0z Im | NN:00 DD:00
+pow 0z Jn | NN:In DD:In
+pow 0z JI | NN:In DD:In
+pow 0z JJ | NN:In DD:In
+pow 0z J0 | NN:In DD:In
+pow 0z Jz | NN:In DD:In
+pow 0z J1 | NN:In DD:In
+pow 0z Jm | NN:In DD:In
+pow 0z 0n | NN:nn DD:nn
+pow 0z 0I | NN:nn DD:nn
+pow 0z 0J | NN:nn DD:nn
+pow 0z 00 | NN:p0 DD:p0
+pow 0z 0z | NN:p0 DD:p0
+pow 0z 01 | NN:nn DD:nn
+pow 0z 0m | NN:nn DD:nn
+pow 0z zn | NN:nn DD:nn
+pow 0z zI | NN:nn DD:nn
+pow 0z zJ | NN:nn DD:nn
+pow 0z z0 | NN:p0 DD:p0
+pow 0z zz | NN:p0 DD:p0
+pow 0z z1 | NN:nn DD:nn
+pow 0z zm | NN:nn DD:nn
+pow 0z 1n | NN:00 DD:00
+pow 0z 1I | NN:nn DD:nn
+pow 0z 1J | NN:nn DD:nn
+pow 0z 10 | NN:00 DD:00
+pow 0z 1z | NN:00 DD:00
+pow 0z 11 | NN:00 DD:00
+pow 0z 1m | NN:00 DD:00
+pow 0z mn | NN:In DD:In
+pow 0z mI | NN:nn DD:nn
+pow 0z mJ | NN:nn DD:nn
+pow 0z m0 | NN:In DD:In
+pow 0z mz | NN:In DD:In
+pow 0z m1 | NN:In DD:In
+pow 0z mm | NN:In DD:In
+pow 01 nn | NN:nn DD:nn
+pow 01 nI | NN:00 DD:00
+pow 01 nJ | NN:In DD:In
+pow 01 n0 | NN:nn DD:nn
+pow 01 nz | NN:nn DD:nn
+pow 01 n1 | NN:nn DD:nn
+pow 01 nm | NN:nn DD:nn
+pow 01 In | NN:nn DD:nn
+pow 01 II | NN:00 DD:00
+pow 01 IJ | NN:In DD:In
+pow 01 I0 | NN:nn DD:nn
+pow 01 Iz | NN:nn DD:nn
+pow 01 I1 | NN:nn DD:nn
+pow 01 Im | NN:nn DD:nn
+pow 01 Jn | NN:nn DD:nn
+pow 01 JI | NN:00 DD:00
+pow 01 JJ | NN:In DD:In
+pow 01 J0 | NN:nn DD:nn
+pow 01 Jz | NN:nn DD:nn
+pow 01 J1 | NN:nn DD:nn
+pow 01 Jm | NN:nn DD:nn
+pow 01 0n | NN:nn DD:nn
+pow 01 0I | NN:00 DD:00
+pow 01 0J | NN:In DD:In
+pow 01 00 | NN:p0 DD:pz
+pow 01 0z | NN:p0 DD:pz
+pow 01 01 | NN:p0 DD:pz
+pow 01 0m | NN:p0 DD:pz
+pow 01 zn | NN:nn DD:nn
+pow 01 zI | NN:00 DD:00
+pow 01 zJ | NN:In DD:In
+pow 01 z0 | NN:pz DD:pz
+pow 01 zz | NN:pz DD:pz
+pow 01 z1 | NN:pz DD:pz
+pow 01 zm | NN:pz DD:pz
+pow 01 1n | NN:nn DD:nn
+pow 01 1I | NN:00 DD:00
+pow 01 1J | NN:In DD:In
+pow 01 10 | NN:0p DD:0p
+pow 01 1z | NN:0p DD:0p
+pow 01 11 | NN:0p DD:0p
+pow 01 1m | NN:0p DD:0p
+pow 01 mn | NN:nn DD:nn
+pow 01 mI | NN:00 DD:00
+pow 01 mJ | NN:In DD:In
+pow 01 m0 | NN:qz DD:qz
+pow 01 mz | NN:qz DD:qz
+pow 01 m1 | NN:qz DD:qz
+pow 01 mm | NN:qz DD:qz
+pow 0m nn | NN:nn DD:nn
+pow 0m nI | NN:In DD:In
+pow 0m nJ | NN:00 DD:00
+pow 0m n0 | NN:nn DD:nn
+pow 0m nz | NN:nn DD:nn
+pow 0m n1 | NN:nn DD:nn
+pow 0m nm | NN:nn DD:nn
+pow 0m In | NN:In DD:In
+pow 0m II | NN:In DD:In
+pow 0m IJ | NN:nn DD:nn
+pow 0m I0 | NN:In DD:In
+pow 0m Iz | NN:In DD:In
+pow 0m I1 | NN:In DD:In
+pow 0m Im | NN:In DD:In
+pow 0m Jn | NN:00 DD:00
+pow 0m JI | NN:nn DD:nn
+pow 0m JJ | NN:00 DD:00
+pow 0m J0 | NN:00 DD:00
+pow 0m Jz | NN:00 DD:00
+pow 0m J1 | NN:00 DD:00
+pow 0m Jm | NN:00 DD:00
+pow 0m 0n | NN:nn DD:nn
+pow 0m 0I | NN:In DD:In
+pow 0m 0J | NN:00 DD:00
+pow 0m 00 | NN:p0 DD:pz
+pow 0m 0z | NN:pz DD:pz
+pow 0m 01 | NN:pp DD:pp
+pow 0m 0m | NN:pq DD:pq
+pow 0m zn | NN:nn DD:nn
+pow 0m zI | NN:In DD:In
+pow 0m zJ | NN:00 DD:00
+pow 0m z0 | NN:p0 DD:pz
+pow 0m zz | NN:pz DD:pz
+pow 0m z1 | NN:pp DD:pp
+pow 0m zm | NN:pq DD:pq
+pow 0m 1n | NN:nn DD:nn
+pow 0m 1I | NN:In DD:In
+pow 0m 1J | NN:00 DD:00
+pow 0m 10 | NN:0q DD:0q
+pow 0m 1z | NN:0q DD:0q
+pow 0m 11 | NN:pq DD:pq
+pow 0m 1m | NN:qq DD:qq
+pow 0m mn | NN:nn DD:nn
+pow 0m mI | NN:In DD:In
+pow 0m mJ | NN:00 DD:00
+pow 0m m0 | NN:q0 DD:q0
+pow 0m mz | NN:q0 DD:q0
+pow 0m m1 | NN:qq DD:qq
+pow 0m mm | NN:qp DD:qp
+pow 0h nn | NN:nn DD:nn
+pow 0h nI | NN:00 DD:00
+pow 0h nJ | NN:In DD:In
+pow 0h n0 | NN:nn DD:nn
+pow 0h nz | NN:nn DD:nn
+pow 0h n1 | NN:nn DD:nn
+pow 0h nm | NN:nn DD:nn
+pow 0h In | NN:00 DD:00
+pow 0h II | NN:00 DD:00
+pow 0h IJ | NN:nn DD:nn
+pow 0h I0 | NN:00 DD:00
+pow 0h Iz | NN:00 DD:00
+pow 0h I1 | NN:00 DD:00
+pow 0h Im | NN:00 DD:00
+pow 0h Jn | NN:In DD:In
+pow 0h JI | NN:nn DD:nn
+pow 0h JJ | NN:In DD:In
+pow 0h J0 | NN:In DD:In
+pow 0h Jz | NN:In DD:In
+pow 0h J1 | NN:In DD:In
+pow 0h Jm | NN:In DD:In
+pow 0h 0n | NN:nn DD:nn
+pow 0h 0I | NN:00 DD:00
+pow 0h 0J | NN:In DD:In
+pow 0h 00 | NN:pz DD:pz
+pow 0h 0z | NN:p0 DD:pz
+pow 0h 01 | NN:pq DD:pq
+pow 0h 0m | NN:pp DD:pp
+pow 0h zn | NN:nn DD:nn
+pow 0h zI | NN:00 DD:00
+pow 0h zJ | NN:In DD:In
+pow 0h z0 | NN:pz DD:pz
+pow 0h zz | NN:p0 DD:pz
+pow 0h z1 | NN:pq DD:pq
+pow 0h zm | NN:pp DD:pp
+pow 0h 1n | NN:nn DD:nn
+pow 0h 1I | NN:00 DD:00
+pow 0h 1J | NN:In DD:In
+pow 0h 10 | NN:0p DD:0p
+pow 0h 1z | NN:0p DD:0p
+pow 0h 11 | NN:pp DD:pp
+pow 0h 1m | NN:qp DD:qp
+pow 0h mn | NN:nn DD:nn
+pow 0h mI | NN:00 DD:00
+pow 0h mJ | NN:In DD:In
+pow 0h m0 | NN:qz DD:qz
+pow 0h mz | NN:qz DD:qz
+pow 0h m1 | NN:qp DD:qp
+pow 0h mm | NN:qq DD:qq
+pow zn nn | NN:nn DD:nn
+pow zn nI | NN:nn DD:nn
+pow zn nJ | NN:nn DD:nn
+pow zn n0 | NN:nn DD:nn
+pow zn nz | NN:nn DD:nn
+pow zn n1 | NN:nn DD:nn
+pow zn nm | NN:nn DD:nn
+pow zn In | NN:nn DD:nn
+pow zn II | NN:nn DD:nn
+pow zn IJ | NN:nn DD:nn
+pow zn I0 | NN:nn DD:nn
+pow zn Iz | NN:nn DD:nn
+pow zn I1 | NN:nn DD:nn
+pow zn Im | NN:nn DD:nn
+pow zn Jn | NN:nn DD:nn
+pow zn JI | NN:nn DD:nn
+pow zn JJ | NN:nn DD:nn
+pow zn J0 | NN:nn DD:nn
+pow zn Jz | NN:nn DD:nn
+pow zn J1 | NN:nn DD:nn
+pow zn Jm | NN:nn DD:nn
+pow zn 0n | NN:nn DD:nn
+pow zn 0I | NN:nn DD:nn
+pow zn 0J | NN:nn DD:nn
+pow zn 00 | NN:p0 DD:pz
+pow zn 0z | NN:p0 DD:pz
+pow zn 01 | NN:nn DD:nn
+pow zn 0m | NN:nn DD:nn
+pow zn zn | NN:nn DD:nn
+pow zn zI | NN:nn DD:nn
+pow zn zJ | NN:nn DD:nn
+pow zn z0 | NN:pz DD:pz
+pow zn zz | NN:pz DD:pz
+pow zn z1 | NN:nn DD:nn
+pow zn zm | NN:nn DD:nn
+pow zn 1n | NN:nn DD:nn
+pow zn 1I | NN:nn DD:nn
+pow zn 1J | NN:nn DD:nn
+pow zn 10 | NN:nn DD:nn
+pow zn 1z | NN:nn DD:nn
+pow zn 11 | NN:nn DD:nn
+pow zn 1m | NN:nn DD:nn
+pow zn mn | NN:nn DD:nn
+pow zn mI | NN:nn DD:nn
+pow zn mJ | NN:nn DD:nn
+pow zn m0 | NN:nn DD:nn
+pow zn mz | NN:nn DD:nn
+pow zn m1 | NN:nn DD:nn
+pow zn mm | NN:nn DD:nn
+pow zI nn | NN:nn DD:nn
+pow zI nI | NN:nn DD:nn
+pow zI nJ | NN:nn DD:nn
+pow zI n0 | NN:nn DD:nn
+pow zI nz | NN:nn DD:nn
+pow zI n1 | NN:nn DD:nn
+pow zI nm | NN:nn DD:nn
+pow zI In | NN:In DD:In
+pow zI II | NN:nn DD:nn
+pow zI IJ | NN:In DD:In
+pow zI I0 | NN:In DD:In
+pow zI Iz | NN:In DD:In
+pow zI I1 | NN:In DD:In
+pow zI Im | NN:In DD:In
+pow zI Jn | NN:00 DD:00
+pow zI JI | NN:00 DD:00
+pow zI JJ | NN:nn DD:nn
+pow zI J0 | NN:00 DD:00
+pow zI Jz | NN:00 DD:00
+pow zI J1 | NN:00 DD:00
+pow zI Jm | NN:00 DD:00
+pow zI 0n | NN:nn DD:nn
+pow zI 0I | NN:nn DD:nn
+pow zI 0J | NN:nn DD:nn
+pow zI 00 | NN:p0 DD:pz
+pow zI 0z | NN:pz DD:pz
+pow zI 01 | NN:nn DD:nn
+pow zI 0m | NN:nn DD:nn
+pow zI zn | NN:nn DD:nn
+pow zI zI | NN:nn DD:nn
+pow zI zJ | NN:nn DD:nn
+pow zI z0 | NN:p0 DD:pz
+pow zI zz | NN:pz DD:pz
+pow zI z1 | NN:nn DD:nn
+pow zI zm | NN:nn DD:nn
+pow zI 1n | NN:In DD:In
+pow zI 1I | NN:nn DD:nn
+pow zI 1J | NN:In DD:In
+pow zI 10 | NN:In DD:In
+pow zI 1z | NN:In DD:In
+pow zI 11 | NN:In DD:In
+pow zI 1m | NN:In DD:In
+pow zI mn | NN:00 DD:00
+pow zI mI | NN:00 DD:00
+pow zI mJ | NN:nn DD:nn
+pow zI m0 | NN:00 DD:00
+pow zI mz | NN:00 DD:00
+pow zI m1 | NN:00 DD:00
+pow zI mm | NN:00 DD:00
+pow zJ nn | NN:nn DD:nn
+pow zJ nI | NN:nn DD:nn
+pow zJ nJ | NN:nn DD:nn
+pow zJ n0 | NN:nn DD:nn
+pow zJ nz | NN:nn DD:nn
+pow zJ n1 | NN:nn DD:nn
+pow zJ nm | NN:nn DD:nn
+pow zJ In | NN:In DD:In
+pow zJ II | NN:In DD:In
+pow zJ IJ | NN:nn DD:nn
+pow zJ I0 | NN:In DD:In
+pow zJ Iz | NN:In DD:In
+pow zJ I1 | NN:In DD:In
+pow zJ Im | NN:In DD:In
+pow zJ Jn | NN:00 DD:00
+pow zJ JI | NN:nn DD:nn
+pow zJ JJ | NN:00 DD:00
+pow zJ J0 | NN:00 DD:00
+pow zJ Jz | NN:00 DD:00
+pow zJ J1 | NN:00 DD:00
+pow zJ Jm | NN:00 DD:00
+pow zJ 0n | NN:nn DD:nn
+pow zJ 0I | NN:nn DD:nn
+pow zJ 0J | NN:nn DD:nn
+pow zJ 00 | NN:p0 DD:pz
+pow zJ 0z | NN:pz DD:pz
+pow zJ 01 | NN:nn DD:nn
+pow zJ 0m | NN:nn DD:nn
+pow zJ zn | NN:nn DD:nn
+pow zJ zI | NN:nn DD:nn
+pow zJ zJ | NN:nn DD:nn
+pow zJ z0 | NN:p0 DD:pz
+pow zJ zz | NN:pz DD:pz
+pow zJ z1 | NN:nn DD:nn
+pow zJ zm | NN:nn DD:nn
+pow zJ 1n | NN:In DD:In
+pow zJ 1I | NN:In DD:In
+pow zJ 1J | NN:nn DD:nn
+pow zJ 10 | NN:In DD:In
+pow zJ 1z | NN:In DD:In
+pow zJ 11 | NN:In DD:In
+pow zJ 1m | NN:In DD:In
+pow zJ mn | NN:00 DD:00
+pow zJ mI | NN:nn DD:nn
+pow zJ mJ | NN:00 DD:00
+pow zJ m0 | NN:00 DD:00
+pow zJ mz | NN:00 DD:00
+pow zJ m1 | NN:00 DD:00
+pow zJ mm | NN:00 DD:00
+pow z0 nn | NN:nn DD:nn
+pow z0 nI | NN:nn DD:nn
+pow z0 nJ | NN:nn DD:nn
+pow z0 n0 | NN:nn DD:nn
+pow z0 nz | NN:nn DD:nn
+pow z0 n1 | NN:nn DD:nn
+pow z0 nm | NN:nn DD:nn
+pow z0 In | NN:00 DD:00
+pow z0 II | NN:00 DD:00
+pow z0 IJ | NN:nn DD:nn
+pow z0 I0 | NN:00 DD:00
+pow z0 Iz | NN:00 DD:00
+pow z0 I1 | NN:00 DD:00
+pow z0 Im | NN:00 DD:00
+pow z0 Jn | NN:In DD:In
+pow z0 JI | NN:nn DD:nn
+pow z0 JJ | NN:In DD:In
+pow z0 J0 | NN:In DD:In
+pow z0 Jz | NN:In DD:In
+pow z0 J1 | NN:In DD:In
+pow z0 Jm | NN:In DD:In
+pow z0 0n | NN:nn DD:nn
+pow z0 0I | NN:nn DD:nn
+pow z0 0J | NN:nn DD:nn
+pow z0 00 | NN:p0 DD:p0
+pow z0 0z | NN:p0 DD:p0
+pow z0 01 | NN:nn DD:nn
+pow z0 0m | NN:nn DD:nn
+pow z0 zn | NN:nn DD:nn
+pow z0 zI | NN:nn DD:nn
+pow z0 zJ | NN:nn DD:nn
+pow z0 z0 | NN:p0 DD:p0
+pow z0 zz | NN:p0 DD:p0
+pow z0 z1 | NN:nn DD:nn
+pow z0 zm | NN:nn DD:nn
+pow z0 1n | NN:00 DD:00
+pow z0 1I | NN:00 DD:00
+pow z0 1J | NN:nn DD:nn
+pow z0 10 | NN:00 DD:00
+pow z0 1z | NN:00 DD:00
+pow z0 11 | NN:00 DD:00
+pow z0 1m | NN:00 DD:00
+pow z0 mn | NN:In DD:In
+pow z0 mI | NN:nn DD:nn
+pow z0 mJ | NN:In DD:In
+pow z0 m0 | NN:In DD:In
+pow z0 mz | NN:In DD:In
+pow z0 m1 | NN:In DD:In
+pow z0 mm | NN:In DD:In
+pow zz nn | NN:nn DD:nn
+pow zz nI | NN:nn DD:nn
+pow zz nJ | NN:nn DD:nn
+pow zz n0 | NN:nn DD:nn
+pow zz nz | NN:nn DD:nn
+pow zz n1 | NN:nn DD:nn
+pow zz nm | NN:nn DD:nn
+pow zz In | NN:00 DD:00
+pow zz II | NN:nn DD:nn
+pow zz IJ | NN:00 DD:00
+pow zz I0 | NN:00 DD:00
+pow zz Iz | NN:00 DD:00
+pow zz I1 | NN:00 DD:00
+pow zz Im | NN:00 DD:00
+pow zz Jn | NN:In DD:In
+pow zz JI | NN:In DD:In
+pow zz JJ | NN:nn DD:nn
+pow zz J0 | NN:In DD:In
+pow zz Jz | NN:In DD:In
+pow zz J1 | NN:In DD:In
+pow zz Jm | NN:In DD:In
+pow zz 0n | NN:nn DD:nn
+pow zz 0I | NN:nn DD:nn
+pow zz 0J | NN:nn DD:nn
+pow zz 00 | NN:p0 DD:p0
+pow zz 0z | NN:p0 DD:p0
+pow zz 01 | NN:nn DD:nn
+pow zz 0m | NN:nn DD:nn
+pow zz zn | NN:nn DD:nn
+pow zz zI | NN:nn DD:nn
+pow zz zJ | NN:nn DD:nn
+pow zz z0 | NN:p0 DD:p0
+pow zz zz | NN:p0 DD:p0
+pow zz z1 | NN:nn DD:nn
+pow zz zm | NN:nn DD:nn
+pow zz 1n | NN:00 DD:00
+pow zz 1I | NN:nn DD:nn
+pow zz 1J | NN:00 DD:00
+pow zz 10 | NN:00 DD:00
+pow zz 1z | NN:00 DD:00
+pow zz 11 | NN:00 DD:00
+pow zz 1m | NN:00 DD:00
+pow zz mn | NN:In DD:In
+pow zz mI | NN:In DD:In
+pow zz mJ | NN:nn DD:nn
+pow zz m0 | NN:In DD:In
+pow zz mz | NN:In DD:In
+pow zz m1 | NN:In DD:In
+pow zz mm | NN:In DD:In
+pow z1 nn | NN:nn DD:nn
+pow z1 nI | NN:00 DD:00
+pow z1 nJ | NN:In DD:In
+pow z1 n0 | NN:nn DD:nn
+pow z1 nz | NN:nn DD:nn
+pow z1 n1 | NN:nn DD:nn
+pow z1 nm | NN:nn DD:nn
+pow z1 In | NN:nn DD:nn
+pow z1 II | NN:00 DD:00
+pow z1 IJ | NN:In DD:In
+pow z1 I0 | NN:nn DD:nn
+pow z1 Iz | NN:nn DD:nn
+pow z1 I1 | NN:nn DD:nn
+pow z1 Im | NN:nn DD:nn
+pow z1 Jn | NN:nn DD:nn
+pow z1 JI | NN:00 DD:00
+pow z1 JJ | NN:In DD:In
+pow z1 J0 | NN:nn DD:nn
+pow z1 Jz | NN:nn DD:nn
+pow z1 J1 | NN:nn DD:nn
+pow z1 Jm | NN:nn DD:nn
+pow z1 0n | NN:nn DD:nn
+pow z1 0I | NN:00 DD:00
+pow z1 0J | NN:In DD:In
+pow z1 00 | NN:p0 DD:pz
+pow z1 0z | NN:p0 DD:pz
+pow z1 01 | NN:p0 DD:pz
+pow z1 0m | NN:p0 DD:pz
+pow z1 zn | NN:nn DD:nn
+pow z1 zI | NN:00 DD:00
+pow z1 zJ | NN:In DD:In
+pow z1 z0 | NN:pz DD:pz
+pow z1 zz | NN:pz DD:pz
+pow z1 z1 | NN:pz DD:pz
+pow z1 zm | NN:pz DD:pz
+pow z1 1n | NN:nn DD:nn
+pow z1 1I | NN:00 DD:00
+pow z1 1J | NN:In DD:In
+pow z1 10 | NN:zp DD:zp
+pow z1 1z | NN:zp DD:zp
+pow z1 11 | NN:0p DD:0p
+pow z1 1m | NN:0p DD:0p
+pow z1 mn | NN:nn DD:nn
+pow z1 mI | NN:00 DD:00
+pow z1 mJ | NN:In DD:In
+pow z1 m0 | NN:q0 DD:q0
+pow z1 mz | NN:q0 DD:q0
+pow z1 m1 | NN:qz DD:qz
+pow z1 mm | NN:qz DD:qz
+pow zm nn | NN:nn DD:nn
+pow zm nI | NN:In DD:In
+pow zm nJ | NN:00 DD:00
+pow zm n0 | NN:nn DD:nn
+pow zm nz | NN:nn DD:nn
+pow zm n1 | NN:nn DD:nn
+pow zm nm | NN:nn DD:nn
+pow zm In | NN:In DD:In
+pow zm II | NN:In DD:In
+pow zm IJ | NN:nn DD:nn
+pow zm I0 | NN:In DD:In
+pow zm Iz | NN:In DD:In
+pow zm I1 | NN:In DD:In
+pow zm Im | NN:In DD:In
+pow zm Jn | NN:00 DD:00
+pow zm JI | NN:nn DD:nn
+pow zm JJ | NN:00 DD:00
+pow zm J0 | NN:00 DD:00
+pow zm Jz | NN:00 DD:00
+pow zm J1 | NN:00 DD:00
+pow zm Jm | NN:00 DD:00
+pow zm 0n | NN:nn DD:nn
+pow zm 0I | NN:In DD:In
+pow zm 0J | NN:00 DD:00
+pow zm 00 | NN:p0 DD:pz
+pow zm 0z | NN:pz DD:pz
+pow zm 01 | NN:pp DD:pp
+pow zm 0m | NN:pq DD:pq
+pow zm zn | NN:nn DD:nn
+pow zm zI | NN:In DD:In
+pow zm zJ | NN:00 DD:00
+pow zm z0 | NN:p0 DD:pz
+pow zm zz | NN:pz DD:pz
+pow zm z1 | NN:pp DD:pp
+pow zm zm | NN:pq DD:pq
+pow zm 1n | NN:nn DD:nn
+pow zm 1I | NN:In DD:In
+pow zm 1J | NN:00 DD:00
+pow zm 10 | NN:zq DD:zq
+pow zm 1z | NN:zq DD:zq
+pow zm 11 | NN:pq DD:pq
+pow zm 1m | NN:qq DD:qq
+pow zm mn | NN:nn DD:nn
+pow zm mI | NN:In DD:In
+pow zm mJ | NN:00 DD:00
+pow zm m0 | NN:qz DD:qz
+pow zm mz | NN:qz DD:qz
+pow zm m1 | NN:qq DD:qq
+pow zm mm | NN:qp DD:qp
+pow zh nn | NN:nn DD:nn
+pow zh nI | NN:00 DD:00
+pow zh nJ | NN:In DD:In
+pow zh n0 | NN:nn DD:nn
+pow zh nz | NN:nn DD:nn
+pow zh n1 | NN:nn DD:nn
+pow zh nm | NN:nn DD:nn
+pow zh In | NN:00 DD:00
+pow zh II | NN:00 DD:00
+pow zh IJ | NN:nn DD:nn
+pow zh I0 | NN:00 DD:00
+pow zh Iz | NN:00 DD:00
+pow zh I1 | NN:00 DD:00
+pow zh Im | NN:00 DD:00
+pow zh Jn | NN:In DD:In
+pow zh JI | NN:nn DD:nn
+pow zh JJ | NN:In DD:In
+pow zh J0 | NN:In DD:In
+pow zh Jz | NN:In DD:In
+pow zh J1 | NN:In DD:In
+pow zh Jm | NN:In DD:In
+pow zh 0n | NN:nn DD:nn
+pow zh 0I | NN:00 DD:00
+pow zh 0J | NN:In DD:In
+pow zh 00 | NN:pz DD:pz
+pow zh 0z | NN:p0 DD:pz
+pow zh 01 | NN:pq DD:pq
+pow zh 0m | NN:pp DD:pp
+pow zh zn | NN:nn DD:nn
+pow zh zI | NN:00 DD:00
+pow zh zJ | NN:In DD:In
+pow zh z0 | NN:pz DD:pz
+pow zh zz | NN:p0 DD:pz
+pow zh z1 | NN:pq DD:pq
+pow zh zm | NN:pp DD:pp
+pow zh 1n | NN:nn DD:nn
+pow zh 1I | NN:00 DD:00
+pow zh 1J | NN:In DD:In
+pow zh 10 | NN:zp DD:zp
+pow zh 1z | NN:zp DD:zp
+pow zh 11 | NN:pp DD:pp
+pow zh 1m | NN:qp DD:qp
+pow zh mn | NN:nn DD:nn
+pow zh mI | NN:00 DD:00
+pow zh mJ | NN:In DD:In
+pow zh m0 | NN:q0 DD:q0
+pow zh mz | NN:q0 DD:q0
+pow zh m1 | NN:qp DD:qp
+pow zh mm | NN:qq DD:qq
+pow 1n nn | NN:nn DD:nn
+pow 1n nI | NN:nn DD:nn
+pow 1n nJ | NN:nn DD:nn
+pow 1n n0 | NN:nn DD:nn
+pow 1n nz | NN:nn DD:nn
+pow 1n n1 | NN:nn DD:nn
+pow 1n nm | NN:nn DD:nn
+pow 1n In | NN:nn DD:nn
+pow 1n II | NN:nn DD:nn
+pow 1n IJ | NN:nn DD:nn
+pow 1n I0 | NN:nn DD:nn
+pow 1n Iz | NN:nn DD:nn
+pow 1n I1 | NN:nn DD:nn
+pow 1n Im | NN:nn DD:nn
+pow 1n Jn | NN:nn DD:nn
+pow 1n JI | NN:nn DD:nn
+pow 1n JJ | NN:nn DD:nn
+pow 1n J0 | NN:nn DD:nn
+pow 1n Jz | NN:nn DD:nn
+pow 1n J1 | NN:nn DD:nn
+pow 1n Jm | NN:nn DD:nn
+pow 1n 0n | NN:nn DD:nn
+pow 1n 0I | NN:nn DD:nn
+pow 1n 0J | NN:nn DD:nn
+pow 1n 00 | NN:p0 DD:pz
+pow 1n 0z | NN:p0 DD:pz
+pow 1n 01 | NN:nn DD:nn
+pow 1n 0m | NN:nn DD:nn
+pow 1n zn | NN:nn DD:nn
+pow 1n zI | NN:nn DD:nn
+pow 1n zJ | NN:nn DD:nn
+pow 1n z0 | NN:pz DD:pz
+pow 1n zz | NN:pz DD:pz
+pow 1n z1 | NN:nn DD:nn
+pow 1n zm | NN:nn DD:nn
+pow 1n 1n | NN:nn DD:nn
+pow 1n 1I | NN:nn DD:nn
+pow 1n 1J | NN:nn DD:nn
+pow 1n 10 | NN:nn DD:nn
+pow 1n 1z | NN:nn DD:nn
+pow 1n 11 | NN:nn DD:nn
+pow 1n 1m | NN:nn DD:nn
+pow 1n mn | NN:nn DD:nn
+pow 1n mI | NN:nn DD:nn
+pow 1n mJ | NN:nn DD:nn
+pow 1n m0 | NN:nn DD:nn
+pow 1n mz | NN:nn DD:nn
+pow 1n m1 | NN:nn DD:nn
+pow 1n mm | NN:nn DD:nn
+pow 1I nn | NN:nn DD:nn
+pow 1I nI | NN:nn DD:nn
+pow 1I nJ | NN:nn DD:nn
+pow 1I n0 | NN:nn DD:nn
+pow 1I nz | NN:nn DD:nn
+pow 1I n1 | NN:nn DD:nn
+pow 1I nm | NN:nn DD:nn
+pow 1I In | NN:In DD:In
+pow 1I II | NN:nn DD:nn
+pow 1I IJ | NN:In DD:In
+pow 1I I0 | NN:In DD:In
+pow 1I Iz | NN:In DD:In
+pow 1I I1 | NN:In DD:In
+pow 1I Im | NN:In DD:In
+pow 1I Jn | NN:00 DD:00
+pow 1I JI | NN:00 DD:00
+pow 1I JJ | NN:nn DD:nn
+pow 1I J0 | NN:00 DD:00
+pow 1I Jz | NN:00 DD:00
+pow 1I J1 | NN:00 DD:00
+pow 1I Jm | NN:00 DD:00
+pow 1I 0n | NN:nn DD:nn
+pow 1I 0I | NN:nn DD:nn
+pow 1I 0J | NN:nn DD:nn
+pow 1I 00 | NN:p0 DD:pz
+pow 1I 0z | NN:pz DD:pz
+pow 1I 01 | NN:nn DD:nn
+pow 1I 0m | NN:nn DD:nn
+pow 1I zn | NN:nn DD:nn
+pow 1I zI | NN:nn DD:nn
+pow 1I zJ | NN:nn DD:nn
+pow 1I z0 | NN:p0 DD:pz
+pow 1I zz | NN:pz DD:pz
+pow 1I z1 | NN:nn DD:nn
+pow 1I zm | NN:nn DD:nn
+pow 1I 1n | NN:In DD:In
+pow 1I 1I | NN:nn DD:nn
+pow 1I 1J | NN:In DD:In
+pow 1I 10 | NN:In DD:In
+pow 1I 1z | NN:In DD:In
+pow 1I 11 | NN:In DD:In
+pow 1I 1m | NN:In DD:In
+pow 1I mn | NN:00 DD:00
+pow 1I mI | NN:00 DD:00
+pow 1I mJ | NN:nn DD:nn
+pow 1I m0 | NN:00 DD:00
+pow 1I mz | NN:00 DD:00
+pow 1I m1 | NN:00 DD:00
+pow 1I mm | NN:00 DD:00
+pow 1J nn | NN:nn DD:nn
+pow 1J nI | NN:nn DD:nn
+pow 1J nJ | NN:nn DD:nn
+pow 1J n0 | NN:nn DD:nn
+pow 1J nz | NN:nn DD:nn
+pow 1J n1 | NN:nn DD:nn
+pow 1J nm | NN:nn DD:nn
+pow 1J In | NN:In DD:In
+pow 1J II | NN:In DD:In
+pow 1J IJ | NN:nn DD:nn
+pow 1J I0 | NN:In DD:In
+pow 1J Iz | NN:In DD:In
+pow 1J I1 | NN:In DD:In
+pow 1J Im | NN:In DD:In
+pow 1J Jn | NN:00 DD:00
+pow 1J JI | NN:nn DD:nn
+pow 1J JJ | NN:00 DD:00
+pow 1J J0 | NN:00 DD:00
+pow 1J Jz | NN:00 DD:00
+pow 1J J1 | NN:00 DD:00
+pow 1J Jm | NN:00 DD:00
+pow 1J 0n | NN:nn DD:nn
+pow 1J 0I | NN:nn DD:nn
+pow 1J 0J | NN:nn DD:nn
+pow 1J 00 | NN:p0 DD:pz
+pow 1J 0z | NN:pz DD:pz
+pow 1J 01 | NN:nn DD:nn
+pow 1J 0m | NN:nn DD:nn
+pow 1J zn | NN:nn DD:nn
+pow 1J zI | NN:nn DD:nn
+pow 1J zJ | NN:nn DD:nn
+pow 1J z0 | NN:p0 DD:pz
+pow 1J zz | NN:pz DD:pz
+pow 1J z1 | NN:nn DD:nn
+pow 1J zm | NN:nn DD:nn
+pow 1J 1n | NN:In DD:In
+pow 1J 1I | NN:In DD:In
+pow 1J 1J | NN:nn DD:nn
+pow 1J 10 | NN:In DD:In
+pow 1J 1z | NN:In DD:In
+pow 1J 11 | NN:In DD:In
+pow 1J 1m | NN:In DD:In
+pow 1J mn | NN:00 DD:00
+pow 1J mI | NN:nn DD:nn
+pow 1J mJ | NN:00 DD:00
+pow 1J m0 | NN:00 DD:00
+pow 1J mz | NN:00 DD:00
+pow 1J m1 | NN:00 DD:00
+pow 1J mm | NN:00 DD:00
+pow 10 nn | NN:nn DD:nn
+pow 10 nI | NN:nn DD:nn
+pow 10 nJ | NN:nn DD:nn
+pow 10 n0 | NN:nn DD:nn
+pow 10 nz | NN:nn DD:nn
+pow 10 n1 | NN:nn DD:nn
+pow 10 nm | NN:nn DD:nn
+pow 10 In | NN:nn DD:nn
+pow 10 II | NN:nn DD:nn
+pow 10 IJ | NN:nn DD:nn
+pow 10 I0 | NN:nn DD:nn
+pow 10 Iz | NN:nn DD:nn
+pow 10 I1 | NN:nn DD:nn
+pow 10 Im | NN:nn DD:nn
+pow 10 Jn | NN:nn DD:nn
+pow 10 JI | NN:nn DD:nn
+pow 10 JJ | NN:nn DD:nn
+pow 10 J0 | NN:nn DD:nn
+pow 10 Jz | NN:nn DD:nn
+pow 10 J1 | NN:nn DD:nn
+pow 10 Jm | NN:nn DD:nn
+pow 10 0n | NN:nn DD:nn
+pow 10 0I | NN:nn DD:nn
+pow 10 0J | NN:nn DD:nn
+pow 10 00 | NN:p0 DD:pz
+pow 10 0z | NN:p0 DD:pz
+pow 10 01 | NN:p0 DD:pz
+pow 10 0m | NN:p0 DD:pz
+pow 10 zn | NN:nn DD:nn
+pow 10 zI | NN:nn DD:nn
+pow 10 zJ | NN:nn DD:nn
+pow 10 z0 | NN:pz DD:pz
+pow 10 zz | NN:pz DD:pz
+pow 10 z1 | NN:pz DD:pz
+pow 10 zm | NN:pz DD:pz
+pow 10 1n | NN:nn DD:nn
+pow 10 1I | NN:nn DD:nn
+pow 10 1J | NN:nn DD:nn
+pow 10 10 | NN:p0 DD:pz
+pow 10 1z | NN:p0 DD:pz
+pow 10 11 | NN:p0 DD:pz
+pow 10 1m | NN:p0 DD:pz
+pow 10 mn | NN:nn DD:nn
+pow 10 mI | NN:nn DD:nn
+pow 10 mJ | NN:nn DD:nn
+pow 10 m0 | NN:pz DD:pz
+pow 10 mz | NN:pz DD:pz
+pow 10 m1 | NN:pz DD:pz
+pow 10 mm | NN:pz DD:pz
+pow 1z nn | NN:nn DD:nn
+pow 1z nI | NN:nn DD:nn
+pow 1z nJ | NN:nn DD:nn
+pow 1z n0 | NN:nn DD:nn
+pow 1z nz | NN:nn DD:nn
+pow 1z n1 | NN:nn DD:nn
+pow 1z nm | NN:nn DD:nn
+pow 1z In | NN:nn DD:nn
+pow 1z II | NN:nn DD:nn
+pow 1z IJ | NN:nn DD:nn
+pow 1z I0 | NN:nn DD:nn
+pow 1z Iz | NN:nn DD:nn
+pow 1z I1 | NN:nn DD:nn
+pow 1z Im | NN:nn DD:nn
+pow 1z Jn | NN:nn DD:nn
+pow 1z JI | NN:nn DD:nn
+pow 1z JJ | NN:nn DD:nn
+pow 1z J0 | NN:nn DD:nn
+pow 1z Jz | NN:nn DD:nn
+pow 1z J1 | NN:nn DD:nn
+pow 1z Jm | NN:nn DD:nn
+pow 1z 0n | NN:nn DD:nn
+pow 1z 0I | NN:nn DD:nn
+pow 1z 0J | NN:nn DD:nn
+pow 1z 00 | NN:pz DD:pz
+pow 1z 0z | NN:pz DD:pz
+pow 1z 01 | NN:pz DD:pz
+pow 1z 0m | NN:pz DD:pz
+pow 1z zn | NN:nn DD:nn
+pow 1z zI | NN:nn DD:nn
+pow 1z zJ | NN:nn DD:nn
+pow 1z z0 | NN:p0 DD:pz
+pow 1z zz | NN:p0 DD:pz
+pow 1z z1 | NN:p0 DD:pz
+pow 1z zm | NN:p0 DD:pz
+pow 1z 1n | NN:nn DD:nn
+pow 1z 1I | NN:nn DD:nn
+pow 1z 1J | NN:nn DD:nn
+pow 1z 10 | NN:pz DD:pz
+pow 1z 1z | NN:pz DD:pz
+pow 1z 11 | NN:pz DD:pz
+pow 1z 1m | NN:pz DD:pz
+pow 1z mn | NN:nn DD:nn
+pow 1z mI | NN:nn DD:nn
+pow 1z mJ | NN:nn DD:nn
+pow 1z m0 | NN:p0 DD:pz
+pow 1z mz | NN:p0 DD:pz
+pow 1z m1 | NN:p0 DD:pz
+pow 1z mm | NN:p0 DD:pz
+pow 11 nn | NN:nn DD:nn
+pow 11 nI | NN:00 DD:00
+pow 11 nJ | NN:In DD:In
+pow 11 n0 | NN:nn DD:nn
+pow 11 nz | NN:nn DD:nn
+pow 11 n1 | NN:nn DD:nn
+pow 11 nm | NN:nn DD:nn
+pow 11 In | NN:In DD:In
+pow 11 II | NN:nn DD:nn
+pow 11 IJ | NN:In DD:In
+pow 11 I0 | NN:In DD:In
+pow 11 Iz | NN:In DD:In
+pow 11 I1 | NN:In DD:In
+pow 11 Im | NN:In DD:In
+pow 11 Jn | NN:00 DD:00
+pow 11 JI | NN:00 DD:00
+pow 11 JJ | NN:nn DD:nn
+pow 11 J0 | NN:00 DD:00
+pow 11 Jz | NN:00 DD:00
+pow 11 J1 | NN:00 DD:00
+pow 11 Jm | NN:00 DD:00
+pow 11 0n | NN:nn DD:nn
+pow 11 0I | NN:00 DD:00
+pow 11 0J | NN:In DD:In
+pow 11 00 | NN:p0 DD:pz
+pow 11 0z | NN:pz DD:pz
+pow 11 01 | NN:pp DD:pp
+pow 11 0m | NN:pq DD:pq
+pow 11 zn | NN:nn DD:nn
+pow 11 zI | NN:00 DD:00
+pow 11 zJ | NN:In DD:In
+pow 11 z0 | NN:p0 DD:pz
+pow 11 zz | NN:pz DD:pz
+pow 11 z1 | NN:pp DD:pp
+pow 11 zm | NN:pq DD:pq
+pow 11 1n | NN:nn DD:nn
+pow 11 1I | NN:00 DD:00
+pow 11 1J | NN:In DD:In
+pow 11 10 | NN:pp DD:pp
+pow 11 1z | NN:pp DD:pp
+pow 11 11 | NN:pp DD:pp
+pow 11 1m | NN:pp DD:pp
+pow 11 mn | NN:nn DD:nn
+pow 11 mI | NN:00 DD:00
+pow 11 mJ | NN:In DD:In
+pow 11 m0 | NN:0q DD:0q
+pow 11 mz | NN:0q DD:0q
+pow 11 m1 | NN:pq DD:pq
+pow 11 mm | NN:qq DD:qq
+pow 1m nn | NN:nn DD:nn
+pow 1m nI | NN:In DD:In
+pow 1m nJ | NN:00 DD:00
+pow 1m n0 | NN:nn DD:nn
+pow 1m nz | NN:nn DD:nn
+pow 1m n1 | NN:nn DD:nn
+pow 1m nm | NN:nn DD:nn
+pow 1m In | NN:In DD:In
+pow 1m II | NN:In DD:In
+pow 1m IJ | NN:nn DD:nn
+pow 1m I0 | NN:In DD:In
+pow 1m Iz | NN:In DD:In
+pow 1m I1 | NN:In DD:In
+pow 1m Im | NN:In DD:In
+pow 1m Jn | NN:00 DD:00
+pow 1m JI | NN:nn DD:nn
+pow 1m JJ | NN:00 DD:00
+pow 1m J0 | NN:00 DD:00
+pow 1m Jz | NN:00 DD:00
+pow 1m J1 | NN:00 DD:00
+pow 1m Jm | NN:00 DD:00
+pow 1m 0n | NN:nn DD:nn
+pow 1m 0I | NN:In DD:In
+pow 1m 0J | NN:00 DD:00
+pow 1m 00 | NN:p0 DD:pz
+pow 1m 0z | NN:pz DD:pz
+pow 1m 01 | NN:pp DD:pp
+pow 1m 0m | NN:qq DD:qq
+pow 1m zn | NN:nn DD:nn
+pow 1m zI | NN:In DD:In
+pow 1m zJ | NN:00 DD:00
+pow 1m z0 | NN:p0 DD:pz
+pow 1m zz | NN:pz DD:pz
+pow 1m z1 | NN:pp DD:pp
+pow 1m zm | NN:qq DD:qq
+pow 1m 1n | NN:nn DD:nn
+pow 1m 1I | NN:In DD:In
+pow 1m 1J | NN:00 DD:00
+pow 1m 10 | NN:pq DD:pq
+pow 1m 1z | NN:pq DD:pq
+pow 1m 11 | NN:pq DD:pq
+pow 1m 1m | NN:qq DD:qq
+pow 1m mn | NN:nn DD:nn
+pow 1m mI | NN:In DD:In
+pow 1m mJ | NN:00 DD:00
+pow 1m m0 | NN:qp DD:qp
+pow 1m mz | NN:qp DD:qp
+pow 1m m1 | NN:qp DD:qp
+pow 1m mm | NN:pp DD:pp
+pow 1h nn | NN:nn DD:nn
+pow 1h nI | NN:00 DD:00
+pow 1h nJ | NN:In DD:In
+pow 1h n0 | NN:nn DD:nn
+pow 1h nz | NN:nn DD:nn
+pow 1h n1 | NN:nn DD:nn
+pow 1h nm | NN:nn DD:nn
+pow 1h In | NN:In DD:In
+pow 1h II | NN:nn DD:nn
+pow 1h IJ | NN:In DD:In
+pow 1h I0 | NN:In DD:In
+pow 1h Iz | NN:In DD:In
+pow 1h I1 | NN:In DD:In
+pow 1h Im | NN:In DD:In
+pow 1h Jn | NN:00 DD:00
+pow 1h JI | NN:00 DD:00
+pow 1h JJ | NN:nn DD:nn
+pow 1h J0 | NN:00 DD:00
+pow 1h Jz | NN:00 DD:00
+pow 1h J1 | NN:00 DD:00
+pow 1h Jm | NN:00 DD:00
+pow 1h 0n | NN:nn DD:nn
+pow 1h 0I | NN:00 DD:00
+pow 1h 0J | NN:In DD:In
+pow 1h 00 | NN:p0 DD:pz
+pow 1h 0z | NN:pz DD:pz
+pow 1h 01 | NN:pp DD:pp
+pow 1h 0m | NN:pq DD:pq
+pow 1h zn | NN:nn DD:nn
+pow 1h zI | NN:00 DD:00
+pow 1h zJ | NN:In DD:In
+pow 1h z0 | NN:p0 DD:pz
+pow 1h zz | NN:pz DD:pz
+pow 1h z1 | NN:pp DD:pp
+pow 1h zm | NN:pq DD:pq
+pow 1h 1n | NN:nn DD:nn
+pow 1h 1I | NN:00 DD:00
+pow 1h 1J | NN:In DD:In
+pow 1h 10 | NN:pp DD:pp
+pow 1h 1z | NN:pp DD:pp
+pow 1h 11 | NN:pp DD:pp
+pow 1h 1m | NN:pp DD:pp
+pow 1h mn | NN:nn DD:nn
+pow 1h mI | NN:00 DD:00
+pow 1h mJ | NN:In DD:In
+pow 1h m0 | NN:pq DD:pq
+pow 1h mz | NN:pq DD:pq
+pow 1h m1 | NN:pq DD:pq
+pow 1h mm | NN:pq DD:pq
+pow mn nn | NN:nn DD:nn
+pow mn nI | NN:nn DD:nn
+pow mn nJ | NN:nn DD:nn
+pow mn n0 | NN:nn DD:nn
+pow mn nz | NN:nn DD:nn
+pow mn n1 | NN:nn DD:nn
+pow mn nm | NN:nn DD:nn
+pow mn In | NN:nn DD:nn
+pow mn II | NN:nn DD:nn
+pow mn IJ | NN:nn DD:nn
+pow mn I0 | NN:nn DD:nn
+pow mn Iz | NN:nn DD:nn
+pow mn I1 | NN:nn DD:nn
+pow mn Im | NN:nn DD:nn
+pow mn Jn | NN:nn DD:nn
+pow mn JI | NN:nn DD:nn
+pow mn JJ | NN:nn DD:nn
+pow mn J0 | NN:nn DD:nn
+pow mn Jz | NN:nn DD:nn
+pow mn J1 | NN:nn DD:nn
+pow mn Jm | NN:nn DD:nn
+pow mn 0n | NN:nn DD:nn
+pow mn 0I | NN:nn DD:nn
+pow mn 0J | NN:nn DD:nn
+pow mn 00 | NN:p0 DD:pz
+pow mn 0z | NN:p0 DD:pz
+pow mn 01 | NN:nn DD:nn
+pow mn 0m | NN:nn DD:nn
+pow mn zn | NN:nn DD:nn
+pow mn zI | NN:nn DD:nn
+pow mn zJ | NN:nn DD:nn
+pow mn z0 | NN:pz DD:pz
+pow mn zz | NN:pz DD:pz
+pow mn z1 | NN:nn DD:nn
+pow mn zm | NN:nn DD:nn
+pow mn 1n | NN:nn DD:nn
+pow mn 1I | NN:nn DD:nn
+pow mn 1J | NN:nn DD:nn
+pow mn 10 | NN:nn DD:nn
+pow mn 1z | NN:nn DD:nn
+pow mn 11 | NN:nn DD:nn
+pow mn 1m | NN:nn DD:nn
+pow mn mn | NN:nn DD:nn
+pow mn mI | NN:nn DD:nn
+pow mn mJ | NN:nn DD:nn
+pow mn m0 | NN:nn DD:nn
+pow mn mz | NN:nn DD:nn
+pow mn m1 | NN:nn DD:nn
+pow mn mm | NN:nn DD:nn
+pow mI nn | NN:nn DD:nn
+pow mI nI | NN:nn DD:nn
+pow mI nJ | NN:nn DD:nn
+pow mI n0 | NN:nn DD:nn
+pow mI nz | NN:nn DD:nn
+pow mI n1 | NN:nn DD:nn
+pow mI nm | NN:nn DD:nn
+pow mI In | NN:In DD:In
+pow mI II | NN:nn DD:nn
+pow mI IJ | NN:In DD:In
+pow mI I0 | NN:In DD:In
+pow mI Iz | NN:In DD:In
+pow mI I1 | NN:In DD:In
+pow mI Im | NN:In DD:In
+pow mI Jn | NN:00 DD:00
+pow mI JI | NN:00 DD:00
+pow mI JJ | NN:nn DD:nn
+pow mI J0 | NN:00 DD:00
+pow mI Jz | NN:00 DD:00
+pow mI J1 | NN:00 DD:00
+pow mI Jm | NN:00 DD:00
+pow mI 0n | NN:nn DD:nn
+pow mI 0I | NN:nn DD:nn
+pow mI 0J | NN:nn DD:nn
+pow mI 00 | NN:p0 DD:pz
+pow mI 0z | NN:pz DD:pz
+pow mI 01 | NN:nn DD:nn
+pow mI 0m | NN:nn DD:nn
+pow mI zn | NN:nn DD:nn
+pow mI zI | NN:nn DD:nn
+pow mI zJ | NN:nn DD:nn
+pow mI z0 | NN:p0 DD:pz
+pow mI zz | NN:pz DD:pz
+pow mI z1 | NN:nn DD:nn
+pow mI zm | NN:nn DD:nn
+pow mI 1n | NN:In DD:In
+pow mI 1I | NN:nn DD:nn
+pow mI 1J | NN:In DD:In
+pow mI 10 | NN:In DD:In
+pow mI 1z | NN:In DD:In
+pow mI 11 | NN:In DD:In
+pow mI 1m | NN:In DD:In
+pow mI mn | NN:00 DD:00
+pow mI mI | NN:00 DD:00
+pow mI mJ | NN:nn DD:nn
+pow mI m0 | NN:00 DD:00
+pow mI mz | NN:00 DD:00
+pow mI m1 | NN:00 DD:00
+pow mI mm | NN:00 DD:00
+pow mJ nn | NN:nn DD:nn
+pow mJ nI | NN:nn DD:nn
+pow mJ nJ | NN:nn DD:nn
+pow mJ n0 | NN:nn DD:nn
+pow mJ nz | NN:nn DD:nn
+pow mJ n1 | NN:nn DD:nn
+pow mJ nm | NN:nn DD:nn
+pow mJ In | NN:In DD:In
+pow mJ II | NN:In DD:In
+pow mJ IJ | NN:nn DD:nn
+pow mJ I0 | NN:In DD:In
+pow mJ Iz | NN:In DD:In
+pow mJ I1 | NN:In DD:In
+pow mJ Im | NN:In DD:In
+pow mJ Jn | NN:00 DD:00
+pow mJ JI | NN:nn DD:nn
+pow mJ JJ | NN:00 DD:00
+pow mJ J0 | NN:00 DD:00
+pow mJ Jz | NN:00 DD:00
+pow mJ J1 | NN:00 DD:00
+pow mJ Jm | NN:00 DD:00
+pow mJ 0n | NN:nn DD:nn
+pow mJ 0I | NN:nn DD:nn
+pow mJ 0J | NN:nn DD:nn
+pow mJ 00 | NN:p0 DD:pz
+pow mJ 0z | NN:pz DD:pz
+pow mJ 01 | NN:nn DD:nn
+pow mJ 0m | NN:nn DD:nn
+pow mJ zn | NN:nn DD:nn
+pow mJ zI | NN:nn DD:nn
+pow mJ zJ | NN:nn DD:nn
+pow mJ z0 | NN:p0 DD:pz
+pow mJ zz | NN:pz DD:pz
+pow mJ z1 | NN:nn DD:nn
+pow mJ zm | NN:nn DD:nn
+pow mJ 1n | NN:In DD:In
+pow mJ 1I | NN:In DD:In
+pow mJ 1J | NN:nn DD:nn
+pow mJ 10 | NN:In DD:In
+pow mJ 1z | NN:In DD:In
+pow mJ 11 | NN:In DD:In
+pow mJ 1m | NN:In DD:In
+pow mJ mn | NN:00 DD:00
+pow mJ mI | NN:nn DD:nn
+pow mJ mJ | NN:00 DD:00
+pow mJ m0 | NN:00 DD:00
+pow mJ mz | NN:00 DD:00
+pow mJ m1 | NN:00 DD:00
+pow mJ mm | NN:00 DD:00
+pow m0 nn | NN:nn DD:nn
+pow m0 nI | NN:00 DD:00
+pow m0 nJ | NN:In DD:In
+pow m0 n0 | NN:nn DD:nn
+pow m0 nz | NN:nn DD:nn
+pow m0 n1 | NN:nn DD:nn
+pow m0 nm | NN:nn DD:nn
+pow m0 In | NN:In DD:In
+pow m0 II | NN:nn DD:nn
+pow m0 IJ | NN:In DD:In
+pow m0 I0 | NN:In DD:In
+pow m0 Iz | NN:In DD:In
+pow m0 I1 | NN:In DD:In
+pow m0 Im | NN:In DD:In
+pow m0 Jn | NN:00 DD:00
+pow m0 JI | NN:00 DD:00
+pow m0 JJ | NN:nn DD:nn
+pow m0 J0 | NN:00 DD:00
+pow m0 Jz | NN:00 DD:00
+pow m0 J1 | NN:00 DD:00
+pow m0 Jm | NN:00 DD:00
+pow m0 0n | NN:nn DD:nn
+pow m0 0I | NN:00 DD:00
+pow m0 0J | NN:In DD:In
+pow m0 00 | NN:p0 DD:pz
+pow m0 0z | NN:pz DD:pz
+pow m0 01 | NN:pp DD:pp
+pow m0 0m | NN:pq DD:pq
+pow m0 zn | NN:nn DD:nn
+pow m0 zI | NN:00 DD:00
+pow m0 zJ | NN:In DD:In
+pow m0 z0 | NN:p0 DD:pz
+pow m0 zz | NN:pz DD:pz
+pow m0 z1 | NN:pp DD:pp
+pow m0 zm | NN:pq DD:pq
+pow m0 1n | NN:nn DD:nn
+pow m0 1I | NN:00 DD:00
+pow m0 1J | NN:In DD:In
+pow m0 10 | NN:qz DD:qz
+pow m0 1z | NN:q0 DD:q0
+pow m0 11 | NN:qq DD:qq
+pow m0 1m | NN:qp DD:qp
+pow m0 mn | NN:nn DD:nn
+pow m0 mI | NN:00 DD:00
+pow m0 mJ | NN:In DD:In
+pow m0 m0 | NN:p0 DD:p0
+pow m0 mz | NN:pz DD:pz
+pow m0 m1 | NN:pp DD:pp
+pow m0 mm | NN:pq DD:pq
+pow mz nn | NN:nn DD:nn
+pow mz nI | NN:In DD:In
+pow mz nJ | NN:00 DD:00
+pow mz n0 | NN:nn DD:nn
+pow mz nz | NN:nn DD:nn
+pow mz n1 | NN:nn DD:nn
+pow mz nm | NN:nn DD:nn
+pow mz In | NN:In DD:In
+pow mz II | NN:In DD:In
+pow mz IJ | NN:nn DD:nn
+pow mz I0 | NN:In DD:In
+pow mz Iz | NN:In DD:In
+pow mz I1 | NN:In DD:In
+pow mz Im | NN:In DD:In
+pow mz Jn | NN:00 DD:00
+pow mz JI | NN:nn DD:nn
+pow mz JJ | NN:00 DD:00
+pow mz J0 | NN:00 DD:00
+pow mz Jz | NN:00 DD:00
+pow mz J1 | NN:00 DD:00
+pow mz Jm | NN:00 DD:00
+pow mz 0n | NN:nn DD:nn
+pow mz 0I | NN:In DD:In
+pow mz 0J | NN:00 DD:00
+pow mz 00 | NN:p0 DD:pz
+pow mz 0z | NN:pz DD:pz
+pow mz 01 | NN:pp DD:pp
+pow mz 0m | NN:pq DD:pq
+pow mz zn | NN:nn DD:nn
+pow mz zI | NN:In DD:In
+pow mz zJ | NN:00 DD:00
+pow mz z0 | NN:p0 DD:pz
+pow mz zz | NN:pz DD:pz
+pow mz z1 | NN:pp DD:pp
+pow mz zm | NN:pq DD:pq
+pow mz 1n | NN:nn DD:nn
+pow mz 1I | NN:In DD:In
+pow mz 1J | NN:00 DD:00
+pow mz 10 | NN:qz DD:qz
+pow mz 1z | NN:q0 DD:q0
+pow mz 11 | NN:qq DD:qq
+pow mz 1m | NN:qp DD:qp
+pow mz mn | NN:nn DD:nn
+pow mz mI | NN:In DD:In
+pow mz mJ | NN:00 DD:00
+pow mz m0 | NN:p0 DD:p0
+pow mz mz | NN:pz DD:pz
+pow mz m1 | NN:pp DD:pp
+pow mz mm | NN:pq DD:pq
+pow m1 nn | NN:nn DD:nn
+pow m1 nI | NN:00 DD:00
+pow m1 nJ | NN:In DD:In
+pow m1 n0 | NN:nn DD:nn
+pow m1 nz | NN:nn DD:nn
+pow m1 n1 | NN:nn DD:nn
+pow m1 nm | NN:nn DD:nn
+pow m1 In | NN:In DD:In
+pow m1 II | NN:nn DD:nn
+pow m1 IJ | NN:In DD:In
+pow m1 I0 | NN:In DD:In
+pow m1 Iz | NN:In DD:In
+pow m1 I1 | NN:In DD:In
+pow m1 Im | NN:In DD:In
+pow m1 Jn | NN:00 DD:00
+pow m1 JI | NN:00 DD:00
+pow m1 JJ | NN:nn DD:nn
+pow m1 J0 | NN:00 DD:00
+pow m1 Jz | NN:00 DD:00
+pow m1 J1 | NN:00 DD:00
+pow m1 Jm | NN:00 DD:00
+pow m1 0n | NN:nn DD:nn
+pow m1 0I | NN:00 DD:00
+pow m1 0J | NN:In DD:In
+pow m1 00 | NN:p0 DD:pz
+pow m1 0z | NN:pz DD:pz
+pow m1 01 | NN:pp DD:pp
+pow m1 0m | NN:qq DD:qq
+pow m1 zn | NN:nn DD:nn
+pow m1 zI | NN:00 DD:00
+pow m1 zJ | NN:In DD:In
+pow m1 z0 | NN:p0 DD:pz
+pow m1 zz | NN:pz DD:pz
+pow m1 z1 | NN:pp DD:pp
+pow m1 zm | NN:qq DD:qq
+pow m1 1n | NN:nn DD:nn
+pow m1 1I | NN:00 DD:00
+pow m1 1J | NN:In DD:In
+pow m1 10 | NN:qp DD:qp
+pow m1 1z | NN:qp DD:qp
+pow m1 11 | NN:qq DD:qq
+pow m1 1m | NN:pp DD:pp
+pow m1 mn | NN:nn DD:nn
+pow m1 mI | NN:00 DD:00
+pow m1 mJ | NN:In DD:In
+pow m1 m0 | NN:pp DD:pp
+pow m1 mz | NN:pp DD:pp
+pow m1 m1 | NN:qp DD:qp
+pow m1 mm | NN:pq DD:pq
+pow mm nn | NN:nn DD:nn
+pow mm nI | NN:In DD:In
+pow mm nJ | NN:00 DD:00
+pow mm n0 | NN:nn DD:nn
+pow mm nz | NN:nn DD:nn
+pow mm n1 | NN:nn DD:nn
+pow mm nm | NN:nn DD:nn
+pow mm In | NN:In DD:In
+pow mm II | NN:In DD:In
+pow mm IJ | NN:nn DD:nn
+pow mm I0 | NN:In DD:In
+pow mm Iz | NN:In DD:In
+pow mm I1 | NN:In DD:In
+pow mm Im | NN:In DD:In
+pow mm Jn | NN:00 DD:00
+pow mm JI | NN:nn DD:nn
+pow mm JJ | NN:00 DD:00
+pow mm J0 | NN:00 DD:00
+pow mm Jz | NN:00 DD:00
+pow mm J1 | NN:00 DD:00
+pow mm Jm | NN:00 DD:00
+pow mm 0n | NN:nn DD:nn
+pow mm 0I | NN:In DD:In
+pow mm 0J | NN:00 DD:00
+pow mm 00 | NN:p0 DD:pz
+pow mm 0z | NN:pz DD:pz
+pow mm 01 | NN:pp DD:pp
+pow mm 0m | NN:qq DD:qq
+pow mm zn | NN:nn DD:nn
+pow mm zI | NN:In DD:In
+pow mm zJ | NN:00 DD:00
+pow mm z0 | NN:p0 DD:pz
+pow mm zz | NN:pz DD:pz
+pow mm z1 | NN:pp DD:pp
+pow mm zm | NN:qq DD:qq
+pow mm 1n | NN:nn DD:nn
+pow mm 1I | NN:In DD:In
+pow mm 1J | NN:00 DD:00
+pow mm 10 | NN:qq DD:qq
+pow mm 1z | NN:qq DD:qq
+pow mm 11 | NN:pq DD:pq
+pow mm 1m | NN:qp DD:qp
+pow mm mn | NN:nn DD:nn
+pow mm mI | NN:In DD:In
+pow mm mJ | NN:00 DD:00
+pow mm m0 | NN:0q DD:0q
+pow mm mz | NN:0q DD:0q
+pow mm m1 | NN:pq DD:pq
+pow mm mm | NN:qp DD:qp
+pow mh nn | NN:nn DD:nn
+pow mh nI | NN:00 DD:00
+pow mh nJ | NN:In DD:In
+pow mh n0 | NN:nn DD:nn
+pow mh nz | NN:nn DD:nn
+pow mh n1 | NN:nn DD:nn
+pow mh nm | NN:nn DD:nn
+pow mh In | NN:In DD:In
+pow mh II | NN:nn DD:nn
+pow mh IJ | NN:In DD:In
+pow mh I0 | NN:In DD:In
+pow mh Iz | NN:In DD:In
+pow mh I1 | NN:In DD:In
+pow mh Im | NN:In DD:In
+pow mh Jn | NN:00 DD:00
+pow mh JI | NN:00 DD:00
+pow mh JJ | NN:nn DD:nn
+pow mh J0 | NN:00 DD:00
+pow mh Jz | NN:00 DD:00
+pow mh J1 | NN:00 DD:00
+pow mh Jm | NN:00 DD:00
+pow mh 0n | NN:nn DD:nn
+pow mh 0I | NN:00 DD:00
+pow mh 0J | NN:In DD:In
+pow mh 00 | NN:p0 DD:pz
+pow mh 0z | NN:pz DD:pz
+pow mh 01 | NN:pp DD:pp
+pow mh 0m | NN:pq DD:pq
+pow mh zn | NN:nn DD:nn
+pow mh zI | NN:00 DD:00
+pow mh zJ | NN:In DD:In
+pow mh z0 | NN:p0 DD:pz
+pow mh zz | NN:pz DD:pz
+pow mh z1 | NN:pp DD:pp
+pow mh zm | NN:pq DD:pq
+pow mh 1n | NN:nn DD:nn
+pow mh 1I | NN:00 DD:00
+pow mh 1J | NN:In DD:In
+pow mh 10 | NN:qp DD:qp
+pow mh 1z | NN:qp DD:qp
+pow mh 11 | NN:qq DD:qq
+pow mh 1m | NN:pp DD:pp
+pow mh mn | NN:nn DD:nn
+pow mh mI | NN:00 DD:00
+pow mh mJ | NN:In DD:In
+pow mh m0 | NN:pp DD:pp
+pow mh mz | NN:pp DD:pp
+pow mh m1 | NN:pp DD:pp
+pow mh mm | NN:pq DD:pq
+pow hn nn | NN:nn DD:nn
+pow hn nI | NN:nn DD:nn
+pow hn nJ | NN:nn DD:nn
+pow hn n0 | NN:nn DD:nn
+pow hn nz | NN:nn DD:nn
+pow hn n1 | NN:nn DD:nn
+pow hn nm | NN:nn DD:nn
+pow hn In | NN:nn DD:nn
+pow hn II | NN:nn DD:nn
+pow hn IJ | NN:nn DD:nn
+pow hn I0 | NN:nn DD:nn
+pow hn Iz | NN:nn DD:nn
+pow hn I1 | NN:nn DD:nn
+pow hn Im | NN:nn DD:nn
+pow hn Jn | NN:nn DD:nn
+pow hn JI | NN:nn DD:nn
+pow hn JJ | NN:nn DD:nn
+pow hn J0 | NN:nn DD:nn
+pow hn Jz | NN:nn DD:nn
+pow hn J1 | NN:nn DD:nn
+pow hn Jm | NN:nn DD:nn
+pow hn 0n | NN:nn DD:nn
+pow hn 0I | NN:nn DD:nn
+pow hn 0J | NN:nn DD:nn
+pow hn 00 | NN:p0 DD:pz
+pow hn 0z | NN:p0 DD:pz
+pow hn 01 | NN:nn DD:nn
+pow hn 0m | NN:nn DD:nn
+pow hn zn | NN:nn DD:nn
+pow hn zI | NN:nn DD:nn
+pow hn zJ | NN:nn DD:nn
+pow hn z0 | NN:pz DD:pz
+pow hn zz | NN:pz DD:pz
+pow hn z1 | NN:nn DD:nn
+pow hn zm | NN:nn DD:nn
+pow hn 1n | NN:nn DD:nn
+pow hn 1I | NN:nn DD:nn
+pow hn 1J | NN:nn DD:nn
+pow hn 10 | NN:nn DD:nn
+pow hn 1z | NN:nn DD:nn
+pow hn 11 | NN:nn DD:nn
+pow hn 1m | NN:nn DD:nn
+pow hn mn | NN:nn DD:nn
+pow hn mI | NN:nn DD:nn
+pow hn mJ | NN:nn DD:nn
+pow hn m0 | NN:nn DD:nn
+pow hn mz | NN:nn DD:nn
+pow hn m1 | NN:nn DD:nn
+pow hn mm | NN:nn DD:nn
+pow hI nn | NN:nn DD:nn
+pow hI nI | NN:nn DD:nn
+pow hI nJ | NN:nn DD:nn
+pow hI n0 | NN:nn DD:nn
+pow hI nz | NN:nn DD:nn
+pow hI n1 | NN:nn DD:nn
+pow hI nm | NN:nn DD:nn
+pow hI In | NN:In DD:In
+pow hI II | NN:nn DD:nn
+pow hI IJ | NN:In DD:In
+pow hI I0 | NN:In DD:In
+pow hI Iz | NN:In DD:In
+pow hI I1 | NN:In DD:In
+pow hI Im | NN:In DD:In
+pow hI Jn | NN:00 DD:00
+pow hI JI | NN:00 DD:00
+pow hI JJ | NN:nn DD:nn
+pow hI J0 | NN:00 DD:00
+pow hI Jz | NN:00 DD:00
+pow hI J1 | NN:00 DD:00
+pow hI Jm | NN:00 DD:00
+pow hI 0n | NN:nn DD:nn
+pow hI 0I | NN:nn DD:nn
+pow hI 0J | NN:nn DD:nn
+pow hI 00 | NN:p0 DD:pz
+pow hI 0z | NN:pz DD:pz
+pow hI 01 | NN:nn DD:nn
+pow hI 0m | NN:nn DD:nn
+pow hI zn | NN:nn DD:nn
+pow hI zI | NN:nn DD:nn
+pow hI zJ | NN:nn DD:nn
+pow hI z0 | NN:p0 DD:pz
+pow hI zz | NN:pz DD:pz
+pow hI z1 | NN:nn DD:nn
+pow hI zm | NN:nn DD:nn
+pow hI 1n | NN:In DD:In
+pow hI 1I | NN:nn DD:nn
+pow hI 1J | NN:In DD:In
+pow hI 10 | NN:In DD:In
+pow hI 1z | NN:In DD:In
+pow hI 11 | NN:In DD:In
+pow hI 1m | NN:In DD:In
+pow hI mn | NN:00 DD:00
+pow hI mI | NN:00 DD:00
+pow hI mJ | NN:nn DD:nn
+pow hI m0 | NN:00 DD:00
+pow hI mz | NN:00 DD:00
+pow hI m1 | NN:00 DD:00
+pow hI mm | NN:00 DD:00
+pow hJ nn | NN:nn DD:nn
+pow hJ nI | NN:nn DD:nn
+pow hJ nJ | NN:nn DD:nn
+pow hJ n0 | NN:nn DD:nn
+pow hJ nz | NN:nn DD:nn
+pow hJ n1 | NN:nn DD:nn
+pow hJ nm | NN:nn DD:nn
+pow hJ In | NN:In DD:In
+pow hJ II | NN:In DD:In
+pow hJ IJ | NN:nn DD:nn
+pow hJ I0 | NN:In DD:In
+pow hJ Iz | NN:In DD:In
+pow hJ I1 | NN:In DD:In
+pow hJ Im | NN:In DD:In
+pow hJ Jn | NN:00 DD:00
+pow hJ JI | NN:nn DD:nn
+pow hJ JJ | NN:00 DD:00
+pow hJ J0 | NN:00 DD:00
+pow hJ Jz | NN:00 DD:00
+pow hJ J1 | NN:00 DD:00
+pow hJ Jm | NN:00 DD:00
+pow hJ 0n | NN:nn DD:nn
+pow hJ 0I | NN:nn DD:nn
+pow hJ 0J | NN:nn DD:nn
+pow hJ 00 | NN:p0 DD:pz
+pow hJ 0z | NN:pz DD:pz
+pow hJ 01 | NN:nn DD:nn
+pow hJ 0m | NN:nn DD:nn
+pow hJ zn | NN:nn DD:nn
+pow hJ zI | NN:nn DD:nn
+pow hJ zJ | NN:nn DD:nn
+pow hJ z0 | NN:p0 DD:pz
+pow hJ zz | NN:pz DD:pz
+pow hJ z1 | NN:nn DD:nn
+pow hJ zm | NN:nn DD:nn
+pow hJ 1n | NN:In DD:In
+pow hJ 1I | NN:In DD:In
+pow hJ 1J | NN:nn DD:nn
+pow hJ 10 | NN:In DD:In
+pow hJ 1z | NN:In DD:In
+pow hJ 11 | NN:In DD:In
+pow hJ 1m | NN:In DD:In
+pow hJ mn | NN:00 DD:00
+pow hJ mI | NN:nn DD:nn
+pow hJ mJ | NN:00 DD:00
+pow hJ m0 | NN:00 DD:00
+pow hJ mz | NN:00 DD:00
+pow hJ m1 | NN:00 DD:00
+pow hJ mm | NN:00 DD:00
+pow h0 nn | NN:nn DD:nn
+pow h0 nI | NN:nn DD:nn
+pow h0 nJ | NN:nn DD:nn
+pow h0 n0 | NN:nn DD:nn
+pow h0 nz | NN:nn DD:nn
+pow h0 n1 | NN:nn DD:nn
+pow h0 nm | NN:nn DD:nn
+pow h0 In | NN:00 DD:00
+pow h0 II | NN:00 DD:00
+pow h0 IJ | NN:00 DD:00
+pow h0 I0 | NN:00 DD:00
+pow h0 Iz | NN:00 DD:00
+pow h0 I1 | NN:00 DD:00
+pow h0 Im | NN:00 DD:00
+pow h0 Jn | NN:In DD:In
+pow h0 JI | NN:In DD:In
+pow h0 JJ | NN:In DD:In
+pow h0 J0 | NN:In DD:In
+pow h0 Jz | NN:In DD:In
+pow h0 J1 | NN:In DD:In
+pow h0 Jm | NN:In DD:In
+pow h0 0n | NN:nn DD:nn
+pow h0 0I | NN:nn DD:nn
+pow h0 0J | NN:nn DD:nn
+pow h0 00 | NN:pz DD:pz
+pow h0 0z | NN:p0 DD:pz
+pow h0 01 | NN:pq DD:pq
+pow h0 0m | NN:pp DD:pp
+pow h0 zn | NN:nn DD:nn
+pow h0 zI | NN:nn DD:nn
+pow h0 zJ | NN:nn DD:nn
+pow h0 z0 | NN:pz DD:pz
+pow h0 zz | NN:p0 DD:pz
+pow h0 z1 | NN:pq DD:pq
+pow h0 zm | NN:pp DD:pp
+pow h0 1n | NN:nn DD:nn
+pow h0 1I | NN:nn DD:nn
+pow h0 1J | NN:nn DD:nn
+pow h0 10 | NN:p0 DD:p0
+pow h0 1z | NN:p0 DD:p0
+pow h0 11 | NN:pq DD:pq
+pow h0 1m | NN:pp DD:pp
+pow h0 mn | NN:nn DD:nn
+pow h0 mI | NN:nn DD:nn
+pow h0 mJ | NN:nn DD:nn
+pow h0 m0 | NN:pz DD:pz
+pow h0 mz | NN:p0 DD:p0
+pow h0 m1 | NN:pq DD:pq
+pow h0 mm | NN:pp DD:pp
+pow hz nn | NN:nn DD:nn
+pow hz nI | NN:nn DD:nn
+pow hz nJ | NN:nn DD:nn
+pow hz n0 | NN:nn DD:nn
+pow hz nz | NN:nn DD:nn
+pow hz n1 | NN:nn DD:nn
+pow hz nm | NN:nn DD:nn
+pow hz In | NN:00 DD:00
+pow hz II | NN:00 DD:00
+pow hz IJ | NN:00 DD:00
+pow hz I0 | NN:00 DD:00
+pow hz Iz | NN:00 DD:00
+pow hz I1 | NN:00 DD:00
+pow hz Im | NN:00 DD:00
+pow hz Jn | NN:In DD:In
+pow hz JI | NN:In DD:In
+pow hz JJ | NN:In DD:In
+pow hz J0 | NN:In DD:In
+pow hz Jz | NN:In DD:In
+pow hz J1 | NN:In DD:In
+pow hz Jm | NN:In DD:In
+pow hz 0n | NN:nn DD:nn
+pow hz 0I | NN:nn DD:nn
+pow hz 0J | NN:nn DD:nn
+pow hz 00 | NN:pz DD:pz
+pow hz 0z | NN:p0 DD:pz
+pow hz 01 | NN:pq DD:pq
+pow hz 0m | NN:pp DD:pp
+pow hz zn | NN:nn DD:nn
+pow hz zI | NN:nn DD:nn
+pow hz zJ | NN:nn DD:nn
+pow hz z0 | NN:pz DD:pz
+pow hz zz | NN:p0 DD:pz
+pow hz z1 | NN:pq DD:pq
+pow hz zm | NN:pp DD:pp
+pow hz 1n | NN:nn DD:nn
+pow hz 1I | NN:nn DD:nn
+pow hz 1J | NN:nn DD:nn
+pow hz 10 | NN:pz DD:pz
+pow hz 1z | NN:p0 DD:p0
+pow hz 11 | NN:pq DD:pq
+pow hz 1m | NN:pp DD:pp
+pow hz mn | NN:nn DD:nn
+pow hz mI | NN:nn DD:nn
+pow hz mJ | NN:nn DD:nn
+pow hz m0 | NN:p0 DD:p0
+pow hz mz | NN:p0 DD:p0
+pow hz m1 | NN:pq DD:pq
+pow hz mm | NN:pp DD:pp
+pow h1 nn | NN:nn DD:nn
+pow h1 nI | NN:00 DD:00
+pow h1 nJ | NN:In DD:In
+pow h1 n0 | NN:nn DD:nn
+pow h1 nz | NN:nn DD:nn
+pow h1 n1 | NN:nn DD:nn
+pow h1 nm | NN:nn DD:nn
+pow h1 In | NN:In DD:In
+pow h1 II | NN:nn DD:nn
+pow h1 IJ | NN:In DD:In
+pow h1 I0 | NN:In DD:In
+pow h1 Iz | NN:In DD:In
+pow h1 I1 | NN:In DD:In
+pow h1 Im | NN:In DD:In
+pow h1 Jn | NN:00 DD:00
+pow h1 JI | NN:00 DD:00
+pow h1 JJ | NN:nn DD:nn
+pow h1 J0 | NN:00 DD:00
+pow h1 Jz | NN:00 DD:00
+pow h1 J1 | NN:00 DD:00
+pow h1 Jm | NN:00 DD:00
+pow h1 0n | NN:nn DD:nn
+pow h1 0I | NN:00 DD:00
+pow h1 0J | NN:In DD:In
+pow h1 00 | NN:p0 DD:pz
+pow h1 0z | NN:pz DD:pz
+pow h1 01 | NN:pp DD:pp
+pow h1 0m | NN:pq DD:pq
+pow h1 zn | NN:nn DD:nn
+pow h1 zI | NN:00 DD:00
+pow h1 zJ | NN:In DD:In
+pow h1 z0 | NN:p0 DD:pz
+pow h1 zz | NN:pz DD:pz
+pow h1 z1 | NN:pp DD:pp
+pow h1 zm | NN:pq DD:pq
+pow h1 1n | NN:nn DD:nn
+pow h1 1I | NN:00 DD:00
+pow h1 1J | NN:In DD:In
+pow h1 10 | NN:pp DD:pp
+pow h1 1z | NN:pp DD:pp
+pow h1 11 | NN:pp DD:pp
+pow h1 1m | NN:pp DD:pp
+pow h1 mn | NN:nn DD:nn
+pow h1 mI | NN:00 DD:00
+pow h1 mJ | NN:In DD:In
+pow h1 m0 | NN:qq DD:qq
+pow h1 mz | NN:qq DD:qq
+pow h1 m1 | NN:qq DD:qq
+pow h1 mm | NN:qq DD:qq
+pow hm nn | NN:nn DD:nn
+pow hm nI | NN:In DD:In
+pow hm nJ | NN:00 DD:00
+pow hm n0 | NN:nn DD:nn
+pow hm nz | NN:nn DD:nn
+pow hm n1 | NN:nn DD:nn
+pow hm nm | NN:nn DD:nn
+pow hm In | NN:In DD:In
+pow hm II | NN:In DD:In
+pow hm IJ | NN:nn DD:nn
+pow hm I0 | NN:In DD:In
+pow hm Iz | NN:In DD:In
+pow hm I1 | NN:In DD:In
+pow hm Im | NN:In DD:In
+pow hm Jn | NN:00 DD:00
+pow hm JI | NN:nn DD:nn
+pow hm JJ | NN:00 DD:00
+pow hm J0 | NN:00 DD:00
+pow hm Jz | NN:00 DD:00
+pow hm J1 | NN:00 DD:00
+pow hm Jm | NN:00 DD:00
+pow hm 0n | NN:nn DD:nn
+pow hm 0I | NN:In DD:In
+pow hm 0J | NN:00 DD:00
+pow hm 00 | NN:p0 DD:pz
+pow hm 0z | NN:pz DD:pz
+pow hm 01 | NN:pp DD:pp
+pow hm 0m | NN:pq DD:pq
+pow hm zn | NN:nn DD:nn
+pow hm zI | NN:In DD:In
+pow hm zJ | NN:00 DD:00
+pow hm z0 | NN:p0 DD:pz
+pow hm zz | NN:pz DD:pz
+pow hm z1 | NN:pp DD:pp
+pow hm zm | NN:pq DD:pq
+pow hm 1n | NN:nn DD:nn
+pow hm 1I | NN:In DD:In
+pow hm 1J | NN:00 DD:00
+pow hm 10 | NN:pq DD:pq
+pow hm 1z | NN:pq DD:pq
+pow hm 11 | NN:pq DD:pq
+pow hm 1m | NN:qq DD:qq
+pow hm mn | NN:nn DD:nn
+pow hm mI | NN:In DD:In
+pow hm mJ | NN:00 DD:00
+pow hm m0 | NN:qp DD:qp
+pow hm mz | NN:qp DD:qp
+pow hm m1 | NN:qq DD:qq
+pow hm mm | NN:pp DD:pp
+pow hh nn | NN:nn DD:nn
+pow hh nI | NN:00 DD:00
+pow hh nJ | NN:In DD:In
+pow hh n0 | NN:nn DD:nn
+pow hh nz | NN:nn DD:nn
+pow hh n1 | NN:nn DD:nn
+pow hh nm | NN:nn DD:nn
+pow hh In | NN:00 DD:00
+pow hh II | NN:00 DD:00
+pow hh IJ | NN:nn DD:nn
+pow hh I0 | NN:00 DD:00
+pow hh Iz | NN:00 DD:00
+pow hh I1 | NN:00 DD:00
+pow hh Im | NN:00 DD:00
+pow hh Jn | NN:In DD:In
+pow hh JI | NN:nn DD:nn
+pow hh JJ | NN:In DD:In
+pow hh J0 | NN:In DD:In
+pow hh Jz | NN:In DD:In
+pow hh J1 | NN:In DD:In
+pow hh Jm | NN:In DD:In
+pow hh 0n | NN:nn DD:nn
+pow hh 0I | NN:00 DD:00
+pow hh 0J | NN:In DD:In
+pow hh 00 | NN:pz DD:pz
+pow hh 0z | NN:p0 DD:pz
+pow hh 01 | NN:pq DD:pq
+pow hh 0m | NN:pp DD:pp
+pow hh zn | NN:nn DD:nn
+pow hh zI | NN:00 DD:00
+pow hh zJ | NN:In DD:In
+pow hh z0 | NN:pz DD:pz
+pow hh zz | NN:p0 DD:pz
+pow hh z1 | NN:pq DD:pq
+pow hh zm | NN:pp DD:pp
+pow hh 1n | NN:nn DD:nn
+pow hh 1I | NN:00 DD:00
+pow hh 1J | NN:In DD:In
+pow hh 10 | NN:pp DD:pp
+pow hh 1z | NN:pp DD:pp
+pow hh 11 | NN:pp DD:pp
+pow hh 1m | NN:pp DD:pp
+pow hh mn | NN:nn DD:nn
+pow hh mI | NN:00 DD:00
+pow hh mJ | NN:In DD:In
+pow hh m0 | NN:0q DD:0q
+pow hh mz | NN:0q DD:0q
+pow hh m1 | NN:qq DD:qq
+pow hh mm | NN:pq DD:pq
+pow_si nn -3 | NN:nn DD:nn
+pow_si nn -2 | NN:nn DD:nn
+pow_si nn -1 | NN:nn DD:nn
+pow_si nn 0 | NN:p0 DD:pz
+pow_si nn 1 | NN:nn DD:nn
+pow_si nn 2 | NN:nn DD:nn
+pow_si nn 3 | NN:nn DD:nn
+pow_si nn 4 | NN:nn DD:nn
+pow_si nI -3 | NN:00 DD:00
+pow_si nI -2 | NN:00 DD:00
+pow_si nI -1 | NN:00 DD:00
+pow_si nI 0 | NN:p0 DD:pz
+pow_si nI 1 | NN:In DD:In
+pow_si nI 2 | NN:In DD:In
+pow_si nI 3 | NN:In DD:In
+pow_si nI 4 | NN:In DD:In
+pow_si nJ -3 | NN:00 DD:00
+pow_si nJ -2 | NN:00 DD:00
+pow_si nJ -1 | NN:00 DD:00
+pow_si nJ 0 | NN:p0 DD:pz
+pow_si nJ 1 | NN:In DD:In
+pow_si nJ 2 | NN:In DD:In
+pow_si nJ 3 | NN:In DD:In
+pow_si nJ 4 | NN:In DD:In
+pow_si n0 -3 | NN:nn DD:nn
+pow_si n0 -2 | NN:nn DD:nn
+pow_si n0 -1 | NN:nn DD:nn
+pow_si n0 0 | NN:p0 DD:pz
+pow_si n0 1 | NN:nn DD:nn
+pow_si n0 2 | NN:nn DD:nn
+pow_si n0 3 | NN:nn DD:nn
+pow_si n0 4 | NN:nn DD:nn
+pow_si nz -3 | NN:nn DD:nn
+pow_si nz -2 | NN:nn DD:nn
+pow_si nz -1 | NN:nn DD:nn
+pow_si nz 0 | NN:pz DD:pz
+pow_si nz 1 | NN:nn DD:nn
+pow_si nz 2 | NN:nn DD:nn
+pow_si nz 3 | NN:nn DD:nn
+pow_si nz 4 | NN:nn DD:nn
+pow_si n1 -3 | NN:nn DD:nn
+pow_si n1 -2 | NN:nn DD:nn
+pow_si n1 -1 | NN:nn DD:nn
+pow_si n1 0 | NN:p0 DD:pz
+pow_si n1 1 | NN:nn DD:nn
+pow_si n1 2 | NN:nn DD:nn
+pow_si n1 3 | NN:nn DD:nn
+pow_si n1 4 | NN:nn DD:nn
+pow_si nm -3 | NN:nn DD:nn
+pow_si nm -2 | NN:nn DD:nn
+pow_si nm -1 | NN:nn DD:nn
+pow_si nm 0 | NN:pz DD:pz
+pow_si nm 1 | NN:nn DD:nn
+pow_si nm 2 | NN:nn DD:nn
+pow_si nm 3 | NN:nn DD:nn
+pow_si nm 4 | NN:nn DD:nn
+pow_si nh -3 | NN:nn DD:nn
+pow_si nh -2 | NN:nn DD:nn
+pow_si nh -1 | NN:nn DD:nn
+pow_si nh 0 | NN:p0 DD:pz
+pow_si nh 1 | NN:nn DD:nn
+pow_si nh 2 | NN:nn DD:nn
+pow_si nh 3 | NN:nn DD:nn
+pow_si nh 4 | NN:nn DD:nn
+pow_si In -3 | NN:00 DD:00
+pow_si In -2 | NN:00 DD:00
+pow_si In -1 | NN:00 DD:00
+pow_si In 0 | NN:p0 DD:pz
+pow_si In 1 | NN:In DD:In
+pow_si In 2 | NN:In DD:In
+pow_si In 3 | NN:In DD:In
+pow_si In 4 | NN:In DD:In
+pow_si II -3 | NN:00 DD:00
+pow_si II -2 | NN:00 DD:00
+pow_si II -1 | NN:00 DD:00
+pow_si II 0 | NN:p0 DD:pz
+pow_si II 1 | NN:In DD:In
+pow_si II 2 | NN:In DD:In
+pow_si II 3 | NN:In DD:In
+pow_si II 4 | NN:In DD:In
+pow_si IJ -3 | NN:00 DD:00
+pow_si IJ -2 | NN:00 DD:00
+pow_si IJ -1 | NN:00 DD:00
+pow_si IJ 0 | NN:p0 DD:pz
+pow_si IJ 1 | NN:In DD:In
+pow_si IJ 2 | NN:In DD:In
+pow_si IJ 3 | NN:In DD:In
+pow_si IJ 4 | NN:In DD:In
+pow_si I0 -3 | NN:00 DD:00
+pow_si I0 -2 | NN:00 DD:00
+pow_si I0 -1 | NN:00 DD:00
+pow_si I0 0 | NN:p0 DD:pz
+pow_si I0 1 | NN:In DD:In
+pow_si I0 2 | NN:In DD:In
+pow_si I0 3 | NN:In DD:In
+pow_si I0 4 | NN:In DD:In
+pow_si Iz -3 | NN:00 DD:00
+pow_si Iz -2 | NN:00 DD:00
+pow_si Iz -1 | NN:00 DD:00
+pow_si Iz 0 | NN:p0 DD:pz
+pow_si Iz 1 | NN:In DD:In
+pow_si Iz 2 | NN:In DD:In
+pow_si Iz 3 | NN:In DD:In
+pow_si Iz 4 | NN:In DD:In
+pow_si I1 -3 | NN:00 DD:00
+pow_si I1 -2 | NN:00 DD:00
+pow_si I1 -1 | NN:00 DD:00
+pow_si I1 0 | NN:p0 DD:pz
+pow_si I1 1 | NN:In DD:In
+pow_si I1 2 | NN:In DD:In
+pow_si I1 3 | NN:In DD:In
+pow_si I1 4 | NN:In DD:In
+pow_si Im -3 | NN:00 DD:00
+pow_si Im -2 | NN:00 DD:00
+pow_si Im -1 | NN:00 DD:00
+pow_si Im 0 | NN:p0 DD:pz
+pow_si Im 1 | NN:In DD:In
+pow_si Im 2 | NN:In DD:In
+pow_si Im 3 | NN:In DD:In
+pow_si Im 4 | NN:In DD:In
+pow_si Ih -3 | NN:00 DD:00
+pow_si Ih -2 | NN:00 DD:00
+pow_si Ih -1 | NN:00 DD:00
+pow_si Ih 0 | NN:p0 DD:pz
+pow_si Ih 1 | NN:In DD:In
+pow_si Ih 2 | NN:In DD:In
+pow_si Ih 3 | NN:In DD:In
+pow_si Ih 4 | NN:In DD:In
+pow_si Jn -3 | NN:00 DD:00
+pow_si Jn -2 | NN:00 DD:00
+pow_si Jn -1 | NN:00 DD:00
+pow_si Jn 0 | NN:p0 DD:pz
+pow_si Jn 1 | NN:In DD:In
+pow_si Jn 2 | NN:In DD:In
+pow_si Jn 3 | NN:In DD:In
+pow_si Jn 4 | NN:In DD:In
+pow_si JI -3 | NN:00 DD:00
+pow_si JI -2 | NN:00 DD:00
+pow_si JI -1 | NN:00 DD:00
+pow_si JI 0 | NN:p0 DD:pz
+pow_si JI 1 | NN:In DD:In
+pow_si JI 2 | NN:In DD:In
+pow_si JI 3 | NN:In DD:In
+pow_si JI 4 | NN:In DD:In
+pow_si JJ -3 | NN:00 DD:00
+pow_si JJ -2 | NN:00 DD:00
+pow_si JJ -1 | NN:00 DD:00
+pow_si JJ 0 | NN:p0 DD:pz
+pow_si JJ 1 | NN:In DD:In
+pow_si JJ 2 | NN:In DD:In
+pow_si JJ 3 | NN:In DD:In
+pow_si JJ 4 | NN:In DD:In
+pow_si J0 -3 | NN:00 DD:00
+pow_si J0 -2 | NN:00 DD:00
+pow_si J0 -1 | NN:00 DD:00
+pow_si J0 0 | NN:p0 DD:pz
+pow_si J0 1 | NN:In DD:In
+pow_si J0 2 | NN:In DD:In
+pow_si J0 3 | NN:In DD:In
+pow_si J0 4 | NN:In DD:In
+pow_si Jz -3 | NN:00 DD:00
+pow_si Jz -2 | NN:00 DD:00
+pow_si Jz -1 | NN:00 DD:00
+pow_si Jz 0 | NN:p0 DD:pz
+pow_si Jz 1 | NN:In DD:In
+pow_si Jz 2 | NN:In DD:In
+pow_si Jz 3 | NN:In DD:In
+pow_si Jz 4 | NN:In DD:In
+pow_si J1 -3 | NN:00 DD:00
+pow_si J1 -2 | NN:00 DD:00
+pow_si J1 -1 | NN:00 DD:00
+pow_si J1 0 | NN:p0 DD:pz
+pow_si J1 1 | NN:In DD:In
+pow_si J1 2 | NN:In DD:In
+pow_si J1 3 | NN:In DD:In
+pow_si J1 4 | NN:In DD:In
+pow_si Jm -3 | NN:00 DD:00
+pow_si Jm -2 | NN:00 DD:00
+pow_si Jm -1 | NN:00 DD:00
+pow_si Jm 0 | NN:p0 DD:pz
+pow_si Jm 1 | NN:In DD:In
+pow_si Jm 2 | NN:In DD:In
+pow_si Jm 3 | NN:In DD:In
+pow_si Jm 4 | NN:In DD:In
+pow_si Jh -3 | NN:00 DD:00
+pow_si Jh -2 | NN:00 DD:00
+pow_si Jh -1 | NN:00 DD:00
+pow_si Jh 0 | NN:p0 DD:pz
+pow_si Jh 1 | NN:In DD:In
+pow_si Jh 2 | NN:In DD:In
+pow_si Jh 3 | NN:In DD:In
+pow_si Jh 4 | NN:In DD:In
+pow_si 0n -3 | NN:nn DD:nn
+pow_si 0n -2 | NN:nn DD:nn
+pow_si 0n -1 | NN:nn DD:nn
+pow_si 0n 0 | NN:p0 DD:pz
+pow_si 0n 1 | NN:nn DD:nn
+pow_si 0n 2 | NN:nn DD:nn
+pow_si 0n 3 | NN:nn DD:nn
+pow_si 0n 4 | NN:nn DD:nn
+pow_si 0I -3 | NN:00 DD:00
+pow_si 0I -2 | NN:00 DD:00
+pow_si 0I -1 | NN:00 DD:00
+pow_si 0I 0 | NN:p0 DD:pz
+pow_si 0I 1 | NN:In DD:In
+pow_si 0I 2 | NN:In DD:In
+pow_si 0I 3 | NN:In DD:In
+pow_si 0I 4 | NN:In DD:In
+pow_si 0J -3 | NN:00 DD:00
+pow_si 0J -2 | NN:00 DD:00
+pow_si 0J -1 | NN:00 DD:00
+pow_si 0J 0 | NN:p0 DD:pz
+pow_si 0J 1 | NN:In DD:In
+pow_si 0J 2 | NN:In DD:In
+pow_si 0J 3 | NN:In DD:In
+pow_si 0J 4 | NN:In DD:In
+pow_si 00 -3 | NN:In DD:In
+pow_si 00 -2 | NN:In DD:In
+pow_si 00 -1 | NN:In DD:In
+pow_si 00 0 | NN:p0 DD:p0
+pow_si 00 1 | NN:00 DD:00
+pow_si 00 2 | NN:00 DD:00
+pow_si 00 3 | NN:00 DD:00
+pow_si 00 4 | NN:00 DD:00
+pow_si 0z -3 | NN:In DD:In
+pow_si 0z -2 | NN:In DD:In
+pow_si 0z -1 | NN:In DD:In
+pow_si 0z 0 | NN:p0 DD:p0
+pow_si 0z 1 | NN:00 DD:00
+pow_si 0z 2 | NN:00 DD:00
+pow_si 0z 3 | NN:00 DD:00
+pow_si 0z 4 | NN:00 DD:00
+pow_si 01 -3 | NN:zp DD:zp
+pow_si 01 -2 | NN:qz DD:qz
+pow_si 01 -1 | NN:0q DD:0q
+pow_si 01 0 | NN:p0 DD:pz
+pow_si 01 1 | NN:0p DD:0p
+pow_si 01 2 | NN:q0 DD:q0
+pow_si 01 3 | NN:zq DD:zq
+pow_si 01 4 | NN:pz DD:pz
+pow_si 0m -3 | NN:zq DD:zq
+pow_si 0m -2 | NN:q0 DD:q0
+pow_si 0m -1 | NN:0p DD:0p
+pow_si 0m 0 | NN:p0 DD:pz
+pow_si 0m 1 | NN:0q DD:0q
+pow_si 0m 2 | NN:qz DD:qz
+pow_si 0m 3 | NN:zp DD:zp
+pow_si 0m 4 | NN:p0 DD:p0
+pow_si 0h -3 | NN:zp DD:zp
+pow_si 0h -2 | NN:qz DD:qz
+pow_si 0h -1 | NN:0q DD:0q
+pow_si 0h 0 | NN:pz DD:pz
+pow_si 0h 1 | NN:0p DD:0p
+pow_si 0h 2 | NN:q0 DD:q0
+pow_si 0h 3 | NN:zq DD:zq
+pow_si 0h 4 | NN:pz DD:pz
+pow_si zn -3 | NN:nn DD:nn
+pow_si zn -2 | NN:nn DD:nn
+pow_si zn -1 | NN:nn DD:nn
+pow_si zn 0 | NN:p0 DD:pz
+pow_si zn 1 | NN:nn DD:nn
+pow_si zn 2 | NN:nn DD:nn
+pow_si zn 3 | NN:nn DD:nn
+pow_si zn 4 | NN:nn DD:nn
+pow_si zI -3 | NN:00 DD:00
+pow_si zI -2 | NN:00 DD:00
+pow_si zI -1 | NN:00 DD:00
+pow_si zI 0 | NN:p0 DD:pz
+pow_si zI 1 | NN:In DD:In
+pow_si zI 2 | NN:In DD:In
+pow_si zI 3 | NN:In DD:In
+pow_si zI 4 | NN:In DD:In
+pow_si zJ -3 | NN:00 DD:00
+pow_si zJ -2 | NN:00 DD:00
+pow_si zJ -1 | NN:00 DD:00
+pow_si zJ 0 | NN:p0 DD:pz
+pow_si zJ 1 | NN:In DD:In
+pow_si zJ 2 | NN:In DD:In
+pow_si zJ 3 | NN:In DD:In
+pow_si zJ 4 | NN:In DD:In
+pow_si z0 -3 | NN:In DD:In
+pow_si z0 -2 | NN:In DD:In
+pow_si z0 -1 | NN:In DD:In
+pow_si z0 0 | NN:p0 DD:p0
+pow_si z0 1 | NN:00 DD:00
+pow_si z0 2 | NN:00 DD:00
+pow_si z0 3 | NN:00 DD:00
+pow_si z0 4 | NN:00 DD:00
+pow_si zz -3 | NN:In DD:In
+pow_si zz -2 | NN:In DD:In
+pow_si zz -1 | NN:In DD:In
+pow_si zz 0 | NN:p0 DD:p0
+pow_si zz 1 | NN:00 DD:00
+pow_si zz 2 | NN:00 DD:00
+pow_si zz 3 | NN:00 DD:00
+pow_si zz 4 | NN:00 DD:00
+pow_si z1 -3 | NN:0p DD:0p
+pow_si z1 -2 | NN:q0 DD:q0
+pow_si z1 -1 | NN:zq DD:zq
+pow_si z1 0 | NN:p0 DD:pz
+pow_si z1 1 | NN:zp DD:zp
+pow_si z1 2 | NN:qz DD:qz
+pow_si z1 3 | NN:0q DD:0q
+pow_si z1 4 | NN:p0 DD:p0
+pow_si zm -3 | NN:0q DD:0q
+pow_si zm -2 | NN:qz DD:qz
+pow_si zm -1 | NN:zp DD:zp
+pow_si zm 0 | NN:p0 DD:pz
+pow_si zm 1 | NN:zq DD:zq
+pow_si zm 2 | NN:q0 DD:q0
+pow_si zm 3 | NN:0p DD:0p
+pow_si zm 4 | NN:pz DD:pz
+pow_si zh -3 | NN:0p DD:0p
+pow_si zh -2 | NN:q0 DD:q0
+pow_si zh -1 | NN:zq DD:zq
+pow_si zh 0 | NN:pz DD:pz
+pow_si zh 1 | NN:zp DD:zp
+pow_si zh 2 | NN:qz DD:qz
+pow_si zh 3 | NN:0q DD:0q
+pow_si zh 4 | NN:p0 DD:p0
+pow_si 1n -3 | NN:nn DD:nn
+pow_si 1n -2 | NN:nn DD:nn
+pow_si 1n -1 | NN:nn DD:nn
+pow_si 1n 0 | NN:p0 DD:pz
+pow_si 1n 1 | NN:nn DD:nn
+pow_si 1n 2 | NN:nn DD:nn
+pow_si 1n 3 | NN:nn DD:nn
+pow_si 1n 4 | NN:nn DD:nn
+pow_si 1I -3 | NN:00 DD:00
+pow_si 1I -2 | NN:00 DD:00
+pow_si 1I -1 | NN:00 DD:00
+pow_si 1I 0 | NN:p0 DD:pz
+pow_si 1I 1 | NN:In DD:In
+pow_si 1I 2 | NN:In DD:In
+pow_si 1I 3 | NN:In DD:In
+pow_si 1I 4 | NN:In DD:In
+pow_si 1J -3 | NN:00 DD:00
+pow_si 1J -2 | NN:00 DD:00
+pow_si 1J -1 | NN:00 DD:00
+pow_si 1J 0 | NN:p0 DD:pz
+pow_si 1J 1 | NN:In DD:In
+pow_si 1J 2 | NN:In DD:In
+pow_si 1J 3 | NN:In DD:In
+pow_si 1J 4 | NN:In DD:In
+pow_si 10 -3 | NN:pz DD:pz
+pow_si 10 -2 | NN:pz DD:pz
+pow_si 10 -1 | NN:pz DD:pz
+pow_si 10 0 | NN:p0 DD:pz
+pow_si 10 1 | NN:p0 DD:pz
+pow_si 10 2 | NN:p0 DD:pz
+pow_si 10 3 | NN:p0 DD:pz
+pow_si 10 4 | NN:p0 DD:pz
+pow_si 1z -3 | NN:p0 DD:pz
+pow_si 1z -2 | NN:p0 DD:pz
+pow_si 1z -1 | NN:p0 DD:pz
+pow_si 1z 0 | NN:pz DD:pz
+pow_si 1z 1 | NN:pz DD:pz
+pow_si 1z 2 | NN:pz DD:pz
+pow_si 1z 3 | NN:pz DD:pz
+pow_si 1z 4 | NN:pz DD:pz
+pow_si 11 -3 | NN:qq DD:qq
+pow_si 11 -2 | NN:0q DD:0q
+pow_si 11 -1 | NN:pq DD:pq
+pow_si 11 0 | NN:p0 DD:pz
+pow_si 11 1 | NN:pp DD:pp
+pow_si 11 3 | NN:qp DD:qp
+pow_si 11 4 | NN:q0 DD:q0
+pow_si 1m -3 | NN:qq DD:qq
+pow_si 1m -2 | NN:qp DD:qp
+pow_si 1m -1 | NN:pp DD:pp
+pow_si 1m 0 | NN:p0 DD:pz
+pow_si 1m 1 | NN:pq DD:pq
+pow_si 1m 2 | NN:qq DD:qq
+pow_si 1m 3 | NN:qp DD:qp
+pow_si 1m 4 | NN:qp DD:qp
+pow_si 1h -3 | NN:pq DD:pq
+pow_si 1h -2 | NN:pq DD:pq
+pow_si 1h -1 | NN:pq DD:pq
+pow_si 1h 0 | NN:p0 DD:pz
+pow_si 1h 1 | NN:pp DD:pp
+pow_si 1h 2 | NN:pp DD:pp
+pow_si 1h 3 | NN:pp DD:pp
+pow_si 1h 4 | NN:qp DD:qp
+pow_si mn -3 | NN:nn DD:nn
+pow_si mn -2 | NN:nn DD:nn
+pow_si mn -1 | NN:nn DD:nn
+pow_si mn 0 | NN:p0 DD:pz
+pow_si mn 1 | NN:nn DD:nn
+pow_si mn 2 | NN:nn DD:nn
+pow_si mn 3 | NN:nn DD:nn
+pow_si mn 4 | NN:nn DD:nn
+pow_si mI -3 | NN:00 DD:00
+pow_si mI -2 | NN:00 DD:00
+pow_si mI -1 | NN:00 DD:00
+pow_si mI 0 | NN:p0 DD:pz
+pow_si mI 1 | NN:In DD:In
+pow_si mI 2 | NN:In DD:In
+pow_si mI 3 | NN:In DD:In
+pow_si mI 4 | NN:In DD:In
+pow_si mJ -3 | NN:00 DD:00
+pow_si mJ -2 | NN:00 DD:00
+pow_si mJ -1 | NN:00 DD:00
+pow_si mJ 0 | NN:p0 DD:pz
+pow_si mJ 1 | NN:In DD:In
+pow_si mJ 2 | NN:In DD:In
+pow_si mJ 3 | NN:In DD:In
+pow_si mJ 4 | NN:In DD:In
+pow_si m0 -3 | NN:qz DD:qz
+pow_si m0 -2 | NN:p0 DD:p0
+pow_si m0 -1 | NN:qz DD:qz
+pow_si m0 0 | NN:p0 DD:pz
+pow_si m0 1 | NN:qz DD:qz
+pow_si m0 2 | NN:p0 DD:p0
+pow_si m0 3 | NN:qz DD:qz
+pow_si m0 4 | NN:p0 DD:p0
+pow_si mz -3 | NN:qz DD:qz
+pow_si mz -2 | NN:p0 DD:p0
+pow_si mz -1 | NN:qz DD:qz
+pow_si mz 0 | NN:p0 DD:pz
+pow_si mz 1 | NN:qz DD:qz
+pow_si mz 2 | NN:p0 DD:p0
+pow_si mz 3 | NN:qz DD:qz
+pow_si mz 4 | NN:p0 DD:p0
+pow_si m1 -3 | NN:qq DD:qq
+pow_si m1 -2 | NN:pp DD:pp
+pow_si m1 -1 | NN:qq DD:qq
+pow_si m1 0 | NN:p0 DD:pz
+pow_si m1 1 | NN:qp DD:qp
+pow_si m1 2 | NN:pq DD:pq
+pow_si m1 3 | NN:qp DD:qp
+pow_si m1 4 | NN:qq DD:qq
+pow_si mm -3 | NN:pp DD:pp
+pow_si mm -2 | NN:0q DD:0q
+pow_si mm -1 | NN:qp DD:qp
+pow_si mm 0 | NN:p0 DD:pz
+pow_si mm 1 | NN:qq DD:qq
+pow_si mm 3 | NN:pq DD:pq
+pow_si mm 4 | NN:q0 DD:q0
+pow_si mh -3 | NN:qq DD:qq
+pow_si mh -2 | NN:pp DD:pp
+pow_si mh -1 | NN:qq DD:qq
+pow_si mh 0 | NN:p0 DD:pz
+pow_si mh 1 | NN:qp DD:qp
+pow_si mh 2 | NN:pq DD:pq
+pow_si mh 3 | NN:qp DD:qp
+pow_si mh 4 | NN:pq DD:pq
+pow_si hn -3 | NN:nn DD:nn
+pow_si hn -2 | NN:nn DD:nn
+pow_si hn -1 | NN:nn DD:nn
+pow_si hn 0 | NN:p0 DD:pz
+pow_si hn 1 | NN:nn DD:nn
+pow_si hn 2 | NN:nn DD:nn
+pow_si hn 3 | NN:nn DD:nn
+pow_si hn 4 | NN:nn DD:nn
+pow_si hI -3 | NN:00 DD:00
+pow_si hI -2 | NN:00 DD:00
+pow_si hI -1 | NN:00 DD:00
+pow_si hI 0 | NN:p0 DD:pz
+pow_si hI 1 | NN:In DD:In
+pow_si hI 2 | NN:In DD:In
+pow_si hI 3 | NN:In DD:In
+pow_si hI 4 | NN:In DD:In
+pow_si hJ -3 | NN:00 DD:00
+pow_si hJ -2 | NN:00 DD:00
+pow_si hJ -1 | NN:00 DD:00
+pow_si hJ 0 | NN:p0 DD:pz
+pow_si hJ 1 | NN:In DD:In
+pow_si hJ 2 | NN:In DD:In
+pow_si hJ 3 | NN:In DD:In
+pow_si hJ 4 | NN:In DD:In
+pow_si h0 -3 | NN:pz DD:pz
+pow_si h0 -2 | NN:pz DD:pz
+pow_si h0 -1 | NN:pz DD:pz
+pow_si h0 0 | NN:pz DD:pz
+pow_si h0 1 | NN:p0 DD:p0
+pow_si h0 2 | NN:p0 DD:p0
+pow_si h0 3 | NN:p0 DD:p0
+pow_si h0 4 | NN:p0 DD:p0
+pow_si hz -3 | NN:p0 DD:p0
+pow_si hz -2 | NN:p0 DD:p0
+pow_si hz -1 | NN:p0 DD:p0
+pow_si hz 0 | NN:pz DD:pz
+pow_si hz 1 | NN:pz DD:pz
+pow_si hz 2 | NN:pz DD:pz
+pow_si hz 3 | NN:pz DD:pz
+pow_si hz 4 | NN:pz DD:pz
+pow_si h1 -3 | NN:qp DD:qp
+pow_si h1 -2 | NN:qq DD:qq
+pow_si h1 -1 | NN:pq DD:pq
+pow_si h1 0 | NN:p0 DD:pz
+pow_si h1 1 | NN:pp DD:pp
+pow_si h1 2 | NN:qp DD:qp
+pow_si h1 3 | NN:qq DD:qq
+pow_si h1 4 | NN:qq DD:qq
+pow_si hm -3 | NN:qq DD:qq
+pow_si hm -2 | NN:qp DD:qp
+pow_si hm -1 | NN:pp DD:pp
+pow_si hm 0 | NN:p0 DD:pz
+pow_si hm 1 | NN:pq DD:pq
+pow_si hm 2 | NN:qq DD:qq
+pow_si hm 3 | NN:qp DD:qp
+pow_si hm 4 | NN:pp DD:pp
+pow_si hh -3 | NN:qq DD:qq
+pow_si hh -2 | NN:0q DD:0q
+pow_si hh -1 | NN:pq DD:pq
+pow_si hh 0 | NN:pz DD:pz
+pow_si hh 1 | NN:pp DD:pp
+pow_si hh 3 | NN:qp DD:qp
+pow_si hh 4 | NN:q0 DD:q0
