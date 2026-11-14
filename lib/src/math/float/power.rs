@@ -10,7 +10,10 @@
 //! on powers computed with every product cut to a working length, whose error is bounded below.
 
 use super::general::{Op, decided};
-use super::limbs;
+use super::limbs::{self, Work};
+use super::power_fixed;
+use super::rec_sqrt;
+use super::root_small;
 use super::round::{overflow, round_into, round_mag, seal, underflow};
 use super::small;
 use super::ziv::{Approx, guard, round_approx};
@@ -164,6 +167,10 @@ fn reciprocal_low(x: &Int, wl: usize) -> Low {
 /// or underflow (false) when it is certainly beyond the exponent range, `None` when its exponent
 /// is within about `2^62` of zero, so that every exponent of the computation fits.
 fn beyond(x: Op<'_>, ly: f64, y_negative: bool) -> Option<bool> {
+    // `|log2 |x|| ≤ |e| + 1` for `x = 0.M·2^e`: nothing to compute when that keeps it in reach.
+    if ly + ((x.exp.unsigned_abs() + 1) as f64).log2() <= 62.0 {
+        return None;
+    }
     let (l2, lneg) = log2_abs(x);
     let l2 = l2?;
     // `log2 |y log2 x|`, its sign that of the result's exponent.
@@ -532,9 +539,21 @@ fn pow_finite(
             return done(kind, o, prec);
         }
     }
+    let bits = limbs::bit_len(n);
+    // The bits of the odd part of the mantissa, which is aligned at its top bit.
+    let b = 64 * x.m.len() as u64 - limbs::trailing_zeros(x.m);
+    if n.len() == 1 && b >= 2 && (n_negative || n[0].checked_mul(b - 1).is_none_or(|lo| lo > prec))
+    {
+        // Neither a number of the precision nor halfway: on limbs of a fixed width first.
+        let ly = (n[0] as f64).log2();
+        if beyond(x, ly, n_negative).is_none()
+            && let Some((kind, o)) = power_fixed::pow(x, negative, n_negative, n[0], prec, round)
+        {
+            return done(kind, o, prec);
+        }
+    }
     let xi = Int::of(x);
     let (odd, k) = xi.odd();
-    let bits = limbs::bit_len(n);
     if is_one(&odd) {
         // `±2^(kn)`, exactly, or beyond the range: `kn` saturates far past it.
         let kn = if bits > 100 {
@@ -581,12 +600,39 @@ fn pow_finite(
         let (kind, o) = seal(r, prec, round, Vec::new());
         return done(kind, o, prec);
     }
+    // Ziv's strategy on products cut to `wl` limbs, which grow by half each time.
+    let mut wl = (prec + 1 + bits + 4 + 12).div_ceil(64).max(2) as usize;
+    loop {
+        if let Some((kind, o)) = limbs::with_work(|w| {
+            power_fixed::pow_vec(x, negative, n_negative, n, wl, prec, round, w)
+        }) {
+            return done(kind, o, prec);
+        }
+        if n_negative && wl > 4 * x.m.len() + 8 {
+            // A divisor that the cut keeps a power of two: the general reciprocal.
+            return pow_general(&xi, negative, n_negative, n, prec, round);
+        }
+        wl += wl / 2 + 1;
+    }
+}
+
+/// `|x|^(±n)` by Ziv's strategy on powers cut to whole limbs from the general reciprocal, for the
+/// divisors that [`power_fixed::pow_vec`] cannot take.
+fn pow_general(
+    xi: &Int,
+    negative: bool,
+    n_negative: bool,
+    n: &[u64],
+    prec: u64,
+    round: Round,
+) -> (BigFloat, Ordering) {
+    let bits = limbs::bit_len(n);
     let kb: u64 = 1;
     let mut w = prec + guard(prec) + bits + 8;
     loop {
         let wl = (w / 64 + 2) as usize;
         let base = if n_negative {
-            reciprocal_low(&xi, wl)
+            reciprocal_low(xi, wl)
         } else {
             let mut m = xi.m.clone();
             let mut lsb = xi.lsb;
@@ -688,33 +734,26 @@ fn range(negative: bool, up: bool, prec: u64, round: Round) -> (BigFloat, Orderi
 /// root `64(n + 1)` bits, as `floor(sqrt(floor(2^E / M))) = floor(sqrt(2^E / M))`; never exact,
 /// so a sticky bit.
 fn rec_sqrt(x: Op<'_>, prec: u64, round: Round) -> (BigFloat, Ordering) {
-    let xi = Int::of(x);
-    let (odd, k) = xi.odd();
-    if is_one(&odd) && k % 2 == 0 {
-        return round_mag(false, &[1], -k / 2, false, prec, round);
-    }
-    if let [m] = xi.m[..]
-        && prec <= 63
-        && m != 1 << 63
-    {
-        // In registers: `Q = floor(2^E / M)` of 127 or 128 bits for `E` of 190 or 191, by two
-        // divisions of two limbs by one, and its root of 64 bits, with a sticky bit.
-        let e: i128 = if (191 + xi.lsb) & 1 == 0 { 191 } else { 190 };
-        let v = nat::invert_limb(m);
-        let (q1, r1) = nat::div_2by1(1 << (e - 128), 0, m, v);
-        let (q0, _) = nat::div_2by1(r1, 0, m, v);
-        let (s, _) = nat::sqrt_rem_u128(u128::from(q1) << 64 | u128::from(q0));
-        let r = small::round_top(
-            false,
-            u128::from(s) << 64,
-            64 - (e + xi.lsb) / 2,
-            true,
-            prec,
-            round,
-        );
+    let x = x.strip();
+    if x.m.len() == 1 && x.m[0].is_power_of_two() {
+        // `2^k`, `k = exp - 1`: exact for an even `k`, otherwise the general path.
+        if x.exp & 1 == 1 {
+            return round_mag(false, &[1], -(x.exp - 1) / 2, false, prec, round);
+        }
+    } else if x.m.len() <= 2 && prec <= 127 {
+        let r = rec_sqrt::small(x.m, x.exp, prec, round);
         let (kind, o) = seal(r, prec, round, Vec::new());
         return done(kind, o, prec);
+    } else if let Some((kind, o)) = limbs::with_work(|w| {
+        if prec < rec_sqrt::NEWTON {
+            rec_sqrt::via_sqrt(x, prec, round, w)
+        } else {
+            rec_sqrt::newton(x, prec, round, w)
+        }
+    }) {
+        return done(kind, o, prec);
     }
+    let xi = Int::of(x);
     let qn = prec.div_ceil(64) + 1;
     let bm = limbs::bit_len(&xi.m);
     let base = 128 * qn + bm + 2;
@@ -763,6 +802,13 @@ const INTEGER_DEGREE: u64 = 16;
 /// The `n`-th root, `n ≥ 3`, of the finite `x`, negative only for an odd `n`.
 fn root(x: Op<'_>, n: u64, prec: u64, round: Round) -> (BigFloat, Ordering) {
     let negative = x.negative;
+    if n <= root_small::NMAX as u64
+        && prec <= 127
+        && let Some(r) = root_small::root(x, n, prec, round)
+    {
+        let (kind, o) = seal(r, prec, round, Vec::new());
+        return done(kind, o, prec);
+    }
     let qn = prec.div_ceil(64) + 1;
     if n <= INTEGER_DEGREE || n.saturating_mul(64 * qn) <= INTEGER_ROOT {
         return root_int(x, n, negative, prec, round);
@@ -771,37 +817,83 @@ fn root(x: Op<'_>, n: u64, prec: u64, round: Round) -> (BigFloat, Ordering) {
 }
 
 /// The `n`-th root of `|x|` of the sign `negative` as an integer root: `S = floor((M·2^t)^(1/n))`
-/// for the mantissa `x = M·2^l` and `t ≡ l (mod n)` that gives `S` at least `64(n_prec + 1)` bits
-/// (a negative `t` drops bits of `M`, as `floor(floor(y)^(1/n)) = floor(y^(1/n))`), then
+/// for the mantissa `x = M·2^l` and `t ≡ l (mod n)` that gives `S` at least `prec + 16` bits
+/// and 80 (a negative `t` drops bits of `M`, as `floor(floor(y)^(1/n)) = floor(y^(1/n))`), then
 /// `S·2^((l - t)/n)` rounded, the remainder and the bits dropped for the sticky bit, computed only
 /// when the bits of `S` below its round bit are all zero.
 fn root_int(x: Op<'_>, n: u64, negative: bool, prec: u64, round: Round) -> (BigFloat, Ordering) {
-    let xi = Int::of(x);
-    let qn = prec.div_ceil(64) + 1;
+    let x = x.strip();
     let ni = i128::from(n);
-    let bm = i128::from(limbs::bit_len(&xi.m));
-    let t0 = ni * (64 * i128::from(qn) + 1) - bm;
-    let t = t0 + (xi.lsb - t0).rem_euclid(ni);
-    let (r, tail) = if t >= 0 {
-        (limbs::shl(&xi.m, t as u64), false)
-    } else {
-        let s = (-t) as u64;
-        (
-            limbs::shr(&xi.m, s),
-            !limbs::zero_below(&xi.m, s.min(limbs::bit_len(&xi.m))),
-        )
-    };
-    let mut s = Vec::new();
-    let mut scratch = Vec::new();
-    nat::root(&mut s, &r, n as u32, &mut scratch);
-    let lsb = (xi.lsb - t) / ni;
-    let sticky = if decided(&s, 0, 0, prec) {
-        true
-    } else {
-        tail || pow_exact(&s, n) != r
-    };
-    let (kind, o) = round_into(negative, &s, lsb, sticky, prec, round, Vec::new());
-    done(kind, o, prec)
+    let bm = 64 * x.m.len() as i128;
+    let xlsb = x.exp - bm;
+    // Two limbs at least, which the test of the rounding reads.
+    let t0 = ni * i128::from((prec + 16).max(80)) - bm;
+    let t = t0 + (xlsb - t0).rem_euclid(ni);
+    limbs::with_work(|w| {
+        let Work {
+            a: r,
+            b: s,
+            c: p,
+            scratch,
+        } = w;
+        // `M·2^t`, or `floor(M·2^t)` and whether bits are dropped, into `r`.
+        r.clear();
+        let tail = if t >= 0 {
+            let (k, b) = ((t / 64) as usize, (t % 64) as u32);
+            r.resize(k, 0);
+            if b == 0 {
+                r.extend_from_slice(x.m);
+            } else {
+                let mut carry = 0u64;
+                for &v in x.m {
+                    r.push(v << b | carry);
+                    carry = v >> (64 - b);
+                }
+                r.push(carry);
+            }
+            false
+        } else {
+            let sh = (-t) as u64;
+            let (k, b) = ((sh / 64) as usize, (sh % 64) as u32);
+            let m = &x.m[k.min(x.m.len())..];
+            if b == 0 {
+                r.extend_from_slice(m);
+            } else {
+                r.extend(
+                    (0..m.len()).map(|i| m[i] >> b | m.get(i + 1).map_or(0, |&h| h << (64 - b))),
+                );
+            }
+            !limbs::zero_below(x.m, sh.min(bm as u64))
+        };
+        limbs::trim(r);
+        nat::root(s, r, n as u32, scratch);
+        let lsb = (xlsb - t) / ni;
+        let sticky = decided(s, 0, 0, prec) || tail || {
+            // `S^n` against the radicand.
+            pow_into(p, s, n, scratch);
+            p != r
+        };
+        let (kind, o) = round_into(negative, s, lsb, sticky, prec, round, Vec::new());
+        done(kind, o, prec)
+    })
+}
+
+/// `m^n` exactly into `out`, without zero limbs at the top, `n ≥ 1`, by squarings from the top bit
+/// of `n`; `scratch` is working memory.
+fn pow_into(out: &mut Vec<u64>, m: &[u64], n: u64, scratch: &mut Vec<u64>) {
+    let mut t = Vec::new();
+    out.clear();
+    out.extend_from_slice(m);
+    for i in (0..63 - n.leading_zeros()).rev() {
+        nat::sqr_into(&mut t, out, scratch);
+        limbs::trim(&mut t);
+        core::mem::swap(out, &mut t);
+        if n >> i & 1 == 1 {
+            nat::mul_into(&mut t, out, m, scratch);
+            limbs::trim(&mut t);
+            core::mem::swap(out, &mut t);
+        }
+    }
 }
 
 /// The `n`-th root of `|x|` of the sign `negative` by Newton's method on floats, for a large `n`:

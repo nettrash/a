@@ -257,63 +257,70 @@ Measured on an Apple M4 Max on one thread, in cycles per call unless a time is g
 
 | Page | Contents |
 | --- | --- |
-| [Arbitrary-precision floats](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/float.md) | `a::math::float::BigFloat`, a binary float of any precision from 1 bit to 2⁴⁰, each result correctly rounded in four modes with MPFR's ternary value and the exponent range `±(2⁶² − 1)`: `+`, `-`, `*`, `/`, the fused multiply-add and the square root in registers for one and two limbs and on windows of the limbs the rounding needs beyond, with Karatsuba, Toom-Cook, transforms, Newton's division and Zimmermann's square root at length; results into existing numbers (`set_add`, `add_assign_round`) without allocating; primitive numbers and `Number`s on either side of the operators; exact sums and dot products rounded once; `1/√x`, roots of any degree, integer and rational powers with their exact and halfway cases found first; conversions to and from `f64` and `f32` with the subnormals, to integers (`floor`, `ceil`, `rint_round`, saturating `to_i64_round`) and exact comparisons with integers, floats, numbers and rationals; `Display` as the shortest decimal that reads back, the digits of `mpfr_get_str` in any radix from 2 to 36, and reading any number of digits with `mpfr_strtofr`'s syntax; `exp`, `exp2`, `exp10`, `exp_m1` by Smith's rectangular splitting and the bit burst, `ln`, `log2`, `log10`, `ln_1p` by Newton's iteration on the exponential and the AGM, `pow` with C99's special values, and the hyperbolic functions and their inverses; `sin`, `cos`, `tan`, `sec`, `csc`, `cot`, `sin_cos`, `atan`, `asin`, `acos` and `atan2`, the argument reduced with π to the bits its exponent needs, a table and Horner's rule in arrays to 512 bits, the series after halvings beyond and Brent's bit burst from about 410,000 bits; π, `e`, `ln 2`, `ln 10`, Euler's `γ` and Catalan's `G` from tables up to 16,384 bits and beyond by binary splitting of the Chudnovskys', Zuniga's and the Pilehroods' series and the Brent–McMillan algorithm in dual numbers, kept per process; `BigComplex`, as GNU MPC, each part of every result rounded in a mode of its own, with its arithmetic, square root, norm and absolute value and `exp`, `ln`, `log10`, the circular and hyperbolic functions and their inverses, `pow`, `arg` and `proj` with MPC's branch cuts and special values; and `Matrix<BigFloat>` and `Matrix<BigComplex>`, products whose every element is the exact dot product rounded once and LU solutions of exact dot products |
+| [Arbitrary-precision floats](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/float.md) | `a::math::float::BigFloat`, a binary float of any precision from 1 bit to 2⁴⁰, each result correctly rounded in four modes with MPFR's ternary value and the exponent range `±(2⁶² − 1)`: `+`, `-`, `*`, `/`, the fused multiply-add and the square root in registers for one and two limbs and on windows of the limbs the rounding needs beyond, with Karatsuba, Toom-Cook, transforms, Newton's division and Zimmermann's square root at length; results into existing numbers (`set_add`, `set_mul_add`, `set_sqrt`, `set_f64`, `set_floor`, `set_rint`, `add_assign_round`) without allocating; primitive numbers and `Number`s on either side of the operators; exact sums and dot products rounded once; `1/√x`, roots of any degree, integer and rational powers with their exact and halfway cases found first; conversions to and from `f64` and `f32` with the subnormals, to integers (`floor`, `ceil`, `rint_round`, saturating `to_i64_round`) and exact comparisons with integers, floats, numbers and rationals; `Display` as the shortest decimal that reads back, the digits of `mpfr_get_str` in any radix from 2 to 36, and reading any number of digits with `mpfr_strtofr`'s syntax; `exp`, `exp2`, `exp10`, `exp_m1` by Smith's rectangular splitting and the bit burst, `ln`, `log2`, `log10`, `ln_1p` from tables to 512 bits, Newton's iteration on the exponential beyond and the AGM from 3,400 bits, `pow` with C99's special values, and the hyperbolic functions and their inverses; `sin`, `cos`, `tan`, `sec`, `csc`, `cot`, `sin_cos`, `atan`, `asin`, `acos` and `atan2`, the argument reduced with π to the bits its exponent needs, a table and Horner's rule in arrays to 512 bits, the series after halvings beyond, and Brent's bit burst from about 770,000 bits for the sine and 205,000 for `atan`; π, `e`, `ln 2`, `ln 10`, Euler's `γ` and Catalan's `G` from tables up to 16,384 bits and beyond by binary splitting of the Chudnovskys', Zuniga's and the Pilehroods' series and the Brent–McMillan algorithm in dual numbers, kept per process; `BigComplex`, as GNU MPC, each part of every result rounded in a mode of its own, with its arithmetic (also into existing numbers, `set_add` and the others), square root, norm and absolute value and `exp`, `ln`, `log10`, the circular and hyperbolic functions and their inverses, `pow`, `arg` and `proj` with MPC's branch cuts and special values; and `Matrix<BigFloat>` and `Matrix<BigComplex>`, products whose every element is the exact dot product rounded once and LU solutions of exact dot products |
 
 Measured on an Apple M4 Max on one thread, in ns, µs, ms or s a call at the precision given in bits (both parts' for complex numbers), against the fastest of MPFR 4.2 (through FFI, into a variable that exists), rug 1.30, Arb in FLINT 3.6 (whose balls are not correctly rounded: for the time only) and GNU MPC 1.4.1 that has the function; the page has the conditions, more sizes and the other operations. MPFR and MPC write into a variable that exists and `a` returns a new number, unless the operation is a `set_*` form.
 
 | Operation | Size | `a` | Fastest reference |
 | --- | --- | ---: | --- |
-| `set_add` | 53 bits | 7.4 ns | MPFR 5 ns |
-|  | 1000 bits | 30.6 ns | MPFR 14.6 ns |
-|  | 10⁵ bits | 716 ns | MPFR 988 ns |
-| `set_add`, operands of 10⁵ bits | 1000 bits | 53 ns | MPFR 268 ns |
-| `set_mul` | 53 bits | 8.7 ns | MPFR 5.4 ns |
-|  | 10⁶ bits | 560 µs | MPFR 1.41 ms |
-| `set_div` | 10⁶ bits | 1.4 ms | MPFR 3.99 ms |
-| `set_sqrt` | 64 bits | 22.5 ns | MPFR 6.8 ns |
-|  | 10⁶ bits | 1.47 ms | MPFR 3.23 ms |
-| `mul_add_round` | 113 bits | 63.2 ns | MPFR 34.5 ns |
-|  | 10⁵ bits | 50.3 µs | MPFR 106 µs |
-| `rec_sqrt_round` | 10⁴ bits | 17.4 µs | MPFR 9.46 µs |
-| `nth_root_round(100)` | 1000 bits | 6.74 µs | MPFR 43.6 µs |
-| `powi_round(7)` | 113 bits | 264 ns | MPFR 75.9 ns |
-| `powi_round(1_000_000_007)` | 53 bits | 142 ns | MPFR 385 ns |
-| `to_f64_round` | 53 bits | 1.6 ns | MPFR 5.4 ns |
-| `from_f64_round` | 53 bits | 10.7 ns | MPFR 5.6 ns |
-| `floor` | 53 bits | 14.7 ns | MPFR 8.5 ns |
-| `to_digits(10, None)` | 10⁶ bits | 4.79 ms | MPFR 9.61 ms |
-| `from_str_radix`, 53 bits | 10⁶ digits | 258 µs | MPFR 495 µs |
-| `exp` | 53 bits | 329 ns | Arb 88 ns |
-|  | 10⁶ bits | 96.8 ms | Arb 76.4 ms |
-| `ln` | 53 bits | 449 ns | Arb 104 ns |
-|  | 10⁴ bits | 199 µs | Arb 80.3 µs |
-|  | 10⁶ bits | 77 ms | Arb 87.1 ms |
-| `pow` | 128 bits | 1.26 µs | Arb 348 ns |
-| `sinh` | 10⁵ bits | 5.75 ms | Arb 3.73 ms |
-| `sin` | 53 bits | 216 ns | Arb 88 ns |
-|  | 10⁵ bits | 7.11 ms | Arb 4.98 ms |
-| `cos`, an argument `m·2^(10⁶)` | 53 bits | 1.4 ms | MPFR 4.12 ms |
-| `atan` | 256 bits | 1.71 µs | Arb 238 ns |
-|  | 10⁶ bits | 447 ms | Arb 156 ms |
-| `atan2` | 1000 bits | 8.54 µs | Arb 2.2 µs |
+| `set_add` | 53 bits | 5 ns | MPFR 5.1 ns |
+|  | 1000 bits | 17.7 ns | MPFR 14.6 ns |
+|  | 10⁵ bits | 483 ns | rug 988 ns |
+| `set_add`, operands of 10⁵ bits | 1000 bits | 55.1 ns | rug 271 ns |
+| `set_mul` | 53 bits | 3.5 ns | MPFR 5.4 ns |
+|  | 10⁶ bits | 559 µs | rug 1.41 ms |
+| `set_div` | 10⁶ bits | 1.36 ms | rug 4 ms |
+| `set_sqrt` | 64 bits | 12.7 ns | MPFR 6.8 ns |
+|  | 10⁶ bits | 1.44 ms | rug 3.23 ms |
+| `mul_add_round` | 113 bits | 21.9 ns | MPFR 22.8 ns |
+|  | 10⁵ bits | 50.4 µs | rug 109 µs |
+| `rec_sqrt_round` | 10⁴ bits | 8.49 µs | MPFR 9.33 µs |
+| `nth_root_round(100)` | 1000 bits | 6.33 µs | MPFR 43.4 µs |
+| `powi_round(7)` | 113 bits | 50.2 ns | MPFR 75.7 ns |
+| `powi_round(1_000_000_007)` | 53 bits | 125 ns | rug 385 ns |
+| `to_f64_round` | 53 bits | 1.6 ns | rug 5.4 ns |
+| `set_f64` | 53 bits | 2.8 ns | MPFR 5.6 ns |
+| `from_f64_round` | 53 bits | 9.9 ns | MPFR 5.6 ns |
+| `set_floor` | 53 bits | 7.2 ns | MPFR 8.2 ns |
+| `floor` | 53 bits | 16.9 ns | MPFR 8.2 ns |
+| `to_digits(10, None)` | 53 bits | 46.2 ns | MPFR 219 ns |
+|  | 10⁶ bits | 4.84 ms | MPFR 9.56 ms |
+| `to_string()` | 53 bits | 133 ns | rug 310 ns |
+| `from_str_radix`, 53 bits | 17 digits | 38.1 ns | MPFR 107 ns |
+|  | 10⁶ digits | 40.1 µs | MPFR 486 µs |
+| `exp` | 53 bits | 334 ns | Arb 84.4 ns |
+|  | 10⁶ bits | 94.9 ms | Arb 75.3 ms |
+| `ln` | 53 bits | 186 ns | Arb 103 ns |
+|  | 10⁴ bits | 168 µs | Arb 78.5 µs |
+|  | 10⁶ bits | 70.5 ms | Arb 87 ms |
+| `pow` | 128 bits | 887 ns | Arb 344 ns |
+| `sinh` | 10⁵ bits | 5.63 ms | Arb 3.68 ms |
+| `sin` | 53 bits | 213 ns | Arb 86.6 ns |
+|  | 10⁵ bits | 6.96 ms | Arb 4.87 ms |
+| `cos`, an argument `m·2^(10⁶)` | 53 bits | 1.38 ms | MPFR 4.05 ms |
+| `atan` | 256 bits | 1.65 µs | Arb 232 ns |
+|  | 10⁶ bits | 241 ms | Arb 154 ms |
+| `atan2` | 1000 bits | 8.4 µs | Arb 2.18 µs |
 | `BigFloat::pi`, first call | 10⁶ bits | 19.7 ms | Arb 28.1 ms |
 |  | 10⁸ bits | 4.44 s | Arb 6.48 s |
 | `BigFloat::ln2`, first call | 10⁶ bits | 39 ms | Arb 55.4 ms |
 | `BigFloat::euler_gamma`, first call | 10⁶ bits | 511 ms | Arb 950 ms |
 | `BigFloat::catalan`, first call | 10⁶ bits | 113 ms | Arb 180 ms |
 | `BigFloat::pi`, cached | 64 bits | 14 ns | Arb 8 ns |
-| `BigComplex::add_round`, a new number | 53 bits | 35.7 ns | MPC 13.5 ns |
-| `BigComplex::mul_round` | 10⁵ bits | 158 µs | MPC 320 µs |
-| `BigComplex::sqrt_round` | 53 bits | 667 ns | MPC 157 ns |
-| `BigComplex::div_round` | 10⁵ bits | 538 µs | MPC 813 µs |
-| `BigComplex::exp_round` | 1000 bits | 8.29 µs | MPC 18.4 µs |
-| `BigComplex::ln_round` | 256 bits | 4.41 µs | MPC 8 µs |
-| `BigComplex::tan_round` | 53 bits | 1.96 µs | MPC 4.27 µs |
-| `BigComplex::asin_round` | 1000 bits | 19.6 µs | MPC 158 µs |
-| `BigComplex::pow_round` | 10⁴ bits | 1.04 ms | MPC 2.74 ms |
-| `BigComplex::powi_round(17)` | 113 bits | 1.09 µs | MPC 822 ns |
-| `&a * &b`, `Matrix<BigFloat>`, 8 × 8 | 256 bits | 12.4 µs | an `mpfr_fma` loop 17.6 µs |
-| `a.solve(&b)`, `Matrix<BigFloat>`, 8 × 8 | 53 bits | 8.69 µs | Gaussian elimination by `mpfr_fms` 3.1 µs |
+| `BigComplex::set_add` | 53 bits | 10.4 ns | rug 12.9 ns |
+| `BigComplex::add_round`, a new number | 53 bits | 28.4 ns | rug 12.9 ns |
+| `BigComplex::set_mul` | 53 bits | 26.6 ns | MPC 53.9 ns |
+| `BigComplex::mul_round` | 10⁵ bits | 160 µs | MPC 322 µs |
+| `BigComplex::sqrt_round` | 53 bits | 105 ns | rug 156 ns |
+| `BigComplex::div_round` | 10⁵ bits | 535 µs | rug 820 µs |
+| `BigComplex::exp_round` | 1000 bits | 8.35 µs | MPC 18.5 µs |
+| `BigComplex::ln_round` | 256 bits | 3.16 µs | MPC 8 µs |
+| `BigComplex::tan_round` | 53 bits | 1.99 µs | MPC 4.22 µs |
+| `BigComplex::asin_round` | 1000 bits | 19.9 µs | MPC 158 µs |
+| `BigComplex::pow_round` | 10⁴ bits | 929 µs | MPC 2.73 ms |
+| `BigComplex::powi_round(17)` | 113 bits | 830 ns | MPC 810 ns |
+| `&a * &b`, `Matrix<BigFloat>`, 8 × 8 | 256 bits | 13.2 µs | an `mpfr_fma` loop 18.1 µs |
+| `a.solve(&b)`, `Matrix<BigFloat>`, 8 × 8 | 53 bits | 3.71 µs | Gaussian elimination by `mpfr_fms` 3.11 µs |
 
 ### Elliptic curves
 

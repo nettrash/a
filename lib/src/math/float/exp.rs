@@ -31,7 +31,10 @@ pub(crate) const INV_LN2: u64 = 0xb8aa_3b29_5c17_f0bb;
 /// this gives `ε_s <= 2^s (E + 1) u (1 + 2^-9)`. The two factors give `θ <= (ε_s + 2(δ_r + 2^s
 /// u))(1 + 2^-9)`.
 pub(crate) fn exp_fix(neg: bool, x: &[u64], n: usize) -> (Vec<u64>, i64, Rad) {
-    if n <= super::small_fix::SMALL {
+    // The arrays hold `|k| L` for `W + 2 bits(k) + 5 <= 384`: four limbs only below `2^56`.
+    if n <= super::small_fix::SMALL
+        && (n < 4 || limbs::bit_len(fix::trimmed(x)) <= 64 * n as u64 + 56)
+    {
         let (y, k, e) = super::small_fix::exp_small(neg, x, n);
         return (y[..n + 1].to_vec(), k, e);
     }

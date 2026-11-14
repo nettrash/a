@@ -7,6 +7,7 @@ use super::common::{below, float, one, pow2, rational, reference, same, size};
 use super::complex::sqrt_reference;
 use a::math::float::{BigComplex, BigFloat, Round};
 use a::math::matrix::{Matrix, Norm};
+use a::math::numbers::{ByteOrder, Number};
 use a::math::rational::Rational;
 use core::cmp::Ordering;
 
@@ -300,4 +301,315 @@ fn matrices_of_floats_have_the_generic_operations() {
     let z = Matrix::from_rows(&[[BigComplex::i(53)]]);
     assert_eq!(z.conjugate_transpose()[(0, 0)], -BigComplex::i(53));
     assert_eq!(z.to_string(), "(0 1)");
+}
+
+/// `q` rounded to nearest at `prec` bits, as a rational: the value of the float.
+fn rounded(q: &Rational, prec: u64) -> Rational {
+    if q.is_zero() {
+        Rational::from(0u8)
+    } else {
+        rational(&reference(q, prec, Round::Nearest).0)
+    }
+}
+
+/// The factorisation of `Matrix::<BigFloat>::det` and `solve` replayed on exact rationals, each
+/// operation rounded once to nearest at `prec`: Doolittle's method with partial pivoting, each
+/// element of `U` and of `L` before its division one exact dot product rounded once; `None` for a
+/// pivot that is zero.
+fn replayed(a: &Matrix<BigFloat>, prec: u64) -> Option<(Vec<Rational>, Vec<usize>, bool)> {
+    let n = a.rows();
+    let mut lu: Vec<Rational> = a.as_slice().iter().map(rational).collect();
+    let mut perm: Vec<usize> = (0..n).collect();
+    let mut odd = false;
+    let abs = |q: &Rational| {
+        if q.is_negative() {
+            -q.clone()
+        } else {
+            q.clone()
+        }
+    };
+    for k in 0..n {
+        for i in k..n {
+            let mut v = lu[i + k * n].clone();
+            for p in 0..k {
+                v -= &lu[i + p * n] * &lu[p + k * n];
+            }
+            lu[i + k * n] = rounded(&v, prec);
+        }
+        let mut r = k;
+        for i in k + 1..n {
+            if abs(&lu[i + k * n]) > abs(&lu[r + k * n]) {
+                r = i;
+            }
+        }
+        if lu[r + k * n].is_zero() {
+            return None;
+        }
+        if r != k {
+            for j in 0..n {
+                lu.swap(r + j * n, k + j * n);
+            }
+            perm.swap(r, k);
+            odd = !odd;
+        }
+        for i in k + 1..n {
+            let q = &lu[i + k * n] / &lu[k + k * n];
+            lu[i + k * n] = rounded(&q, prec);
+        }
+        for j in k + 1..n {
+            let mut v = lu[k + j * n].clone();
+            for p in 0..k {
+                v -= &lu[k + p * n] * &lu[p + j * n];
+            }
+            lu[k + j * n] = rounded(&v, prec);
+        }
+    }
+    Some((lu, perm, odd))
+}
+
+#[test]
+fn factorisations_are_their_rounded_steps_exactly() {
+    // The determinant and the solution of every matrix are its factorisation's steps, each
+    // correctly rounded: in registers (parts to 128 bits) and on limbs (beyond) alike.
+    let mut s = 0x5EED_3A7E_0000_0010u64;
+    for i in 0..size(400, 6) {
+        let n = 1 + below(&mut s, if cfg!(miri) { 3 } else { 6 }) as usize;
+        let max = match i % 10 {
+            0 => 300,
+            1 | 2 => 64,
+            _ => 128,
+        };
+        let exps = if i % 9 == 0 { 400 } else { 8 };
+        let mut a = random(&mut s, n, n, max, exps);
+        if i % 4 == 0 {
+            // Dominant, so that the solutions are not far out.
+            for k in 0..n {
+                let x = &a[(k, k)] + &BigFloat::from(4 * n as u64);
+                a[(k, k)] = x.with_prec(a[(k, k)].prec());
+            }
+        }
+        let b = random(&mut s, n, 2, max, exps);
+        let prec = prec_of(&a).max(prec_of(&b));
+        let what = format!("{a:?}, {b:?} at {prec}");
+        let x = a.solve(&b);
+        let d = a.det();
+        let pa = prec_of(&a);
+        match replayed(&a, pa) {
+            None => assert!(d.is_zero(), "det {what}"),
+            Some((lu, _, odd)) => {
+                let mut want = Rational::from(1u8);
+                for k in 0..n {
+                    want = rounded(&(&want * &lu[k + k * n]), pa);
+                }
+                if odd {
+                    want = -want;
+                }
+                assert_eq!(d.prec(), pa, "det {what}");
+                assert!(rational(&d) == want, "det {what}: {d:?}");
+            }
+        }
+        match replayed(&a, prec) {
+            None => assert!(x.is_none(), "solve {what}"),
+            Some((lu, perm, _)) => {
+                let x = x.expect("a solution");
+                for j in 0..2 {
+                    let mut y: Vec<Rational> = Vec::new();
+                    for r in 0..n {
+                        let mut v = rational(&b[(perm[r], j)]);
+                        for p in 0..r {
+                            v -= &lu[r + p * n] * &y[p];
+                        }
+                        y.push(rounded(&v, prec));
+                    }
+                    for r in (0..n).rev() {
+                        let mut v = y[r].clone();
+                        for p in r + 1..n {
+                            v -= &lu[r + p * n] * &y[p];
+                        }
+                        let v = rounded(&v, prec);
+                        y[r] = rounded(&(&v / &lu[r + r * n]), prec);
+                    }
+                    for r in 0..n {
+                        assert_eq!(x[(r, j)].prec(), prec, "solve {what}");
+                        assert!(
+                            rational(&x[(r, j)]) == y[r],
+                            "solve ({r}, {j}) {what}: {x:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn complex_factorisations_solve_dominant_systems() {
+    // The complex elimination on the stack (parts to 128 bits) solves a dominant system near the
+    // exact solution, as on limbs (beyond 128 bits).
+    let mut s = 0x5EED_3A7E_0000_0011u64;
+    for i in 0..size(60, 3) {
+        let n = 1 + below(&mut s, 5) as usize;
+        let prec = if i % 3 == 0 {
+            200
+        } else {
+            1 + below(&mut s, 128).max(20)
+        };
+        let mut a = Matrix::from_fn(n, n, |_, _| {
+            BigComplex::new(float(&mut s, prec, 1), float(&mut s, prec, 1)).with_prec(prec)
+        });
+        for k in 0..n {
+            let x = &a[(k, k)] + &BigComplex::from(8 * n as u64);
+            a[(k, k)] = x.with_prec(prec);
+        }
+        let x0 = Matrix::from_fn(n, 1, |_, _| {
+            BigComplex::new(float(&mut s, prec, 1), float(&mut s, prec, 1)).with_prec(prec)
+        });
+        let b = &a * &x0;
+        let x = a.solve(&b).expect("a solution");
+        for r in 0..n {
+            for (u, v) in [
+                (x[(r, 0)].re(), x0[(r, 0)].re()),
+                (x[(r, 0)].im(), x0[(r, 0)].im()),
+            ] {
+                let d = rational(u) - rational(v);
+                let d = if d.is_negative() { -d } else { d };
+                assert!(
+                    d <= Rational::new(one(), pow2(prec.saturating_sub(12))),
+                    "{a:?} \\ {b:?} at {prec}: {x:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A float of `p` bits with few bits set, of the exponent `e` of `0.1…·2^e`, of either sign.
+fn sparse_float(s: &mut u64, p: u64, e: i64) -> BigFloat {
+    let mut m = Number::new_from_u8(0, ByteOrder::LittleEndian);
+    m.set_bit(p - 1, true);
+    for _ in 0..below(s, 3) {
+        m.set_bit(below(s, p), true);
+    }
+    if below(s, 2) == 0 {
+        m = -m;
+    }
+    BigFloat::from_parts(&m, e - p as i64, p, Round::Nearest).0
+}
+
+#[test]
+fn sparse_products_and_ties_round_once() {
+    // Sums `x + h + ε` with `h` half a unit of `x`'s last place and `ε` far below (beyond the
+    // top 256 bits of the sum): the tie is broken by `ε` alone. Then products of matrices of
+    // sparse elements spread over 300 bits, against the exact rationals.
+    let mut s = 0x5EED_3A7E_0000_0012u64;
+    for i in 0..size(4000, 40) {
+        let p = 1 + below(&mut s, 128);
+        let e = below(&mut s, 20) as i64 - 10;
+        let mx = super::common::mantissa(&mut s, p);
+        let mx = &(&mx >> 1usize) << 1usize;
+        let mx = if mx.bits() < p {
+            super::common::mantissa(&mut s, p)
+        } else {
+            mx
+        };
+        let neg = below(&mut s, 2) == 0;
+        let sign = |m: Number| if neg { -m } else { m };
+        let x = BigFloat::from_parts(&sign(mx), e - p as i64, p, Round::Nearest).0;
+        let h = BigFloat::from_parts(&sign(one()), e - p as i64 - 1, 1, Round::Nearest).0;
+        let far = 260 + below(&mut s, 200) as i64;
+        let eps = if below(&mut s, 2) == 0 { one() } else { -one() };
+        let eps = BigFloat::from_parts(&eps, e - p as i64 - far, 1, Round::Nearest).0;
+        let row = Matrix::from_rows(&[[x.clone(), h.clone(), eps.clone()]]);
+        let unit = BigFloat::from(1).with_prec(1);
+        let col = Matrix::from_rows(&[[unit.clone()], [unit.clone()], [unit.clone()]]);
+        let got = (&row * &col)[(0, 0)].clone();
+        let q = rational(&x) + rational(&h) + rational(&eps);
+        let prec = p;
+        same(
+            &(got, Ordering::Equal),
+            &(reference(&q, prec, Round::Nearest).0, Ordering::Equal),
+            &format!("{x:?} + {h:?} + {eps:?}"),
+        );
+        // The same sum as a substitution: `y_2 = b_2 + b_0 + b_1` of a unit lower triangle.
+        let minus = BigFloat::from(-1).with_prec(1);
+        let (o, z) = (unit.clone(), BigFloat::zero(1));
+        let a = Matrix::from_rows(&[
+            [o.clone(), z.clone(), z.clone()],
+            [z.clone(), o.clone(), z.clone()],
+            [minus.clone(), minus.clone(), o.clone()],
+        ]);
+        let b = Matrix::from_rows(&[[h.clone()], [eps.clone()], [x.clone()]]);
+        let sol = a.solve(&b).expect("a solution");
+        same(
+            &(sol[(2, 0)].clone(), Ordering::Equal),
+            &(reference(&q, prec, Round::Nearest).0, Ordering::Equal),
+            &format!("solve {x:?} + {h:?} + {eps:?}"),
+        );
+        // Sparse matrices.
+        if i % 4 == 0 {
+            let (m, k, n) = (
+                1 + below(&mut s, 3) as usize,
+                1 + below(&mut s, 5) as usize,
+                1 + below(&mut s, 3) as usize,
+            );
+            let pm = 1 + below(&mut s, 128);
+            let el = |s: &mut u64| {
+                let p = 1 + below(s, pm);
+                let e = below(s, 300) as i64 - 150;
+                sparse_float(s, p, e)
+            };
+            let a = Matrix::from_fn(m, k, |_, _| el(&mut s));
+            let b = Matrix::from_fn(k, n, |_, _| el(&mut s));
+            let c = &a * &b;
+            let prec = prec_of(&a).max(prec_of(&b));
+            let ec = &exact(&a) * &exact(&b);
+            for r in 0..m {
+                for j in 0..n {
+                    let q = &ec[(r, j)];
+                    let what = format!("({r}, {j}) of {a:?} · {b:?}");
+                    if q.is_zero() {
+                        assert!(
+                            c[(r, j)].is_zero() && c[(r, j)].is_sign_positive(),
+                            "{what}"
+                        );
+                    } else {
+                        same(
+                            &(c[(r, j)].clone(), Ordering::Equal),
+                            &(reference(q, prec, Round::Nearest).0, Ordering::Equal),
+                            &what,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cancelling_factorisations_give_positive_zeros() {
+    // A solution whose dot product cancels exactly is `+0` (IEEE 754's sum to nearest), in
+    // registers and on limbs alike: `x_1 = b_1 - b_0` for `b_0 = b_1`.
+    let mut s = 0x5EED_3A7E_0000_0013u64;
+    for _ in 0..size(200, 10) {
+        let p = if below(&mut s, 3) == 0 {
+            129 + below(&mut s, 200)
+        } else {
+            1 + below(&mut s, 128)
+        };
+        let v = float(&mut s, p, 10).with_prec(p);
+        let (o, z) = (BigFloat::from(1).with_prec(p), BigFloat::zero(p));
+        let a = Matrix::from_rows(&[[o.clone(), z.clone()], [o.clone(), o.clone()]]);
+        let b = Matrix::from_rows(&[[v.clone()], [v.clone()]]);
+        let x = a.solve(&b).expect("a solution");
+        assert!(
+            x[(1, 0)].is_zero() && x[(1, 0)].is_sign_positive(),
+            "{a:?} \\ {b:?}: {x:?}"
+        );
+        // And `-0` stays `-0` where every term is `-0`: `x_0 = b_0 = -0`.
+        let b = Matrix::from_rows(&[[BigFloat::neg_zero(p)], [BigFloat::neg_zero(p)]]);
+        let x = a.solve(&b).expect("a solution");
+        assert!(
+            x[(0, 0)].is_zero() && x[(0, 0)].is_sign_negative(),
+            "{a:?} \\ {b:?}: {x:?}"
+        );
+    }
 }

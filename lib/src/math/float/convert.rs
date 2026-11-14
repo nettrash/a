@@ -8,6 +8,7 @@ use super::arith::div_mags;
 use super::limbs;
 use super::round::{away, round_mag, signed};
 use super::scale::{Dir, decide, int_parts};
+use super::small::{self, Fit};
 use super::{BigFloat, Kind, Round};
 use crate::math::numbers::{ByteOrder, Number};
 use crate::math::rational::Rational;
@@ -119,12 +120,100 @@ fn of_parts(
     match parts {
         Ok((negative, m, e)) => {
             if u64::from(64 - m.leading_zeros()) <= prec {
-                (word(negative, m, e, prec), Ordering::Equal)
-            } else {
-                round_mag(negative, &[m], i128::from(e), false, prec, round)
+                return (word(negative, m, e, prec), Ordering::Equal);
             }
+            if let Some(r) = round_word(negative, m, e, prec, round) {
+                let kind = Kind::Finite {
+                    negative,
+                    exp: r.exp,
+                    mant: vec![r.m],
+                };
+                return (BigFloat { prec, kind }, r.o);
+            }
+            round_mag(negative, &[m], i128::from(e), false, prec, round)
         }
         Err(kind) => (BigFloat { prec, kind }, Ordering::Equal),
+    }
+}
+
+/// `±m·2^e` rounded in a register to `prec` bits, fewer than `m` has (at most 64): `None` out of
+/// the exponent range.
+#[inline(always)]
+fn round_word(negative: bool, m: u64, e: i64, prec: u64, round: Round) -> Option<Fit<u64>> {
+    debug_assert!(prec < 64 && m != 0);
+    let lz = m.leading_zeros();
+    small::fit(
+        negative,
+        m << lz,
+        0,
+        e + i64::from(64 - lz),
+        false,
+        (64 - prec) as u32,
+        round,
+    )
+}
+
+impl BigFloat {
+    /// Sets `self` to the float parts `parts` rounded to its precision in the mode `round`,
+    /// into its limbs when it has them, and returns the direction of the rounding.
+    #[inline]
+    fn set_parts(&mut self, parts: Result<(bool, u64, i64), Kind>, round: Round) -> Ordering {
+        let prec = self.prec;
+        let (negative, m, e) = match parts {
+            Ok(p) => p,
+            Err(kind) => {
+                self.kind = kind;
+                return Ordering::Equal;
+            }
+        };
+        let lz = m.leading_zeros();
+        if let Kind::Finite {
+            negative: sign,
+            exp,
+            mant,
+        } = &mut self.kind
+        {
+            if u64::from(64 - lz) <= prec {
+                let n = mant.len();
+                mant[..n - 1].fill(0);
+                mant[n - 1] = m << lz;
+                *sign = negative;
+                *exp = e + i64::from(64 - lz);
+                return Ordering::Equal;
+            }
+            if let Some(r) = round_word(negative, m, e, prec, round) {
+                mant[0] = r.m;
+                *sign = negative;
+                *exp = r.exp;
+                return r.o;
+            }
+        }
+        let (x, o) = of_parts(Ok((negative, m, e)), prec, round);
+        self.kind = x.kind;
+        o
+    }
+
+    /// Sets `self` to the float `x` rounded to the precision of `self` in the mode `round`,
+    /// reusing its vector, and returns the direction of the rounding, as MPFR's `mpfr_set_d`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    /// use core::cmp::Ordering;
+    ///
+    /// let mut r = BigFloat::zero(4);
+    /// assert_eq!(r.set_f64(0.1, Round::Nearest), Ordering::Greater);
+    /// assert_eq!(r, BigFloat::from(0.1015625));
+    /// ```
+    pub fn set_f64(&mut self, x: f64, round: Round) -> Ordering {
+        self.set_parts(f64_parts(x), round)
+    }
+
+    /// Sets `self` to the float `x` rounded to the precision of `self` in the mode `round`,
+    /// reusing its vector, and returns the direction of the rounding, as MPFR's `mpfr_set_flt`.
+    pub fn set_f32(&mut self, x: f32, round: Round) -> Ordering {
+        self.set_parts(f32_parts(x), round)
     }
 }
 

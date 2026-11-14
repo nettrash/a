@@ -8,7 +8,7 @@ use super::limbs;
 use super::round::{round_mag, signed};
 use super::scale::{self, Dir, round_int, round_value};
 use super::{BigFloat, Kind, Round};
-use crate::math::numbers::{ByteOrder, Number};
+use crate::math::numbers::{ByteOrder, Number, nat};
 use core::cmp::Ordering;
 use core::fmt;
 use core::str::FromStr;
@@ -77,12 +77,8 @@ fn word_digits(mut v: u128, b: u32) -> Vec<u8> {
 /// The largest power `b^t` of the radix in a word, and `t`.
 #[inline]
 fn chunk_power(b: u32) -> (u64, usize) {
-    let (mut p, mut t) = (u64::from(b), 1);
-    while let Some(q) = p.checked_mul(u64::from(b)) {
-        p = q;
-        t += 1;
-    }
-    (p, t)
+    let (p, t) = scale::word_power(u64::from(b));
+    (p, t as usize)
 }
 
 /// The `n ≥ 1` significant digits in radix `b` of the finite number `x`, not zero, rounded in
@@ -97,9 +93,47 @@ pub(crate) fn digits(x: &BigFloat, b: u32, n: u64, round: Round) -> (Vec<u8>, i1
     let (negative, m, lsb, e) = finite(x).expect("a finite number that is not zero");
     let dir = Dir::of(negative, round);
     let mut big_e = scale::floor_log(i128::from(e) - 1, b).0;
+    if b == 10 && n <= 37 && x.prec <= SMALL_SHORTEST {
+        let unused = 64 * m.len() as u64 - x.prec;
+        let v = match *m {
+            [lo] => u128::from(lo),
+            [lo, hi] => u128::from(lo) | u128::from(hi) << 64,
+            _ => unreachable!("a mantissa of one or two limbs"),
+        } >> unused;
+        if let Some((text, e, o)) = digits_small(v, lsb + i128::from(unused), n, dir, big_e) {
+            return (text, e, signed(negative, o));
+        }
+    }
+    // Whether an integer has `n + 1` digits or more, `t ≥ b^n`: by its bits against the bounds of
+    // `n·log2(b)`, and when they do not tell, against `b^n` itself.
+    let (a, c) = scale::split(b);
+    let (blo, bhi) = scale::log2_pow(b, u128::from(n));
+    // `c^n` in registers when it fits: `t ≥ c^n·2^(a·n)` exactly when `floor(t/2^(a·n)) ≥ c^n`.
+    let small = u32::try_from(n)
+        .ok()
+        .and_then(|n| u128::from(c).checked_pow(n));
+    let wide = |t: &[u64]| -> bool {
+        let bits = i128::from(limbs::bit_len(t));
+        if c == 1 {
+            bits > i128::from(a) * i128::from(n)
+        } else if bits > bhi {
+            true
+        } else if bits <= blo {
+            false
+        } else if let Some(cn) = small {
+            let top = limbs::shr(t, u64::from(a) * n);
+            limbs::cmp(&top, &scale::limbs_of(cn)) != Ordering::Less
+        } else {
+            let p = limbs::shl(&scale::pow_exact(c, n), u64::from(a) * n);
+            limbs::cmp(t, &p) != Ordering::Less
+        }
+    };
     loop {
         let k = i128::from(n) - 1 - big_e;
-        let (d, o) = round_int(m, lsb, b, k, dir);
+        let (d, o, divided) = scale::round_int_wide(m, lsb, b, k, dir, wide);
+        if divided {
+            big_e += 1;
+        }
         let mut text = digit_text(&d, b);
         let len = text.len() as u64;
         if len == n + 1 {
@@ -117,6 +151,71 @@ pub(crate) fn digits(x: &BigFloat, b: u32, n: u64, round: Round) -> (Vec<u8>, i1
         debug_assert_eq!(len, n);
         return (text, big_e, signed(negative, o));
     }
+}
+
+/// [`digits`] in registers, in radix 10, for a mantissa `v` below `2^122` of the lowest bit
+/// `2^lsb` and `n ≤ 37` digits, from the first guess `big_e` of the exponent: the same steps on
+/// the exact parts of `v·2^lsb·10^k` that [`scaled_small`] gives, the integer `t` divided by ten
+/// when it has `n + 1` digits (the fraction of `t/10` compared to one half as `2r + 2f` to 10, `r`
+/// the last digit and `f` the fraction of `t`), and the digits and the direction of the rounding
+/// of the magnitude; `None` when they do not fit.
+fn digits_small(
+    v: u128,
+    lsb: i128,
+    n: u64,
+    dir: Dir,
+    mut big_e: i128,
+) -> Option<(Vec<u8>, i128, Ordering)> {
+    let top = 10u128.pow(n as u32);
+    for _ in 0..4 {
+        let k = n as i128 - 1 - big_e;
+        let (mut t, mut half, mut zero) = scaled_small(v, k, lsb)?;
+        let mut e = big_e;
+        if t >= top {
+            let r = (t % 10) as i64;
+            t /= 10;
+            // `2r - 10` is even: never the `2r = b - 1` of an odd radix.
+            half = match 2 * r - 10 {
+                1.. => Ordering::Greater,
+                0 if zero => Ordering::Equal,
+                0 => Ordering::Greater,
+                _ => Ordering::Less,
+            };
+            zero = zero && r == 0;
+            e += 1;
+        }
+        let up = !zero
+            && match dir {
+                Dir::Floor => false,
+                Dir::Ceil => true,
+                Dir::Nearest => half == Ordering::Greater || half == Ordering::Equal && t & 1 == 1,
+                Dir::Away => half != Ordering::Less,
+            };
+        let o = if zero {
+            Ordering::Equal
+        } else if up {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        };
+        let d = t + u128::from(up);
+        if d >= top {
+            if d == top && up {
+                // Carried past the last integer of `n` digits: `10^(n-1)` at the next exponent.
+                let mut text = vec![b'0'; n as usize];
+                text[0] = b'1';
+                return Some((text, e + 1, o));
+            }
+            big_e = e + 1;
+            continue;
+        }
+        if d < top / 10 {
+            big_e = e - 1;
+            continue;
+        }
+        return Some((word_digits(d, 10), e, o));
+    }
+    None
 }
 
 /// The number of digits in radix `b` that a number of `prec` bits needs to be read back exactly,
@@ -154,8 +253,19 @@ pub(crate) fn shortest(x: &BigFloat) -> (Vec<u8>, i128) {
     let (_, mant, _, e) = finite(x).expect("a finite number that is not zero");
     let prec = x.prec;
     let unused = 64 * mant.len() as u64 - prec;
-    let mp = limbs::shr(mant, unused);
     let lsb = i128::from(e) - i128::from(prec);
+    if prec <= SMALL_SHORTEST {
+        let m = match *mant {
+            [lo] => u128::from(lo),
+            [lo, hi] => u128::from(lo) | u128::from(hi) << 64,
+            _ => unreachable!("a mantissa of one or two limbs"),
+        } >> unused;
+        let bottom = m.trailing_zeros() as u64 == prec - 1;
+        if let Some(r) = shortest_small(m, lsb, bottom, m & 1 == 0) {
+            return r;
+        }
+    }
+    let mp = limbs::shr(mant, unused);
     let bottom = limbs::trailing_zeros(&mp) == prec - 1;
     let even = mp[0] & 1 == 0;
     let x4 = limbs::shl(&mp, 2);
@@ -241,6 +351,168 @@ pub(crate) fn shortest(x: &BigFloat) -> (Vec<u8>, i128) {
     let text = digit_text(&d, 10);
     let len = text.len() as i128;
     (text, len - 1 - k)
+}
+
+/// The largest precision that [`shortest_small`] serves: `4M + 2` fits 122 bits, and the integers
+/// at the scale of the shortest digits, of about `prec + 4` bits, fit 128.
+const SMALL_SHORTEST: u64 = 120;
+
+/// `5^k` for `k` up to 82, in three limbs.
+const POW5: [[u64; 3]; 83] = {
+    let mut t = [[0u64; 3]; 83];
+    t[0][0] = 1;
+    let mut k = 1;
+    while k < 83 {
+        let mut carry = 0u128;
+        let mut i = 0;
+        while i < 3 {
+            let p = t[k - 1][i] as u128 * 5 + carry;
+            t[k][i] = p as u64;
+            carry = p >> 64;
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
+/// The integer part of `n·2^s`, `n` of five limbs and not zero, when it fits 128 bits, the order
+/// of its fractional part to one half and whether that is zero; `None` when the integer is wider
+/// or the shift is beyond 319 bits.
+fn parts5(n: &[u64; 5], s: i128) -> Option<(u128, Ordering, bool)> {
+    if s >= 0 {
+        if n[2] | n[3] | n[4] != 0 {
+            return None;
+        }
+        let lo = u128::from(n[0]) | u128::from(n[1]) << 64;
+        if s >= 128 || i128::from(lo.leading_zeros()) < s {
+            return None;
+        }
+        return Some((lo << s, Ordering::Less, true));
+    }
+    let d = (-s) as u64;
+    if d >= 320 {
+        return None;
+    }
+    let (w, b) = ((d / 64) as usize, (d % 64) as u32);
+    let get = |i: usize| if i < 5 { n[i] } else { 0 };
+    // Limb `i` of `floor(n/2^d)`.
+    let limb = |i: usize| -> u64 {
+        if b == 0 {
+            get(w + i)
+        } else {
+            get(w + i) >> b | get(w + i + 1) << (64 - b)
+        }
+    };
+    if (2..5).any(|i| limb(i) != 0) {
+        return None;
+    }
+    let int = u128::from(limb(0)) | u128::from(limb(1)) << 64;
+    let hb = d - 1;
+    let (hw, hbit) = ((hb / 64) as usize, (hb % 64) as u32);
+    let half = n[hw] >> hbit & 1 == 1;
+    let rest = n[..hw].iter().any(|&x| x != 0) || n[hw] & ((1u64 << hbit) - 1) != 0;
+    let order = match (half, rest) {
+        (false, _) => Ordering::Less,
+        (true, false) => Ordering::Equal,
+        (true, true) => Ordering::Greater,
+    };
+    Some((int, order, !half && !rest))
+}
+
+/// The integer part of `v·2^s0·10^k` (`v` below `2^122`, not zero), the order of its fraction to
+/// one half and whether that is zero, exactly, in registers: `v·5^k` in five limbs for `0 ≤ k ≤
+/// 82`, or `v·2^(s0 - j)` divided by `5^j` in 128 bits for `k = -j`, `j ≤ 27`; `None` when they
+/// do not fit.
+fn scaled_small(v: u128, k: i128, s0: i128) -> Option<(u128, Ordering, bool)> {
+    if k >= 0 {
+        if k > 82 {
+            return None;
+        }
+        let p = &POW5[k as usize];
+        let (v0, v1) = (v as u64, (v >> 64) as u64);
+        let mut n = [0u64; 5];
+        for (i, &y) in [v0, v1].iter().enumerate() {
+            let mut carry = 0u64;
+            for (j, &x) in p.iter().enumerate() {
+                let t = u128::from(y) * u128::from(x) + u128::from(n[i + j]) + u128::from(carry);
+                n[i + j] = t as u64;
+                carry = (t >> 64) as u64;
+            }
+            n[i + 3] = carry;
+        }
+        return parts5(&n, s0 + k);
+    }
+    let j = k.unsigned_abs();
+    if j > 27 {
+        return None;
+    }
+    let p = u128::from(POW5[j as usize][0]);
+    let s = s0 - j as i128;
+    let (num, den) = if s >= 0 {
+        if s >= 128 || i128::from(v.leading_zeros()) < s {
+            return None;
+        }
+        (v << s, p)
+    } else {
+        let d = (-s) as u64;
+        if d >= 123 {
+            // Below `2^(122 - d)/5`, under one half.
+            return Some((0, Ordering::Less, false));
+        }
+        if u64::from(p.leading_zeros()) <= d {
+            return None;
+        }
+        (v, p << d)
+    };
+    let (q, r) = (num / den, num % den);
+    Some((q, r.cmp(&(den - r)), r == 0))
+}
+
+/// [`shortest`] in registers, for a mantissa `m` of `prec ≤ SMALL_SHORTEST` bits (`bottom` when it
+/// is a power of two, `even` when it is even) of the lowest bit `2^lsb`: the same steps on the
+/// same exact integers, by [`scaled_small`]; `None` when they do not fit.
+fn shortest_small(m: u128, lsb: i128, bottom: bool, even: bool) -> Option<(Vec<u8>, i128)> {
+    let x4 = m << 2;
+    let lo4 = x4 - if bottom { 1 } else { 2 };
+    let hi4 = x4 + 2;
+    let s0 = lsb - 2;
+    let mut k = scale::floor_log(-lsb, 10).0 + 1;
+    let (mut lo, mut hi) = loop {
+        let (l, _, z) = scaled_small(lo4, k, s0)?;
+        let l = if !z || !even { l + 1 } else { l };
+        let (h, _, z) = scaled_small(hi4, k, s0)?;
+        let h = if z && !even { h.checked_sub(1)? } else { h };
+        if l > h {
+            k += 1;
+            continue;
+        }
+        break (l, h);
+    };
+    while hi - lo >= 10 {
+        let r = lo % 10;
+        lo /= 10;
+        if r != 0 {
+            lo += 1;
+        }
+        hi /= 10;
+        k -= 1;
+    }
+    let z = hi - hi % 10;
+    if z >= lo && z != 0 {
+        let mut text = word_digits(z, 10);
+        let len = text.len() as i128;
+        while text.last() == Some(&b'0') {
+            text.pop();
+        }
+        return Some((text, len - 1 - k));
+    }
+    let (t, half, zero) = scaled_small(x4, k, s0)?;
+    let up = !zero && (half == Ordering::Greater || half == Ordering::Equal && t & 1 == 1);
+    let d = (t + u128::from(up)).clamp(lo, hi);
+    let text = word_digits(d, 10);
+    let len = text.len() as i128;
+    Some((text, len - 1 - k))
 }
 
 /// The ends of the interval and the number at a scale, `(lo, x, hi)·2^s`.
@@ -642,6 +914,35 @@ fn digit_value(c: u8) -> u32 {
     }
 }
 
+/// The length of the run of digits of `radix` at the start of `s`. Up to radix 10, eight bytes
+/// at a time, so that a long text costs well under a cycle a byte whatever the compiler makes of
+/// [`digit_value`]: in a word of bytes, a byte `b` is not a digit when its top bit is set, when
+/// `b + 0x80 − (b'0' + radix)` has its top bit set (`b ≥ b'0' + radix`) or when `(b | 0x80) − b'0'`
+/// has it clear (`b < b'0'`). Neither the sum nor the difference carries across a byte below the
+/// first that is not a digit (the sum of a digit stays below `0x80`, the difference of a byte with
+/// its top bit set is at least `0x50`), so the lowest flag marks exactly that byte.
+fn digit_run(s: &[u8], radix: u32) -> usize {
+    let mut i = 0;
+    if radix <= 10 {
+        const ONES: u64 = u64::MAX / 0xff;
+        const HIGH: u64 = ONES * 0x80;
+        let above = ONES * u64::from(0x80 - (u32::from(b'0') + radix));
+        let zero = ONES * u64::from(b'0');
+        while let Some(chunk) = s.get(i..i + 8) {
+            let x = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+            let not_digit = (x | x.wrapping_add(above) | !((x | HIGH).wrapping_sub(zero))) & HIGH;
+            if not_digit != 0 {
+                return i + (not_digit.trailing_zeros() / 8) as usize;
+            }
+            i += 8;
+        }
+    }
+    while i < s.len() && digit_value(s[i]) < radix {
+        i += 1;
+    }
+    i
+}
+
 /// The text of a number, read.
 enum Parsed<'a> {
     /// NaN.
@@ -664,20 +965,108 @@ enum Parsed<'a> {
     },
 }
 
-/// Digits, in the text or copied out of it around the point.
-enum Digits<'a> {
+/// The significant digits of a text, from the first that is not zero to the last that is not
+/// zero: those before the point, then those after it (either part may be empty), as they are in
+/// the text, without a copy.
+#[derive(Clone, Copy)]
+struct Digits<'a> {
+    hi: &'a [u8],
+    lo: &'a [u8],
+}
+
+impl<'a> Digits<'a> {
+    /// The digits of one part.
+    #[inline]
+    fn one(d: &'a [u8]) -> Self {
+        Digits { hi: d, lo: &[] }
+    }
+
+    /// The number of digits.
+    #[inline]
+    fn len(&self) -> usize {
+        self.hi.len() + self.lo.len()
+    }
+
+    /// The digits in one slice: borrowed when they are in one part, copied otherwise.
+    fn joined(&self) -> Joined<'a> {
+        if self.lo.is_empty() {
+            Joined::Text(self.hi)
+        } else if self.hi.is_empty() {
+            Joined::Text(self.lo)
+        } else {
+            let mut v = Vec::with_capacity(self.len());
+            v.extend_from_slice(self.hi);
+            v.extend_from_slice(self.lo);
+            Joined::Owned(v)
+        }
+    }
+
+    /// The value in `radix` of the digits `i..j`, at most a word's ([`chunk_power`]).
+    #[inline]
+    fn word(&self, i: usize, j: usize, radix: u32) -> u64 {
+        let h = self.hi.len();
+        if j <= h {
+            accumulate(0, &self.hi[i..j], radix)
+        } else if i >= h {
+            accumulate(0, &self.lo[i - h..j - h], radix)
+        } else {
+            accumulate(
+                accumulate(0, &self.hi[i..], radix),
+                &self.lo[..j - h],
+                radix,
+            )
+        }
+    }
+}
+
+/// Digits in one slice: borrowed from the text, or copied out of it around the point.
+enum Joined<'a> {
     Text(&'a [u8]),
     Owned(Vec<u8>),
 }
 
-impl Digits<'_> {
+impl Joined<'_> {
     #[inline]
     fn get(&self) -> &[u8] {
         match self {
-            Digits::Text(t) => t,
-            Digits::Owned(v) => v,
+            Joined::Text(t) => t,
+            Joined::Owned(v) => v,
         }
     }
+}
+
+/// `x·radix^len + d`, `d` the value of the digits `s` (characters of the radix) of length `len`,
+/// for a result that fits a word: eight decimal digits at a time in radix 10.
+#[inline]
+fn accumulate(mut x: u64, mut s: &[u8], radix: u32) -> u64 {
+    if radix == 10 {
+        while let Some((eight, rest)) = s.split_first_chunk::<8>() {
+            x = x * 100_000_000 + eight_digits(*eight);
+            s = rest;
+        }
+        for &c in s {
+            x = x * 10 + u64::from(c - b'0');
+        }
+    } else {
+        for &c in s {
+            x = x * u64::from(radix) + u64::from(digit_value(c));
+        }
+    }
+    x
+}
+
+/// The value of eight decimal digits (ASCII), the first the most significant, in a few
+/// operations on a word (the method of Lemire's `fast_float`): the digits' values in the bytes
+/// of a little-endian word, the pairs `10·d₀ + d₁` in the even bytes, then the two halves of four
+/// digits each by one product with the place values of their pairs, which lands the sum in the
+/// top half.
+#[inline]
+fn eight_digits(b: [u8; 8]) -> u64 {
+    let v = u64::from_le_bytes(b).wrapping_sub(0x3030_3030_3030_3030);
+    let v = v.wrapping_mul(10).wrapping_add(v >> 8);
+    let lo = (v & 0x0000_00ff_0000_00ff).wrapping_mul(100 + (1_000_000 << 32));
+    let hi = ((v >> 16) & 0x0000_00ff_0000_00ff).wrapping_mul(1 + (10_000 << 32));
+    lo.wrapping_add(hi) >> 32
 }
 
 /// The bound at which an exponent in the text is held: past it every number overflows or
@@ -757,18 +1146,12 @@ fn parse(src: &str, radix: u32) -> Result<Parsed<'_>, ParseBigFloatError> {
         radix = 10;
     }
     // The digits, the point, the digits.
-    let mut i = 0;
-    while i < s.len() && digit_value(s[i]) < radix {
-        i += 1;
-    }
+    let mut i = digit_run(s, radix);
     let int = &s[..i];
     let mut frac: &[u8] = &[];
     if i < s.len() && s[i] == b'.' {
         let start = i + 1;
-        i = start;
-        while i < s.len() && digit_value(s[i]) < radix {
-            i += 1;
-        }
+        i = start + digit_run(&s[start..], radix);
         frac = &s[start..i];
     }
     if int.is_empty() && frac.is_empty() {
@@ -818,33 +1201,31 @@ fn parse(src: &str, radix: u32) -> Result<Parsed<'_>, ParseBigFloatError> {
                 .rposition(|&c| c != b'0')
                 .expect("a digit that is not zero");
             (
-                Digits::Text(&int[f..=l]),
+                Digits::one(&int[f..=l]),
                 (int.len() - f + frac.len()) as u64,
                 (int.len() - 1 - l) as i128,
             )
         }
-        (Some(f), Some(l)) => {
-            let mut v = Vec::with_capacity(int.len() - f + l + 1);
-            v.extend_from_slice(&int[f..]);
-            v.extend_from_slice(&frac[..=l]);
-            (
-                Digits::Owned(v),
-                (int.len() - f + frac.len()) as u64,
-                -(l as i128) - 1,
-            )
-        }
+        (Some(f), Some(l)) => (
+            Digits {
+                hi: &int[f..],
+                lo: &frac[..=l],
+            },
+            (int.len() - f + frac.len()) as u64,
+            -(l as i128) - 1,
+        ),
         (None, Some(l)) => {
             let f = frac
                 .iter()
                 .position(|&c| c != b'0')
                 .expect("a digit that is not zero");
             (
-                Digits::Text(&frac[f..=l]),
+                Digits::one(&frac[f..=l]),
                 (frac.len() - f) as u64,
                 -(l as i128) - 1,
             )
         }
-        (None, None) => (Digits::Text(&[]), 0, 0),
+        (None, None) => (Digits::one(&[]), 0, 0),
     };
     Ok(Parsed::Number {
         negative,
@@ -871,18 +1252,12 @@ fn digits_value(d: &[u8], radix: u32) -> Vec<u64> {
         let (chunk, t) = chunk_power(radix);
         let mut v: Vec<u64> = Vec::with_capacity((bits / 64 + 2) as usize);
         let head = d.len() % t;
-        let mut acc = 0u64;
-        for &c in &d[..head] {
-            acc = acc * u64::from(radix) + u64::from(digit_value(c));
-        }
+        let acc = accumulate(0, &d[..head], radix);
         if acc != 0 {
             v.push(acc);
         }
         for part in d[head..].chunks(t) {
-            let mut x = 0u64;
-            for &c in part {
-                x = x * u64::from(radix) + u64::from(digit_value(c));
-            }
+            let x = accumulate(0, part, radix);
             scale::mul_1(&mut v, chunk);
             if v.is_empty() {
                 v.push(x);
@@ -911,6 +1286,40 @@ fn digits_value(d: &[u8], radix: u32) -> Vec<u64> {
 }
 
 /// The value of the number `±digits·radix^exp·2^bexp`, `digits` not empty, rounded to `prec`
+/// bits in the mode `round`: in registers ([`small_value`]) or in fixed buffers
+/// ([`short_value`]) when they decide, otherwise by [`general_value`].
+fn value(
+    negative: bool,
+    digits: Digits<'_>,
+    radix: u32,
+    exp: i128,
+    bexp: i128,
+    prec: u64,
+    round: Round,
+) -> (BigFloat, Ordering) {
+    if !radix.is_power_of_two() {
+        debug_assert_eq!(bexp, 0);
+        if prec <= 62
+            && let Some(r) = small_value(negative, digits, radix, exp, prec, round)
+        {
+            return r;
+        }
+        if let Some(r) = short_value(negative, digits, radix, exp, prec, round) {
+            return r;
+        }
+    }
+    general_value(
+        negative,
+        digits.joined().get(),
+        radix,
+        exp,
+        bexp,
+        prec,
+        round,
+    )
+}
+
+/// The value of the number `±digits·radix^exp·2^bexp`, `digits` not empty, rounded to `prec`
 /// bits in the mode `round`.
 ///
 /// For a radix that is a power of two, the digits that hold two bits more than the precision,
@@ -919,7 +1328,7 @@ fn digits_value(d: &[u8], radix: u32) -> Vec<u64> {
 /// digits dropped, which are not all zeros: when both round to the same number, which is not
 /// between them, it is the rounding of the number, and its direction is known; otherwise twice
 /// as many digits, up to all of them.
-fn value(
+fn general_value(
     negative: bool,
     digits: &[u8],
     radix: u32,
@@ -949,11 +1358,6 @@ fn value(
         );
     }
     debug_assert_eq!(bexp, 0);
-    if prec <= 62
-        && let Some(r) = small_value(negative, digits, radix, exp, prec, round)
-    {
-        return r;
-    }
     // Digits for 8 bits more than the precision, at most a word's for 53 bits: the interval of
     // the truncation decides but for one number in about 2^8; then twice as many digits.
     let mut m = (scale::floor_log(i128::from(prec) + 8, radix).0 as u64 + 1).min(n);
@@ -1037,22 +1441,18 @@ fn round_u128(
 /// fit, or the truncation does not decide.
 fn small_value(
     negative: bool,
-    digits: &[u8],
+    digits: Digits<'_>,
     radix: u32,
     exp: i128,
     prec: u64,
     round: Round,
 ) -> Option<(BigFloat, Ordering)> {
     let (a, c) = scale::split(radix);
-    let (chunk, t) = chunk_power(radix);
-    let _ = chunk;
+    let (_, t) = chunk_power(radix);
     let n = digits.len();
     let m = n.min(t);
     let k = exp + (n - m) as i128;
-    let mut d = 0u64;
-    for &ch in &digits[..m] {
-        d = d * u64::from(radix) + u64::from(digit_value(ch));
-    }
+    let d = digits.word(0, m, radix);
     let j = k.unsigned_abs();
     if j > 40 {
         return None;
@@ -1112,6 +1512,212 @@ fn small_value(
         },
         o,
     ))
+}
+
+/// The longest digits, in limbs, that [`short_value`] holds.
+const SHORT_D: usize = 18;
+/// The longest power of the radix's odd part, in limbs, that [`short_value`] holds.
+const SHORT_P: usize = 18;
+/// The limbs of a dividend of [`short_value`]: `D·2^s`, `s` below `prec + 2 + 64·SHORT_P + 64`.
+const SHORT_N: usize = SHORT_D + SHORT_P + 4;
+/// The largest precision that [`short_value`] serves.
+const SHORT_PREC: u64 = 1024;
+
+/// `x[..len]·y + z` in place, for `x` with room for one more limb: the new length.
+#[inline]
+fn mul_add_1(x: &mut [u64], len: usize, y: u64, z: u64) -> usize {
+    let mut carry = z;
+    for v in &mut x[..len] {
+        let t = u128::from(*v) * u128::from(y) + u128::from(carry);
+        *v = t as u64;
+        carry = (t >> 64) as u64;
+    }
+    if carry != 0 {
+        x[len] = carry;
+        len + 1
+    } else {
+        len
+    }
+}
+
+/// `x[..len]·c^j` in place, for the odd `c` from 3 to 35, by the largest power of `c` in a word
+/// at a time: the new length.
+#[inline]
+fn mul_pow(x: &mut [u64], mut len: usize, c: u64, j: u64) -> usize {
+    let (wp, wt) = scale::word_power(c);
+    let mut r = j;
+    while r >= wt {
+        len = mul_add_1(x, len, wp, 0);
+        r -= wt;
+    }
+    if r > 0 {
+        len = mul_add_1(x, len, c.pow(r as u32), 0);
+    }
+    len
+}
+
+/// Whether the bits `lo..hi` of `p` are all ones.
+fn ones(p: &[u64], lo: u64, hi: u64) -> bool {
+    let mut i = lo;
+    while i < hi {
+        let (w, b) = ((i / 64) as usize, i % 64);
+        let span = (64 - b).min(hi - i);
+        let mask = (u64::MAX >> (64 - span)) << b;
+        if p[w] & mask != mask {
+            return false;
+        }
+        i += span;
+    }
+    true
+}
+
+/// The value of the digits `D` times `radix^exp`, `radix = 2^a·c` not a power of two, rounded to
+/// `prec ≤ SHORT_PREC` bits in the mode `round`, exactly, in fixed buffers on the stack: `None`
+/// when the digits or the power do not fit them, or (rarely) when the digits dropped leave the
+/// rounding open.
+///
+/// The first `m` digits are read, all of them or those of `prec + 40` bits at least, `(m - 1)·
+/// log2(radix) ≥ prec + 40`; with `k = exp + (digits dropped)`:
+///
+/// - `k ≥ 0`: `P = D·c^k` exactly, the number `P·2^(a·k)`. When digits were dropped the number
+///   lies strictly between `P·2^(a·k)` and `(P + c^k)·2^(a·k)`, with `c^k < 2^g`; when the bits
+///   `g..r` of `P` are not all ones, `r = bits(P) - prec - 2`, adding `c^k` does not carry past
+///   bit `r`, so the number lies strictly between `P'·2^(a·k + r)` and `(P' + 1)·2^(a·k + r)`,
+///   `P' = floor(P/2^r)` of `prec + 2` bits, where every number rounds as `P·2^(a·k)` with the
+///   sticky bit does. `bits(D) ≥ prec + 41` and `g ≤ k·log2(c) + 2`, so `r - g ≥ bits(D) - prec -
+///   4 ≥ 37`: about one input in `2^37` falls back.
+/// - `k = -j < 0`: `Q = floor(D·2^u / c^j)` and `R` the remainder, `u` such that `Q` has at least
+///   `prec + 2` bits, by the crate's division (normalized divisor, in registers to two limbs);
+///   the number is `(Q + R/c^j)·2^(-u - a·j)`, the remainder the sticky bit. When digits were
+///   dropped the number lies strictly between `(Q + R/c^j)·2^(-u - a·j)` and `(Q + (R + 2^u)/c^j)
+///   ·2^(-u - a·j)`, inside `(Q, Q + 1)·2^(-u - a·j)` when `R + 2^u ≤ c^j`, which fails for about
+///   `2^u/c^j < 2^(prec + 3 - bits(D)) ≤ 2^-38` of the inputs.
+fn short_value(
+    negative: bool,
+    digits: Digits<'_>,
+    radix: u32,
+    exp: i128,
+    prec: u64,
+    round: Round,
+) -> Option<(BigFloat, Ordering)> {
+    if prec > SHORT_PREC {
+        return None;
+    }
+    let (a, c) = scale::split(radix);
+    let (chunk, t) = chunk_power(radix);
+    let n = digits.len();
+    let need = scale::floor_log(i128::from(prec) + 40, radix).0 as usize + 2;
+    let m = n.min(need);
+    let truncated = m < n;
+    if m.div_ceil(t) > SHORT_D {
+        return None;
+    }
+    let k = exp + (n - m) as i128;
+    let j = k.unsigned_abs();
+    if j >> 32 != 0 {
+        return None;
+    }
+    // `c^j < 2^g`: `j·log2(c)`, which is irrational for `j > 0`, is at most `g`; `c^0 = 1 < 2`.
+    let g = scale::log2_pow(c as u32, j).1 as u64;
+    if g > 64 * SHORT_P as u64 {
+        return None;
+    }
+    let j = j as u64;
+    // `D`, from the top: a head of `m mod t` digits (or `t`), then chunks of `t`.
+    let mut x = [0u64; SHORT_D + SHORT_P + 1];
+    let head = match m % t {
+        0 => t,
+        h => h,
+    };
+    x[0] = digits.word(0, head, radix);
+    let mut len = 1;
+    let mut i = head;
+    while i < m {
+        len = mul_add_1(&mut x, len, chunk, digits.word(i, i + t, radix));
+        i += t;
+    }
+    if k >= 0 {
+        // `D < 2^(64·SHORT_D)` and `c^j < 2^(64·SHORT_P)`: the product fits.
+        len = mul_pow(&mut x, len, c, j);
+        let p = &x[..len];
+        let lsb = i128::from(a) * k;
+        if !truncated {
+            return Some(round_mag(negative, p, lsb, false, prec, round));
+        }
+        let r = limbs::bit_len(p) - prec - 2;
+        if g >= r || ones(p, g, r) {
+            return None;
+        }
+        return Some(round_mag(negative, p, lsb, true, prec, round));
+    }
+    // `P = c^j`, normalized to its top bit.
+    let mut pw = [0u64; SHORT_P + 1];
+    pw[0] = 1;
+    let pl = mul_pow(&mut pw, 1, c, j);
+    let bp = limbs::bit_len(&pw[..pl]);
+    let bd = limbs::bit_len(&x[..len]);
+    let sh = pw[pl - 1].leading_zeros();
+    if sh > 0 {
+        for i in (1..pl).rev() {
+            pw[i] = pw[i] << sh | pw[i - 1] >> (64 - sh);
+        }
+        pw[0] <<= sh;
+    }
+    // `N = D·2^(u + sh)`, of `max(bits(D), prec + 2 + bits(P)) + sh` bits.
+    let u = (prec + 2 + bp).saturating_sub(bd);
+    let s = u + u64::from(sh);
+    let (ls, bs) = ((s / 64) as usize, (s % 64) as u32);
+    let mut nb = [0u64; SHORT_N];
+    if bs == 0 {
+        nb[ls..ls + len].copy_from_slice(&x[..len]);
+    } else {
+        let mut carry = 0;
+        for i in 0..len {
+            nb[ls + i] = x[i] << bs | carry;
+            carry = x[i] >> (64 - bs);
+        }
+        nb[ls + len] = carry;
+    }
+    let mut nl = ls + len + 1;
+    while nb[nl - 1] == 0 {
+        nl -= 1;
+    }
+    let qn = nl - pl;
+    let mut q = [0u64; SHORT_N];
+    let mut scratch = Vec::new();
+    let top = nat::div_qr(&mut q[..qn], &mut nb[..nl], &pw[..pl], &mut scratch);
+    let mut ql = qn;
+    if top {
+        q[qn] = 1;
+        ql += 1;
+    }
+    while q[ql - 1] == 0 {
+        ql -= 1;
+    }
+    let q = &q[..ql];
+    let lsb = -i128::from(u) - i128::from(a) * i128::from(j);
+    // The remainder, times `2^sh`.
+    let rem = &mut nb[..pl];
+    if !truncated {
+        let sticky = rem.iter().any(|&v| v != 0);
+        return Some(round_mag(negative, q, lsb, sticky, prec, round));
+    }
+    // `R·2^sh + 2^s ≤ P·2^sh`.
+    if ls >= pl {
+        return None;
+    }
+    let (sum, mut carry) = rem[ls].overflowing_add(1 << bs);
+    rem[ls] = sum;
+    for v in &mut rem[ls + 1..] {
+        if !carry {
+            break;
+        }
+        (*v, carry) = v.overflowing_add(1);
+    }
+    if carry || limbs::cmp(rem, &pw[..pl]) == Ordering::Greater {
+        return None;
+    }
+    Some(round_mag(negative, q, lsb, true, prec, round))
 }
 
 impl BigFloat {
@@ -1187,8 +1793,7 @@ impl BigFloat {
                 bexp,
                 ..
             } => {
-                let d = digits.get();
-                if d.is_empty() {
+                if digits.len() == 0 {
                     (
                         BigFloat {
                             prec,
@@ -1197,7 +1802,7 @@ impl BigFloat {
                         Ordering::Equal,
                     )
                 } else {
-                    value(negative, d, radix, exp, bexp, prec, round)
+                    value(negative, digits, radix, exp, bexp, prec, round)
                 }
             }
         })
@@ -1274,14 +1879,13 @@ impl FromStr for BigFloat {
                 bexp,
                 ..
             } => {
-                let d = digits.get();
-                if d.is_empty() {
+                if digits.len() == 0 {
                     BigFloat {
                         prec,
                         kind: Kind::Zero { negative },
                     }
                 } else {
-                    value(negative, d, radix, exp, bexp, prec, Round::Nearest).0
+                    value(negative, digits, radix, exp, bexp, prec, Round::Nearest).0
                 }
             }
         })

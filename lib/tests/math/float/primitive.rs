@@ -263,3 +263,68 @@ fn comparisons_with_small_rationals() {
     }
     assert!(BigFloat::from(1.5) > Rational::from(4) / 3u32);
 }
+
+/// `set_f64` and `set_f32` against MPFR's `mpfr_set_d`, into numbers of the precision that hold
+/// a finite value of their own, a zero or NaN; and against `from_f64_round` on special values
+/// and subnormals at every precision.
+#[test]
+fn set_f64_matches_mpfr() {
+    for (i, v) in lines(include_str!("data/convert_setd.txt")).enumerate() {
+        let bits = u64::from_str_radix(v[0], 16).unwrap();
+        let prec: u64 = v[1].parse().unwrap();
+        let round = vectors::mode(v[2]);
+        let want = (vectors::float(v[3], prec), ternary(v[4]));
+        let start = || match i % 3 {
+            // A third: every limb of the mantissa set, which the result must clear.
+            0 => {
+                BigFloat::from(-1)
+                    .div_round(&BigFloat::from(3), prec, Round::Nearest)
+                    .0
+            }
+            1 => BigFloat::zero(prec),
+            _ => BigFloat::nan(prec),
+        };
+        let mut r = start();
+        let o = r.set_f64(f64::from_bits(bits), round);
+        same(&(r, o), &want, &format!("set_f64 {bits:x}"));
+        let d = f64::from_bits(bits);
+        if prec >= 24 && d as f32 as f64 == d {
+            let mut r = start();
+            let o = r.set_f32(d as f32, round);
+            same(&(r, o), &want, &format!("set_f32 {d:e}"));
+        }
+    }
+    let mut s = 0x5EED_5E7D_0000_0001u64;
+    let specials = [
+        0.0,
+        -0.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        -f64::from_bits(0x000f_ffff_ffff_ffff),
+        f64::MAX,
+        1.0,
+        -0.1,
+    ];
+    for k in 0..size(2000, 40) {
+        let d = if k < specials.len() {
+            specials[k]
+        } else {
+            f64::from_bits(super::common::xorshift(&mut s))
+        };
+        let prec = 1 + below(&mut s, 200);
+        let round = mode(&mut s);
+        let want = BigFloat::from_f64_round(d, prec, round);
+        let mut r = BigFloat::from(1)
+            .div_round(&BigFloat::from(3), prec, Round::Nearest)
+            .0;
+        let o = r.set_f64(d, round);
+        if want.0.is_nan() {
+            assert!(r.is_nan() && o == Ordering::Equal);
+        } else {
+            same(&(r, o), &want, &format!("set_f64 {d:e} at {prec}"));
+        }
+    }
+}

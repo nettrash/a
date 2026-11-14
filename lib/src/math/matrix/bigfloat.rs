@@ -5,6 +5,7 @@
 
 use super::element::sealed;
 use super::{Element, Matrix, Norm};
+use crate::math::float::complex::fast::{self, Reg};
 use crate::math::float::sum::{Term, Work, round_summed, sqrt_summed, sum_terms_in};
 use crate::math::float::{BigComplex, BigFloat, Round};
 use core::cmp::Ordering;
@@ -74,9 +75,18 @@ impl sealed::Element for BigFloat {
         let prec = max_prec(a.iter().chain(b)).max(1);
         let mut work = Work::default();
         let mut terms = Vec::with_capacity(k);
+        let finite = a.iter().chain(b).all(BigFloat::is_finite);
         for j in 0..n {
             let col = &b[j * k..(j + 1) * k];
             for i in 0..m {
+                let term = |p: usize| fast::Term::product(&a[i + p * m], &col[p], false);
+                if finite {
+                    let mut x = BigFloat::zero(prec);
+                    if fast::short_dot(&mut x, k, term, Round::Nearest).is_some() {
+                        c[i + j * m] = x;
+                        continue;
+                    }
+                }
                 terms.clear();
                 terms.extend((0..k).map(|p| Term::product(&a[i + p * m], &col[p], false)));
                 c[i + j * m] =
@@ -184,6 +194,34 @@ impl sealed::Element for BigComplex {
         for j in 0..n {
             let col = &b[j * k..(j + 1) * k];
             for i in 0..m {
+                // Parts of one or two limbs: each part's exact sum on the stack.
+                let tr = |t: usize| {
+                    let (x, y) = (&a[i + (t / 2) * m], &col[t / 2]);
+                    if t.is_multiple_of(2) {
+                        fast::Term::product(x.re(), y.re(), false)
+                    } else {
+                        fast::Term::product(x.im(), y.im(), true)
+                    }
+                };
+                let ti = |t: usize| {
+                    let (x, y) = (&a[i + (t / 2) * m], &col[t / 2]);
+                    if t.is_multiple_of(2) {
+                        fast::Term::product(x.re(), y.im(), false)
+                    } else {
+                        fast::Term::product(x.im(), y.re(), false)
+                    }
+                };
+                let n = Round::Nearest;
+                if let (Some(r), Some(s)) = (
+                    fast::short_dot_value(2 * k, tr, prec, n),
+                    fast::short_dot_value(2 * k, ti, prec, n),
+                ) {
+                    let mut z = BigComplex::zero(prec);
+                    fast::put_short(&mut z.re, r, n);
+                    fast::put_short(&mut z.im, s, n);
+                    c[i + j * m] = z;
+                    continue;
+                }
                 re.clear();
                 im.clear();
                 for (p, y) in col.iter().enumerate() {
@@ -207,9 +245,11 @@ fn max_prec<'a>(xs: impl Iterator<Item = &'a BigFloat>) -> u64 {
 }
 
 /// What Gaussian elimination needs of an element beyond the ring operations.
-trait Field: Element {
+trait Field: Element + 'static {
     /// The largest precision of the parts.
     fn precision(&self) -> u64;
+    /// A zero of the precision `prec` in each part, to write into.
+    fn blank(prec: u64) -> Self;
     /// A size to choose the pivots by: `|x|`, or `|z|` to 64 bits.
     fn size(&self) -> BigFloat;
     /// Whether `self` is larger than `other` by [`size`](Field::size), NaN never.
@@ -222,17 +262,61 @@ trait Field: Element {
     fn times(a: &Self, b: &Self, prec: u64) -> Self;
     /// `c - Σ x_p·y_p`, each part rounded once to nearest at `prec`.
     fn dot_sub<'a>(
-        c: &'a Self,
+        c: &Self,
         xy: impl Iterator<Item = (&'a Self, &'a Self)>,
         prec: u64,
         work: &mut Work,
     ) -> Self;
+    /// Sets `out`, each part of the precision `prec`, to `c - Σ_{p < len} x_p·y_p` (`c` is `out`
+    /// itself when `None`), as [`dot_sub`](Field::dot_sub) has it, into the vectors of `out`.
+    fn dot_sub_in<'a>(
+        out: &mut Self,
+        c: Option<&Self>,
+        len: usize,
+        xy: impl Fn(usize) -> (&'a Self, &'a Self),
+        prec: u64,
+        work: &mut Work,
+    ) {
+        let v = {
+            let c = c.unwrap_or(out);
+            Self::dot_sub(c, (0..len).map(xy), prec, work)
+        };
+        *out = v;
+    }
+    /// Sets `x`, of the precision `prec`, to `x / d` rounded to nearest, into its vectors.
+    fn quotient_in(x: &mut Self, d: &Self, prec: u64) {
+        *x = Self::quotient(x, d, prec);
+    }
+    /// The number at the precision `prec`, exactly when it is of that precision or less.
+    fn at_prec(&self, prec: u64) -> Self;
+    /// Gives the vectors of the number to the thread's pool, where [`at_prec`](Field::at_prec)
+    /// takes them.
+    fn recycle(self);
+    /// The factorisation in registers when the elements allow it (see [`RegFactors`]): `None`
+    /// when they do not, `Some(None)` for a pivot that is exactly zero.
+    fn reg_factor(_a: &Matrix<Self>, _prec: u64) -> Option<Option<RegFactors>> {
+        None
+    }
+    /// The solution by the factors in registers, `None` when a result leaves the exponent
+    /// range.
+    fn reg_solve(_f: &RegFactors, _b: &Matrix<Self>, _prec: u64) -> Option<Matrix<Self>> {
+        None
+    }
+    /// The determinant by the factors in registers, `None` when a result leaves the exponent
+    /// range.
+    fn reg_det(_f: &RegFactors, _prec: u64) -> Option<Self> {
+        None
+    }
 }
 
 impl Field for BigFloat {
     #[inline]
     fn precision(&self) -> u64 {
         self.prec()
+    }
+    #[inline]
+    fn blank(prec: u64) -> Self {
+        BigFloat::zero(prec)
     }
     #[inline]
     fn size(&self) -> BigFloat {
@@ -251,7 +335,7 @@ impl Field for BigFloat {
         a.mul_round(b, prec, Round::Nearest).0
     }
     fn dot_sub<'a>(
-        c: &'a Self,
+        c: &Self,
         xy: impl Iterator<Item = (&'a Self, &'a Self)>,
         prec: u64,
         work: &mut Work,
@@ -264,12 +348,84 @@ impl Field for BigFloat {
         terms.extend(xy.map(|(x, y)| Term::product(x, y, true)));
         round_summed(sum_terms_in(&terms, prec, work), prec, Round::Nearest).0
     }
+    /// The exact sum on the stack ([`fast::short_dot`]) when the numbers are finite and of one or
+    /// two limbs, rounded into `out`; otherwise [`dot_sub`](Field::dot_sub).
+    fn dot_sub_in<'a>(
+        out: &mut Self,
+        c: Option<&Self>,
+        len: usize,
+        xy: impl Fn(usize) -> (&'a Self, &'a Self),
+        prec: u64,
+        work: &mut Work,
+    ) {
+        debug_assert_eq!(out.prec(), prec);
+        let done = {
+            let c = c.unwrap_or(out);
+            let finite = c.is_finite()
+                && (0..len).all(|p| {
+                    let (x, y) = xy(p);
+                    x.is_finite() && y.is_finite()
+                });
+            let term = |i: usize| {
+                if i == 0 {
+                    fast::Term::one(c, false)
+                } else {
+                    let (x, y) = xy(i - 1);
+                    fast::Term::product(x, y, true)
+                }
+            };
+            if finite {
+                fast::short_dot_value(len + 1, term, prec, Round::Nearest)
+            } else {
+                None
+            }
+        };
+        if let Some(r) = done {
+            fast::put_short(out, r, Round::Nearest);
+            return;
+        }
+        let v = {
+            let c = c.unwrap_or(out);
+            Self::dot_sub(c, (0..len).map(xy), prec, work)
+        };
+        *out = v;
+    }
+    #[inline]
+    fn quotient_in(x: &mut Self, d: &Self, prec: u64) {
+        debug_assert_eq!(x.prec(), prec);
+        x.div_assign_round(d, Round::Nearest);
+    }
+    #[inline]
+    fn at_prec(&self, prec: u64) -> Self {
+        if self.prec() == prec {
+            fast::pooled_copy(self)
+        } else {
+            self.with_prec(prec)
+        }
+    }
+    #[inline]
+    fn recycle(self) {
+        fast::recycle(self);
+    }
+    fn reg_factor(a: &Matrix<Self>, prec: u64) -> Option<Option<RegFactors>> {
+        RegFactors::of(a, prec)
+    }
+    fn reg_solve(f: &RegFactors, b: &Matrix<Self>, prec: u64) -> Option<Matrix<Self>> {
+        f.solve(b, prec)
+    }
+    fn reg_det(f: &RegFactors, prec: u64) -> Option<Self> {
+        f.det(prec)
+    }
 }
 
 impl Field for BigComplex {
     #[inline]
     fn precision(&self) -> u64 {
         self.re().prec().max(self.im().prec())
+    }
+    #[inline]
+    fn blank(prec: u64) -> Self {
+        BigComplex::zero(prec)
     }
     #[inline]
     fn size(&self) -> BigFloat {
@@ -284,7 +440,7 @@ impl Field for BigComplex {
         a.mul_round(b, prec, Round::Nearest).0
     }
     fn dot_sub<'a>(
-        c: &'a Self,
+        c: &Self,
         xy: impl Iterator<Item = (&'a Self, &'a Self)>,
         prec: u64,
         work: &mut Work,
@@ -317,6 +473,67 @@ impl Field for BigComplex {
         let i = round_summed(sum_terms_in(&im, prec, work), prec, Round::Nearest).0;
         BigComplex::new(r, i)
     }
+    #[inline]
+    fn at_prec(&self, prec: u64) -> Self {
+        BigComplex::new(self.re().at_prec(prec), self.im().at_prec(prec))
+    }
+    /// Each part's exact sum on the stack when the parts are finite and of one or two limbs,
+    /// rounded into `out`; otherwise [`dot_sub`](Field::dot_sub).
+    fn dot_sub_in<'a>(
+        out: &mut Self,
+        c: Option<&Self>,
+        len: usize,
+        xy: impl Fn(usize) -> (&'a Self, &'a Self),
+        prec: u64,
+        work: &mut Work,
+    ) {
+        let n = Round::Nearest;
+        let parts = {
+            let c = c.unwrap_or(out);
+            let tr = |t: usize| {
+                if t == 0 {
+                    return fast::Term::one(c.re(), false);
+                }
+                let (x, y) = xy((t - 1) / 2);
+                if t % 2 == 1 {
+                    fast::Term::product(x.re(), y.re(), true)
+                } else {
+                    fast::Term::product(x.im(), y.im(), false)
+                }
+            };
+            let ti = |t: usize| {
+                if t == 0 {
+                    return fast::Term::one(c.im(), false);
+                }
+                let (x, y) = xy((t - 1) / 2);
+                if t % 2 == 1 {
+                    fast::Term::product(x.re(), y.im(), true)
+                } else {
+                    fast::Term::product(x.im(), y.re(), true)
+                }
+            };
+            match fast::short_dot_value(2 * len + 1, tr, prec, n) {
+                Some(r) => fast::short_dot_value(2 * len + 1, ti, prec, n).map(|s| (r, s)),
+                None => None,
+            }
+        };
+        if let Some((r, s)) = parts {
+            fast::put_short(out.re_mut(), r, n);
+            fast::put_short(out.im_mut(), s, n);
+            return;
+        }
+        let v = {
+            let c = c.unwrap_or(out);
+            Self::dot_sub(c, (0..len).map(xy), prec, work)
+        };
+        *out = v;
+    }
+    #[inline]
+    fn recycle(self) {
+        let (re, im) = self.into_parts();
+        fast::recycle(re);
+        fast::recycle(im);
+    }
 }
 
 /// An LU factorisation with partial pivoting, `P·A = L·U`, of a square matrix: `L` below the
@@ -334,16 +551,35 @@ struct Factors<T> {
 /// rounded once.
 fn factor<T: Field>(a: &Matrix<T>, prec: u64) -> Option<Factors<T>> {
     let n = a.rows();
-    let mut lu = a.as_slice().to_vec();
+    // At the working precision, exactly, to be changed in place.
+    let mut lu: Vec<T> = a.as_slice().iter().map(|x| x.at_prec(prec)).collect();
     let mut perm: Vec<usize> = (0..n).collect();
     let mut odd = false;
     let mut work = Work::default();
+    // `lu[at] -= Σ_{p<len} lu[x(p)]·lu[y(p)]`, the element taken out while the others are read.
+    let mut update = |lu: &mut Vec<T>,
+                      at: usize,
+                      len: usize,
+                      x: &dyn Fn(usize) -> usize,
+                      y: &dyn Fn(usize) -> usize| {
+        let mut v = core::mem::replace(&mut lu[at], T::zero());
+        {
+            let lu = &*lu;
+            T::dot_sub_in(
+                &mut v,
+                None,
+                len,
+                |p| (&lu[x(p)], &lu[y(p)]),
+                prec,
+                &mut work,
+            );
+        }
+        lu[at] = v;
+    };
     for k in 0..n {
         // Column k from the diagonal down: `a_ik - Σ_{p<k} l_ip·u_pk`.
         for i in k..n {
-            let xy = (0..k).map(|p| (&lu[i + p * n], &lu[p + k * n]));
-            let v = T::dot_sub(&lu[i + k * n], xy, prec, &mut work);
-            lu[i + k * n] = v;
+            update(&mut lu, i + k * n, k, &|p| i + p * n, &|p| p + k * n);
         }
         // The pivot: the largest from the diagonal down.
         let mut r = k;
@@ -364,20 +600,26 @@ fn factor<T: Field>(a: &Matrix<T>, prec: u64) -> Option<Factors<T>> {
             odd = !odd;
         }
         for i in k + 1..n {
-            let v = T::quotient(&lu[i + k * n], &lu[k + k * n], prec);
+            let mut v = core::mem::replace(&mut lu[i + k * n], T::zero());
+            T::quotient_in(&mut v, &lu[k + k * n], prec);
             lu[i + k * n] = v;
         }
         // Row k right of the diagonal: `a_kj - Σ_{p<k} l_kp·u_pj`.
         for j in k + 1..n {
-            let xy = (0..k).map(|p| (&lu[k + p * n], &lu[p + j * n]));
-            let v = T::dot_sub(&lu[k + j * n], xy, prec, &mut work);
-            lu[k + j * n] = v;
+            update(&mut lu, k + j * n, k, &|p| k + p * n, &|p| p + j * n);
         }
     }
     Some(Factors { lu, n, perm, odd })
 }
 
 impl<T: Field> Factors<T> {
+    /// Gives the vectors of the factors to the thread's pool.
+    fn recycle(self) {
+        for x in self.lu {
+            x.recycle();
+        }
+    }
+
     /// The solution of `A·X = B`: `L·Y = P·B` from the top, then `U·X = Y` from the bottom, each
     /// element one dot product rounded once, divided by the pivot.
     fn solve(&self, b: &Matrix<T>, prec: u64) -> Matrix<T> {
@@ -387,19 +629,38 @@ impl<T: Field> Factors<T> {
         let mut out = Vec::with_capacity(n * cols);
         for j in 0..cols {
             let col = b.column(j);
+            // `y_i = b_perm(i) - Σ_{p<i} l_ip·y_p`, then `x_i = (y_i - Σ_{p>i} u_ip·x_p)/u_ii`
+            // in the place of `y_i`.
             let mut y: Vec<T> = Vec::with_capacity(n);
             for i in 0..n {
-                let xy = (0..i).map(|p| (&lu[i + p * n], &y[p]));
-                let v = T::dot_sub(&col[self.perm[i]], xy, prec, &mut work);
+                let mut v = T::blank(prec);
+                T::dot_sub_in(
+                    &mut v,
+                    Some(&col[self.perm[i]]),
+                    i,
+                    |p| (&lu[i + p * n], &y[p]),
+                    prec,
+                    &mut work,
+                );
                 y.push(v);
             }
-            let mut x: Vec<T> = vec![T::zero(); n];
             for i in (0..n).rev() {
-                let xy = (i + 1..n).map(|p| (&lu[i + p * n], &x[p]));
-                let v = T::dot_sub(&y[i], xy, prec, &mut work);
-                x[i] = T::quotient(&v, &lu[i + i * n], prec);
+                let mut v = core::mem::replace(&mut y[i], T::zero());
+                {
+                    let x = &y;
+                    T::dot_sub_in(
+                        &mut v,
+                        None,
+                        n - 1 - i,
+                        |q| (&lu[i + (i + 1 + q) * n], &x[i + 1 + q]),
+                        prec,
+                        &mut work,
+                    );
+                }
+                T::quotient_in(&mut v, &lu[i + i * n], prec);
+                y[i] = v;
             }
-            out.extend(x);
+            out.extend(y);
         }
         Matrix::from_column_major(n, cols, out)
     }
@@ -416,6 +677,134 @@ impl<T: Field> Factors<T> {
     }
 }
 
+/// The factorisation of [`factor`] of a matrix of finite [`BigFloat`]s of at most two limbs each
+/// (to 128 bits) in registers ([`Reg`]): each element of the factors one exact dot product
+/// rounded once to nearest, as [`factor`] has it, on the stack, so that its results are those of
+/// [`factor`] exactly, without a vector for each element; `None` when an exact sum spans more
+/// than the accumulator or a result leaves the exponent range.
+pub(crate) struct RegFactors {
+    lu: Vec<Reg>,
+    n: usize,
+    perm: Vec<usize>,
+    odd: bool,
+}
+
+impl RegFactors {
+    /// The factors of `a` at the precision `prec` (at most 128 bits), as [`Field::reg_factor`].
+    fn of(a: &Matrix<BigFloat>, prec: u64) -> Option<Option<RegFactors>> {
+        if prec > 128 {
+            return None;
+        }
+        let n = a.rows();
+        let mut lu: Vec<Reg> = a.as_slice().iter().map(Reg::of).collect::<Option<_>>()?;
+        let mut perm: Vec<usize> = (0..n).collect();
+        let mut odd = false;
+        // `lu[at] - Σ_{p<len} lu[x(p)]·lu[y(p)]`.
+        let dot = |lu: &[Reg],
+                   at: usize,
+                   len: usize,
+                   x: &dyn Fn(usize) -> usize,
+                   y: &dyn Fn(usize) -> usize| {
+            fast::reg_dot(
+                len + 1,
+                |t| {
+                    if t == 0 {
+                        (lu[at], None, false)
+                    } else {
+                        (lu[x(t - 1)], Some(lu[y(t - 1)]), true)
+                    }
+                },
+                prec,
+            )
+        };
+        for k in 0..n {
+            for i in k..n {
+                lu[i + k * n] = dot(&lu, i + k * n, k, &|p| i + p * n, &|p| p + k * n)?;
+            }
+            let mut r = k;
+            for i in k + 1..n {
+                if lu[i + k * n].larger(lu[r + k * n]) {
+                    r = i;
+                }
+            }
+            if lu[r + k * n].is_zero() {
+                return Some(None);
+            }
+            if r != k {
+                for j in 0..n {
+                    lu.swap(r + j * n, k + j * n);
+                }
+                perm.swap(r, k);
+                odd = !odd;
+            }
+            let pivot = lu[k + k * n];
+            for i in k + 1..n {
+                lu[i + k * n] = lu[i + k * n].div(pivot, prec)?;
+            }
+            for j in k + 1..n {
+                lu[k + j * n] = dot(&lu, k + j * n, k, &|p| k + p * n, &|p| p + j * n)?;
+            }
+        }
+        Some(Some(RegFactors { lu, n, perm, odd }))
+    }
+
+    /// The solution of `A·X = B`, as [`Factors::solve`] has it.
+    fn solve(&self, b: &Matrix<BigFloat>, prec: u64) -> Option<Matrix<BigFloat>> {
+        let (n, cols) = (self.n, b.cols());
+        let lu = &self.lu;
+        let mut out = Vec::with_capacity(n * cols);
+        let mut y: Vec<Reg> = Vec::with_capacity(n);
+        for j in 0..cols {
+            let col: Vec<Reg> = b.column(j).iter().map(Reg::of).collect::<Option<_>>()?;
+            y.clear();
+            for i in 0..n {
+                let c = col[self.perm[i]];
+                let v = fast::reg_dot(
+                    i + 1,
+                    |t| {
+                        if t == 0 {
+                            (c, None, false)
+                        } else {
+                            (lu[i + (t - 1) * n], Some(y[t - 1]), true)
+                        }
+                    },
+                    prec,
+                )?;
+                y.push(v);
+            }
+            for i in (0..n).rev() {
+                let v = fast::reg_dot(
+                    n - i,
+                    |t| {
+                        if t == 0 {
+                            (y[i], None, false)
+                        } else {
+                            (lu[i + (i + t) * n], Some(y[i + t]), true)
+                        }
+                    },
+                    prec,
+                )?;
+                y[i] = v.div(lu[i + i * n], prec)?;
+            }
+            out.extend(y.iter().map(|x| x.to_float(prec)));
+        }
+        Some(Matrix::from_column_major(n, cols, out))
+    }
+
+    /// The determinant, as [`Factors::det`] has it.
+    fn det(&self, prec: u64) -> Option<BigFloat> {
+        let n = self.n;
+        let mut d = Reg::of(&one_bit()).expect("one");
+        for i in 0..n {
+            d = d.mul(self.lu[i + i * n], prec)?;
+        }
+        if self.odd {
+            d = d.neg();
+        }
+        Some(d.to_float(prec))
+    }
+}
+
 /// The working precision of a matrix: the largest of its elements', 1 for none.
 fn work_prec<T: Field>(a: &Matrix<T>) -> u64 {
     a.as_slice().iter().map(Field::precision).max().unwrap_or(1)
@@ -425,8 +814,21 @@ fn work_prec<T: Field>(a: &Matrix<T>) -> u64 {
 fn det_of<T: Field>(a: &Matrix<T>) -> T {
     assert!(a.is_square(), "the matrix is not square");
     let prec = work_prec(a);
+    match T::reg_factor(a, prec) {
+        Some(Some(f)) => {
+            if let Some(d) = T::reg_det(&f, prec) {
+                return d;
+            }
+        }
+        Some(None) => return T::zero(),
+        None => {}
+    }
     match factor(a, prec) {
-        Some(f) => f.det(prec),
+        Some(f) => {
+            let d = f.det(prec);
+            f.recycle();
+            d
+        }
         // A column of zeros in the remaining block, exactly: the determinant is zero.
         None => T::zero(),
     }
@@ -440,14 +842,40 @@ fn solve_of<T: Field>(a: &Matrix<T>, b: &Matrix<T>) -> Option<Matrix<T>> {
         "the right-hand side has not as many rows as the matrix"
     );
     let prec = work_prec(a).max(work_prec(b));
-    factor(a, prec).map(|f| f.solve(b, prec))
+    match T::reg_factor(a, prec) {
+        Some(Some(f)) => {
+            if let Some(x) = T::reg_solve(&f, b, prec) {
+                return Some(x);
+            }
+        }
+        Some(None) => return None,
+        None => {}
+    }
+    factor(a, prec).map(|f| {
+        let x = f.solve(b, prec);
+        f.recycle();
+        x
+    })
 }
 
 fn inverse_of<T: Field>(a: &Matrix<T>) -> Option<Matrix<T>> {
     assert!(a.is_square(), "the matrix is not square");
     let prec = work_prec(a);
     let n = a.rows();
-    factor(a, prec).map(|f| f.solve(&Matrix::identity(n), prec))
+    match T::reg_factor(a, prec) {
+        Some(Some(f)) => {
+            if let Some(x) = T::reg_solve(&f, &Matrix::identity(n), prec) {
+                return Some(x);
+            }
+        }
+        Some(None) => return None,
+        None => {}
+    }
+    factor(a, prec).map(|f| {
+        let x = f.solve(&Matrix::identity(n), prec);
+        f.recycle();
+        x
+    })
 }
 
 /// The rank by Gaussian elimination with complete pivoting at the precision `prec`: the number

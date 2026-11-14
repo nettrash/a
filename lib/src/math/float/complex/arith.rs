@@ -69,6 +69,12 @@ fn sign_of(e: &Exact) -> i8 {
     }
 }
 
+/// A result of the precisions to write into: zeros, which hold no vectors.
+#[inline]
+fn blank(prec: (u64, u64)) -> BigComplex {
+    BigComplex::new(zero(prec.0, false), zero(prec.1, false))
+}
+
 /// Checks both precisions.
 #[inline]
 #[track_caller]
@@ -510,6 +516,19 @@ impl BigComplex {
         round: (Round, Round),
     ) -> (BigComplex, (Ordering, Ordering)) {
         let prec = check(prec);
+        let mut z = blank(prec);
+        let o = z.put_mul(self, other, round);
+        (z, o)
+    }
+
+    /// [`mul_round_parts`](BigComplex::mul_round_parts) by the exact products on the heap, and
+    /// the special values.
+    pub(super) fn mul_general(
+        &self,
+        other: &BigComplex,
+        prec: (u64, u64),
+        round: (Round, Round),
+    ) -> (BigComplex, Ternary) {
         if self.is_infinite() || other.is_infinite() {
             return mul_infinite(self, other, prec);
         }
@@ -517,9 +536,6 @@ impl BigComplex {
             return exact_pair(BigFloat::nan(prec.0), BigFloat::nan(prec.1));
         }
         let (a, b, c, d) = (&self.re, &self.im, &other.re, &other.im);
-        if let Some(r) = mul_short(a, b, c, d, prec, round) {
-            return r;
-        }
         if let Some(r) = mul3(a, b, c, d, prec, round) {
             return r;
         }
@@ -565,8 +581,19 @@ impl BigComplex {
         round: (Round, Round),
     ) -> (BigComplex, (Ordering, Ordering)) {
         let prec = check(prec);
+        let mut z = blank(prec);
+        let o = z.put_sqr(self, round);
+        (z, o)
+    }
+
+    /// [`sqr_round_parts`](BigComplex::sqr_round_parts) by the exact products on the heap.
+    pub(super) fn sqr_general(
+        &self,
+        prec: (u64, u64),
+        round: (Round, Round),
+    ) -> (BigComplex, Ternary) {
         if !self.is_finite() {
-            return self.mul_round_parts(self, prec, round);
+            return self.mul_general(self, prec, round);
         }
         let (a, b) = (&self.re, &self.im);
         let ab = match prod(a, b) {
@@ -686,6 +713,13 @@ impl BigComplex {
     #[track_caller]
     pub fn norm_round(&self, prec: u64, round: Round) -> (BigFloat, Ordering) {
         let prec = BigFloat::check_prec(prec);
+        let mut x = zero(prec, false);
+        let o = x.set_complex_norm(self, round);
+        (x, o)
+    }
+
+    /// [`norm_round`](BigComplex::norm_round) by the exact squares on the heap.
+    pub(super) fn norm_general(&self, prec: u64, round: Round) -> (BigFloat, Ordering) {
         if self.is_infinite() {
             return (BigFloat::infinity(prec), Ordering::Equal);
         }
@@ -728,6 +762,13 @@ impl BigComplex {
     #[track_caller]
     pub fn abs_round(&self, prec: u64, round: Round) -> (BigFloat, Ordering) {
         let prec = BigFloat::check_prec(prec);
+        let mut x = zero(prec, false);
+        let o = x.set_complex_abs(self, round);
+        (x, o)
+    }
+
+    /// [`abs_round`](BigComplex::abs_round) by the exact sum on the heap.
+    pub(super) fn abs_general(&self, prec: u64, round: Round) -> (BigFloat, Ordering) {
         if self.is_infinite() {
             return (BigFloat::infinity(prec), Ordering::Equal);
         }
@@ -753,54 +794,6 @@ impl BigComplex {
     pub fn abs(&self) -> BigFloat {
         self.abs_round(self.max_prec(), Round::Nearest).0
     }
-}
-
-/// The exact product of two parts that are not zero and whose significant bits fit one limb
-/// each, in two limbs on the stack: the limbs, their number, their lowest bit's exponent and the
-/// sign.
-#[inline]
-fn short_product(x: &BigFloat, y: &BigFloat) -> Option<([u64; 2], usize, i128, bool)> {
-    let (nx, mx, lx) = super::raw::significant(x);
-    let (ny, my, ly) = super::raw::significant(y);
-    if mx.len() != 1 || my.len() != 1 {
-        return None;
-    }
-    let p = u128::from(mx[0]) * u128::from(my[0]);
-    let limbs = [p as u64, (p >> 64) as u64];
-    Some((limbs, if limbs[1] == 0 { 1 } else { 2 }, lx + ly, nx != ny))
-}
-
-/// `(a + bi)(c + di)` for parts that are all finite, not zero and of one limb of significant
-/// bits each (precisions to 64 bits, the usual short case): the four products exact in
-/// registers, each part one rounded sum of two of them, as in the general case; `None`
-/// otherwise.
-fn mul_short(
-    a: &BigFloat,
-    b: &BigFloat,
-    c: &BigFloat,
-    d: &BigFloat,
-    prec: (u64, u64),
-    round: (Round, Round),
-) -> Option<(BigComplex, Ternary)> {
-    use crate::math::float::arith::{Mag, add_mags};
-    if !(a.is_normal() && b.is_normal() && c.is_normal() && d.is_normal()) {
-        return None;
-    }
-    let (ac, nac, lac, sac) = short_product(a, c)?;
-    let (bd, nbd, lbd, sbd) = short_product(b, d)?;
-    let (ad, nad, lad, sad) = short_product(a, d)?;
-    let (bc, nbc, lbc, sbc) = short_product(b, c)?;
-    fn mag(m: &[u64], lsb: i128, negative: bool) -> Mag<'_> {
-        Mag { negative, m, lsb }
-    }
-    let mag_ac = mag(&ac[..nac], lac, sac);
-    let mag_bd = mag(&bd[..nbd], lbd, !sbd);
-    let mag_ad = mag(&ad[..nad], lad, sad);
-    let mag_bc = mag(&bc[..nbc], lbc, sbc);
-    Some(pair(
-        add_mags(mag_ac, mag_bd, prec.0, round.0),
-        add_mags(mag_ad, mag_bc, prec.1, round.1),
-    ))
 }
 
 /// The precision of the parts from which a product takes three multiplications rather than

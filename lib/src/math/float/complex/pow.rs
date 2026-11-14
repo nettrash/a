@@ -880,11 +880,16 @@ fn fast_powi(z: &BigComplex, n: i64, w: u64) -> Option<(Approx, Approx)> {
     let m = n.unsigned_abs();
     let bits = 64 - u64::from(m.leading_zeros());
     let nr = (Round::Nearest, Round::Nearest);
-    let mut acc = z.clone();
+    // The products into one number of `w` bits: the first square of `z` itself, exactly.
+    let mut acc = BigComplex::zero(w);
     for k in (0..bits - 1).rev() {
-        acc = acc.sqr_round_parts((w, w), nr).0;
+        if k == bits - 2 {
+            acc.set_sqr(z, Round::Nearest);
+        } else {
+            acc.sqr_assign_round(Round::Nearest);
+        }
         if (m >> k) & 1 == 1 {
-            acc = acc.mul_round_parts(z, (w, w), nr).0;
+            acc.mul_assign_round(z, Round::Nearest);
         }
     }
     if n < 0 {

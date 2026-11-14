@@ -4,8 +4,8 @@
 //! and sums and differences, over slices.
 
 use super::div::limbs::{
-    bdiv_q, binvert_limb, div_qr as div_qr_limbs, div_qr_1, div_qr_2 as div_qr_2_limbs,
-    invert_3by2 as invert_3by2_limbs, qr_itch,
+    bdiv_q, binvert_limb, div_3by2 as div_3by2_limbs, div_q as div_q_limbs, div_qr as div_qr_limbs,
+    div_qr_1, div_qr_2 as div_qr_2_limbs, invert_3by2 as invert_3by2_limbs, q_itch, qr_itch,
 };
 pub(crate) use super::div::limbs::{div_2by1, invert_limb};
 use super::mul::basecase;
@@ -89,6 +89,69 @@ pub(crate) fn sqr_into(r: &mut Vec<u64>, x: &[u64], scratch: &mut Vec<u64>) {
     }
 }
 
+/// `r = x²` in the slice `r` of twice the operand's length, for `x` of at least one limb, with the
+/// working memory of the longer methods in `scratch`, which grows as they need: [`sqr_into`] into
+/// limbs the caller holds (on the stack, say).
+///
+/// # Panics
+///
+/// Panics if `x` is empty or `r` is not twice as long.
+#[inline]
+pub(crate) fn sqr_to(r: &mut [u64], x: &[u64], scratch: &mut Vec<u64>) {
+    let n = x.len();
+    assert!(n >= 1 && r.len() == 2 * n);
+    let itch = sqr_itch(n);
+    if scratch.len() < itch {
+        scratch.resize(itch, 0);
+    }
+    // SAFETY: `n >= 1`; `r` holds the `2n` limbs, which the method writes before it reads any of
+    // them, apart from the operand as a unique borrow, and the scratch holds the `itch` limbs it
+    // uses.
+    unsafe {
+        sqr_limbs(
+            r.as_mut_ptr(),
+            x.as_ptr(),
+            n,
+            Scratch::new(scratch.as_mut_ptr(), itch),
+        );
+    }
+}
+
+/// `r = x·y` in the slice `r` of the operands' lengths together, for `x` and `y` of at least one
+/// limb, with the working memory of the longer methods in `scratch`: [`mul_into`] into limbs the
+/// caller holds.
+///
+/// # Panics
+///
+/// Panics if an operand is empty or `r` is not as long as both.
+#[inline]
+pub(crate) fn mul_to(r: &mut [u64], x: &[u64], y: &[u64], scratch: &mut Vec<u64>) {
+    let (x, y) = if x.len() >= y.len() { (x, y) } else { (y, x) };
+    let (nx, ny) = (x.len(), y.len());
+    assert!(ny >= 1 && r.len() == nx + ny);
+    if ny < basecase::SCHOOLBOOK {
+        // SAFETY: `nx >= ny >= 1`; `r` holds the `nx + ny` limbs, which the kernel writes before
+        // it reads any of them, apart from the operands as a unique borrow.
+        unsafe { basecase::mul_unbalanced(r.as_mut_ptr(), x.as_ptr(), nx, y.as_ptr(), ny) };
+        return;
+    }
+    let itch = mul_itch(nx, ny);
+    if scratch.len() < itch {
+        scratch.resize(itch, 0);
+    }
+    // SAFETY: as above, and the scratch holds the `itch` limbs the method of these lengths uses.
+    unsafe {
+        mul_limbs(
+            r.as_mut_ptr(),
+            x.as_ptr(),
+            nx,
+            y.as_ptr(),
+            ny,
+            Scratch::new(scratch.as_mut_ptr(), itch),
+        );
+    }
+}
+
 /// `r += x·y` for `x` as long as `r`: the limb that carries out.
 ///
 /// # Panics
@@ -137,6 +200,31 @@ pub(crate) fn sub_assign(r: &mut [u64], a: &[u64]) -> bool {
         (*x, borrow) = x.overflowing_sub(1);
     }
     borrow
+}
+
+/// `r = a + b` for `r`, `a` and `b` of the same length: the carry out.
+#[inline]
+pub(crate) fn add_n_into(r: &mut [u64], a: &[u64], b: &[u64]) -> bool {
+    let n = r.len();
+    assert!(a.len() == n && b.len() == n);
+    if n == 0 {
+        return false;
+    }
+    // SAFETY: the `n` limbs of each are valid, and the output, a unique borrow, is apart from
+    // the inputs.
+    unsafe { add_n(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), n) }
+}
+
+/// `r = a - b` for `r`, `a` and `b` of the same length: the borrow out.
+#[inline]
+pub(crate) fn sub_n_into(r: &mut [u64], a: &[u64], b: &[u64]) -> bool {
+    let n = r.len();
+    assert!(a.len() == n && b.len() == n);
+    if n == 0 {
+        return false;
+    }
+    // SAFETY: as for `add_n_into`.
+    unsafe { sub_n(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), n) }
 }
 
 /// `r = a - r` for `r` and `a` of the same length: the borrow out.
@@ -239,6 +327,15 @@ pub(crate) fn invert_3by2(d1: u64, d0: u64) -> u64 {
     invert_3by2_limbs(d1, d0)
 }
 
+/// `(u2 B^2 + u1 B + u0) / (d1 B + d0)` for the normalized divisor with its reciprocal `v` of
+/// [`invert_3by2`]: the quotient limb and the remainder's two limbs, the high one first.
+/// `u2 B + u1` must be below the divisor.
+#[inline(always)]
+pub(crate) fn div_3by2(u2: u64, u1: u64, u0: u64, d1: u64, d0: u64, v: u64) -> (u64, u64, u64) {
+    debug_assert!((u2, u1) < (d1, d0));
+    div_3by2_limbs(u2, u1, u0, d1, d0, v)
+}
+
 /// `q = u / (d1 B + d0)` for the normalized divisor `d1 B + d0` with its reciprocal `v` of
 /// [`invert_3by2`], and the remainder's two limbs, the high one first: `q` of `u.len() - 2` limbs.
 ///
@@ -329,6 +426,46 @@ pub(crate) fn div_qr(q: &mut [u64], n: &mut [u64], d: &[u64], scratch: &mut Vec<
                 )
             }
         }
+    }
+}
+
+/// `q = n / d` alone, as [`div_qr`] computes it but without the remainder, for the normalized
+/// divisor `d` of at least three limbs and `n` at least as long, whose limbs it clobbers: its top
+/// limbs by the schoolbook method or divide and conquer, its last ones from a divisor that drops a
+/// limb at each step (about half the products). Returns the quotient's top bit, as `div_qr`, or
+/// `None`, rarely, when the shrinking divisor gives up: the quotient is then to be computed by
+/// `div_qr` from the dividend again. `scratch` grows as it needs.
+///
+/// # Panics
+///
+/// Panics if `d` has fewer than three limbs or is not normalized, `n` is shorter than `d`, or `q`
+/// is not `n.len() - d.len()` limbs long.
+pub(crate) fn div_q(
+    q: &mut [u64],
+    n: &mut [u64],
+    d: &[u64],
+    scratch: &mut Vec<u64>,
+) -> Option<bool> {
+    let (nn, dn) = (n.len(), d.len());
+    assert!(dn >= 3 && nn >= dn && q.len() == nn - dn && d[dn - 1] >> 63 == 1);
+    let itch = q_itch(nn, dn);
+    if scratch.len() < itch {
+        scratch.resize(itch, 0);
+    }
+    let v = invert_3by2_limbs(d[dn - 1], d[dn - 2]);
+    // SAFETY: `nn >= dn > 2`, the divisor normalized; the limbs of `n` for reads and writes, of `d`
+    // for reads and the `nn - dn` of `q` for writes, apart as borrows, and the scratch holds the
+    // `q_itch` limbs the method needs.
+    unsafe {
+        div_q_limbs(
+            q.as_mut_ptr(),
+            n.as_mut_ptr(),
+            nn,
+            d.as_ptr(),
+            dn,
+            v,
+            Scratch::new(scratch.as_mut_ptr(), itch),
+        )
     }
 }
 

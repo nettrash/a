@@ -567,8 +567,9 @@ fn huge_and_tiny_arguments() {
 #[test]
 fn every_kernel_agrees_with_the_others() {
     // The short kernel (to 512 bits after the point), the series with the doublings, and binary
-    // splitting (from about 410,000 bits): a rounding down at one precision is the rounding down
-    // of one at another, whichever kernels they took.
+    // splitting (from about 770,000 bits; the arctangent's bit burst from about 205,000): a
+    // rounding down at one precision is the rounding down of one at another, whichever kernels
+    // they took.
     let x = BigFloat::from(0.7)
         .add_round(&BigFloat::from(1e-17), 2000, Round::Nearest)
         .0;
@@ -577,7 +578,13 @@ fn every_kernel_agrees_with_the_others() {
     } else if cfg!(debug_assertions) {
         &[(60, 500), (300, 2000), (1500, 9000)]
     } else {
-        &[(60, 500), (300, 2000), (1500, 9000), (400_000, 420_000)]
+        &[
+            (60, 500),
+            (300, 2000),
+            (1500, 9000),
+            (150_000, 260_000),
+            (700_000, 790_000),
+        ]
     };
     for &(short, long) in pairs {
         for name in ["sin", "cos", "atan"] {

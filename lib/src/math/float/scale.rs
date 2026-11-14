@@ -22,7 +22,10 @@
 //!
 //! The approximations are lower bounds truncated to `w` bits, each truncation of a number of at
 //! least `w` bits losing less than `u = 2^(1-w)` of it relatively; a value that `K` truncations
-//! made, `K·u ≤ 1`, lies within `[A, A·(1 + u)^K] ⊂ [A, A·(1 + 2Ku)]` of the result `A`.
+//! made, `K·u ≤ 1`, lies within `[A, A·(1 + u)^K] ⊂ [A, A·(1 + 2Ku)]` of the result `A`. The
+//! power is cut to whole limbs, `64·ceil(w/64)` bits, which loses less still; up to 384 bits it
+//! is squared in registers and on the stack, and up to 768 bits the rest of an attempt of
+//! [`round_int`] works in fixed buffers on the stack too.
 
 use super::arith::div_mags;
 use super::limbs;
@@ -181,15 +184,26 @@ pub(crate) fn mul_1(v: &mut Vec<u64>, y: u64) {
     }
 }
 
-/// The largest power `c^t` of the odd `c > 1` below `2^64`, and `t`.
-#[inline]
-fn word_power(c: u64) -> (u64, u64) {
-    let (mut p, mut t) = (c, 1);
-    while let Some(q) = p.checked_mul(c) {
-        p = q;
-        t += 1;
+/// The largest power `b^t` below `2^64` of each `b` from 2 to 36 (index `b`), and `t`.
+const WORD_POWERS: [(u64, u64); 37] = {
+    let mut table = [(0u64, 0u64); 37];
+    let mut b = 2u64;
+    while b <= 36 {
+        let (mut p, mut t) = (b, 1u64);
+        while let Some(q) = p.checked_mul(b) {
+            p = q;
+            t += 1;
+        }
+        table[b as usize] = (p, t);
+        b += 1;
     }
-    (p, t)
+    table
+};
+
+/// The largest power `b^t` of `b` from 2 to 36 below `2^64`, and `t`.
+#[inline]
+pub(crate) fn word_power(b: u64) -> (u64, u64) {
+    WORD_POWERS[b as usize]
 }
 
 /// `c^k` exactly, for the odd `c > 1`: by squares of `c^t`, the largest power in a word, from the
@@ -241,48 +255,206 @@ fn truncate(v: &mut Vec<u64>, w: u64) -> u64 {
     d
 }
 
-/// A lower bound `P·2^s` of `c^k`, for the odd `c > 1`, with `P` of at most `w` bits and a count
-/// `K` of truncations, `c^k ≤ P·2^s·(1 + 2^(1-w))^K`: by squares of `c^t` from the top bit of
-/// `k/t`, each square and product truncated to `w` bits. A square of a bound of `K` truncations is
-/// one of `2K`, and `2K + 1` truncated; a product by the exact `c^t`, `K + 1`.
-pub(crate) fn pow_approx(c: u64, k: u128, w: u64) -> (Vec<u64>, i128, u128) {
-    let (base, t) = word_power(c);
-    let (q, r) = (k / u128::from(t), (k % u128::from(t)) as u32);
-    let (mut v, mut s, mut count) = (vec![1u64], 0i128, 0u128);
-    let mut scratch = Vec::new();
-    let mut sq = Vec::new();
-    if q > 0 {
-        v = vec![base];
-        for i in (0..127 - q.leading_zeros()).rev() {
-            crate::math::numbers::nat::sqr_into(&mut sq, &v, &mut scratch);
-            limbs::trim(&mut sq);
-            core::mem::swap(&mut v, &mut sq);
-            s *= 2;
-            count = count.saturating_mul(2);
-            let d = truncate(&mut v, w);
-            if d > 0 {
-                s += i128::from(d);
-                count = count.saturating_add(1);
+/// `x²` into `r`, `N = 2L`, column by column, the products off the diagonal once and doubled, with
+/// a three-word accumulator: for the short operands of [`pow_fixed`], whose loops unroll.
+#[inline(always)]
+fn sqr_fixed<const L: usize, const N: usize>(x: &[u64; L], r: &mut [u64; N]) {
+    // The running sum, three words: `acc` and `top` above it.
+    let (mut acc, mut top) = (0u128, 0u64);
+    for k in 0..N - 1 {
+        // Column `k`: twice the products `x_i·x_(k-i)` for `i < k - i`, and the square of
+        // `x_(k/2)` for an even `k`.
+        let (mut c, mut ct) = (0u128, 0u64);
+        let mut i = (k + 1).saturating_sub(L);
+        while 2 * i < k {
+            let (sum, o) = c.overflowing_add(u128::from(x[i]) * u128::from(x[k - i]));
+            c = sum;
+            ct += u64::from(o);
+            i += 1;
+        }
+        ct = ct << 1 | (c >> 127) as u64;
+        c <<= 1;
+        if k % 2 == 0 {
+            let (sum, o) = c.overflowing_add(u128::from(x[k / 2]) * u128::from(x[k / 2]));
+            c = sum;
+            ct += u64::from(o);
+        }
+        let (sum, o) = acc.overflowing_add(c);
+        acc = sum;
+        top += ct + u64::from(o);
+        r[k] = acc as u64;
+        acc = acc >> 64 | u128::from(top) << 64;
+        top = 0;
+    }
+    r[N - 1] = acc as u64;
+}
+
+/// [`pow_approx`] in `L` limbs held in registers and on the stack (`N = 2L`): every square and
+/// product cut to its top `L` limbs, shifted to its top bit, the low limbs zero at first. Each
+/// step counts as a truncation, which the bound `K ≤ 2q - 1` covers.
+fn pow_fixed<const L: usize, const N: usize>(
+    c: u64,
+    base: u64,
+    q: u128,
+    r: u32,
+) -> (Vec<u64>, i128, u128) {
+    let mut v = [0u64; L];
+    let sh = base.leading_zeros();
+    v[L - 1] = base << sh;
+    let mut s = -i128::from(sh) - 64 * (L as i128 - 1);
+    let mut count = 0u128;
+    let mut sq = [0u64; N];
+    let times = |v: &mut [u64; L], m: u64| -> i128 {
+        let mut p = [0u64; L];
+        let mut carry = 0u64;
+        for i in 0..L {
+            let t = u128::from(v[i]) * u128::from(m) + u128::from(carry);
+            p[i] = t as u64;
+            carry = (t >> 64) as u64;
+        }
+        // `v ≥ 2^(64L - 1)` and `m ≥ 3`: the carry is not zero.
+        let sh = carry.leading_zeros();
+        if sh == 0 {
+            v[..L - 1].copy_from_slice(&p[1..]);
+            v[L - 1] = carry;
+        } else {
+            for i in 0..L - 1 {
+                v[i] = p[i + 1] << sh | p[i] >> (64 - sh);
             }
-            if q >> i & 1 == 1 {
-                mul_1(&mut v, base);
-                let d = truncate(&mut v, w);
-                if d > 0 {
-                    s += i128::from(d);
-                    count = count.saturating_add(1);
-                }
+            v[L - 1] = carry << sh | p[L - 1] >> (64 - sh);
+        }
+        64 - i128::from(sh)
+    };
+    for i in (0..127 - q.leading_zeros()).rev() {
+        sqr_fixed(&v, &mut sq);
+        // At least `2^(128L - 2)`: shifted by one bit at most.
+        if sq[N - 1] >> 63 == 0 {
+            for j in 0..L {
+                v[j] = sq[L + j] << 1 | sq[L + j - 1] >> 63;
             }
+            s = 2 * s + 64 * L as i128 - 1;
+        } else {
+            v.copy_from_slice(&sq[L..]);
+            s = 2 * s + 64 * L as i128;
+        }
+        count = 2 * count + 1;
+        if q >> i & 1 == 1 {
+            s += times(&mut v, base);
+            count += 1;
         }
     }
     if r > 0 {
-        mul_1(&mut v, c.pow(r));
-        let d = truncate(&mut v, w);
-        if d > 0 {
-            s += i128::from(d);
-            count = count.saturating_add(1);
+        s += times(&mut v, c.pow(r));
+        count += 1;
+    }
+    let mut out = v.to_vec();
+    limbs::trim(&mut out);
+    (out, s, count)
+}
+
+/// The limbs that [`pow_approx`] keeps on the stack; longer ones go to the heap.
+const POW_STACK: usize = 12;
+
+/// The top `ln = min(rn, l)` limbs of `r[..rn]` (top limb not zero) shifted to its top bit, into
+/// `v`: `r = (v + θ)·2^ds`, `0 ≤ θ < 1`; their number, `ds`, and whether limbs were dropped
+/// (`θ` may then be anything below one, a relative error below `2^(1 - 64l)`, `v` being at least
+/// `2^(64l - 1)`).
+#[inline]
+fn take_top(v: &mut [u64], r: &[u64], rn: usize, l: usize) -> (usize, i128, bool) {
+    let sh = r[rn - 1].leading_zeros();
+    let ln = rn.min(l);
+    let d = rn - ln;
+    if sh == 0 {
+        v[..ln].copy_from_slice(&r[d..rn]);
+    } else {
+        for (i, o) in v[..ln].iter_mut().enumerate() {
+            let k = d + i;
+            let below = if k > 0 { r[k - 1] >> (64 - sh) } else { 0 };
+            *o = r[k] << sh | below;
         }
     }
-    (v, s, count)
+    (ln, 64 * d as i128 - i128::from(sh), d > 0)
+}
+
+/// `v[..len]·m` into `r`, then its top `l` limbs back into `v`, as [`take_top`].
+#[inline]
+fn times(v: &mut [u64], r: &mut [u64], len: usize, m: u64, l: usize) -> (usize, i128, bool) {
+    let mut carry = 0u64;
+    for (o, &x) in r[..len].iter_mut().zip(&v[..len]) {
+        let p = u128::from(x) * u128::from(m) + u128::from(carry);
+        *o = p as u64;
+        carry = (p >> 64) as u64;
+    }
+    r[len] = carry;
+    let rn = if carry == 0 { len } else { len + 1 };
+    take_top(v, r, rn, l)
+}
+
+/// A lower bound `P·2^s` of `c^k`, for the odd `c > 1`, with `P` of at most `64l` bits, `l =
+/// ceil(w/64)`, and a count `K` of truncations, `c^k ≤ P·2^s·(1 + 2^(1-64l))^K`: by squares of
+/// `c^t` (the largest power of `c` in a word) from the top bit of `q = floor(k/t)`, each square
+/// and product shifted to its top bit and cut to its top `l` limbs, which loses less than
+/// `2^(1-64l)` of it, then `c^(k mod t)`, in two buffers of `2l + 1` and `l` limbs (on the stack
+/// to [`POW_STACK`] limbs). A square of a bound of `K` truncations is one of `2K`, and `2K + 1`
+/// cut; a product by the exact `c^t`, `K + 1`: after the bits of `q` down to a prefix `p`, `K ≤
+/// 2p - 2` (`2(2p - 2) + 2 ≤ 2(2p + 1) - 2`), so that in the end `K ≤ 2q - 1 < 2k/t`.
+pub(crate) fn pow_approx(c: u64, k: u128, w: u64) -> (Vec<u64>, i128, u128) {
+    let (base, t) = word_power(c);
+    let (q, r) = (k / u128::from(t), (k % u128::from(t)) as u32);
+    if q == 0 {
+        return (vec![c.pow(r)], 0, 0);
+    }
+    let l = w.div_ceil(64).max(1) as usize;
+    match l {
+        1 | 2 => return pow_fixed::<2, 4>(c, base, q, r),
+        3 => return pow_fixed::<3, 6>(c, base, q, r),
+        4 => return pow_fixed::<4, 8>(c, base, q, r),
+        5 => return pow_fixed::<5, 10>(c, base, q, r),
+        6 => return pow_fixed::<6, 12>(c, base, q, r),
+        _ => {}
+    }
+    pow_general(c, base, q, r, l)
+}
+
+/// [`pow_approx`] in `l` limbs, by the crate's squares.
+fn pow_general(c: u64, base: u64, q: u128, r: u32, l: usize) -> (Vec<u64>, i128, u128) {
+    let mut stack = [0u64; 3 * POW_STACK + 1];
+    let mut heap = Vec::new();
+    let buf: &mut [u64] = if l <= POW_STACK {
+        &mut stack
+    } else {
+        heap.resize(3 * l + 1, 0);
+        &mut heap
+    };
+    let (v, r2) = buf.split_at_mut(l);
+    let mut scratch = Vec::new();
+    let sh = base.leading_zeros();
+    v[0] = base << sh;
+    let (mut len, mut s, mut count) = (1usize, -i128::from(sh), 0u128);
+    for i in (0..127 - q.leading_zeros()).rev() {
+        {
+            let (sq, _) = r2.split_at_mut(2 * len);
+            crate::math::numbers::nat::sqr_to(sq, &v[..len], &mut scratch);
+            // `v ≥ 2^(64·len - 1)`: the top limb of the square is at least `2^62`.
+            let (ln, ds, cut) = take_top(v, sq, 2 * len, l);
+            len = ln;
+            s = 2 * s + ds;
+            count = 2 * count + u128::from(cut);
+        }
+        if q >> i & 1 == 1 {
+            let (ln, ds, cut) = times(v, r2, len, base, l);
+            len = ln;
+            s += ds;
+            count += u128::from(cut);
+        }
+    }
+    if r > 0 {
+        let (ln, ds, cut) = times(v, r2, len, c.pow(r), l);
+        len = ln;
+        s += ds;
+        count += u128::from(cut);
+    }
+    (v[..len].to_vec(), s, count)
 }
 
 /// A direction of rounding of a magnitude to an integer.
@@ -479,11 +651,55 @@ pub(crate) fn div_rem(a: &[u64], b: &[u64]) -> (Vec<u64>, Vec<u64>) {
 /// of the rounding. Exact when `y` may be a half-integer or the exact work is small; by Ziv's
 /// strategy otherwise (see the [module](self)).
 pub(crate) fn round_int(m: &[u64], lsb: i128, b: u32, k: i128, dir: Dir) -> (Vec<u64>, Ordering) {
+    let (d, o, _) = round_int_wide(m, lsb, b, k, dir, |_| false);
+    (d, o)
+}
+
+/// The parts of `y/b` from those of `y`: its integer part `t`, the order of its fractional part
+/// `f` to one half and whether `f` is zero. With `t = b·t' + r`, `y/b = t' + (r + f)/b`, whose
+/// fraction is zero when `r` and `f` are, and compares to one half as `2r + 2f` to `b`: above
+/// for `2r ≥ b + 1`, and for `2r = b` unless `f` is zero, as `f` to one half for `2r = b - 1`,
+/// below otherwise.
+fn narrow(mut t: Vec<u64>, half: Ordering, zero: bool, b: u32) -> (Vec<u64>, Ordering, bool) {
+    let r = div_1(&mut t, u64::from(b));
+    let d = 2 * r as i64 - i64::from(b);
+    let h = match d {
+        1.. => Ordering::Greater,
+        0 if zero => Ordering::Equal,
+        0 => Ordering::Greater,
+        -1 => half,
+        _ => Ordering::Less,
+    };
+    (t, h, zero && r == 0)
+}
+
+/// [`round_int`], or, when the integer part `T` of `y` is one that `wide(T)` holds (the caller's
+/// test of a digit too many), the integer that `y/b` rounds to, from the same work: the integer,
+/// the direction, and whether it is that of `y/b`.
+pub(crate) fn round_int_wide(
+    m: &[u64],
+    lsb: i128,
+    b: u32,
+    k: i128,
+    dir: Dir,
+    wide: impl Fn(&[u64]) -> bool,
+) -> (Vec<u64>, Ordering, bool) {
     debug_assert!(!m.is_empty() && m.last() != Some(&0));
+    // The rounding of the exact parts, of `y` or of `y/b`.
+    let exact = |t: Vec<u64>, h: Ordering, z: bool| {
+        if wide(&t) {
+            let (t, h, z) = narrow(t, h, z, b);
+            let (d, o) = decide(t, h, z, dir);
+            (d, o, true)
+        } else {
+            let (d, o) = decide(t, h, z, dir);
+            (d, o, false)
+        }
+    };
     let (a, c) = split(b);
     if c == 1 {
         let (t, h, z) = int_parts(m, lsb + i128::from(a) * k);
-        return decide(t, h, z, dir);
+        return exact(t, h, z);
     }
     let bits = i128::from(limbs::bit_len(m));
     let j = k.unsigned_abs();
@@ -496,7 +712,7 @@ pub(crate) fn round_int(m: &[u64], lsb: i128, b: u32, k: i128, dir: Dir) -> (Vec
     };
     if yhi <= -2 {
         // Below a quarter: zero, or one rounding up.
-        return decide(Vec::new(), Ordering::Less, false, dir);
+        return exact(Vec::new(), Ordering::Less, false);
     }
     let q = bits - i128::from(limbs::trailing_zeros(m));
     let (clo, chi) = log2_pow(c as u32, j);
@@ -510,7 +726,7 @@ pub(crate) fn round_int(m: &[u64], lsb: i128, b: u32, k: i128, dir: Dir) -> (Vec
         if k >= 0 {
             let n = limbs::mul(m, &pow_exact(c, j as u64));
             let (t, h, z) = int_parts(&n, lsb + i128::from(a) * k);
-            return decide(t, h, z, dir);
+            return exact(t, h, z);
         }
         let p = pow_exact(c, j as u64);
         let s = lsb - i128::from(a) * j as i128;
@@ -521,11 +737,22 @@ pub(crate) fn round_int(m: &[u64], lsb: i128, b: u32, k: i128, dir: Dir) -> (Vec
         };
         let (t, r) = div_rem(&num, &den);
         let z = r.is_empty();
-        return decide(t, half_order(&r, &den), z, dir);
+        return exact(t, half_order(&r, &den), z);
     }
-    // Ziv: `y` is no half-integer. The working precision covers the integer part and the count of
-    // truncations, `K ≤ 2·|k| + 3 < 2^67`, so that `K·u ≤ 1` and the bounds below hold.
-    let mut w = yhi as u64 + 64 + 2 * bitlen(j);
+    // Ziv: `y` is no half-integer, and so neither is `y/b` (`y/b = t + 1/2` makes `y` an integer
+    // or a half-integer). The working precision covers the integer part, the count of
+    // truncations, `K ≤ 2·|k| + 3 < 2^67` (see [`pow_approx`]), so that `K·u ≤ 1` and the bounds
+    // below hold, and 12 bits more, whole limbs: the error, `8|k|/t + 10` units (`t ≥ 3` the
+    // digits of `c` in a word), leaves the decision open for about one input in `2^9` or fewer,
+    // which then costs a second attempt at a working precision half as large again.
+    let mut w = (yhi as u64 + bitlen(j) + 12).next_multiple_of(64);
+    while w <= 64 * POW_STACK as u64 {
+        if let Some(r) = ziv_small(m, lsb, b, k, w, dir, &wide) {
+            return r;
+        }
+        w += w / 2;
+        w = w.next_multiple_of(64);
+    }
     loop {
         let (x, sx) = top_bits(m, w);
         let (p, sp, count) = pow_approx(c, j, w);
@@ -556,32 +783,241 @@ pub(crate) fn round_int(m: &[u64], lsb: i128, b: u32, k: i128, dir: Dir) -> (Vec
         let (thi, hhi, _) = int_parts(&hi, s);
         if tlo == thi {
             // `T ≤ lo ≤ y ≤ hi < T + 1`, and `y` is not an integer.
+            let mut t = tlo;
+            let divided = wide(&t);
+            let nearest = if divided {
+                // `y/b = T' + (r + f)/b`, `f` the fraction of `y`, neither zero nor a half: above
+                // one half for `2r ≥ b`, below for `2r ≤ b - 2`, as `f` for `2r = b - 1`.
+                let r = div_1(&mut t, u64::from(b));
+                match 2 * r as i64 - i64::from(b) {
+                    0.. => Some(true),
+                    -1 => None,
+                    _ => Some(false),
+                }
+            } else {
+                None
+            };
             let up = match dir {
                 Dir::Floor => Some(false),
                 Dir::Ceil => Some(true),
                 // `hi ≤ T + 1/2`: `y < T + 1/2`, which `y` is not; `lo ≥ T + 1/2`: `y > T + 1/2`.
-                Dir::Nearest | Dir::Away => {
-                    if hhi != Ordering::Greater {
-                        Some(false)
-                    } else if hlo != Ordering::Less {
-                        Some(true)
-                    } else {
-                        None
-                    }
-                }
+                Dir::Nearest | Dir::Away => nearest.or(if hhi != Ordering::Greater {
+                    Some(false)
+                } else if hlo != Ordering::Less {
+                    Some(true)
+                } else {
+                    None
+                }),
             };
             if let Some(up) = up {
-                let mut t = tlo;
                 return if up {
                     limbs::increment(&mut t);
-                    (t, Ordering::Greater)
+                    (t, Ordering::Greater, divided)
                 } else {
-                    (t, Ordering::Less)
+                    (t, Ordering::Less, divided)
                 };
             }
         }
         w += w / 2;
     }
+}
+
+/// The limbs of the fixed buffers of [`ziv_small`].
+const ZIV_LIMBS: usize = 2 * POW_STACK + 4;
+
+/// `v·2^sh` into `out` (`sh < 64`): its length, without a zero limb at the top.
+#[inline]
+fn shl_small(out: &mut [u64], v: &[u64], sh: u64) -> usize {
+    let (w, b) = ((sh / 64) as usize, (sh % 64) as u32);
+    out[..w].fill(0);
+    if b == 0 {
+        out[w..w + v.len()].copy_from_slice(v);
+        return w + v.len();
+    }
+    let mut carry = 0;
+    for (i, &x) in v.iter().enumerate() {
+        out[w + i] = x << b | carry;
+        carry = x >> (64 - b);
+    }
+    out[w + v.len()] = carry;
+    if carry == 0 {
+        w + v.len()
+    } else {
+        w + v.len() + 1
+    }
+}
+
+/// `floor(v/2^d)` into `out`: its length, without zero limbs at the top.
+#[inline]
+fn shr_small(out: &mut [u64], v: &[u64], d: u64) -> usize {
+    let (w, b) = ((d / 64) as usize, (d % 64) as u32);
+    if w >= v.len() {
+        return 0;
+    }
+    let n = v.len() - w;
+    for i in 0..n {
+        let hi = if b > 0 && w + i + 1 < v.len() {
+            v[w + i + 1] << (64 - b)
+        } else {
+            0
+        };
+        out[i] = if b == 0 { v[w + i] } else { v[w + i] >> b | hi };
+    }
+    let mut n = n;
+    while n > 0 && out[n - 1] == 0 {
+        n -= 1;
+    }
+    n
+}
+
+/// `v ± e` into `out` (`v ≥ e` for a difference): its length, without zero limbs at the top.
+#[inline]
+fn add_small(out: &mut [u64], v: &[u64], e: u128, sub: bool) -> usize {
+    let mut carry = e;
+    let mut n = v.len();
+    for (i, &x) in v.iter().enumerate() {
+        let c = carry as u64;
+        let (r, o) = if sub {
+            x.overflowing_sub(c)
+        } else {
+            x.overflowing_add(c)
+        };
+        out[i] = r;
+        carry = (carry >> 64) + u128::from(o);
+    }
+    if carry != 0 {
+        debug_assert!(!sub && carry >> 64 == 0);
+        out[n] = carry as u64;
+        n += 1;
+    }
+    while n > 0 && out[n - 1] == 0 {
+        n -= 1;
+    }
+    n
+}
+
+/// The order to one half of the fraction of `v·2^-d`, `d ≥ 1`.
+#[inline]
+fn fraction_half(v: &[u64], d: u64) -> Ordering {
+    let hb = d - 1;
+    if !limbs::bit(v, hb) {
+        Ordering::Less
+    } else if limbs::zero_below(v, hb) {
+        Ordering::Equal
+    } else {
+        Ordering::Greater
+    }
+}
+
+/// One attempt of Ziv's strategy of [`round_int_wide`] at the working precision `w` (a multiple
+/// of 64, at most `64·POW_STACK`), as the loop there, in fixed buffers on the stack with the
+/// crate's product and division: `Some` of the result when the attempt decides it.
+fn ziv_small(
+    m: &[u64],
+    lsb: i128,
+    b: u32,
+    k: i128,
+    w: u64,
+    dir: Dir,
+    wide: &impl Fn(&[u64]) -> bool,
+) -> Option<(Vec<u64>, Ordering, bool)> {
+    let (a, c) = split(b);
+    let j = k.unsigned_abs();
+    let bits = limbs::bit_len(m);
+    let sx = bits.saturating_sub(w);
+    let mut x = [0u64; ZIV_LIMBS];
+    let xl = shr_small(&mut x, m, sx);
+    let x = &x[..xl];
+    let (p, sp, count) = pow_approx(c, j, w);
+    let mut lo = [0u64; ZIV_LIMBS];
+    let mut hi = [0u64; ZIV_LIMBS];
+    let mut scratch = Vec::new();
+    let (ll, hl, s) = if k >= 0 {
+        // As in `round_int_wide`: `y ∈ [A, A + 4K]·2^s`, `K = count + 2`.
+        let mut prod = [0u64; ZIV_LIMBS];
+        let pn = xl + p.len();
+        crate::math::numbers::nat::mul_to(&mut prod[..pn], x, &p, &mut scratch);
+        let pn = if prod[pn - 1] == 0 { pn - 1 } else { pn };
+        let sa = limbs::bit_len(&prod[..pn]).saturating_sub(w);
+        let ll = shr_small(&mut lo, &prod[..pn], sa);
+        let hl = add_small(&mut hi, &lo[..ll], 4 * (count + 2), false);
+        let s = lsb + i128::from(sx) + sp + i128::from(sa) + i128::from(a) * k;
+        (ll, hl, s)
+    } else {
+        // As in `round_int_wide`: `y ∈ [Q - 8K, Q + 9]·2^s`, `K = count`, with `Q =
+        // floor(X·2^t/P)` from the divisor shifted to its top bit.
+        let sh = u64::from(p[p.len() - 1].leading_zeros());
+        let mut dv = [0u64; ZIV_LIMBS];
+        let dl = shl_small(&mut dv, &p, sh);
+        let t = w + 1 + limbs::bit_len(&p) - limbs::bit_len(x);
+        let mut num = [0u64; ZIV_LIMBS];
+        let nl = {
+            // `X·2^(t + sh)`: whole limbs, then the bits.
+            let s = t + sh;
+            let (wl, _) = ((s / 64) as usize, s % 64);
+            let n = shl_small(&mut num[wl..], x, s % 64);
+            num[..wl].fill(0);
+            wl + n
+        };
+        let qn = nl - dl;
+        let mut q = [0u64; ZIV_LIMBS];
+        let top = crate::math::numbers::nat::div_qr(
+            &mut q[..qn],
+            &mut num[..nl],
+            &dv[..dl],
+            &mut scratch,
+        );
+        q[qn] = u64::from(top);
+        let ql = if top { qn + 1 } else { qn };
+        let e = 8 * count + 10;
+        let ll = add_small(&mut lo, &q[..ql], e, true);
+        let hl = add_small(&mut hi, &q[..ql], e, false);
+        let s = lsb + i128::from(sx) - sp - i128::from(t) - i128::from(a) * j as i128;
+        (ll, hl, s)
+    };
+    let (lo, hi) = (&lo[..ll], &hi[..hl]);
+    if s >= 0 {
+        // Integers at this scale: the loop on vectors takes them.
+        return None;
+    }
+    let d = (-s) as u64;
+    let mut tl = [0u64; ZIV_LIMBS];
+    let mut th = [0u64; ZIV_LIMBS];
+    let tn = shr_small(&mut tl, lo, d);
+    let hn = shr_small(&mut th, hi, d);
+    if tl[..tn] != th[..hn] {
+        return None;
+    }
+    // `T ≤ lo ≤ y ≤ hi < T + 1`, and `y` is not an integer.
+    let mut t = tl[..tn].to_vec();
+    let divided = wide(&t);
+    let nearest = if divided {
+        let r = div_1(&mut t, u64::from(b));
+        match 2 * r as i64 - i64::from(b) {
+            0.. => Some(true),
+            -1 => None,
+            _ => Some(false),
+        }
+    } else {
+        None
+    };
+    let up = match dir {
+        Dir::Floor => Some(false),
+        Dir::Ceil => Some(true),
+        Dir::Nearest | Dir::Away => nearest.or(if fraction_half(hi, d) != Ordering::Greater {
+            Some(false)
+        } else if fraction_half(lo, d) != Ordering::Less {
+            Some(true)
+        } else {
+            None
+        }),
+    }?;
+    Some(if up {
+        limbs::increment(&mut t);
+        (t, Ordering::Greater, divided)
+    } else {
+        (t, Ordering::Less, divided)
+    })
 }
 
 /// The limbs of `n`, without zero limbs at the top.
@@ -684,7 +1120,7 @@ pub(crate) fn round_value(
         };
     }
     // Ziv: `v` is no boundary. As in `round_int`, with `K ≤ 2·|e| + 3 < 2^67`.
-    let mut w = prec + 64 + 2 * bitlen(j);
+    let mut w = (prec + bitlen(j) + 12).next_multiple_of(64);
     loop {
         let (x, sx) = top_bits(d, w);
         let (pw, sp, count) = pow_approx(c, j, w);

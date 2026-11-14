@@ -22,7 +22,7 @@ fn two_to(k: i64) -> Rational {
 }
 
 /// `q^n` exactly, `n ≥ 0`.
-fn pow(q: &Rational, n: u64) -> Rational {
+pub(super) fn pow(q: &Rational, n: u64) -> Rational {
     let mut r = Rational::from(1);
     for i in (0..64 - n.leading_zeros()).rev() {
         r = &r * &r;
@@ -43,7 +43,7 @@ fn ulp(x: &BigFloat, prec: u64) -> Rational {
 /// (monotone in `r`), so that the result lies on the side its ternary says, the neighbour beyond
 /// on the other side, and to nearest the midpoint between them beyond the result's side.
 #[track_caller]
-fn bracket(
+pub(super) fn bracket(
     got: &(BigFloat, Ordering),
     prec: u64,
     round: Round,

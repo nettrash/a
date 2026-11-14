@@ -1,9 +1,11 @@
 //! The sine and the cosine at long working precisions by binary splitting, after Brent's bit-burst
 //! method as MPFR's `mpfr_sincos_fast` carries it out: the argument `r` in `[0, 1]` is a sum of
-//! pieces `x_k = u_k/2^(2^k)`, `u_k` the bits of `r` from `2^(k - 1) + 1` to `2^k` after the point,
-//! so that `x_k < 2^(-2^(k - 1))` has a numerator of `2^(k - 1)` bits; the sine of each piece is
-//! its Taylor series summed exactly by binary splitting and its cosine `sqrt(1 - sin²)`, and the
-//! pieces are put together by the formulas of the sum. About `O(M(F) log² F)` for `F` bits.
+//! pieces `x_k = u_k/2^(2^k)`, `u_k` the bits of `r` from `2^(k - 1) + 1` to `2^k` after the point
+//! (the first piece the bits to 32), so that `x_k < 2^(-2^(k - 1))` has a numerator of `2^(k - 1)`
+//! bits; the sine of each piece is its Taylor series summed exactly by binary splitting and its
+//! cosine `sqrt(1 - sin²)`, and the pieces are put together by the formulas of the sum. About
+//! `O(M(F) log² F)` for `F` bits. The arctangent by the bit burst on the point `1 + iz` too
+//! ([`atan`]).
 
 use super::limbs;
 use super::sincos::{Fx, Lg, div, isqrt};
@@ -95,7 +97,9 @@ pub(super) fn sin_cos(
     let one = limbs::shl(&[1], fp);
     let (mut s, mut c) = (Vec::new(), one.clone());
     let (mut es, mut ec) = (0f64, 0f64);
-    let (mut lo, mut hi) = (0u64, 1u64);
+    // The first piece the bits to 32 after the point: one binary splitting of a numerator of 33
+    // bits costs about half the six of the pieces of 1, 1, 2, 4, 8 and 16 bits it stands for.
+    let (mut lo, mut hi) = (0u64, 32u64);
     while lo < fp {
         let hi_c = hi.min(fp);
         // The bits `lo + 1..=hi_c` after the point, `floor(r·2^hi_c) mod 2^(hi_c - lo)`, and for
@@ -154,4 +158,120 @@ fn mul_fix(a: &[u64], b: &[u64], f: u64) -> Vec<u64> {
         return Vec::new();
     }
     limbs::shr(&limbs::mul(a, b), f)
+}
+
+/// The angle of the point `(re, im)` cut to a dyadic of `hi` bits after the point, for `|im/re| <
+/// 1`: `floor(|im| 2^hi / re)`, from `re` and `im` cut to the top `hi - lo + 96` bits of `im`,
+/// `lo` the bits that are zero after the point (a quotient of a few more bits than the piece
+/// holds, within a relative `2^(1 - (hi - lo + 96))` of the exact one).
+fn piece(re: &[u64], im: &[u64], lo: u64, hi: u64) -> Vec<u64> {
+    // Both cut by `s` bits, `im` keeps `hi - lo + 96` bits, and so the quotient about as many:
+    // `|im/re| < 2^(2 - lo)`, so that it has about `hi - lo` bits.
+    let keep = hi - lo.min(hi) + 96;
+    let s = limbs::bit_len(im).saturating_sub(keep);
+    let r = limbs::shr(re, s);
+    let i = limbs::shr(im, s);
+    div(&limbs::shl(&i, hi), &r)
+}
+
+/// `atan(z)` for the fixed-point `z = Z·2^-F`, `0 < z <= 1`, `F = 64·fl`, by the bit burst on the
+/// point `1 + iz`, whose angle it is: the angle is taken off in pieces `θ_k` of doubling lengths,
+/// `(re, im) ← (re, im)·(cos θ_k - i sin θ_k)`, the sine of each piece by the binary splitting of
+/// its series ([`sin_piece`]) and its cosine `sqrt(1 - sin²)`, as for [`sin_cos`]; each piece
+/// read off the point's own angle, `atan(im/re) = im/re` within `|im/re|³/3`, so that no division
+/// at the full precision is needed but the last one. The first piece is the `f64` arctangent cut
+/// to 32 bits; the pieces stop when `lo`, the bits after the point that the angle left has zero,
+/// reaches a third of the precision, and the angle left is `t = im/re` within `t³/3`. Returns the
+/// angle at `F` bits after the point and the bound of its error in ulps.
+///
+/// At `F' = F + 64` bits: a step multiplies the point by `ŵ = (ĉ, -ŝ)` within `e_s + e_c` ulps of
+/// `e^(-iθ_k)` (`e_s <= 1.25`, `e_c <= 3`, as in [`sin_cos`]), whose angle is within `asin(e_s +
+/// e_c)` ulps of `-θ_k`, and the four products cut add `|ρ| <= 3` ulps, an angle below
+/// `asin(|ρ|/|ẑ ŵ|)`; the modulus starts at `sqrt(1 + z²) >= 1` and stays above `0.99`, so each
+/// step moves the angle by at most `1.02 (e_s + e_c + 3)` ulps, the first piece's too. The pieces
+/// are exact dyadics, the last quotient within two ulps.
+pub(super) fn atan(z: &[u64], fl: usize) -> (Vec<u64>, Lg) {
+    let f = 64 * fl as u64;
+    let fp = f + 64;
+    let x = limbs::shl(z, 64);
+    // The first piece: the `f64` arctangent of the top bits, cut to 32 bits.
+    let bz = limbs::bit_len(z);
+    let top = if bz > 64 {
+        limbs::shr(z, bz - 64)[0]
+    } else {
+        z[0] << (64 - bz)
+    };
+    let zf = (top as f64 * (bz as f64 - f as f64 - 64.0).exp2()).min(1.0);
+    let a = zf.atan();
+    // `a = m·2^-g0` with `m` of 32 bits.
+    let g0 = (32.0 - a.log2().floor()) as u64;
+    let u0 = (a * (g0 as f64).exp2()) as u64;
+    // Its sine by one binary splitting (one piece of 32 bits costs about half the six pieces of
+    // the sine's own bit burst), within 1.25 ulps, and its cosine within 3.
+    let s0 = sin_piece(&[u0], g0, fp);
+    let c0 = isqrt(&limbs::sub(
+        &limbs::shl(&[1], 2 * fp),
+        &limbs::mul(&s0, &s0),
+    ));
+    let mut e = 1.02 * (1.25 + 3.0 + 3.0);
+    // `(1 + iX)(c - i s)`.
+    let mut re = limbs::add(&c0, &mul_fix(&x, &s0, fp));
+    let xc = mul_fix(&x, &c0, fp);
+    let (mut neg, mut im) = if limbs::cmp(&xc, &s0) == core::cmp::Ordering::Less {
+        (true, limbs::sub(&s0, &xc))
+    } else {
+        (false, limbs::sub(&xc, &s0))
+    };
+    // The angle so far, at `F'` bits: the positive and the negative pieces.
+    let mut pos = limbs::shl(&[u0], fp - g0);
+    let mut negs: Vec<u64> = Vec::new();
+    let stop = (fp + 6).div_ceil(3);
+    let mut lo = g0 - 1;
+    while lo < stop && !im.is_empty() {
+        let hi = (2 * lo).min(stop + 1);
+        let u = piece(&re, &im, lo, hi);
+        if !u.is_empty() {
+            let sp = sin_piece(&u, hi, fp);
+            let cp = isqrt(&limbs::sub(
+                &limbs::shl(&[1], 2 * fp),
+                &limbs::mul(&sp, &sp),
+            ));
+            // `(re + i im)(c - i s)` for `im >= 0`, `(c + i s)` for `im < 0`, in magnitudes.
+            let nre = limbs::add(&mul_fix(&re, &cp, fp), &mul_fix(&im, &sp, fp));
+            let ic = mul_fix(&im, &cp, fp);
+            let rs = mul_fix(&re, &sp, fp);
+            let (flip, nim) = if limbs::cmp(&ic, &rs) == core::cmp::Ordering::Less {
+                (true, limbs::sub(&rs, &ic))
+            } else {
+                (false, limbs::sub(&ic, &rs))
+            };
+            let pu = limbs::shl(&u, fp - hi);
+            if neg {
+                negs = limbs::add(&negs, &pu);
+            } else {
+                pos = limbs::add(&pos, &pu);
+            }
+            neg ^= flip;
+            re = nre;
+            im = nim;
+            e += 1.02 * (1.25 + 3.0 + 3.0);
+        }
+        lo = hi;
+    }
+    // The angle left: `t = im/re` within an ulp and `t³/3`.
+    if !im.is_empty() {
+        // The quotient from the cut `re` and `im`: within an ulp and one more.
+        let t = piece(&re, &im, lo, fp);
+        let tb = limbs::bit_len(&t) as f64;
+        e += 2.0 + (3.0 * tb - 2.0 * fp as f64).exp2();
+        if neg {
+            negs = limbs::add(&negs, &t);
+        } else {
+            pos = limbs::add(&pos, &t);
+        }
+    }
+    let y = limbs::sub(&pos, &negs);
+    // At `F` bits: the floor adds an ulp of `2^-F`.
+    let y = limbs::shr(&y, 64);
+    (y, Lg::of(e / 18_446_744_073_709_551_616.0 + 1.0))
 }

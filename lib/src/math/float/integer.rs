@@ -3,7 +3,7 @@
 //! infinities and the zeros stay as they are, and a zero result has the sign of the number.
 
 use super::limbs;
-use super::round::{round_mag, signed};
+use super::round::{round_into, round_mag, signed};
 use super::scale::{Dir, int_parts};
 use super::{BigFloat, Kind, Round};
 use core::cmp::Ordering;
@@ -33,13 +33,9 @@ impl Way {
 }
 
 impl BigFloat {
-    /// The integer that the finite number, not zero and not an integer, rounds to in the
-    /// direction `dir` of its magnitude, at the number's precision, which holds it, and the
+    /// The integer that the finite number, not zero and with bits below its point, rounds to in
+    /// the direction `dir` of its magnitude, at the number's precision, which holds it, and the
     /// direction of that rounding of the magnitude; a zero of the number's sign for zero.
-    ///
-    /// With bits before the point, the mantissa is copied with its fraction cleared, and one unit
-    /// added when the direction rounds up, a carry out of the top making it the next power of two;
-    /// a number below one is zero or one.
     pub(crate) fn integer_same(&self, dir: Dir) -> (BigFloat, Ordering) {
         let (negative, exp, mant) = match &self.kind {
             Kind::Finite {
@@ -49,77 +45,19 @@ impl BigFloat {
             } => (*negative, *exp, mant),
             _ => unreachable!("a finite number"),
         };
-        let len = mant.len();
-        let all = 64 * len as u64;
-        // The bits of the fraction, below the unit's: all of them below one, the top one the half
-        // for a number from one half to one.
-        let u = if exp < 0 { all + 1 } else { all - exp as u64 };
-        debug_assert!(u > 0 && (exp <= 0 || u < all));
-        let half = limbs::bit(mant, u - 1);
-        let rest = !limbs::zero_below(mant, u - 1);
-        let unit_odd = limbs::bit(mant, u);
-        let up = match dir {
-            Dir::Floor => false,
-            Dir::Ceil => half || rest,
-            Dir::Nearest => half && (rest || unit_odd),
-            Dir::Away => half,
+        let (exp, o, out) = integer_copy(mant, exp, dir);
+        let kind = match exp {
+            Some(exp) => Kind::Finite {
+                negative,
+                exp,
+                mant: out,
+            },
+            None => Kind::Zero { negative },
         };
-        let o = if !(half || rest) {
-            Ordering::Equal
-        } else if up {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        };
-        if exp <= 0 {
-            let kind = if up {
-                let mut mant = vec![0; len];
-                mant[len - 1] = 1 << 63;
-                Kind::Finite {
-                    negative,
-                    exp: 1,
-                    mant,
-                }
-            } else {
-                Kind::Zero { negative }
-            };
-            return (
-                BigFloat {
-                    prec: self.prec,
-                    kind,
-                },
-                o,
-            );
-        }
-        let (k, b) = ((u / 64) as usize, u % 64);
-        let mut v = mant.clone();
-        v[..k].fill(0);
-        let mut exp = exp;
-        if b > 0 {
-            v[k] &= !((1u64 << b) - 1);
-        }
-        if up {
-            let (s, mut carry) = v[k].overflowing_add(1u64 << b);
-            v[k] = s;
-            for x in &mut v[k + 1..] {
-                if !carry {
-                    break;
-                }
-                (*x, carry) = x.overflowing_add(1);
-            }
-            if carry {
-                v[len - 1] = 1 << 63;
-                exp += 1;
-            }
-        }
         (
             BigFloat {
                 prec: self.prec,
-                kind: Kind::Finite {
-                    negative,
-                    exp,
-                    mant: v,
-                },
+                kind,
             },
             o,
         )
@@ -137,10 +75,13 @@ impl BigFloat {
                     // An integer already.
                     return self.prec_round(prec, round);
                 }
-                let (int, _) = self.integer_same(way.dir(*negative));
-                if prec == self.prec {
+                let exp = self.exponent().expect("a finite number");
+                if prec == self.prec || exp <= 0 || exp as u64 <= prec {
+                    // The integer has at most `exp` bits, or is `2^exp`: `prec` bits hold it.
+                    let (int, _) = self.integer_at(way.dir(*negative), prec);
                     (int, Ordering::Equal)
                 } else {
+                    let (int, _) = self.integer_same(way.dir(*negative));
                     int.prec_round(prec, round)
                 }
             }
@@ -313,15 +254,9 @@ impl BigFloat {
                 if lsb >= 0 || i128::from(*exp) >= i128::from(prec) {
                     return self.prec_round(prec, round);
                 }
-                let (int, o) = self.integer_same(Dir::of(*negative, round));
-                let o = signed(*negative, o);
-                // At most `exp < prec` bits, or `2^exp`: exact.
-                let int = if prec == self.prec {
-                    int
-                } else {
-                    int.prec_round(prec, round).0
-                };
-                (int, o)
+                // At most `exp < prec` bits, or `2^exp`: exact at `prec`.
+                let (int, o) = self.integer_at(Dir::of(*negative, round), prec);
+                (int, signed(*negative, o))
             }
             kind => (
                 BigFloat {
@@ -331,6 +266,124 @@ impl BigFloat {
                 Ordering::Equal,
             ),
         }
+    }
+
+    /// [`integer_same`](Self::integer_same) at the precision `prec`, which must hold the integer
+    /// (at least the number's exponent), in one pass into the result's limbs.
+    fn integer_at(&self, dir: Dir, prec: u64) -> (BigFloat, Ordering) {
+        let Kind::Finite {
+            negative,
+            exp,
+            mant,
+        } = &self.kind
+        else {
+            unreachable!("a finite number")
+        };
+        let n = prec.div_ceil(64) as usize;
+        let (exp, o, out) = if n == mant.len() {
+            integer_copy(mant, *exp, dir)
+        } else {
+            let mut out = vec![0; n];
+            let (e, o) = integer_fit(mant, *exp, dir, &mut out);
+            (e, o, out)
+        };
+        let kind = match exp {
+            Some(exp) => Kind::Finite {
+                negative: *negative,
+                exp,
+                mant: out,
+            },
+            None => Kind::Zero {
+                negative: *negative,
+            },
+        };
+        (BigFloat { prec, kind }, o)
+    }
+
+    /// Sets `self` to [`rint_round`](Self::rint_round) of `a` at the precision of `self`,
+    /// reusing its vector, and returns the direction of the rounding from `a`, as MPFR's
+    /// `mpfr_rint`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    /// use core::cmp::Ordering;
+    ///
+    /// let mut r = BigFloat::zero(2);
+    /// assert_eq!(r.set_rint(&BigFloat::from(10.5), Round::Nearest), Ordering::Greater);
+    /// assert_eq!(r, BigFloat::from(12));
+    /// ```
+    pub fn set_rint(&mut self, a: &BigFloat, round: Round) -> Ordering {
+        let prec = self.prec;
+        let Kind::Finite {
+            negative: na,
+            exp: ea,
+            mant: ma,
+        } = &a.kind
+        else {
+            self.kind = a.kind.clone();
+            return Ordering::Equal;
+        };
+        let (na, ea) = (*na, *ea);
+        let lsb = i128::from(ea) - 64 * ma.len() as i128;
+        if lsb >= 0 || i128::from(ea) >= i128::from(prec) {
+            // The numbers of `prec` bits there are integers: a rounding to the precision.
+            let out = self.take_mant();
+            let (kind, o) = round_into(na, ma, lsb, false, prec, round, out);
+            self.kind = kind;
+            return o;
+        }
+        let dir = Dir::of(na, round);
+        if let Kind::Finite {
+            negative,
+            exp,
+            mant,
+        } = &mut self.kind
+        {
+            let (e, o) = integer_fit(ma, ea, dir, mant);
+            if let Some(e) = e {
+                *negative = na;
+                *exp = e;
+            } else {
+                self.kind = Kind::Zero { negative: na };
+            }
+            return signed(na, o);
+        }
+        let (x, o) = a.integer_at(dir, prec);
+        self.kind = x.kind;
+        signed(na, o)
+    }
+
+    /// Sets `self` to the greatest integer not above `a`, rounded to the precision of `self`
+    /// toward negative infinity, reusing its vector, and returns the direction from `a`, as
+    /// MPFR's `mpfr_floor`: [`set_rint`](Self::set_rint) with [`Round::Down`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::BigFloat;
+    /// use core::cmp::Ordering;
+    ///
+    /// let mut r = BigFloat::zero(53);
+    /// assert_eq!(r.set_floor(&BigFloat::from(-2.5)), Ordering::Less);
+    /// assert_eq!(r, BigFloat::from(-3));
+    /// ```
+    pub fn set_floor(&mut self, a: &BigFloat) -> Ordering {
+        self.set_rint(a, Round::Down)
+    }
+
+    /// Sets `self` to the least integer not below `a`, rounded to the precision of `self` toward
+    /// positive infinity, as MPFR's `mpfr_ceil`: [`set_rint`](Self::set_rint) with
+    /// [`Round::Up`].
+    pub fn set_ceil(&mut self, a: &BigFloat) -> Ordering {
+        self.set_rint(a, Round::Up)
+    }
+
+    /// Sets `self` to the integer part of `a`, rounded to the precision of `self` toward zero, as
+    /// MPFR's `mpfr_trunc`: [`set_rint`](Self::set_rint) with [`Round::TowardZero`].
+    pub fn set_trunc(&mut self, a: &BigFloat) -> Ordering {
+        self.set_rint(a, Round::TowardZero)
     }
 
     /// The fractional part, `x - trunc(x)`, of the sign of the number, rounded to `prec` bits in
@@ -414,6 +467,130 @@ impl BigFloat {
         match self.parts() {
             Some((_, m, lsb)) => lsb >= 0 || limbs::zero_below(m, (-lsb) as u64),
             None => self.is_zero(),
+        }
+    }
+}
+
+/// The integer that the finite number `0.mant·2^exp`, not zero, rounds to in the direction `dir`
+/// of its magnitude, into the limbs `out` (`64·out.len()` bits, at least `exp`): the exponent of
+/// the integer, `None` for zero, and the direction of the rounding of the magnitude. The limbs
+/// from the unit's up are the mantissa's top ones, those below zero.
+fn integer_fit(mant: &[u64], exp: i64, dir: Dir, out: &mut [u64]) -> (Option<i64>, Ordering) {
+    let (len, n) = (mant.len(), out.len());
+    debug_assert!(exp <= 64 * n as i64);
+    let (up, o) = integer_dir(mant, exp, dir);
+    if exp > 0 {
+        // The unit's limb lies at or above the mantissa's lowest one there, `exp < 64·len`.
+        let k = unit_limb(n, exp);
+        debug_assert!(k + len >= n);
+        zero(&mut out[..k]);
+        out[k..].copy_from_slice(&mant[k + len - n..]);
+    }
+    (integer_apply(out, exp, up), o)
+}
+
+/// [`integer_fit`] into a copy of the mantissa, decided from the mantissa before the copy is made,
+/// and none made for a zero.
+fn integer_copy(mant: &[u64], exp: i64, dir: Dir) -> (Option<i64>, Ordering, Vec<u64>) {
+    let (up, o) = integer_dir(mant, exp, dir);
+    if exp <= 0 && !up {
+        return (None, o, Vec::new());
+    }
+    let mut v = mant.to_vec();
+    if exp > 0 {
+        let k = unit_limb(v.len(), exp);
+        zero(&mut v[..k]);
+    }
+    (integer_apply(&mut v, exp, up), o, v)
+}
+
+/// The limb of `n` that holds the unit's bit of a number of the exponent `exp`, `0 < exp ≤ 64n`.
+#[inline]
+fn unit_limb(n: usize, exp: i64) -> usize {
+    ((64 * n as u64 - exp as u64) / 64) as usize
+}
+
+/// Whether the magnitude `0.mant·2^exp` rounds up to an integer in the direction `dir`, and the
+/// direction of that rounding: the bits of the fraction, below the unit's, decide it, all of the
+/// mantissa's below one, its top bit the half for a number from one half to one.
+#[inline]
+fn integer_dir(mant: &[u64], exp: i64, dir: Dir) -> (bool, Ordering) {
+    let all = 64 * mant.len() as u64;
+    let u = if exp < 0 {
+        all + 1
+    } else {
+        all.saturating_sub(exp as u64)
+    };
+    let (half, rest, odd) = if u == 0 {
+        (false, false, false)
+    } else {
+        (
+            limbs::bit(mant, u - 1),
+            !limbs::zero_below(mant, u - 1),
+            limbs::bit(mant, u),
+        )
+    };
+    let up = match dir {
+        Dir::Floor => false,
+        Dir::Ceil => half || rest,
+        Dir::Nearest => half && (rest || odd),
+        Dir::Away => half,
+    };
+    let o = if !(half || rest) {
+        Ordering::Equal
+    } else if up {
+        Ordering::Greater
+    } else {
+        Ordering::Less
+    };
+    (up, o)
+}
+
+/// The integer of the exponent `exp` in the limbs `out`, whose limbs below the unit's are already
+/// zero: the bits of the unit's limb below it cleared, and one unit added when `up`, a carry out of
+/// the top making it the next power of two; a number below one is zero or one. Its exponent, or
+/// `None` for zero.
+#[inline]
+fn integer_apply(out: &mut [u64], exp: i64, up: bool) -> Option<i64> {
+    let n = out.len();
+    if exp <= 0 {
+        if !up {
+            return None;
+        }
+        zero(&mut out[..n - 1]);
+        out[n - 1] = 1 << 63;
+        return Some(1);
+    }
+    let uo = 64 * n as u64 - exp as u64;
+    let (k, b) = ((uo / 64) as usize, uo % 64);
+    out[k] &= !((1u64 << b) - 1);
+    let mut exp = exp;
+    if up {
+        let (v, mut carry) = out[k].overflowing_add(1u64 << b);
+        out[k] = v;
+        for x in &mut out[k + 1..] {
+            if !carry {
+                break;
+            }
+            (*x, carry) = x.overflowing_add(1);
+        }
+        if carry {
+            out[n - 1] = 1 << 63;
+            exp += 1;
+        }
+    }
+    Some(exp)
+}
+
+/// Sets the limbs `v` to zero: a loop for the few limbs of the short numbers, which a call of the
+/// library's would cost more than.
+#[inline]
+fn zero(v: &mut [u64]) {
+    if v.len() > 16 {
+        v.fill(0);
+    } else {
+        for x in v.iter_mut() {
+            *x = 0;
         }
     }
 }

@@ -110,3 +110,31 @@ fn near_the_rounding_near_the_argument() {
     let range = |p: u64| (-(p as i64) / 2 - 3, -(p as i64) / 2 + 1);
     near_threshold(|x, p, r| x.cosh_round(p, r), range, true, "cosh");
 }
+
+/// `sinh`, `cosh` and `tanh` from the exponential in fixed point, at two to four limbs in every
+/// mode, against themselves at 700 bits (more limbs than the array kernels take) rounded again.
+#[test]
+fn fixed_point_paths_agree_with_wide_ones() {
+    let mut s = 0x4E_0001u64;
+    for i in 0..size(120, 3) {
+        let x = float(&mut s, 300, 0);
+        let k = BigFloat::from_parts(&Number::from(1), (i % 20) as i64 - 13, 1, Round::Nearest).0;
+        let x = x.mul_round(&k, 300, Round::Nearest).0;
+        if !x.is_normal() {
+            continue;
+        }
+        let p = [64u64, 100, 128, 150, 192, 240][i % 6];
+        for f in ["sinh", "cosh", "tanh"] {
+            let wide = hyper(f, &x, 700, Round::Nearest);
+            for r in MODES {
+                if let Some(want) = super::explog_vectors::reround(&wide, p, r) {
+                    same(
+                        &hyper(f, &x, p, r),
+                        &want,
+                        &format!("{f}({x:?}) at {p} {r:?}"),
+                    );
+                }
+            }
+        }
+    }
+}

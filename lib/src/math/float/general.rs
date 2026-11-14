@@ -12,7 +12,9 @@
 
 use super::limbs::{self, Work};
 use super::round::{round_into, round_vec};
-use super::{Kind, Round};
+use super::same::{self, Put};
+use super::small;
+use super::{BigFloat, Kind, Round};
 use crate::math::numbers::nat;
 use core::cmp::Ordering;
 
@@ -129,6 +131,10 @@ fn exact_sum(x: Op<'_>, y: Op<'_>, prec: u64, round: Round, out: Vec<u64>) -> (K
 /// `x + y` for operands of signs of their own (a difference when they differ), rounded to `prec`
 /// bits in the mode `round`, into `out`.
 ///
+/// Operands of the result's length (three or more limbs) are added by [`same::add`]; operands of
+/// at most four limbs, or any for a result of at most two, are tried in a word first
+/// ([`small::add_short`]). Otherwise:
+///
 /// The larger term `x` (in exponent; in magnitude for a difference of one exponent) sets a window
 /// of `w` limbs below its top bit, `w = n + 1` for `n = ceil(prec / 64)`. Its limbs in the window,
 /// plus or minus the bits of `y` there (shifted into place), make `T`, with a carry limb for a
@@ -156,9 +162,41 @@ pub(crate) fn add(
 ) -> (Kind, Ordering) {
     let n = prec.div_ceil(64) as usize;
     if n >= 3 && x.m.len() == n && y.m.len() == n {
-        return super::same::add(
-            x.negative, x.m, x.exp, y.negative, y.m, y.exp, prec, round, out,
-        );
+        out.clear();
+        out.resize(n, 0);
+        return match same::add(
+            x.negative, x.m, x.exp, y.negative, y.m, y.exp, prec, round, &mut out,
+        ) {
+            Put::Finite(negative, exp, o) => (
+                Kind::Finite {
+                    negative,
+                    exp,
+                    mant: out,
+                },
+                o,
+            ),
+            Put::Other(kind, o) => (kind, o),
+        };
+    }
+    let short = x.m.len() <= 4 && y.m.len() <= 4;
+    if (n <= 2 || short)
+        && word_exp(x.exp)
+        && word_exp(y.exp)
+        && let Some(r) = small::with_vec(prec, &mut out, |o| {
+            small::add_short(
+                x.negative,
+                x.m,
+                x.exp as i64,
+                y.negative,
+                y.m,
+                y.exp as i64,
+                prec,
+                round,
+                o,
+            )
+        })
+    {
+        return r;
     }
     let (x, y) = (x.strip(), y.strip());
     let sub = x.negative != y.negative;
@@ -323,6 +361,9 @@ fn shift_add(t: &mut [u64], y: &[u64], o: i128, sub: bool) -> bool {
 
 /// `x·y` of the sign `negative`, rounded to `prec` bits in the mode `round`, into `out`.
 ///
+/// Operands of at most four limbs for a result of three or more are multiplied in a word first
+/// ([`small::mul_short`]). Otherwise:
+///
 /// Operands longer than `n + 2` limbs, `n = ceil(prec / 64)`, are cut to their top `n + 2`: the
 /// product of the cut operands, `P`, is below the exact one by less than `B^l` units of its lowest
 /// limb (`B = 2^64`) for one cut operand, `l` the other's length, and `2B^l + 1` for two, `l` their
@@ -339,6 +380,27 @@ pub(crate) fn mul(
     out: Vec<u64>,
 ) -> (Kind, Ordering) {
     let same = core::ptr::eq(x.m, y.m);
+    let mut out = out;
+    if prec > 128
+        && x.m.len() <= 4
+        && y.m.len() <= 4
+        && word_exp(x.exp)
+        && word_exp(y.exp)
+        && let Some(r) = small::with_vec(prec, &mut out, |o| {
+            small::mul_short(
+                negative,
+                x.m,
+                x.exp as i64,
+                y.m,
+                y.exp as i64,
+                prec,
+                round,
+                o,
+            )
+        })
+    {
+        return r;
+    }
     let (x, y) = (x.strip(), y.strip());
     let n = prec.div_ceil(64) as usize;
     let keep = n + 2;
@@ -375,6 +437,62 @@ pub(crate) fn mul(
     round_into(negative, p, lsb, false, prec, round, out)
 }
 
+/// The longest divisor, in limbs, whose quotient [`div`] computes alone, with a shrinking divisor
+/// for its last limbs (about half the products of the schoolbook method), before it takes the
+/// remainder too: measured on an Apple M4 Max against the division with the remainder (divide and
+/// conquer from 40 limbs), equal-length operands of 20,000 bits took 0.85 of its time, of 30,000
+/// 0.95, of 38,000 1.04.
+pub(crate) const SHORT_DIV: usize = 480;
+
+/// Whether an exponent is one of a float's, which the kernels in words take as an `i64`: the
+/// magnitudes that the other modules pass may have exponents of `i128`s beyond, and within the
+/// range the sums and differences of two exponents are still `i64`s.
+#[inline(always)]
+fn word_exp(e: i128) -> bool {
+    (i128::from(BigFloat::EXP_MIN)..=i128::from(BigFloat::EXP_MAX)).contains(&e)
+}
+
+/// `x/y` of the sign `negative` for a result of at most 62 bits, from the top limbs of the
+/// operands: each lies between its top limb `T` and `T` plus one unit of it, strictly when its
+/// other limbs are not all zero, so the quotient lies strictly between `X/(Y + 1)` and
+/// `(X + 1)/Y` (each end one only when that operand has a tail), whose roundings by
+/// [`small::div_fit1`] settle its rounding when [`small::between`] says so. `None` for the
+/// general path.
+#[inline]
+fn div_short(
+    negative: bool,
+    x: Op<'_>,
+    y: Op<'_>,
+    prec: u64,
+    round: Round,
+) -> Option<small::Fit<u64>> {
+    use small::Term;
+    let (lx, ly) = (x.m.len(), y.m.len());
+    let tx = x.m[..lx - 1].iter().any(|&v| v != 0);
+    let ty = y.m[..ly - 1].iter().any(|&v| v != 0);
+    let term = |o: Op<'_>| Term {
+        negative: false,
+        exp: o.exp as i64,
+        m: o.m[o.m.len() - 1],
+    };
+    let (a, b) = (term(x), term(y));
+    let sh = (64 - prec) as u32;
+    let q =
+        |a: Term<u64>, b: Term<u64>| small::div_fit1(negative, a.exp, a.m, b.exp, b.m, sh, round);
+    if !(tx || ty) {
+        return q(a, b);
+    }
+    // The ends of the magnitude, then in the order of the signed values.
+    let small_end = q(a, if ty { b.bump() } else { b })?;
+    let large_end = q(if tx { a.bump() } else { a }, b)?;
+    let (lo, hi) = if negative {
+        (large_end, small_end)
+    } else {
+        (small_end, large_end)
+    };
+    small::between(lo, hi)
+}
+
 /// `x/y` of the sign `negative`, rounded to `prec` bits in the mode `round`, into `out`.
 ///
 /// With `x` taken as `0.x·2^-c`, `c = 1` when `0.x ≥ 0.y`, the quotient `F = 0.x·2^-c / 0.y` lies
@@ -384,9 +502,16 @@ pub(crate) fn mul(
 ///   limbs `D'` of the divisor: `Q' = floor(N'/D')` and `Q' - 2 < F·B^q < Q' + 1` (the bound of
 ///   the crate's quotient from the top limbs, `div_q_top`), so [`decided`] tells whether `Q'`
 ///   rounds as the quotient;
-/// - otherwise, or when that leaves it undecided, the exact division of the dividend's top
-///   `d + q` limbs, `d` the divisor's length, with its remainder (and the dividend's limbs below
-///   those, if any) for the sticky bit: Newton's method for the longest.
+/// - otherwise, for a divisor of 3 to [`SHORT_DIV`] limbs, the quotient alone of the dividend's
+///   top `d + q` limbs, `d` the divisor's length, exactly, its last limbs from a shrinking divisor:
+///   when its bits below the round bit are not all zero, the remainder cannot change the rounding
+///   and is a sticky bit;
+/// - otherwise, or when that leaves it undecided, the exact division of those limbs with its
+///   remainder (and the dividend's limbs below those, if any) for the sticky bit: Newton's method
+///   for the longest.
+///
+/// A result of at most 62 bits from long operands is first tried from their top limbs, by
+/// [`div_short`].
 pub(crate) fn div(
     negative: bool,
     x: Op<'_>,
@@ -396,6 +521,21 @@ pub(crate) fn div(
     w: &mut Work,
     out: Vec<u64>,
 ) -> (Kind, Ordering) {
+    if prec <= 62
+        && word_exp(x.exp)
+        && word_exp(y.exp)
+        && let Some(r) = div_short(negative, x, y, prec, round)
+    {
+        let mut out = out;
+        out.clear();
+        out.push(r.m);
+        let kind = Kind::Finite {
+            negative: r.negative,
+            exp: r.exp,
+            mant: out,
+        };
+        return (kind, r.o);
+    }
     let (x, y) = (x.strip(), y.strip());
     let n = prec.div_ceil(64) as usize;
     let qn = n + 1;
@@ -422,21 +562,43 @@ pub(crate) fn div(
     let nn = dn + qn;
     num.clear();
     num.resize(nn, 0);
-    let tail = limbs::top_limbs(x.m, c, num);
+    let mut tail = limbs::top_limbs(x.m, c, num);
+    if (3..=SHORT_DIV).contains(&dn) {
+        // The quotient alone, exactly: when its bits below the round bit are not all zero, the
+        // remainder cannot change the rounding, and is a sticky bit.
+        if let Some(high) = nat::div_q(q, num, y.m, scratch) {
+            debug_assert!(!high);
+            if decided(q, 0, 0, prec) {
+                return round_into(negative, q, lsb, true, prec, round, out);
+            }
+        }
+        tail = limbs::top_limbs(x.m, c, num);
+    }
     let high = nat::div_qr(q, num, y.m, scratch);
     debug_assert!(!high);
     let sticky = tail || num[..dn].iter().any(|&v| v != 0);
     round_into(negative, q, lsb, sticky, prec, round, out)
 }
 
+/// Up to this many limbs, a square root with fewer than 16 bits below its precision in its own
+/// limbs takes the root of those limbs with its remainder rather than a limb more; beyond, the
+/// remainder costs more than the limb (Apple M4 Max: 10^6 bits 1.76 ms against 1.55).
+const SHORT_ROOT: usize = 64;
+
 /// The square root of `x`, positive, rounded to `prec` bits in the mode `round`, into `out`.
 ///
-/// With `c` the parity of the exponent, the top `2q` limbs `R` of `0.x·2^-c` (`q = n + 1`) have a
-/// root `S` of `64q` bits, by the crate's Karatsuba square root; the floor of the root of the
-/// truncated `R` is that of the exact one, as `s^2 ≤ R` holds for an integer `s` exactly when it
-/// holds for `floor(R)`. The root is never halfway between two numbers of the precision, so the
-/// remainder, and the limbs of `x` below `R`, matter only when the bits of `S` below its round bit
-/// are all zero: then it is computed with the remainder.
+/// With `c` the parity of the exponent, the top `2q` limbs `R` of `0.x·2^-c` (`q` the limbs of
+/// `prec + 16` bits, so that 16 bits or more lie below the round bit, and 2 at least; beyond
+/// [`SHORT_ROOT`] limbs, one more than the precision's) have a root
+/// `S` of `64q` bits, by the crate's Karatsuba square root; the floor of the root of the truncated
+/// `R` is that of the exact one, as `s^2 ≤ R` holds for an integer `s` exactly when it holds for
+/// `floor(R)`. The remainder, and the limbs of `x` below `R`, matter only when the bits of `S`
+/// below its round bit are all zero (a root halfway between two numbers of the precision is one
+/// of them): then it is computed with the remainder. When fewer than 16 bits lie below the
+/// precision in its own `n` limbs (up to [`SHORT_ROOT`]), the root of `n` limbs is taken with its
+/// remainder instead, which decides exactly; for `64n` bits the round bit lies below the root,
+/// and `√R ≥ S + 1/2` exactly when the remainder is above `S` (`R = S^2 + S + 1/4` is not an
+/// integer), a tail leaving only the remainder `S` itself to the root of a limb more.
 pub(crate) fn sqrt(
     x: Op<'_>,
     prec: u64,
@@ -445,16 +607,49 @@ pub(crate) fn sqrt(
     out: Vec<u64>,
 ) -> (Kind, Ordering) {
     let x = x.strip();
-    let n = prec.div_ceil(64) as usize;
-    let qn = n + 1;
     let c = (x.exp & 1) as u32;
-    let lsb = (x.exp + i128::from(c)) / 2 - 64 * qn as i128;
     let Work {
         a: r,
         b: s,
         c: rem,
         scratch,
     } = w;
+    let q0 = prec.div_ceil(64) as usize;
+    if 64 * q0 as u64 - prec < 16 && (2..=SHORT_ROOT).contains(&q0) {
+        // Fewer than 16 bits below the precision in `q0` limbs: the root of `q0` limbs and its
+        // remainder decide, as MPFR's `mpfr_sqrt` takes them, rather than a limb more.
+        r.clear();
+        r.resize(2 * q0, 0);
+        let tail = limbs::top_limbs(x.m, c, r);
+        nat::sqrt_rem(s, Some(rem), r, scratch);
+        let lsb = (x.exp + i128::from(c)) / 2 - 64 * q0 as i128;
+        let sticky = tail || !rem.is_empty();
+        if prec < 64 * q0 as u64 {
+            return round_into(false, s, lsb, sticky, prec, round, out);
+        }
+        // The round bit below `S`: `√R ≥ S + 1/2` exactly when the remainder is above `S` (never
+        // equal), but with a tail when it equals `S`, which a limb more decides.
+        let above = limbs::cmp(rem, s);
+        if !(above == Ordering::Equal && tail) {
+            // `2S` or `2S + 1`, the half bit in place of the round bit, with the sticky bit.
+            let mut carry = u64::from(above == Ordering::Greater);
+            for v in s.iter_mut() {
+                let next = *v >> 63;
+                *v = *v << 1 | carry;
+                carry = next;
+            }
+            s.push(carry);
+            return round_into(false, s, lsb - 1, sticky, prec, round, out);
+        }
+    }
+    // A limb more beyond [`SHORT_ROOT`], where the lengths of the integer root's halves matter
+    // more than a limb (10^4 bits: 4.48 µs against 4.62 for the 157 limbs of `prec + 16` bits).
+    let qn = if q0 > SHORT_ROOT {
+        q0 + 1
+    } else {
+        (prec + 16).div_ceil(64).max(2) as usize
+    };
+    let lsb = (x.exp + i128::from(c)) / 2 - 64 * qn as i128;
     r.clear();
     r.resize(2 * qn, 0);
     let tail = limbs::top_limbs(x.m, c, r);

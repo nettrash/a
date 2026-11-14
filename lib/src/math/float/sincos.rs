@@ -790,11 +790,12 @@ pub(super) fn sin_cos(
     (sin, cos)
 }
 
-/// From this many limbs after the point (about 410,000 bits), the sine and the cosine of an
+/// From this many limbs after the point (about 770,000 bits), the sine and the cosine of an
 /// argument above `2^-K` by binary splitting ([`split`]) instead of the doublings: measured on an
-/// Apple M4 Max, a sine of 200,000 bits took 28 ms by the doublings and 68 ms by binary splitting,
-/// of 400,000 bits 129 ms by either, and of 1,000,000 bits 434 ms against 324 ms.
-pub(super) const BS_LIMBS: usize = 6400;
+/// Apple M4 Max (a loaded machine, the best of six), a sine of 450,000 bits took 92 ms by the
+/// doublings and 107 ms by binary splitting, of 800,000 bits 209 ms by either, and of 1,000,000
+/// bits 299 ms against 262 ms.
+pub(super) const BS_LIMBS: usize = 12_000;
 
 /// `atan(z)` for the fixed-point `z = Z·2^-F`, `0 < z <= 1`, `F = 64·fl`, by Newton's iteration on
 /// `tan y = z`, `y ← y - cos y (sin y - z cos y)`, at doubling precisions from the `f64`
@@ -858,6 +859,13 @@ pub(super) fn atan_newton(z: &[u64], fl: usize) -> (Vec<u64>, Lg) {
     (y, err)
 }
 
+/// From this many limbs after the point (about 205,000 bits), the arctangent by the bit burst
+/// ([`split::atan`]) instead of Newton's iteration: measured on an Apple M4 Max (a loaded machine,
+/// the best of twelve), an arctangent of 100,000 bits took 12.1 ms by Newton's iteration and 14.8
+/// ms by the bit burst, of 200,000 bits 35.5 ms by either, of 300,000 bits 71.0 ms against 62.0
+/// ms, and of 1,000,000 bits 496 ms against 260 ms.
+pub(super) const ATAN_BB_LIMBS: usize = 3200;
+
 /// `atan(z)` for `0 < z <= 1` (an [`Fx`] with its error), at `F = 64·fl` bits after the point, or
 /// relatively to `z` for `z < 2^-K`: then by the series `z·Σ (-1)^n z^(2n)/(2n + 1)`
 /// ([`series_atan`]), otherwise by [`atan_newton`]. The error of `z` passes as it is, `|atan' |
@@ -887,7 +895,11 @@ pub(super) fn atan(z: &Fx, fl: usize) -> Fx {
         };
     }
     let (zf, ez) = z.to_fixed(f);
-    let (y, ey) = atan_newton(&zf, fl);
+    let (y, ey) = if fl >= ATAN_BB_LIMBS {
+        split::atan(&zf, fl)
+    } else {
+        atan_newton(&zf, fl)
+    };
     Fx {
         negative: false,
         m: y,

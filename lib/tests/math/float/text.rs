@@ -3,7 +3,9 @@
 //! exponents; `Display` and the exponent forms against `f64`'s and as the shortest text that
 //! reads back; `FromStr` against `f64`'s and the exact rationals.
 
-use super::common::{MODES, below, float, mode, rational, reference, same, size, xorshift};
+use super::common::{
+    MODES, below, float, mantissa, mode, rational, reference, same, size, xorshift,
+};
 use super::vectors::{self, lines, ternary};
 use a::math::float::{BigFloat, BigFloatErrorKind, Round};
 use a::math::numbers::{ByteOrder, Number};
@@ -17,10 +19,11 @@ fn digits_value(digits: &str, radix: u32, exp: i64) -> Rational {
     Rational::from_integer(d) * Rational::from(radix).pow(e as i32)
 }
 
-#[test]
-fn digits_match_mpfr() {
+/// The digits of the vectors of `mpfr_get_str` in `data`, their direction, and their text: the
+/// number of vectors.
+fn digits_of(data: &str) -> usize {
     let mut n = 0;
-    for v in lines(include_str!("data/convert_getstr.txt")) {
+    for v in lines(data) {
         let prec: u64 = v[1].parse().unwrap();
         let x = vectors::float(v[0], prec);
         let radix: u32 = v[2].parse().unwrap();
@@ -58,13 +61,13 @@ fn digits_match_mpfr() {
         assert_eq!(t, format!("{sign}{}{tail}{marker}{}", &d[..1], e - 1));
         n += 1;
     }
-    assert!(n > size(400, 8));
+    n
 }
 
-#[test]
-fn reading_matches_mpfr() {
+/// The readings of the vectors of `mpfr_strtofr` in `data`: the number of vectors.
+fn readings_of(data: &str) -> usize {
     let mut n = 0;
-    for v in lines(include_str!("data/convert_strtofr.txt")) {
+    for v in lines(data) {
         let radix: u32 = v[0].parse().unwrap();
         let prec: u64 = v[1].parse().unwrap();
         let round = vectors::mode(v[2]);
@@ -77,7 +80,32 @@ fn reading_matches_mpfr() {
         );
         n += 1;
     }
-    assert!(n > size(700, 15));
+    n
+}
+
+#[test]
+fn digits_match_mpfr() {
+    assert!(digits_of(include_str!("data/convert_getstr.txt")) > size(400, 8));
+}
+
+#[test]
+fn reading_matches_mpfr() {
+    assert!(readings_of(include_str!("data/convert_strtofr.txt")) > size(700, 15));
+}
+
+#[test]
+fn digits_of_huge_exponents_and_near_powers_match_mpfr() {
+    // Exponents to ±(2^62 - 1), where the power of the radix is approximated in fixed buffers,
+    // and floats next to powers of the radix, where the first guess of the exponent of the digits
+    // is one too small and the digits come from the same work divided by the radix.
+    assert!(digits_of(include_str!("data/text_getstr.txt")) > size(400, 8));
+}
+
+#[test]
+fn stack_reading_matches_mpfr() {
+    // Up to 350 digits in radix 10 and others at precisions to 1,100 bits, the midpoints of two
+    // numbers with tails of zeros and nines: the stack path, its fallbacks and its limits.
+    assert!(readings_of(include_str!("data/text_strtofr.txt")) > size(800, 15));
 }
 
 #[test]
@@ -631,4 +659,337 @@ fn held_exponents_with_many_digits() {
 #[should_panic(expected = "digits of zero")]
 fn zero_digits_panic_for_zero_too() {
     let _ = BigFloat::zero(5).to_string_radix(10, Some(0), Round::Nearest);
+}
+
+/// The rational `digits·radix^exp` of a text of digits in `radix` with a point and an exponent
+/// `@e`.
+fn text_value(text: &str, radix: u32) -> Rational {
+    let (body, exp) = text.split_once('@').unwrap_or((text, "0"));
+    let (neg, body) = match body.strip_prefix('-') {
+        Some(b) => (true, b),
+        None => (false, body),
+    };
+    let (int, frac) = body.split_once('.').unwrap_or((body, ""));
+    let all = format!("{int}{frac}");
+    let d = Number::from_str_radix(&all, radix, ByteOrder::LittleEndian).unwrap();
+    let e = exp.parse::<i64>().unwrap() - frac.len() as i64;
+    let q = Rational::from_integer(d) * Rational::from(radix).pow(e as i32);
+    if neg { -q } else { q }
+}
+
+#[test]
+fn stack_reading_rounds_the_exact_rationals() {
+    // Digits in fixed buffers: up to 250 digits in several radices, runs of zeros and of the
+    // largest digit, exponents to ±450, precisions to 1,100 bits, the four modes; against an
+    // exact rounding of the rational by integers.
+    let mut s = 0x5EED_7E47_0000_0007u64;
+    let radices = [10, 10, 10, 3, 5, 6, 7, 12, 36];
+    for _ in 0..size(1200, 12) {
+        let radix = radices[below(&mut s, radices.len() as u64) as usize];
+        let nd = match below(&mut s, 4) {
+            0 => 1 + below(&mut s, 20),
+            1 => 15 + below(&mut s, 30),
+            2 => 1 + below(&mut s, 120),
+            _ => 100 + below(&mut s, 150),
+        } as usize;
+        let mut text = String::new();
+        if xorshift(&mut s) & 1 == 1 {
+            text.push('-');
+        }
+        let point = below(&mut s, nd as u64 + 1) as usize;
+        let run = below(&mut s, 3);
+        for i in 0..nd {
+            if i == point {
+                text.push('.');
+            }
+            let d = match run {
+                _ if i == 0 => 1 + below(&mut s, u64::from(radix) - 1) as u32,
+                0 if i > nd / 3 => 0,
+                1 if i > nd / 3 => radix - 1,
+                _ => below(&mut s, u64::from(radix)) as u32,
+            };
+            text.push(char::from_digit(d, radix).unwrap());
+        }
+        if below(&mut s, 2) == 0 {
+            // A last digit that is not zero after a run.
+            text.push(char::from_digit(1, radix).unwrap());
+        }
+        let e = below(&mut s, 900) as i64 - 450;
+        text.push_str(&format!("@{e}"));
+        let q = text_value(&text, radix);
+        let prec = match below(&mut s, 3) {
+            0 => {
+                [1, 24, 53, 62, 63, 64, 113, 128, 333, 1000, 1024, 1025][below(&mut s, 12) as usize]
+            }
+            _ => 1 + below(&mut s, 1100),
+        };
+        for round in MODES {
+            let got = BigFloat::from_str_radix(&text, radix, prec, round).unwrap();
+            same(
+                &got,
+                &reference(&q, prec, round),
+                &format!("{text} radix {radix} {prec}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn stack_reading_near_midpoints() {
+    // Decimals of 20 to 140 digits nearest to the midpoints of two numbers of 53 to 1,024 bits,
+    // of either side: the digits past those the stack path reads decide, or send it to the exact
+    // path.
+    let mut s = 0x5EED_7E47_0000_0008u64;
+    for _ in 0..size(300, 6) {
+        let prec = [53u64, 64, 67, 113, 167, 200, 333, 640, 1000, 1024][below(&mut s, 10) as usize];
+        let mut m = mantissa(&mut s, prec + 1);
+        m.set_bit(0, true);
+        if xorshift(&mut s) & 1 == 1 {
+            m = -m;
+        }
+        let e = below(&mut s, 600) as i64 - 300 - prec as i64;
+        let (mid, o) = BigFloat::from_parts(&m, e, prec + 1, Round::Nearest);
+        assert_eq!(o, Ordering::Equal);
+        for _ in 0..3 {
+            let n = 20 + below(&mut s, 120) as usize;
+            let dir = MODES[below(&mut s, 4) as usize];
+            let t = mid.to_string_radix(10, Some(n), dir);
+            let q: Rational = t.parse().unwrap();
+            for round in MODES {
+                same(
+                    &BigFloat::from_str_radix(&t, 10, prec, round).unwrap(),
+                    &reference(&q, prec, round),
+                    &t,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn digits_next_to_powers_of_the_radix() {
+    // Floats next to `radix^E`, whose digits the first guess of their exponent gets one too few
+    // of: the integer of the digits is divided by the radix, its fraction's order to one half
+    // carried over; against the exact digits of the rational.
+    let mut s = 0x5EED_7E47_0000_0009u64;
+    for _ in 0..size(500, 6) {
+        let radix = [10u32, 10, 3, 7, 12, 36][below(&mut s, 6) as usize];
+        let prec = 1 + below(&mut s, 200);
+        let e = below(&mut s, 400) as i64 - 200;
+        let power = Rational::from(radix).pow(e as i32);
+        let (mut x, _) = BigFloat::from_rational(&power, prec, MODES[below(&mut s, 4) as usize]);
+        for _ in 0..below(&mut s, 3) {
+            // The neighbour above or below: a number below half the smaller unit, rounded away.
+            let tiny = BigFloat::from_parts(
+                &Number::from(1),
+                x.exponent().unwrap() - prec as i64 - 2,
+                1,
+                Round::Nearest,
+            )
+            .0;
+            x = if xorshift(&mut s) & 1 == 1 {
+                x.add_round(&tiny, prec, Round::Up).0
+            } else {
+                x.sub_round(&tiny, prec, Round::Down).0
+            };
+        }
+        for n in [1usize, 2, 3, 1 + below(&mut s, 40) as usize] {
+            for round in MODES {
+                digits_are_the_rounding(&x, radix, n, round);
+            }
+        }
+    }
+}
+
+/// Asserts that the `n` digits of `x` in `radix` rounded in `round` are the correct rounding of
+/// the exact rational, with its direction and an exponent that gives `n` digits.
+#[track_caller]
+fn digits_are_the_rounding(x: &BigFloat, radix: u32, n: usize, round: Round) {
+    let q = rational(x).abs();
+    let (d, ex, o) = x.to_digits(radix, Some(n), round).unwrap();
+    assert_eq!(d.len(), n);
+    assert!(!d.starts_with('0'), "{x:?} {d}");
+    let got = digits_value(&d, radix, ex);
+    let ord = got.partial_cmp(&q).unwrap();
+    let want = if x.is_sign_negative() {
+        ord.reverse()
+    } else {
+        ord
+    };
+    assert_eq!(o, want, "{x:?} radix {radix} {n} {round:?}");
+    let unit = Rational::from(radix).pow((ex - n as i64) as i32);
+    let other = match ord {
+        Ordering::Less => got.clone() + unit,
+        Ordering::Greater => got.clone() - unit,
+        Ordering::Equal => return,
+    };
+    // The neighbour of the digits on the other side lies beyond the value, and the digits are the
+    // ones the mode picks of the two.
+    assert_ne!(other.partial_cmp(&q).unwrap(), ord, "{x:?} {d}");
+    let away = match round {
+        Round::Up => !x.is_sign_negative(),
+        Round::Down => x.is_sign_negative(),
+        _ => false,
+    };
+    let ok = match round {
+        Round::Nearest => {
+            let a = (q.clone() - got.clone()).abs();
+            let b = (q.clone() - other.clone()).abs();
+            // Halfway, the digits of the even integer.
+            a < b
+                || a == b
+                    && !Number::from_str_radix(&d, radix, ByteOrder::LittleEndian)
+                        .unwrap()
+                        .bit(0)
+        }
+        _ => (ord == Ordering::Greater) == away,
+    };
+    assert!(ok, "{x:?} radix {radix} {n} {round:?}: {d}e{ex}");
+}
+
+#[test]
+fn digits_in_every_radix_are_the_rounding() {
+    // Random floats of moderate exponents in every radix, where the first guess of the exponent
+    // of the digits is one too small about a third of the time and the digits come from the exact
+    // parts divided by the radix: against the exact rational.
+    let mut s = 0x5EED_7E47_0000_000Au64;
+    for _ in 0..size(1500, 12) {
+        let x = float(&mut s, 200, 600);
+        let radix = 2 + below(&mut s, 35) as u32;
+        let n = 1 + below(&mut s, 50) as usize;
+        for round in MODES {
+            digits_are_the_rounding(&x, radix, n, round);
+        }
+    }
+}
+
+#[test]
+fn digits_of_small_integers_are_the_rounding() {
+    // Integers and their halves, quarters and doublings at a few precisions, to one to four
+    // decimal digits: quotients by small powers of five whose remainders fall on every side of
+    // one half, ties among them.
+    let top = size(3000, 40);
+    for i in 1..=top as i64 {
+        for (e, prec) in [(0, 53), (-1, 53), (-2, 20), (1, 16), (3, 64)] {
+            let (x, o) = BigFloat::from_parts(&Number::from(i), e, prec, Round::Nearest);
+            if o != Ordering::Equal {
+                continue;
+            }
+            for n in 1..=4 {
+                for round in MODES {
+                    digits_are_the_rounding(&x, 10, n, round);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn shortest_ties_go_to_the_even_digits() {
+    // Floats of few bits whose shortest decimal is exactly halfway between two of as many
+    // digits, both of which read back: the even one is written.
+    let (max_prec, max_exp) = if cfg!(miri) { (4, 6) } else { (12, 40) };
+    let mut ties = 0;
+    for prec in 1..=max_prec {
+        for m in (1u32 << (prec - 1))..(1 << prec) {
+            for e in -max_exp..=max_exp {
+                let x = BigFloat::from_parts(&Number::from(m), e, prec, Round::Nearest).0;
+                let sci = format!("{x:e}");
+                let (mant, exp) = sci.split_once('e').unwrap();
+                let digits: String = mant.chars().filter(char::is_ascii_digit).collect();
+                let exp: i64 = exp.parse().unwrap();
+                let n = digits.len() as i64;
+                let d = Number::from_str_radix(&digits, 10, ByteOrder::LittleEndian).unwrap();
+                let unit = Rational::from(10).pow((exp - n + 1) as i32);
+                let got = Rational::from_integer(d.clone()) * unit.clone();
+                let q = rational(&x);
+                let gap = (q.clone() - got.clone()).abs();
+                if gap.clone() + gap == unit {
+                    // The digits on the other side, as far: a tie when they read back too.
+                    let other = if got < q { got + unit } else { got - unit };
+                    let (y, _) = BigFloat::from_rational(&other, prec, Round::Nearest);
+                    if y == x {
+                        ties += 1;
+                        assert!(!d.bit(0), "{x:?} as {sci}: a tie written odd");
+                    }
+                }
+            }
+        }
+    }
+    assert!(ties > 0);
+}
+
+/// The scan of the digits, eight bytes at a time up to radix 10: texts of every length around
+/// the words' boundaries with the point anywhere read as their exact rationals rounded, and a
+/// byte that is no digit of the radix at any place (below `'0'`, the radix's first digit and
+/// above, `':'`, letters, bytes with the top bit set) is an error wherever it falls. (The
+/// flag of byte `k` is bit `8k + 7`, which divided by 9 instead of 8 is `k` too: that mutant is
+/// equivalent.)
+#[test]
+fn digit_runs_end_at_the_first_byte_that_is_no_digit() {
+    let mut st = 0x5ca1_ab1e_u64;
+    let lens: Vec<usize> = (1..=size(41, 18))
+        .chain([63, 64, 65, size(1000, 100)])
+        .collect();
+    for radix in (2..=10).chain([11, 16, 36]) {
+        for &n in &lens {
+            let digits: String = (0..n)
+                .map(|_| char::from_digit(below(&mut st, u64::from(radix)) as u32, radix).unwrap())
+                .collect();
+            let digits = format!(
+                "{}{}",
+                char::from_digit(1 + below(&mut st, u64::from(radix) - 1) as u32, radix).unwrap(),
+                &digits[1..]
+            );
+            let point = below(&mut st, n as u64 + 1) as usize;
+            let text = format!("{}.{}", &digits[..point], &digits[point..]);
+            let round = mode(&mut st);
+            let prec = 1 + below(&mut st, 120);
+            let got = BigFloat::from_str_radix(&text, radix, prec, round).unwrap();
+            let q = digits_value(&digits, radix, point as i64);
+            same(
+                &got,
+                &reference(&q, prec, round),
+                &format!("{text} radix {radix}"),
+            );
+            let at = below(&mut st, n as u64 + 2) as usize;
+            let mut wrong: Vec<u8> = vec![b'/', b' ', b'\0', 0x7f, b'_', b'-', b'+'];
+            if radix <= 10 {
+                wrong.extend([b':', b'0' + radix as u8, b'x', b'Z']);
+                if radix < 10 {
+                    wrong.push(b'9');
+                }
+            } else {
+                wrong.extend(b"[{");
+            }
+            let w = wrong[below(&mut st, wrong.len() as u64) as usize];
+            let mut bytes = text.clone().into_bytes();
+            // A sign is valid in front of the digits.
+            let at = if matches!(w, b'+' | b'-') {
+                at.max(1)
+            } else {
+                at
+            };
+            bytes.insert(at.min(bytes.len()), w);
+            let bad = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                BigFloat::from_str_radix(&bad, radix, prec, round)
+                    .err()
+                    .map(|e| *e.kind()),
+                Some(BigFloatErrorKind::InvalidDigit),
+                "{bad:?} radix {radix}"
+            );
+            // Bytes from `0xba` up pass the other two tests and are caught by their top bit
+            // alone: `º` is `c2 ba`.
+            let mut multi = text.clone();
+            multi.insert_str(at.min(text.len()), ["é", "º"][below(&mut st, 2) as usize]);
+            assert_eq!(
+                BigFloat::from_str_radix(&multi, radix, prec, round)
+                    .err()
+                    .map(|e| *e.kind()),
+                Some(BigFloatErrorKind::InvalidDigit),
+                "{multi:?} radix {radix}"
+            );
+        }
+    }
 }

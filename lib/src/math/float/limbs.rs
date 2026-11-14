@@ -262,10 +262,36 @@ pub(crate) fn top_limbs(a: &[u64], c: u32, dst: &mut [u64]) -> bool {
         dst.copy_from_slice(&a[s..]);
         return a[..s].iter().any(|&x| x != 0);
     }
-    for (i, d) in dst.iter_mut().enumerate() {
-        *d = extract(a, p0 + 64 * i as i128);
+    if la >= k {
+        // Limb `i` is `a[s + i] >> c | a[s + i + 1] << (64 - c)`, `0 < c < 64`, the top one
+        // without a limb above.
+        let s = (la - k) as usize;
+        let n = dst.len();
+        for i in 0..n - 1 {
+            dst[i] = a[s + i] >> c | a[s + i + 1] << (64 - c);
+        }
+        dst[n - 1] = a[la as usize - 1] >> c;
+        return a[s] << (64 - c) != 0 || a[..s].iter().any(|&x| x != 0);
     }
-    any_below(a, p0)
+    // A mantissa shorter than `dst`: zeros, then the bits of `a` shifted up by `64 - c` (by
+    // whole limbs for `c = 0`); nothing lies below them.
+    let (la, k) = (la as usize, k as usize);
+    let z = k - la;
+    for d in &mut dst[..z - 1] {
+        *d = 0;
+    }
+    if c == 0 {
+        dst[z - 1] = 0;
+        dst[z..].copy_from_slice(a);
+    } else {
+        dst[z - 1] = a[0] << (64 - c);
+        for j in 1..la {
+            dst[z - 1 + j] = a[j - 1] >> c | a[j] << (64 - c);
+        }
+        dst[k - 1] = a[la - 1] >> c;
+    }
+    debug_assert!(p0 < 0);
+    false
 }
 
 /// The number of zero limbs at the bottom of a mantissa, which is not zero.

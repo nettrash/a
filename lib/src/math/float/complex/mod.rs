@@ -16,10 +16,12 @@
 
 mod arith;
 mod exp;
+pub(crate) mod fast;
 mod inv;
 mod pow;
 pub(crate) mod raw;
 mod real;
+mod set;
 mod sqrt;
 mod trig;
 

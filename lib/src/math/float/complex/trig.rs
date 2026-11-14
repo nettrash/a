@@ -71,16 +71,26 @@ struct Kernels(RefCell<Vec<Kernel>>);
 type Kernel = (u64, (Fx, Fx), Result<(Fx, Fx), Range>);
 
 impl Kernels {
-    /// The functions at `w`, computed unless they were.
-    fn at(&self, fx: &Fx, fy: &Fx, w: u64) -> ((Fx, Fx), Result<(Fx, Fx), Range>) {
-        let mut v = self.0.borrow_mut();
-        if let Some(k) = v.iter().find(|k| k.0 == w) {
-            return (k.1.clone(), k.2.clone());
-        }
-        let k = (w, sin_cos(fx, w), sinh_cosh(fy, w));
-        let out = (k.1.clone(), k.2.clone());
-        v.push(k);
-        out
+    /// The functions at `w`, computed unless they were, lent to `f`.
+    fn with<R>(
+        &self,
+        fx: &Fx,
+        fy: &Fx,
+        w: u64,
+        f: impl FnOnce(&(Fx, Fx), &Result<(Fx, Fx), Range>) -> R,
+    ) -> R {
+        let i = {
+            let mut v = self.0.borrow_mut();
+            match v.iter().position(|k| k.0 == w) {
+                Some(i) => i,
+                None => {
+                    v.push((w, sin_cos(fx, w), sinh_cosh(fy, w)));
+                    v.len() - 1
+                }
+            }
+        };
+        let v = self.0.borrow();
+        f(&v[i].1, &v[i].2)
     }
 }
 
@@ -139,47 +149,48 @@ fn sin_with(
     real::ziv2(p, r, |w, need| {
         let mut out: [Option<Step>; 2] = [None, None];
         let (tr, ti) = (tiny(&fx, &fy, p.0), tiny(&fx, &fy, p.1));
-        let ((s, c), hyp) = kernels.at(&fx, &fy, w);
-        let Ok((sh, ch)) = hyp else {
-            // `|y| >= 2^62`: `cosh y`, `|sinh y|` beyond the range, the signs of `sin x`, `cos x`
-            // and `y`'s.
-            for (i, (f, n)) in [(&s, false), (&c, fy.negative)].into_iter().enumerate() {
-                if need[i] && sign_known(f) {
-                    out[i] = Some(range_step(
-                        Range::Over,
-                        f.negative != n,
-                        [p.0, p.1][i],
-                        [r.0, r.1][i],
-                    ));
+        kernels.with(&fx, &fy, w, |(s, c), hyp| {
+            let Ok((sh, ch)) = hyp else {
+                // `|y| >= 2^62`: `cosh y`, `|sinh y|` beyond the range, the signs of `sin x`, `cos x`
+                // and `y`'s.
+                for (i, (f, n)) in [(&s, false), (&c, fy.negative)].into_iter().enumerate() {
+                    if need[i] && sign_known(f) {
+                        out[i] = Some(range_step(
+                            Range::Over,
+                            f.negative != n,
+                            [p.0, p.1][i],
+                            [r.0, r.1][i],
+                        ));
+                    }
                 }
+                return out;
+            };
+            if need[0] {
+                out[0] = Some(if tr {
+                    // `x + (sin x - x) cosh y + x (cosh y - 1)`.
+                    let chm = coshm1(&fy, w);
+                    let d = add(
+                        &mul(&odd_series(&fx, w, true, false), ch, w),
+                        &mul(&fx, &chm, w),
+                        w,
+                    );
+                    lead(&fx, &d, w, p.0, r.0)
+                } else {
+                    step(&mul(s, ch, w))
+                });
             }
-            return out;
-        };
-        if need[0] {
-            out[0] = Some(if tr {
-                // `x + (sin x - x) cosh y + x (cosh y - 1)`.
-                let chm = coshm1(&fy, w);
-                let d = add(
-                    &mul(&odd_series(&fx, w, true, false), &ch, w),
-                    &mul(&fx, &chm, w),
-                    w,
-                );
-                lead(&fx, &d, w, p.0, r.0)
-            } else {
-                step(&mul(&s, &ch, w))
-            });
-        }
-        if need[1] {
-            out[1] = Some(if ti {
-                // `y + (cos x - 1) sinh y + (sinh y - y)`.
-                let cm = cosm1(&fx, w);
-                let d = add(&mul(&cm, &sh, w), &odd_series(&fy, w, false, false), w);
-                lead(&fy, &d, w, p.1, r.1)
-            } else {
-                step(&mul(&c, &sh, w))
-            });
-        }
-        out
+            if need[1] {
+                out[1] = Some(if ti {
+                    // `y + (cos x - 1) sinh y + (sinh y - y)`.
+                    let cm = cosm1(&fx, w);
+                    let d = add(&mul(&cm, sh, w), &odd_series(&fy, w, false, false), w);
+                    lead(&fy, &d, w, p.1, r.1)
+                } else {
+                    step(&mul(c, sh, w))
+                });
+            }
+            out
+        })
     })
 }
 
@@ -269,44 +280,45 @@ fn cos_with(
     real::ziv2(p, r, |w, need| {
         let mut out: [Option<Step>; 2] = [None, None];
         let (tr, ti) = (tiny(&fx, &fy, p.0), tiny(&fx, &fy, p.1));
-        let ((s, c), hyp) = kernels.at(&fx, &fy, w);
-        let Ok((sh, ch)) = hyp else {
-            for (i, (f, n)) in [(&c, false), (&s, !fy.negative)].into_iter().enumerate() {
-                if need[i] && sign_known(f) {
-                    out[i] = Some(range_step(
-                        Range::Over,
-                        f.negative != n,
-                        [p.0, p.1][i],
-                        [r.0, r.1][i],
-                    ));
+        kernels.with(&fx, &fy, w, |(s, c), hyp| {
+            let Ok((sh, ch)) = hyp else {
+                for (i, (f, n)) in [(&c, false), (&s, !fy.negative)].into_iter().enumerate() {
+                    if need[i] && sign_known(f) {
+                        out[i] = Some(range_step(
+                            Range::Over,
+                            f.negative != n,
+                            [p.0, p.1][i],
+                            [r.0, r.1][i],
+                        ));
+                    }
                 }
+                return out;
+            };
+            if need[0] {
+                out[0] = Some(if tr {
+                    // `1 + (cos x - 1) cosh y + (cosh y - 1)`.
+                    let d = add(&mul(&cosm1(&fx, w), ch, w), &coshm1(&fy, w), w);
+                    lead(&one(), &d, w, p.0, r.0)
+                } else {
+                    step(&mul(c, ch, w))
+                });
             }
-            return out;
-        };
-        if need[0] {
-            out[0] = Some(if tr {
-                // `1 + (cos x - 1) cosh y + (cosh y - 1)`.
-                let d = add(&mul(&cosm1(&fx, w), &ch, w), &coshm1(&fy, w), w);
-                lead(&one(), &d, w, p.0, r.0)
-            } else {
-                step(&mul(&c, &ch, w))
-            });
-        }
-        if need[1] {
-            out[1] = Some(if ti {
-                // `-xy - (sin x - x) sinh y - x (sinh y - y)`.
-                let l = neg(real::mul_exact(&fx, &fy));
-                let d = neg(add(
-                    &mul(&odd_series(&fx, w, true, false), &sh, w),
-                    &mul(&fx, &odd_series(&fy, w, false, false), w),
-                    w,
-                ));
-                lead(&l, &d, w, p.1, r.1)
-            } else {
-                step(&neg(mul(&s, &sh, w)))
-            });
-        }
-        out
+            if need[1] {
+                out[1] = Some(if ti {
+                    // `-xy - (sin x - x) sinh y - x (sinh y - y)`.
+                    let l = neg(real::mul_exact(&fx, &fy));
+                    let d = neg(add(
+                        &mul(&odd_series(&fx, w, true, false), sh, w),
+                        &mul(&fx, &odd_series(&fy, w, false, false), w),
+                        w,
+                    ));
+                    lead(&l, &d, w, p.1, r.1)
+                } else {
+                    step(&neg(mul(s, sh, w)))
+                });
+            }
+            out
+        })
     })
 }
 

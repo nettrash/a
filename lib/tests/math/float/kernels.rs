@@ -171,6 +171,15 @@ fn assigning(a: &BigFloat, b: &BigFloat, prec: u64, round: Round) {
         &(a.div_round(b, p, Round::Nearest).0, Ordering::Equal),
         "/",
     );
+    // The operators on borrowed operands, a new result.
+    for (name, got, want) in [
+        ("&+", a + b, a.add_round(b, p, Round::Nearest).0),
+        ("&-", a - b, a.sub_round(b, p, Round::Nearest).0),
+        ("&*", a * b, a.mul_round(b, p, Round::Nearest).0),
+        ("&/", a / b, a.div_round(b, p, Round::Nearest).0),
+    ] {
+        same(&(got, Ordering::Equal), &(want, Ordering::Equal), name);
+    }
     let mut x = target(a);
     let xa = x.clone();
     let o = x.sqrt_assign_round(round);
@@ -653,6 +662,389 @@ fn square_roots_of_long_mantissas_at_short_precisions() {
                 "sqrt {x:?} at {p} {round:?}"
             );
             assert_ne!(got.1, Ordering::Equal);
+        }
+    }
+}
+
+/// A value of the vectors: `prec:` then `nan`, `inf`, `-inf`, `0`, `-0` or `<hex>p<exponent>`.
+fn field(s: &str) -> BigFloat {
+    let (p, v) = s.split_once(':').expect("prec:value");
+    super::vectors::float(v, p.parse().expect("a precision"))
+}
+
+/// MPFR's results for the forms into an existing number (`set_add` and the others, and the
+/// assigning forms), into numbers of the result's precision that hold a value of their own (a
+/// finite one, so that the kernels write into its limbs, or a special value, which has none),
+/// with operands of the result's precision, of at most it in as many limbs, and of other lengths,
+/// near the ends of the exponent range too; the forms with a new result alike.
+#[test]
+fn forms_into_numbers_match_mpfr() {
+    let mut count = 0;
+    for (i, line) in include_str!("data/arith_into.txt")
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .step_by(size(1, 13))
+        .enumerate()
+    {
+        let f: Vec<&str> = line.split(' ').collect();
+        let eq = f.iter().position(|&t| t == "=").expect("=");
+        let (op, p) = (f[0], f[1].parse::<u64>().expect("a precision"));
+        let round = super::vectors::mode(f[2]);
+        let x: Vec<BigFloat> = f[3..eq].iter().map(|t| field(t)).collect();
+        let want = (field(f[eq + 1]), super::vectors::ternary(f[eq + 2]));
+        let new = match op {
+            "add" => x[0].add_round(&x[1], p, round),
+            "sub" => x[0].sub_round(&x[1], p, round),
+            "mul" => x[0].mul_round(&x[1], p, round),
+            "sqr" => x[0].mul_round(&x[0], p, round),
+            "div" => x[0].div_round(&x[1], p, round),
+            "fma" => x[0].mul_add_round(&x[1], &x[2], p, round),
+            _ => panic!("op {op}"),
+        };
+        same(&new, &want, line);
+        let mut r = match i % 4 {
+            0 => BigFloat::zero(p),
+            1 => BigFloat::nan(p),
+            _ => {
+                BigFloat::from(-1)
+                    .div_round(&BigFloat::from(3), p, Round::Nearest)
+                    .0
+            }
+        };
+        let o = match op {
+            "add" => r.set_add(&x[0], &x[1], round),
+            "sub" => r.set_sub(&x[0], &x[1], round),
+            "mul" => r.set_mul(&x[0], &x[1], round),
+            "sqr" => r.set_mul(&x[0], &x[0], round),
+            "div" => r.set_div(&x[0], &x[1], round),
+            _ => r.set_mul_add(&x[0], &x[1], &x[2], round),
+        };
+        same(&(r, o), &want, &format!("into: {line}"));
+        if x[0].prec() == p && op != "fma" && op != "sqr" {
+            let mut r = x[0].clone();
+            let o = match op {
+                "add" => r.add_assign_round(&x[1], round),
+                "sub" => r.sub_assign_round(&x[1], round),
+                "mul" => r.mul_assign_round(&x[1], round),
+                _ => r.div_assign_round(&x[1], round),
+            };
+            same(&(r, o), &want, &format!("assign: {line}"));
+        }
+        count += 1;
+    }
+    assert!(count > size(1000, 50));
+}
+
+/// The forms into an existing number against the exact results rounded by integers: results of
+/// the precisions where the kernels change, operands of the result's precision, of at most it in
+/// as many limbs and of other lengths, exponents apart by the amounts where the kernels change,
+/// terms that cancel, and fused multiply-adds of operands of one, two and four limbs and addends
+/// up to eight; each into a number that holds a finite value of its own.
+#[test]
+fn forms_into_numbers_round_correctly_at_every_kernel() {
+    let mut s = 0x1A70_F0E5_0000_0003u64;
+    for i in 0..size(5000, 30) {
+        let p = prec(&mut s);
+        let pick = |s: &mut u64| -> u64 {
+            match below(s, 6) {
+                0..=2 => p,
+                3 => 1 + below(s, p.div_ceil(64) * 64),
+                4 => 1 + below(s, 256),
+                _ => prec(s),
+            }
+        };
+        let (pa, pb, pc) = (pick(&mut s), pick(&mut s), pick(&mut s));
+        let ea = below(&mut s, 200) as i64 - 100;
+        let a = of(&mut s, pa, ea);
+        let b = if i % 5 == 0 {
+            // A difference that cancels: `-a` at its own precision, nudged.
+            let (pt, k) = (1 + below(&mut s, 70), 1 + below(&mut s, 2 * pb) as i64);
+            let tiny = of(&mut s, pt, ea - k);
+            (-&a)
+                .prec_round(pb, mode(&mut s))
+                .0
+                .add_round(&tiny, pb, Round::Nearest)
+                .0
+        } else {
+            let k = shift(&mut s, p.max(pa));
+            of(&mut s, pb, ea - k)
+        };
+        let ec = ea + b.exponent().unwrap_or(0) - shift(&mut s, p) + 1;
+        let c = of(&mut s, pc, ec);
+        let (ra, rb, rc) = (rational(&a), rational(&b), rational(&c));
+        for round in MODES {
+            let down = round == Round::Down;
+            let start = || {
+                BigFloat::from(1)
+                    .div_round(&BigFloat::from(3), p, Round::Nearest)
+                    .0
+            };
+            let mut r = start();
+            let o = r.set_add(&a, &b, round);
+            check(
+                &(r, o),
+                &(&ra + &rb),
+                down,
+                p,
+                round,
+                &format!("set {a:?} + {b:?} at {p}"),
+            );
+            let mut r = start();
+            let o = r.set_sub(&a, &b, round);
+            check(
+                &(r, o),
+                &(&ra - &rb),
+                down,
+                p,
+                round,
+                &format!("set {a:?} - {b:?} at {p}"),
+            );
+            let mut r = start();
+            let o = r.set_mul(&a, &b, round);
+            check(
+                &(r, o),
+                &(&ra * &rb),
+                false,
+                p,
+                round,
+                &format!("set {a:?} * {b:?} at {p}"),
+            );
+            let mut r = start();
+            let o = r.set_div(&a, &b, round);
+            check(
+                &(r, o),
+                &(&ra / &rb),
+                false,
+                p,
+                round,
+                &format!("set {a:?} / {b:?} at {p}"),
+            );
+            if round == Round::Nearest && i % 4 == 0 {
+                assigning(&a, &b, p, mode(&mut s));
+            }
+            let exact = &(&ra * &rb) + &rc;
+            let what = format!("set {a:?} * {b:?} + {c:?} at {p}");
+            let mut r = start();
+            let o = r.set_mul_add(&a, &b, &c, round);
+            check(&(r, o), &exact, down, p, round, &what);
+            check(
+                &a.mul_add_round(&b, &c, p, round),
+                &exact,
+                down,
+                p,
+                round,
+                &what,
+            );
+        }
+    }
+}
+
+/// Results past the ends of the exponent range by the forms into an existing number, whose
+/// kernels leave them to the general path: the same as the forms with a new result, which round
+/// them to an infinity or the largest number, or to zero or the smallest, by the mode.
+#[test]
+fn forms_into_numbers_overflow_and_underflow_as_the_others() {
+    let mut s = 0x0E0F_10E5_0000_0005u64;
+    for _ in 0..size(1500, 20) {
+        let p = prec(&mut s);
+        let (pa, pb) = (
+            if below(&mut s, 2) == 0 {
+                p
+            } else {
+                prec(&mut s)
+            },
+            p,
+        );
+        let top = BigFloat::EXP_MAX - below(&mut s, 3) as i64;
+        let bottom = BigFloat::EXP_MIN + below(&mut s, 3) as i64;
+        let k = below(&mut s, 3) as i64;
+        let (ea, eb) = match below(&mut s, 4) {
+            0 => (top, top - k),
+            1 => (top, 1 + k),
+            2 => (bottom, bottom + k.min(1)),
+            _ => (bottom, 1 + k),
+        };
+        let (a, b) = (of(&mut s, pa, ea), of(&mut s, pb, eb));
+        let ec = if below(&mut s, 2) == 0 { top } else { bottom };
+        let c = of(&mut s, pb, ec);
+        let round = mode(&mut s);
+        let start = || BigFloat::from(5).prec_round(p, Round::Nearest).0;
+        let pairs: [(&str, Op); 4] = [
+            ("+", |x, y, p, r| x.add_round(y, p, r)),
+            ("-", |x, y, p, r| x.sub_round(y, p, r)),
+            ("*", |x, y, p, r| x.mul_round(y, p, r)),
+            ("/", |x, y, p, r| x.div_round(y, p, r)),
+        ];
+        for (k, (name, f)) in pairs.iter().enumerate() {
+            let want = f(&a, &b, p, round);
+            let mut r = start();
+            let o = match k {
+                0 => r.set_add(&a, &b, round),
+                1 => r.set_sub(&a, &b, round),
+                2 => r.set_mul(&a, &b, round),
+                _ => r.set_div(&a, &b, round),
+            };
+            same(&(r, o), &want, &format!("set {a:?} {name} {b:?} at {p}"));
+        }
+        let want = a.mul_add_round(&b, &c, p, round);
+        let mut r = start();
+        let o = r.set_mul_add(&a, &b, &c, round);
+        same(&(r, o), &want, &format!("set {a:?} * {b:?} + {c:?} at {p}"));
+        if let Some(e) = want.0.exponent() {
+            assert!((BigFloat::EXP_MIN..=BigFloat::EXP_MAX).contains(&e));
+        }
+    }
+}
+
+/// Differences whose smaller term is all ones and lies just below the word of the kernels (one
+/// or two limbs, the four of a fused multiply-add's sum): its bits that reach the word below, all
+/// ones but the lowest, leave that word zero after the shift that refills the top bit, and only
+/// the fraction below it says that the difference is not exact.
+#[test]
+fn differences_with_all_ones_just_below_the_word() {
+    let mut s = 0xA110_0E5D_0000_0009u64;
+    for &w in &[64u64, 128, 256] {
+        let ones = (super::common::one() << w as usize) - super::common::one();
+        let y = BigFloat::from_parts(&ones, -(w as i64), w, Round::Nearest).0;
+        for &p in &[w - 1, w, w / 2 + 1, 1] {
+            for d in (w - 2..=w + 3).step_by(size(1, 3)) {
+                for k in 0..size(4, 1) {
+                    let x = if k == 0 {
+                        BigFloat::from_parts(&super::common::one(), 0, p, Round::Nearest).0
+                    } else {
+                        of(&mut s, p, 1).abs()
+                    };
+                    let yd = y
+                        .mul_round(
+                            &BigFloat::from_parts(
+                                &super::common::one(),
+                                -(d as i64),
+                                1,
+                                Round::Nearest,
+                            )
+                            .0,
+                            w,
+                            Round::Nearest,
+                        )
+                        .0;
+                    let (rx, ry) = (rational(&x), rational(&yd));
+                    for round in MODES {
+                        let down = round == Round::Down;
+                        let what = format!("{x:?} - {yd:?} at {p}");
+                        check(
+                            &x.sub_round(&yd, p, round),
+                            &(&rx - &ry),
+                            down,
+                            p,
+                            round,
+                            &what,
+                        );
+                        let mut r = BigFloat::from(3).prec_round(p, Round::Nearest).0;
+                        let o = r.set_sub(&x, &yd, round);
+                        check(&(r, o), &(&rx - &ry), down, p, round, &what);
+                        let one = BigFloat::from(1).prec_round(p, Round::Nearest).0;
+                        let what = format!("{x:?} * 1 - {yd:?} at {p}");
+                        check(
+                            &x.mul_add_round(&one, &(-&yd), p, round),
+                            &(&rx - &ry),
+                            down,
+                            p,
+                            round,
+                            &what,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Sums of operands of the result's length that carry, the smaller shifted by about a limb so
+/// that the lowest bit shifted out is alone below the halfway point: the shift by one of the
+/// carry moves it out of the word below, and only the sticky bit keeps it.
+#[test]
+fn same_length_sums_whose_last_bit_out_decides() {
+    let mut s = 0x5A3E_0B17_0000_000Bu64;
+    for n in 3..=5u64 {
+        for p in [64 * n, 64 * n - 1, 64 * n - 2, 64 * n - 63] {
+            for &d in [63i64, 64, 65, 127, 128, 129].iter().step_by(size(1, 2)) {
+                for &low in [1u64, (1 << 63) | 1, 3, 2].iter().step_by(size(1, 3)) {
+                    // `x` all ones at the top, so that the sum carries; `y` with `low` as its
+                    // lowest limb.
+                    let ones = (super::common::one() << (64 * n) as usize) - super::common::one();
+                    let x =
+                        BigFloat::from_parts(&ones, -((64 * n) as i64), 64 * n, Round::Nearest).0;
+                    let x = x.prec_round(p, Round::Down).0;
+                    let mut y = super::common::one() << (64 * n - 1) as usize;
+                    for k in 1..n - 1 {
+                        y += Number::from(xorshift(&mut s)) << (64 * k) as usize;
+                    }
+                    y += Number::from(low);
+                    let y =
+                        BigFloat::from_parts(&y, -((64 * n) as i64) - d, 64 * n, Round::Nearest).0;
+                    let y = y.prec_round(p, Round::Down).0;
+                    let (rx, ry) = (rational(&x), rational(&y));
+                    for round in MODES {
+                        let what = format!("{x:?} + {y:?} at {p}");
+                        check(
+                            &x.add_round(&y, p, round),
+                            &(&rx + &ry),
+                            false,
+                            p,
+                            round,
+                            &what,
+                        );
+                        let mut r = BigFloat::from(3).prec_round(p, Round::Nearest).0;
+                        let o = r.set_add(&x, &y, round);
+                        check(&(r, o), &(&rx + &ry), false, p, round, &what);
+                        let what = format!("{x:?} - {:?} at {p}", -&y);
+                        check(
+                            &x.sub_round(&-&y, p, round),
+                            &(&rx + &ry),
+                            false,
+                            p,
+                            round,
+                            &what,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Differences of terms one exponent apart that cancel all the limbs of the result, `2^(e-1)` less
+/// all ones of the result's length one exponent down: what is left is the bit shifted out of the
+/// smaller term, alone, the word below the result's limbs, which becomes the whole mantissa.
+#[test]
+fn differences_that_cancel_every_limb() {
+    for n in 3..=6u64 {
+        let w = 64 * n;
+        let ones = (super::common::one() << w as usize) - super::common::one();
+        for p in [w, w - 1, w - 63] {
+            for e in [0i64, 7, -300] {
+                let x = BigFloat::from_parts(&super::common::one(), e - 1, p, Round::Nearest).0;
+                let y = BigFloat::from_parts(&ones, e - 1 - w as i64, w, Round::Nearest).0;
+                let y = y.prec_round(p, Round::Down).0;
+                let (rx, ry) = (rational(&x), rational(&y));
+                for round in MODES {
+                    let what = format!("{x:?} - {y:?} at {p}");
+                    let down = round == Round::Down;
+                    check(
+                        &x.sub_round(&y, p, round),
+                        &(&rx - &ry),
+                        down,
+                        p,
+                        round,
+                        &what,
+                    );
+                    let mut r = BigFloat::from(1)
+                        .div_round(&BigFloat::from(3), p, Round::Nearest)
+                        .0;
+                    let o = r.set_sub(&x, &y, round);
+                    check(&(r, o), &(&rx - &ry), down, p, round, &what);
+                }
+            }
         }
     }
 }

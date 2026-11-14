@@ -14,6 +14,7 @@ mod matrix;
 mod pow;
 mod power;
 mod primitive;
+mod roots;
 mod sum;
 mod text;
 mod trig;

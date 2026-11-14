@@ -236,3 +236,92 @@ fn special_values_and_signs() {
         Some((i128::MIN, Ordering::Greater))
     );
 }
+
+/// The forms into an existing number, `set_rint` and its kind, against the vectors of MPFR's
+/// `mpfr_rint`, `mpfr_floor`, `mpfr_ceil` and `mpfr_trunc`, into numbers of the result's
+/// precision that hold a finite value of their own, a zero or NaN.
+#[test]
+fn rint_into_numbers_matches_mpfr() {
+    let mut n = 0;
+    for (i, v) in lines(include_str!("data/convert_rint.txt")).enumerate() {
+        let p: u64 = v[2].parse().unwrap();
+        let q: u64 = v[3].parse().unwrap();
+        let x = vectors::float(v[1], p);
+        let round = vectors::mode(v[4]);
+        let want = (vectors::float(v[5], q), ternary(v[6]));
+        let mut r = match i % 3 {
+            0 => {
+                BigFloat::from(-1)
+                    .div_round(&BigFloat::from(3), q, Round::Nearest)
+                    .0
+            }
+            1 => BigFloat::zero(q),
+            _ => BigFloat::nan(q),
+        };
+        let o = match v[0] {
+            "rint" | "roundeven" => r.set_rint(&x, round),
+            "floor" => r.set_floor(&x),
+            "ceil" => r.set_ceil(&x),
+            "trunc" => r.set_trunc(&x),
+            _ => continue,
+        };
+        same(&(r, o), &want, &format!("into: {}", v.join(" ")));
+        n += 1;
+    }
+    assert!(n > size(200, 4));
+}
+
+/// `rint_round` and `set_rint` against the integers of the exact rationals: a number of fewer
+/// bits before its point than the precision is the integer of its mode, exactly; one of more is
+/// rounded to the precision; at precisions below, at and above the number's, into numbers that
+/// hold a value of their own.
+#[test]
+fn rint_rounds_as_the_rationals() {
+    let mut s = 0x5EED_1A7E_0000_0007u64;
+    for i in 0..size(3000, 30) {
+        let x = float(&mut s, 300, 200);
+        let q = match below(&mut s, 3) {
+            0 => x.prec(),
+            1 => 1 + below(&mut s, x.prec()),
+            _ => 1 + below(&mut s, 400),
+        };
+        let round = mode(&mut s);
+        let got = x.rint_round(q, round);
+        let mut r = if i % 2 == 0 {
+            BigFloat::from(7)
+                .div_round(&BigFloat::from(3), q, Round::Nearest)
+                .0
+        } else {
+            BigFloat::infinity(q)
+        };
+        let o = r.set_rint(&x, round);
+        same(&(r, o), &got, &format!("set_rint {x:?} to {q} {round:?}"));
+        if !x.is_finite() {
+            continue;
+        }
+        let rx = rational(&x);
+        let want = match x.exponent() {
+            Some(e) if e < q as i64 => {
+                let z = match round {
+                    Round::Down => rx.floor(),
+                    Round::Up => rx.ceil(),
+                    Round::TowardZero => rx.trunc(),
+                    Round::Nearest => integer(&rx, Round::Nearest),
+                };
+                let o = Rational::from_integer(z.clone()).partial_cmp(&rx).unwrap();
+                let int = if z.is_zero() {
+                    if x.is_sign_negative() {
+                        BigFloat::neg_zero(q)
+                    } else {
+                        BigFloat::zero(q)
+                    }
+                } else {
+                    BigFloat::from_number(&z, q, Round::Nearest).0
+                };
+                (int, o)
+            }
+            _ => x.prec_round(q, round),
+        };
+        same(&got, &want, &format!("rint {x:?} to {q} {round:?}"));
+    }
+}

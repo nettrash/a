@@ -5,7 +5,9 @@
 
 use super::ball::{Ball, Rad, round_near, undecided, ziv_fast, ziv_or};
 use super::exp::{Range, Raw, exp_ball, expo, out_of_range};
+use super::limbs;
 use super::log::{ln_ball, ln2_ball};
+use super::ziv::Approx;
 
 use super::{BigFloat, Kind, Round};
 use core::cmp::Ordering;
@@ -31,16 +33,6 @@ fn away(negative: bool) -> Ordering {
     }
 }
 
-/// The ball of `e^a - 1` for a finite `a > 0` below `2^62`, to `w` bits about: from `e^a` with
-/// as many more bits as `a` has zeros after the point, the cancellation of the subtraction.
-fn expm1_ball(a: &Ball, w: u64) -> Option<Ball> {
-    let ex = expo(&a.mid);
-    let more = (-ex).max(0) as u64;
-    let raw = exp_ball(a, w + more + 8).ok()?;
-    raw.ball()
-        .map(|e| e.sub(&Ball::exact(BigFloat::from(1)), w + 8))
-}
-
 /// `ln(1 + z)` for the ball `z >= 0` (or `z > -1`), to `w` bits about: `1 + z` to as many more
 /// bits as `z` has zeros after the point.
 fn ln1p_ball(z: &Ball, w: u64) -> Option<Ball> {
@@ -57,6 +49,89 @@ fn half_exp(a: &Ball, w: u64) -> Result<Raw, Range> {
     raw.lsb -= 1;
     raw.rel = raw.rel.add(Rad::pow2(-i128::from(w) - 16));
     Ok(raw)
+}
+
+/// `v·2^s`, or `floor(v·2^s)` for `s < 0`.
+fn shift(v: &[u64], s: i128) -> Vec<u64> {
+    if s >= 0 {
+        limbs::shl(v, s as u64)
+    } else {
+        limbs::shr(v, s.unsigned_abs().min(u128::from(u64::MAX)) as u64)
+    }
+}
+
+/// `(E - 1/E)/2` (`sinh a`) or `(E + 1/E)/2` (`cosh a`) for the raw exponential `E = e^a`, `a >
+/// 0`, in fixed point: `E = y·2^l` within a relative `ε`, `1/E` as `R·2^(-D - l)` with `R =
+/// floor(2^D / y)`, `D = 2 bits(y) + 16`, within `2^(-D - l)` of `1/Ẽ`, which is within a relative
+/// `ε/(1 - ε)` of `1/E`. The error: `(Ẽ + 1/Ẽ)·1.01 ε / 2` and the floor's half unit, from the
+/// bounds `y < 2^bits(y)`, `R < 2^bits(R)`.
+fn sinh_cosh_fix(raw: &Raw, cosh: bool, negative: bool) -> Approx {
+    let mut y = raw.m.clone();
+    limbs::trim(&mut y);
+    if y.is_empty() || !raw.rel.le(Rad::pow2(-20)) {
+        return undecided();
+    }
+    let by = limbs::bit_len(&y);
+    let d = 2 * by + 16;
+    let r = super::sincos::div(&limbs::shl(&[1], d), &y);
+    let br = limbs::bit_len(&r);
+    let l = raw.lsb;
+    let li = -i128::from(d) - l;
+    let l0 = l.min(li);
+    let ey = shift(&y, l - l0);
+    let ry = shift(&r, li - l0);
+    let v = if cosh {
+        limbs::add(&ey, &ry)
+    } else if limbs::cmp(&ey, &ry) == Ordering::Greater {
+        limbs::sub(&ey, &ry)
+    } else {
+        return undecided();
+    };
+    let scale = Rad::pow2(i128::from(by) + l).add(Rad::pow2(i128::from(br) + li));
+    let err = scale
+        .mul(raw.rel)
+        .mul(Rad::up(259, -8))
+        .add(Rad::pow2(li))
+        .shl(-1);
+    fixed(negative, v, l0 - 1, err)
+}
+
+/// `tanh a = (P - 1)/(P + 1)` for the raw exponential `P = e^(2a)`, `a > 0`, within a relative
+/// `ε`: `|T(P̃) - T(P)| = 2|P̃ - P| / ((P̃ + 1)(P + 1)) <= ε (1 + 2ε)/2` as `2P/(P + 1)² <= 1/2`;
+/// the quotient's floor at `q` bits after the point, one unit more.
+fn tanh_fix(raw: &Raw, q: u64, negative: bool) -> Approx {
+    let mut y = raw.m.clone();
+    limbs::trim(&mut y);
+    if y.is_empty() || !raw.rel.le(Rad::pow2(-20)) {
+        return undecided();
+    }
+    let l = raw.lsb;
+    let l0 = l.min(0);
+    let py = shift(&y, l - l0);
+    let one = limbs::shl(&[1], l0.unsigned_abs() as u64);
+    if limbs::cmp(&py, &one) != Ordering::Greater {
+        return undecided();
+    }
+    let num = limbs::sub(&py, &one);
+    let den = limbs::add(&py, &one);
+    let t = super::sincos::div(&limbs::shl(&num, q), &den);
+    let err = raw.rel.mul(Rad::up(131, -8)).add(Rad::pow2(-i128::from(q)));
+    fixed(negative, t, -i128::from(q), err)
+}
+
+/// The approximation `±v·2^lsb` within `err` for Ziv's loop.
+fn fixed(negative: bool, mut v: Vec<u64>, lsb: i128, err: Rad) -> Approx {
+    limbs::trim(&mut v);
+    let e = err.exp2_ceil().max(lsb - 128);
+    if v.is_empty() || e >= lsb + i128::from(limbs::bit_len(&v)) - 1 {
+        return undecided();
+    }
+    Approx {
+        negative,
+        m: v,
+        lsb,
+        err: e,
+    }
 }
 
 impl BigFloat {
@@ -103,15 +178,12 @@ impl BigFloat {
                     Err(r) => Err(out_of_range(r, negative, prec, round)),
                 };
             }
-            let Some(u) = expm1_ball(&a, w + 4) else {
-                return Ok(undecided());
-            };
-            let v = u.add(&Ball::exact(BigFloat::from(1)), w + 8);
-            let Some(q) = u.div(&v, w + 8) else {
-                return Ok(undecided());
-            };
-            let s = u.add(&q, w + 8).shl(-1);
-            Ok(if negative { s.neg() } else { s }.approx())
+            // `|sinh'/sinh| = coth a <= 2^(2 - ex)` below 1, below 2 above.
+            let more = (2 - ex).max(1) as u64 + 8;
+            match exp_ball(&a, w + more) {
+                Ok(raw) => Ok(sinh_cosh_fix(&raw, false, negative)),
+                Err(r) => Err(out_of_range(r, negative, prec, round)),
+            }
         })
     }
 
@@ -225,17 +297,10 @@ impl BigFloat {
                     Err(r) => Err(out_of_range(r, false, prec, round)),
                 };
             }
-            let raw = match exp_ball(&a, w + 4) {
-                Ok(raw) => raw,
-                Err(r) => return Err(out_of_range(r, false, prec, round)),
-            };
-            let Some(e) = raw.ball() else {
-                return Ok(undecided());
-            };
-            let Some(inv) = Ball::exact(BigFloat::from(1)).div(&e, w + 8) else {
-                return Ok(undecided());
-            };
-            Ok(e.add(&inv, w + 8).shl(-1).approx())
+            match exp_ball(&a, w + 8) {
+                Ok(raw) => Ok(sinh_cosh_fix(&raw, true, false)),
+                Err(r) => Err(out_of_range(r, false, prec, round)),
+            }
         })
     }
 
@@ -289,15 +354,11 @@ impl BigFloat {
             }
         }
         let two_a = Ball::exact(self.abs()).shl(1);
-        ziv_fast(prec, round, |w| {
-            let Some(u) = expm1_ball(&two_a, w + 4) else {
-                return undecided();
-            };
-            let d = u.add(&Ball::exact(BigFloat::from(2)), w + 8);
-            match u.div(&d, w + 8) {
-                Some(t) => if negative { t.neg() } else { t }.approx(),
-                None => undecided(),
-            }
+        // The absolute error `ε/2` against `tanh a >= 2^(ex - 2)`.
+        let more = (3 - ex).max(0) as u64 + 8;
+        ziv_fast(prec, round, |w| match exp_ball(&two_a, w + more) {
+            Ok(raw) => tanh_fix(&raw, w + more + 8, negative),
+            Err(_) => undecided(),
         })
     }
 

@@ -514,14 +514,25 @@ fn arg_of(y: &BigFloat, x: &BigFloat, prec: u64, round: Round, ten: bool) -> Par
     if !ten {
         return arg_part(y, x, prec, round);
     }
-    let (a, _) = y.atan2_round(x, 2, Round::Nearest);
-    if a.is_zero() || a.is_nan() {
-        return exactly(a.prec_round(prec, round).0);
-    }
-    // The special points have a multiple `num/4` of π (`atan2`'s table), which the rounding to
-    // 2 bits tells: 0.75, 1.5, 2 and 3 for `num` 1 to 4.
-    let negative = a.is_sign_negative();
     let special = !(x.is_finite() && y.is_finite() && !x.is_zero() && !y.is_zero());
+    // For finite parts that are not zero the argument is not zero, of the sign of `y`; for the
+    // others, `atan2` at 2 bits tells a zero or NaN, and the special points have a multiple
+    // `num/4` of π (`atan2`'s table), which the rounding to 2 bits tells: 0.75, 1.5, 2 and 3 for
+    // `num` 1 to 4.
+    let a = if special {
+        let (a, _) = y.atan2_round(x, 2, Round::Nearest);
+        if a.is_zero() || a.is_nan() {
+            return exactly(a.prec_round(prec, round).0);
+        }
+        a
+    } else {
+        BigFloat::zero(2)
+    };
+    let negative = if special {
+        a.is_sign_negative()
+    } else {
+        y.is_sign_negative()
+    };
     let num = special.then(|| {
         let f = a.abs();
         if f < 1 {

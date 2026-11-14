@@ -762,3 +762,947 @@ fn roots_of_squares_with_a_small_part_near_the_working_precision() {
         );
     }
 }
+
+/// A part of a random complex number for the forms into a number: a float, or a zero, or (when
+/// `special`) NaN or an infinity, now and then.
+fn any_part(s: &mut u64, max: u64, exps: i64, special: bool) -> BigFloat {
+    let prec = 1 + below(s, max);
+    match below(s, 24) {
+        0 => BigFloat::zero(prec),
+        1 => BigFloat::neg_zero(prec),
+        2 if special => BigFloat::nan(prec),
+        3 if special => BigFloat::infinity(prec),
+        4 if special => BigFloat::neg_infinity(prec),
+        _ => float(s, max, exps),
+    }
+}
+
+/// A number of the precisions `prec` to write into, holding something already: a finite value
+/// (so that its vectors are reused), NaN or a zero.
+fn target(s: &mut u64, prec: (u64, u64)) -> BigComplex {
+    let fill = |s: &mut u64, p: u64| match below(s, 4) {
+        0 => BigFloat::nan(p),
+        1 => BigFloat::neg_zero(p),
+        _ => float(s, p, 50).prec_round(p, Round::Nearest).0,
+    };
+    BigComplex::new(fill(s, prec.0), fill(s, prec.1))
+}
+
+/// The parts of `z` and their directions.
+fn parts_of(z: BigComplex, o: (Ordering, Ordering)) -> [(BigFloat, Ordering); 2] {
+    let (re, im) = z.into_parts();
+    [(re, o.0), (im, o.1)]
+}
+
+/// A form that assigns: its name, the `_round_parts` form's result, and the number and the
+/// directions it assigned.
+type Assigned = (
+    &'static str,
+    (BigComplex, (Ordering, Ordering)),
+    BigComplex,
+    (Ordering, Ordering),
+);
+
+#[test]
+fn forms_into_a_number_are_the_round_parts_forms() {
+    let mut s = 0x5EED_C0C0_0000_0010u64;
+    for i in 0..size(3000, 24) {
+        let max = match i % 50 {
+            0 if !cfg!(miri) => 1200,
+            n if n % 5 == 1 => 300,
+            n if n % 5 == 2 => 64,
+            _ => 130,
+        };
+        let special = i % 7 == 3;
+        let part = |s: &mut u64| any_part(s, max, 40, special);
+        let x = BigComplex::new(part(&mut s), part(&mut s));
+        let y = BigComplex::new(part(&mut s), part(&mut s));
+        let r = part(&mut s);
+        let pmax = if max > 300 { max + 100 } else { 300 };
+        let prec = (1 + below(&mut s, pmax), 1 + below(&mut s, pmax));
+        let round = (mode(&mut s), mode(&mut s));
+        let what = format!("{x:?}, {y:?}, {r:?} at {prec:?} {round:?}");
+        type Op<'a> = (
+            &'a str,
+            Box<dyn Fn(&mut BigComplex) -> (Ordering, Ordering) + 'a>,
+            (BigComplex, (Ordering, Ordering)),
+        );
+        let ops: Vec<Op<'_>> = vec![
+            (
+                "add",
+                Box::new(|z| z.set_add_parts(&x, &y, round)),
+                x.add_round_parts(&y, prec, round),
+            ),
+            (
+                "sub",
+                Box::new(|z| z.set_sub_parts(&x, &y, round)),
+                x.sub_round_parts(&y, prec, round),
+            ),
+            (
+                "mul",
+                Box::new(|z| z.set_mul_parts(&x, &y, round)),
+                x.mul_round_parts(&y, prec, round),
+            ),
+            (
+                "sqr",
+                Box::new(|z| z.set_sqr_parts(&x, round)),
+                x.sqr_round_parts(prec, round),
+            ),
+            (
+                "div",
+                Box::new(|z| z.set_div_parts(&x, &y, round)),
+                x.div_round_parts(&y, prec, round),
+            ),
+            (
+                "sqrt",
+                Box::new(|z| z.set_sqrt_parts(&x, round)),
+                x.sqrt_round_parts(prec, round),
+            ),
+            (
+                "add_real",
+                Box::new(|z| z.set_add_real_parts(&x, &r, round)),
+                x.add_real_round_parts(&r, prec, round),
+            ),
+            (
+                "sub_real",
+                Box::new(|z| z.set_sub_real_parts(&x, &r, round)),
+                x.sub_real_round_parts(&r, prec, round),
+            ),
+            (
+                "mul_real",
+                Box::new(|z| z.set_mul_real_parts(&x, &r, round)),
+                x.mul_real_round_parts(&r, prec, round),
+            ),
+            (
+                "div_real",
+                Box::new(|z| z.set_div_real_parts(&x, &r, round)),
+                x.div_real_round_parts(&r, prec, round),
+            ),
+            (
+                "neg",
+                Box::new(|z| z.set_neg_parts(&x, round)),
+                (-&x).prec_round_parts(prec, round),
+            ),
+            (
+                "conj",
+                Box::new(|z| z.set_conj_parts(&x, round)),
+                x.conj().prec_round_parts(prec, round),
+            ),
+        ];
+        for (name, into, (want, wo)) in ops {
+            let mut z = target(&mut s, prec);
+            let o = into(&mut z);
+            assert_eq!(z.prec(), prec, "{name} {what}");
+            for (got, want) in parts_of(z, o).iter().zip(&parts_of(want, wo)) {
+                same(got, want, &format!("{name} {what}"));
+            }
+        }
+        // The norm and the absolute value into a float.
+        let mut n = target(&mut s, prec).into_parts().0;
+        let o = n.set_complex_norm(&x, round.0);
+        same(
+            &(n, o),
+            &x.norm_round(prec.0, round.0),
+            &format!("norm {what}"),
+        );
+        let mut a = target(&mut s, prec).into_parts().0;
+        let o = a.set_complex_abs(&x, round.0);
+        same(
+            &(a, o),
+            &x.abs_round(prec.0, round.0),
+            &format!("abs {what}"),
+        );
+        // The forms that assign, at `self`'s precisions, one mode.
+        let rd = round.0;
+        let both = (rd, rd);
+        let at = |z: &BigComplex| z.prec_round_parts(prec, (Round::Nearest, Round::Nearest)).0;
+        let ops: Vec<Assigned> = {
+            let mut v = Vec::new();
+            let w = at(&x);
+            let mut z = w.clone();
+            let o = z.add_assign_round(&y, rd);
+            v.push(("add_assign", w.add_round_parts(&y, prec, both), z, o));
+            let mut z = w.clone();
+            let o = z.sub_assign_round(&y, rd);
+            v.push(("sub_assign", w.sub_round_parts(&y, prec, both), z, o));
+            let mut z = w.clone();
+            let o = z.mul_assign_round(&y, rd);
+            v.push(("mul_assign", w.mul_round_parts(&y, prec, both), z, o));
+            let mut z = w.clone();
+            let o = z.div_assign_round(&y, rd);
+            v.push(("div_assign", w.div_round_parts(&y, prec, both), z, o));
+            let mut z = w.clone();
+            let o = z.sqr_assign_round(rd);
+            v.push(("sqr_assign", w.sqr_round_parts(prec, both), z, o));
+            v
+        };
+        for (name, (want, wo), z, o) in ops {
+            for (got, want) in parts_of(z, o).iter().zip(&parts_of(want, wo)) {
+                same(got, want, &format!("{name} {what}"));
+            }
+        }
+    }
+}
+
+/// A float of `p` bits whose mantissa is `m` (top bit set, at most `p` bits) times `2^e`, the
+/// exponent `e` of `0.m·2^e`.
+fn of_mantissa(m: &Number, e: i64, p: u64, negative: bool) -> BigFloat {
+    let m = if negative { -m.clone() } else { m.clone() };
+    let (x, o) = BigFloat::from_parts(&m, e - m.bits() as i64, p, Round::Nearest);
+    assert_eq!(o, Ordering::Equal);
+    x
+}
+
+#[test]
+fn short_products_near_cancellation_round_part_by_part() {
+    // Parts of one and two limbs (the products of 128 and 256 bits in registers) whose products
+    // `ac` and `bd` agree in their top bits, or have exponents up to 300 apart (the shifts of the
+    // 384-bit window past one and two limbs), against the exact rationals.
+    let mut s = 0x5EED_C0C0_0000_0011u64;
+    for i in 0..size(6000, 40) {
+        let pa = 1 + below(&mut s, if i % 2 == 0 { 64 } else { 128 });
+        let pb = 1 + below(&mut s, 128);
+        let a = super::common::mantissa(&mut s, pa);
+        let b = super::common::mantissa(&mut s, pb);
+        let ea = below(&mut s, 40) as i64 - 20;
+        let gap = match below(&mut s, 4) {
+            0 => 0,
+            1 => below(&mut s, 3) as i64,
+            2 => below(&mut s, 140) as i64,
+            _ => below(&mut s, 300) as i64,
+        };
+        let (na, nb) = (below(&mut s, 2) == 0, below(&mut s, 2) == 0);
+        // `(a + b·i)·(b' + a'·i)` with `b'` and `a'` `b` and `a` changed in their last bits, so
+        // that `ab' - ba'` cancels to their last bits.
+        let tweak = |s: &mut u64, m: &Number, p: u64| -> Number {
+            let d = Number::from(below(s, 5));
+            let t = if below(s, 2) == 0 { m + &d } else { m - &d };
+            if t.bits() == p && !t.is_zero() {
+                t
+            } else {
+                m.clone()
+            }
+        };
+        let (a2, b2) = (tweak(&mut s, &a, pa), tweak(&mut s, &b, pb));
+        let x = BigComplex::new(
+            of_mantissa(&a, ea, pa, na),
+            of_mantissa(&b, ea - gap, pb, nb),
+        );
+        let y = BigComplex::new(
+            of_mantissa(&b2, ea - gap, pb, nb),
+            of_mantissa(&a2, ea, pa, na),
+        );
+        let prec = (1 + below(&mut s, 128), 1 + below(&mut s, 128));
+        let round = (mode(&mut s), mode(&mut s));
+        let what = format!("{x:?} · {y:?} at {prec:?} {round:?}");
+        let (ra, rb, rc, rd) = (
+            rational(x.re()),
+            rational(x.im()),
+            rational(y.re()),
+            rational(y.im()),
+        );
+        let mut z = target(&mut s, prec);
+        let o = z.set_mul_parts(&x, &y, round);
+        let [re, im] = parts_of(z, o);
+        part(
+            re,
+            &(&ra * &rc - &rb * &rd),
+            prec.0,
+            round.0,
+            &format!("re {what}"),
+        );
+        part(
+            im,
+            &(&ra * &rd + &rb * &rc),
+            prec.1,
+            round.1,
+            &format!("im {what}"),
+        );
+        // The square and the norm of `x`.
+        let mut z = target(&mut s, prec);
+        let o = z.set_sqr_parts(&x, round);
+        let [re, im] = parts_of(z, o);
+        part(
+            re,
+            &(&ra * &ra - &rb * &rb),
+            prec.0,
+            round.0,
+            &format!("re sqr {what}"),
+        );
+        let two = Rational::from(2u8);
+        part(
+            im,
+            &(&two * &ra * &rb),
+            prec.1,
+            round.1,
+            &format!("im sqr {what}"),
+        );
+        let mut n = BigFloat::zero(prec.0);
+        let o = n.set_complex_norm(&x, round.0);
+        part(
+            (n, o),
+            &(&ra * &ra + &rb * &rb),
+            prec.0,
+            round.0,
+            &format!("norm {what}"),
+        );
+        let mut m = BigFloat::zero(prec.1);
+        let o = m.set_complex_abs(&x, round.1);
+        same(
+            &(m, o),
+            &sqrt_reference(&(&ra * &ra + &rb * &rb), prec.1, round.1),
+            &format!("abs {what}"),
+        );
+    }
+}
+
+#[test]
+fn short_roots_round_part_by_part_across_the_exponent_range() {
+    // The roots in registers (results to 113 bits) and on the pool (beyond), of parts of every
+    // precision to 128 bits and exponents at the bottom of the range, the top and between, against a
+    // root 100 bits more precise rounded (unless that one is within reach of a halfway point).
+    let mut s = 0x5EED_C0C0_0000_0012u64;
+    for i in 0..size(4000, 30) {
+        // Both exponents near the top of the range, near the bottom, or near zero, at most 200
+        // apart (parts much further apart take a root far more precise than this one).
+        let base = match below(&mut s, 5) {
+            0 => BigFloat::EXP_MAX - 300,
+            1 => BigFloat::EXP_MIN + 300,
+            _ => 0,
+        };
+        let e = |s: &mut u64| -> i64 { base + below(s, 200) as i64 - 100 };
+        let (pa, pb) = (1 + below(&mut s, 128), 1 + below(&mut s, 128));
+        let (ea, eb) = (e(&mut s), e(&mut s));
+        let a = super::common::mantissa(&mut s, pa);
+        let b = super::common::mantissa(&mut s, pb);
+        let z = BigComplex::new(
+            of_mantissa(&a, ea, pa, below(&mut s, 2) == 0),
+            of_mantissa(&b, eb, pb, below(&mut s, 2) == 0),
+        );
+        let top = if i % 3 == 0 { 300 } else { 113 };
+        let prec = (1 + below(&mut s, top), 1 + below(&mut s, top));
+        let round = (mode(&mut s), mode(&mut s));
+        let what = format!("sqrt({z:?}) at {prec:?} {round:?}");
+        let mut r = target(&mut s, prec);
+        let o = r.set_sqrt_parts(&z, round);
+        let (hi, ho) = z.sqrt_round_parts(
+            (prec.0 + 100, prec.1 + 100),
+            (Round::Nearest, Round::Nearest),
+        );
+        for (got, h, ho, p, rd) in [
+            ((r.re().clone(), o.0), hi.re(), ho.0, prec.0, round.0),
+            ((r.im().clone(), o.1), hi.im(), ho.1, prec.1, round.1),
+        ] {
+            let (hp, hpo) = h.prec_round(p, rd);
+            if ho == Ordering::Equal
+                || hpo != Ordering::Equal
+                    && h.prec_round(p + 1, Round::Nearest).1 != Ordering::Equal
+            {
+                same(&got, &(hp, hpo), &what);
+            }
+        }
+    }
+}
+
+#[test]
+fn products_and_squares_beyond_the_exponent_range_overflow_and_underflow_by_mode() {
+    // A real part `ac - bd` with `bd = 0` (`b` zero): the product of floats, which overflows or
+    // underflows as `mul_round` does, in the registers, the window products and the
+    // accumulator alike.
+    let mut s = 0x5EED_C0C0_0000_0013u64;
+    for _ in 0..size(2000, 20) {
+        let p = match below(&mut s, 3) {
+            0 => 1 + below(&mut s, 64),
+            1 => 65 + below(&mut s, 64),
+            _ => 129 + below(&mut s, 400),
+        };
+        let big = below(&mut s, 2) == 0;
+        let e = |s: &mut u64| -> i64 {
+            if big {
+                BigFloat::EXP_MAX / 2 + below(s, 4) as i64
+            } else {
+                BigFloat::EXP_MIN / 2 - below(s, 4) as i64
+            }
+        };
+        let a = of_mantissa(
+            &super::common::mantissa(&mut s, p),
+            e(&mut s),
+            p,
+            below(&mut s, 2) == 0,
+        );
+        let c = of_mantissa(
+            &super::common::mantissa(&mut s, p),
+            e(&mut s),
+            p,
+            below(&mut s, 2) == 0,
+        );
+        let z = BigComplex::new(a.clone(), BigFloat::zero(p));
+        let w = BigComplex::new(c.clone(), BigFloat::zero(p));
+        let round = (mode(&mut s), mode(&mut s));
+        let mut out = target(&mut s, (p, p));
+        let o = out.set_mul_parts(&z, &w, round);
+        same(
+            &(out.re().clone(), o.0),
+            &a.mul_round(&c, p, round.0),
+            &format!("{a:?} · {c:?} at {p} {round:?}"),
+        );
+        let mut out = target(&mut s, (p, p));
+        let o = out.set_sqr_parts(&z, round);
+        same(
+            &(out.re().clone(), o.0),
+            &a.mul_round(&a, p, round.0),
+            &format!("{a:?}² at {p} {round:?}"),
+        );
+        let mut n = BigFloat::zero(p);
+        let o = n.set_complex_norm(&z, round.0);
+        same(
+            &(n, o),
+            &a.mul_round(&a, p, round.0),
+            &format!("|{a:?}|² at {p} {round:?}"),
+        );
+    }
+}
+
+#[test]
+fn operators_that_assign_keep_the_larger_precisions() {
+    let mut s = 0x5EED_C0C0_0000_0014u64;
+    for _ in 0..size(500, 10) {
+        let x = random(&mut s, 200, 20);
+        let y = random(&mut s, 200, 20);
+        let mut z = x.clone();
+        z += &y;
+        assert_eq!(z, &x + &y);
+        assert_eq!(z.prec(), (&x + &y).prec());
+        let mut z = x.clone();
+        z -= &y;
+        assert_eq!(z, &x - &y);
+        let mut z = x.clone();
+        z *= &y;
+        assert_eq!(z, &x * &y);
+        assert_eq!(z.prec(), (&x * &y).prec());
+        let mut z = x.clone();
+        z /= &y;
+        assert_eq!(z, &x / &y);
+    }
+}
+
+/// A mantissa of `bits` bits that is sparse: its top bit and a few others set.
+fn sparse(s: &mut u64, bits: u64) -> Number {
+    let mut m = Number::new_from_u8(0, ByteOrder::LittleEndian);
+    m.set_bit(bits - 1, true);
+    for _ in 0..below(s, 4) {
+        m.set_bit(below(s, bits), true);
+    }
+    m
+}
+
+#[test]
+fn sparse_short_products_round_part_by_part() {
+    // Parts of one and two limbs with few bits set, so that the exact products have long runs
+    // of zero limbs, and of exponents that put the two products of a part from 0 to 400 bits
+    // apart (every shift of the 384-bit window and past it), each sign: the parts of the product,
+    // the square, the norm and the absolute value against the exact rationals.
+    let mut s = 0x5EED_C0C0_0000_0015u64;
+    for _ in 0..size(30_000, 60) {
+        let mut p = || {
+            let bits = match below(&mut s, 3) {
+                0 => 1 + below(&mut s, 64),
+                _ => 65 + below(&mut s, 64),
+            };
+            let m = if below(&mut s, 3) == 0 {
+                super::common::mantissa(&mut s, bits)
+            } else {
+                sparse(&mut s, bits)
+            };
+            (m, bits, below(&mut s, 2) == 0)
+        };
+        let (a, b, c, d) = (p(), p(), p(), p());
+        let g = match below(&mut s, 4) {
+            0 => below(&mut s, 3) as i64,
+            1 => 120 + below(&mut s, 20) as i64,
+            2 => 250 + below(&mut s, 20) as i64,
+            _ => below(&mut s, 400) as i64,
+        };
+        // `ac` at exponent `ea + ec`, `bd` at `ea + ec - g` (and `ad`, `bc` alike).
+        let (ea, ec) = (below(&mut s, 20) as i64 - 10, below(&mut s, 20) as i64 - 10);
+        let eb = below(&mut s, 20) as i64 - 10 - g;
+        let ed = ea + ec - eb - g - g;
+        let x = BigComplex::new(
+            of_mantissa(&a.0, ea, a.1, a.2),
+            of_mantissa(&b.0, eb, b.1, b.2),
+        );
+        let y = BigComplex::new(
+            of_mantissa(&c.0, ec, c.1, c.2),
+            of_mantissa(&d.0, ed + g, d.1, d.2),
+        );
+        let prec = (1 + below(&mut s, 128), 1 + below(&mut s, 128));
+        let round = (mode(&mut s), mode(&mut s));
+        let what = format!("{x:?} · {y:?} at {prec:?} {round:?}");
+        let (ra, rb, rc, rd) = (
+            rational(x.re()),
+            rational(x.im()),
+            rational(y.re()),
+            rational(y.im()),
+        );
+        let mut z = target(&mut s, prec);
+        let o = z.set_mul_parts(&x, &y, round);
+        let [re, im] = parts_of(z, o);
+        part(
+            re,
+            &(&ra * &rc - &rb * &rd),
+            prec.0,
+            round.0,
+            &format!("re {what}"),
+        );
+        part(
+            im,
+            &(&ra * &rd + &rb * &rc),
+            prec.1,
+            round.1,
+            &format!("im {what}"),
+        );
+        let mut z = target(&mut s, prec);
+        let o = z.set_sqr_parts(&x, round);
+        let [re, im] = parts_of(z, o);
+        part(
+            re,
+            &(&ra * &ra - &rb * &rb),
+            prec.0,
+            round.0,
+            &format!("re sqr {what}"),
+        );
+        let two = Rational::from(2u8);
+        part(
+            im,
+            &(&two * &ra * &rb),
+            prec.1,
+            round.1,
+            &format!("im sqr {what}"),
+        );
+        let mut n = BigFloat::zero(prec.0);
+        let o = n.set_complex_norm(&x, round.0);
+        part(
+            (n, o),
+            &(&ra * &ra + &rb * &rb),
+            prec.0,
+            round.0,
+            &format!("norm {what}"),
+        );
+        let mut m = BigFloat::zero(prec.1);
+        let o = m.set_complex_abs(&x, round.1);
+        same(
+            &(m, o),
+            &sqrt_reference(&(&ra * &ra + &rb * &rb), prec.1, round.1),
+            &format!("abs {what}"),
+        );
+    }
+}
+
+#[test]
+fn roots_just_beside_a_rounding_boundary_round_part_by_part() {
+    // `√(q²)` for `q` whose parts are a number of the precision `p`, or a halfway point, moved by
+    // `δ` of about the bound of the working precision's error (`2^(e + 4 - w)`, `w = p + guard`):
+    // the attempts' intervals then hold the boundary, and must not decide on the wrong side.
+    let mut s = 0x5EED_C0C0_0000_0016u64;
+    for _ in 0..size(3000, 20) {
+        let p = if below(&mut s, 2) == 0 {
+            20 + below(&mut s, 94)
+        } else {
+            114 + below(&mut s, 200)
+        };
+        let guard = 2 * (64 - p.leading_zeros() as u64) + 16;
+        let w = if p <= 113 {
+            (p + guard).min(127)
+        } else {
+            p + guard
+        };
+        let q_part = |s: &mut u64, e: i64| -> BigFloat {
+            let t = super::common::mantissa(s, p);
+            // `t·2^k + h + δ`, `k` bits below: `h` half a unit (or none), `δ` near `2^(p + 4 - w)`
+            // units of `t`'s last place... in units of `2^-k`.
+            let k = w - p + 8;
+            let mut m = &t << k as usize;
+            if below(s, 2) == 0 {
+                m = &m + &pow2(k - 1);
+            }
+            let j = (k as i64 - (w - p) as i64 + 4 + below(s, 9) as i64 - 6).max(0) as u64;
+            let d = &pow2(j) + &Number::from(below(s, 1 << 10));
+            m = if below(s, 2) == 0 { &m + &d } else { &m - &d };
+            let bits = m.bits();
+            let neg = below(s, 2) == 0;
+            of_mantissa(&m, e, bits, neg)
+        };
+        let e = below(&mut s, 20) as i64 - 10;
+        let re = q_part(&mut s, e);
+        let shift = below(&mut s, 4) as i64;
+        let im = q_part(&mut s, e - shift);
+        let q = BigComplex::new(re.abs(), im);
+        let sq = q.sqr_round(100_000, Round::Nearest);
+        assert_eq!(sq.1, (Ordering::Equal, Ordering::Equal));
+        let round = (mode(&mut s), mode(&mut s));
+        let what = format!("sqrt({:?}) at {p} {round:?}", sq.0);
+        let (r, o) = sq.0.sqrt_round_parts((p, p), round);
+        let (a, b) = r.into_parts();
+        same(&(a, o.0), &reference(&rational(q.re()), p, round.0), &what);
+        same(&(b, o.1), &reference(&rational(q.im()), p, round.1), &what);
+    }
+}
+
+/// The mode that rounds `-x` as `round` rounds `x`: up and down swapped.
+fn swapped(round: Round) -> Round {
+    match round {
+        Round::Up => Round::Down,
+        Round::Down => Round::Up,
+        r => r,
+    }
+}
+
+#[test]
+fn roots_of_parts_astronomically_apart_end_and_round() {
+    // `√(a + b·i)` with `|b|` so far below `|a|` (exponents near the top and the bottom of the
+    // range, or just past the threshold of the direct decision) that the root is `√|a|` just
+    // above and `|b|/(2√|a|)` just below: for a square `a` both are exact, and only the side
+    // decides; Ziv's intervals alone would need `2(e_a - e_b)` bits.
+    let mut s = 0x5EED_C0C0_0000_0017u64;
+    for i in 0..size(1500, 20) {
+        let p = 1 + below(&mut s, 200);
+        let pc = 1 + below(&mut s, 100);
+        let square = i % 3 != 0;
+        let (ec, eb) = if i % 2 == 0 {
+            (
+                BigFloat::EXP_MAX / 2 - below(&mut s, 100) as i64,
+                BigFloat::EXP_MIN + below(&mut s, 100) as i64,
+            )
+        } else {
+            (
+                below(&mut s, 20) as i64 - 10,
+                -(2000 + below(&mut s, 500) as i64),
+            )
+        };
+        let c = of_mantissa(&super::common::mantissa(&mut s, pc), ec, pc, false);
+        let a = if square {
+            c.mul_round(&c, 2 * pc, Round::Nearest).0
+        } else {
+            let m = super::common::mantissa(&mut s, pc);
+            of_mantissa(&m, 2 * ec - below(&mut s, 2) as i64, pc, false)
+        };
+        let pb = 1 + below(&mut s, 100);
+        let b = of_mantissa(
+            &super::common::mantissa(&mut s, pb),
+            eb,
+            pb,
+            below(&mut s, 2) == 0,
+        );
+        let negative_a = below(&mut s, 2) == 0;
+        let a = if negative_a { -a } else { a };
+        let round = (mode(&mut s), mode(&mut s));
+        let z = BigComplex::new(a.clone(), b.clone());
+        let what = format!("sqrt({z:?}) at {p} {round:?}");
+        let (r, o) = z.sqrt_round_parts((p, p), round);
+        // Which part is `t` and which `u`, and their modes.
+        let (t, ot, rt, tn, u, ou, ru, un) = if negative_a {
+            (
+                r.im().clone(),
+                o.1,
+                round.1,
+                b.is_sign_negative(),
+                r.re().clone(),
+                o.0,
+                round.0,
+                false,
+            )
+        } else {
+            (
+                r.re().clone(),
+                o.0,
+                round.0,
+                false,
+                r.im().clone(),
+                o.1,
+                round.1,
+                b.is_sign_negative(),
+            )
+        };
+        let flip = |x: &(BigFloat, Ordering), n: bool| -> (BigFloat, Ordering) {
+            if n { (-&x.0, x.1.reverse()) } else { x.clone() }
+        };
+        let tiny = |x: &BigFloat| {
+            BigFloat::from_parts(
+                &one(),
+                x.exponent().unwrap() - 4 * p as i64 - 1000,
+                1,
+                Round::Nearest,
+            )
+            .0
+        };
+        // `t`: `√|a|` just above, in the mode for its sign.
+        let rt_mag = if tn { swapped(rt) } else { rt };
+        // `√|a| + δ` for a `δ > 0` far below: the exact root (to `4·pc` bits) with `δ` added, or
+        // the root itself when it is not dyadic.
+        let (sx, sxo) = a.abs().sqrt_round(4 * pc + 8, Round::Nearest);
+        let want_t = if sxo == Ordering::Equal {
+            sx.add_round(&tiny(&sx), p, rt_mag)
+        } else {
+            a.abs().sqrt_round(p, rt_mag)
+        };
+        same(&(t, ot), &flip(&want_t, tn), &format!("t of {what}"));
+        if square {
+            // `u`: `|b|/(2|c|)` just below.
+            let ru_mag = if un { swapped(ru) } else { ru };
+            let half = b
+                .abs()
+                .mul_round(&BigFloat::from(0.5), pb, Round::Nearest)
+                .0;
+            let (qx, qxo) = half.div_round(&c, 4 * (pb + pc) + p + 8, Round::Nearest);
+            let want_u = if qxo == Ordering::Equal {
+                qx.sub_round(&tiny(&qx), p, ru_mag)
+            } else {
+                half.div_round(&c, p, ru_mag)
+            };
+            same(&(u, ou), &flip(&want_u, un), &format!("u of {what}"));
+        }
+    }
+}
+
+#[test]
+fn long_sums_at_the_edges_of_the_window_round_part_by_part() {
+    // Products of parts of up to two limbs (256 bits exact), summed in the 384-bit window of
+    // `add4`, built so that each bit the window keeps apart from the precision decides:
+    // - `(2^127 + 1) - (2^128 - 1)·2^-129`: a difference whose only bit below the round bit
+    //   (at 128 bits) is in the window's low limb, past a tie;
+    // - `(2^128 - 1)² - 3·(2^129 + 1)/3·2^-129`: a shift of 255 that drops the low limb of the
+    //   second product alone (the middle limb's sticky bit), the rest of the difference a number
+    //   of 127 bits;
+    // - `(2^127 + 1)(2^128 - 2) + 5·(2^130 + 1)/5·2^-129`: a sum that carries out of the window
+    //   (the first product normalised to `2^256 - 4`) and drops its last bit, `2^255 + 2^-129`.
+    // Each scaled by `2^k`, negated, conjugated and turned by `i`, at precisions to 128 bits,
+    // every mode, against the exact rationals.
+    let n = |m: Number, e: i64, p: u64, negative: bool| of_mantissa(&m, e, p, negative);
+    let ones = &pow2(128) - &one();
+    let third = Number::from(3u8);
+    let fifth = Number::from(5u8);
+    let by3 = (&pow2(129) + &one()).div_rem(&third).0;
+    let by5 = (&pow2(130) + &one()).div_rem(&fifth).0;
+    assert_eq!(by3.bits(), 128);
+    assert_eq!(by5.bits(), 128);
+    let cases = [
+        (
+            n(&pow2(127) + &one(), 128, 128, false),
+            n(ones.clone(), -1, 128, false),
+            n(one(), 1, 1, false),
+            n(one(), 1, 1, false),
+        ),
+        (
+            n(ones.clone(), 128, 128, false),
+            n(third.clone(), 2, 2, false),
+            n(ones.clone(), 128, 128, false),
+            n(by3.clone(), -1, 128, false),
+        ),
+        (
+            n(&pow2(127) + &one(), 128, 128, false),
+            n(fifth.clone(), -126, 3, true),
+            n(&pow2(127) - &one(), 128, 127, false),
+            n(by5.clone(), 128, 128, false),
+        ),
+    ];
+    let mut s = 0x5EED_C0C0_0000_0019u64;
+    let precs: &[u64] = if cfg!(miri) {
+        &[2, 64, 127, 128]
+    } else {
+        &[1, 2, 53, 64, 65, 100, 126, 127, 128]
+    };
+    for (c, (a, b, cc, d)) in cases.iter().enumerate() {
+        for v in 0..8 {
+            if cfg!(miri) && v % 3 != 0 {
+                continue;
+            }
+            let k = below(&mut s, 200) as i64 - 100;
+            let scale = |x: &BigFloat| {
+                x.mul_round(
+                    &BigFloat::from_parts(&one(), k, 1, Round::Nearest).0,
+                    x.prec(),
+                    Round::Nearest,
+                )
+                .0
+            };
+            let mut x = BigComplex::new(scale(a), scale(b));
+            let mut y = BigComplex::new(cc.clone(), d.clone());
+            if v & 1 == 1 {
+                x = -&x;
+            }
+            if v & 2 == 2 {
+                x = x.conj();
+                y = y.conj();
+            }
+            if v & 4 == 4 {
+                // `(ix)(y)`: the parts swap, one negated.
+                x = BigComplex::new(-x.im(), x.re().clone());
+            }
+            let (ra, rb, rc, rd) = (
+                rational(x.re()),
+                rational(x.im()),
+                rational(y.re()),
+                rational(y.im()),
+            );
+            let (re, im) = (&ra * &rc - &rb * &rd, &ra * &rd + &rb * &rc);
+            for &p in precs {
+                for round in MODES {
+                    let prec = (p, p);
+                    let round = (round, mode(&mut s));
+                    let what = format!("case {c} variant {v}: {x:?} · {y:?} at {prec:?} {round:?}");
+                    let (r, o) = x.mul_round_parts(&y, prec, round);
+                    let (got_re, got_im) = r.into_parts();
+                    part((got_re, o.0), &re, prec.0, round.0, &format!("re {what}"));
+                    part((got_im, o.1), &im, prec.1, round.1, &format!("im {what}"));
+                    let mut z = target(&mut s, prec);
+                    let o = z.set_mul_parts(&x, &y, round);
+                    let [zr, zi] = parts_of(z, o);
+                    part(zr, &re, prec.0, round.0, &format!("into re {what}"));
+                    part(zi, &im, prec.1, round.1, &format!("into im {what}"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn roots_with_an_exact_part_beside_a_long_one_round_part_by_part() {
+    // `√(q²)` for `q = m + n·i` with `m > 0` far longer than the working precision `w` and
+    // `|n| < m` a number of the precision `p` or a halfway point of it: `t = m` is cut at every
+    // step, so `u = |b|/(2t)` comes out a little above `|n|`, within the bound of the working
+    // precision, and the decision of the long parts must leave it to the exact root. Then the
+    // same with the parts' roles swapped, `q = n + m·i` with `n > 0` (`a < 0`).
+    let mut s = 0x5EED_C0C0_0000_001Au64;
+    for i in 0..size(800, 8) {
+        let p = 1 + below(&mut s, 300);
+        let guard = 2 * (64 - p.leading_zeros() as u64) + 16;
+        let lm = p + guard + 20 + below(&mut s, 200);
+        let m = super::common::mantissa(&mut s, lm);
+        let nm = if i % 3 == 0 {
+            &(&super::common::mantissa(&mut s, p) << 1usize) + &one()
+        } else {
+            super::common::mantissa(&mut s, p)
+        };
+        let em = below(&mut s, 20) as i64 - 10;
+        let en = em - 1 - below(&mut s, 6) as i64;
+        let mf = of_mantissa(&m, em, lm, false);
+        let negative = below(&mut s, 2) == 0;
+        let nf = of_mantissa(&nm, en, nm.bits(), negative);
+        let q = if i % 2 == 0 {
+            BigComplex::new(mf, nf)
+        } else {
+            BigComplex::new(nf.abs(), if negative { -mf } else { mf })
+        };
+        let sq = q.sqr_round(100_000, Round::Nearest);
+        assert_eq!(sq.1, (Ordering::Equal, Ordering::Equal));
+        let round = (mode(&mut s), mode(&mut s));
+        let what = format!("sqrt({:?}) at {p} {round:?}", sq.0);
+        let (r, o) = sq.0.sqrt_round_parts((p, p), round);
+        let (a, b) = r.into_parts();
+        same(&(a, o.0), &reference(&rational(q.re()), p, round.0), &what);
+        same(&(b, o.1), &reference(&rational(q.im()), p, round.1), &what);
+        let mut z = target(&mut s, (p, p));
+        let o = z.set_sqrt_parts(&sq.0, round);
+        let [a, b] = parts_of(z, o);
+        same(
+            &a,
+            &reference(&rational(q.re()), p, round.0),
+            &format!("into {what}"),
+        );
+        same(
+            &b,
+            &reference(&rational(q.im()), p, round.1),
+            &format!("into {what}"),
+        );
+    }
+}
+
+#[test]
+fn roots_of_real_parts_astronomically_below_the_imaginary_end_and_round() {
+    // `√(a + b·i)` with `|a|` so far below `|b|` (exponents near the bottom and the top of the
+    // range, or a few thousand apart) that both parts are `s = √(|b|/2)` within `|a|/|b|`: `t`
+    // just above, `u` just below. For `b = ±2c²` `s = |c|` is exact and only the side decides;
+    // Ziv's intervals alone would need `e_b - e_a` bits.
+    let mut s = 0x5EED_C0C0_0000_001Bu64;
+    for i in 0..size(1500, 20) {
+        let p = 1 + below(&mut s, 200);
+        let pc = 1 + below(&mut s, 100);
+        let square = i % 3 != 0;
+        let (ec, ea) = if i % 2 == 0 {
+            (
+                BigFloat::EXP_MAX / 2 - below(&mut s, 100) as i64,
+                BigFloat::EXP_MIN + below(&mut s, 100) as i64,
+            )
+        } else {
+            (
+                below(&mut s, 20) as i64 - 10,
+                -(2000 + below(&mut s, 500) as i64),
+            )
+        };
+        let c = of_mantissa(&super::common::mantissa(&mut s, pc), ec, pc, false);
+        let b = if square {
+            let cc = c.mul_round(&c, 2 * pc, Round::Nearest).0;
+            cc.mul_round(&BigFloat::from(2), 2 * pc, Round::Nearest).0
+        } else {
+            let m = super::common::mantissa(&mut s, pc);
+            of_mantissa(&m, 2 * ec - below(&mut s, 2) as i64, pc, false)
+        };
+        let negative_b = below(&mut s, 2) == 0;
+        let b = if negative_b { -b } else { b };
+        let pa = 1 + below(&mut s, 100);
+        let a = of_mantissa(
+            &super::common::mantissa(&mut s, pa),
+            ea,
+            pa,
+            below(&mut s, 2) == 0,
+        );
+        let round = (mode(&mut s), mode(&mut s));
+        let z = BigComplex::new(a.clone(), b.clone());
+        let what = format!("sqrt({z:?}) at {p} {round:?}");
+        let (r, o) = z.sqrt_round_parts((p, p), round);
+        // `s` just above (`t`) or just below (`u`), rounded in the mode for the part's
+        // magnitude, and given the part's sign.
+        let near = |above: bool, negative: bool, round: Round| -> (BigFloat, Ordering) {
+            let mode = if negative { swapped(round) } else { round };
+            // `|b|/2`, exactly, and its root to more bits than it can have when it is exact.
+            let half = b
+                .abs()
+                .mul_round(&BigFloat::from(0.5), 2 * pc, Round::Nearest)
+                .0;
+            let (sx, sxo) = half.sqrt_round(4 * pc + 8, Round::Nearest);
+            let want = if sxo == Ordering::Equal {
+                let tiny = BigFloat::from_parts(
+                    &one(),
+                    sx.exponent().unwrap() - 4 * (p + pc) as i64 - 100,
+                    1,
+                    Round::Nearest,
+                )
+                .0;
+                if above {
+                    sx.add_round(&tiny, p, mode)
+                } else {
+                    sx.sub_round(&tiny, p, mode)
+                }
+            } else {
+                half.sqrt_round(p, mode)
+            };
+            if negative {
+                (-&want.0, want.1.reverse())
+            } else {
+                want
+            }
+        };
+        // `(re, im)` is `(t, ±u)` for `a > 0` and `(u, ±t)` for `a < 0`.
+        let t_is_re = !a.is_sign_negative();
+        same(
+            &(r.re().clone(), o.0),
+            &near(t_is_re, false, round.0),
+            &format!("re of {what}"),
+        );
+        same(
+            &(r.im().clone(), o.1),
+            &near(!t_is_re, negative_b, round.1),
+            &format!("im of {what}"),
+        );
+    }
+}
