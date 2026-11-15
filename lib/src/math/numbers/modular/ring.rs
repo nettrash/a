@@ -1003,7 +1003,7 @@ pub(in super::super) fn magnitude_64(x: &Number) -> Option<u64> {
 }
 
 /// The limbs of the magnitude of `x`, the least significant first, without zeros at the top.
-pub(in super::super) fn limbs_of(x: &Number) -> Vec<u64> {
+pub(crate) fn limbs_of(x: &Number) -> Vec<u64> {
     let mut l: Vec<u64> = if x.byte_order == ByteOrder::LittleEndian {
         x.value
             .chunks(8)
@@ -1081,7 +1081,7 @@ pub(in super::super) fn read_limbs(x: &Number, out: &mut [core::mem::MaybeUninit
 
 /// The non-negative number of the limbs `x`, the least significant first, in the byte order
 /// `order`, in the shortest form.
-pub(in super::super) fn from_limbs(x: &[u64], order: ByteOrder) -> Number {
+pub(crate) fn from_limbs(x: &[u64], order: ByteOrder) -> Number {
     let n = x.iter().rposition(|&l| l != 0).map_or(0, |i| i + 1);
     if n == 0 {
         return Number::new_from_u8(0, order);

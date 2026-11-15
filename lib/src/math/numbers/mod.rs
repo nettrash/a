@@ -125,6 +125,7 @@ pub(crate) use div::{divide_2by1, reciprocal};
 pub(crate) use factorial::product::times;
 pub(crate) use gcd::fraction;
 pub(crate) use gcd::{Bound, common_prefix, partial, quotients};
+pub(crate) use modular::ring::{from_limbs, limbs_of};
 pub(crate) use mul::basecase;
 pub(crate) use pow::montgomery::{redc_inverse, redc_limbs};
 pub(crate) use prime::is_prime_u64;
