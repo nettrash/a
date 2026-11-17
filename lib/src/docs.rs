@@ -146,6 +146,9 @@ struct MathEc;
 #[doc = include_str!("../docs/math/complex.md")]
 struct MathComplex;
 
+#[doc = include_str!("../docs/math/poly.md")]
+struct MathPoly;
+
 #[doc = include_str!("../docs/math/rational.md")]
 struct MathRational;
 

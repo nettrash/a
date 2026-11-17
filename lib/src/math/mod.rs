@@ -18,6 +18,10 @@
 //!   in either byte order; they add with `+` and `+=`, subtract with `-` and `-=`, multiply
 //!   with `*` and `*=`, divide with `/`, `/=`, `%` and `%=`, shift with `<<`, `>>`, `<<=` and
 //!   `>>=`, and are written and read as text in any radix from 2 to 36.
+//! * [`poly`]: polynomials in one variable with coefficients that are numbers, rationals, floats,
+//!   complex numbers or residues modulo an integer, their arithmetic, division and powers modulo a
+//!   polynomial, greatest common divisors and resultants, evaluation at many points and
+//!   interpolation, roots in double precision, certified or correctly rounded, and factorisation.
 //! * [`rational`]: rational numbers in lowest terms over [`numbers`], their arithmetic with `+`,
 //!   `-`, `*` and `/`, with numbers and primitive integers too, comparisons, rounding, and their
 //!   conversions from and to integers, text and floats; continued fractions, best approximations
@@ -28,4 +32,5 @@ pub mod ec;
 pub mod float;
 pub mod matrix;
 pub mod numbers;
+pub mod poly;
 pub mod rational;

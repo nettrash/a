@@ -11,10 +11,11 @@ Algorithms in pure Rust, with no dependencies:
 - **Integers of any size** (`a::math::numbers`): `Number`, with its arithmetic up to transforms for the longest products, roots, powers modulo a number, greatest common divisors, primes and text in any radix; prime sieves and counting, factorisation up to the quadratic sieve, arithmetic functions, modular arithmetic and discrete logarithms, and integer sequences.
 - **Rational numbers** (`a::math::rational`): `Rational`, in lowest terms, with its arithmetic, conversions to and from floats and text, continued fractions, best approximations, rational reconstruction, and the Bernoulli and harmonic numbers.
 - **Arbitrary-precision floats** (`a::math::float`): `BigFloat` and `BigComplex`, correctly rounded in four modes as MPFR and GNU MPC, with their arithmetic, roots and powers, conversions and text, the exponential, logarithmic, circular and hyperbolic functions and their inverses, and the constants π, `e`, `ln 2`, `ln 10`, `γ` and Catalan's `G`.
+- **Polynomials** (`a::math::poly`): `Polynomial<T>` over the integers, the rationals, floats and complex floats, and `ModPolynomial` modulo any integer, with fast products and division, greatest common divisors and resultants, evaluation at many points and interpolation, roots in double precision, certified or correctly rounded, and factorisation modulo primes and over the integers and the rationals.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers and rationals.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
 
 ## Usage
 
@@ -321,6 +322,40 @@ Measured on an Apple M4 Max on one thread, in ns, µs, ms or s a call at the pre
 | `BigComplex::powi_round(17)` | 113 bits | 830 ns | MPC 810 ns |
 | `&a * &b`, `Matrix<BigFloat>`, 8 × 8 | 256 bits | 13.2 µs | an `mpfr_fma` loop 18.1 µs |
 | `a.solve(&b)`, `Matrix<BigFloat>`, 8 × 8 | 53 bits | 3.71 µs | Gaussian elimination by `mpfr_fms` 3.11 µs |
+
+### Polynomials
+
+| Page | Contents |
+| --- | --- |
+| [Polynomials](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/poly.md) | `a::math::poly::Polynomial<T>`, dense, with coefficients that are `Number`s, `Rational`s, `f64`s or `Complex<f64>`s, and `ModPolynomial`, with residues modulo any `n ≥ 2` that it holds once, in one word below 2⁶⁴: `+`, `-`, `*`, `sqr` and `pow` by the schoolbook method with each sum of products reduced once (NEON's multiply-adds for small moduli, machine integers for small integer coefficients), the number-theoretic transforms on the coefficients or on their pieces, Kronecker substitution, and the FFT for long float products; power series inverses, division by Newton's method, pseudo-division and exact division on limbs and by Kronecker substitution, `mul_mod`, `pow_mod` and Brent and Kung's `compose_mod` with the inverse of the modulus kept, and `compose` by divide and conquer; greatest common divisors by Euclid's algorithm in Montgomery's form and the half gcd, over the integers the heuristic gcd and the multimodular algorithm, `xgcd` (multimodular over the rationals), `lcm`, resultants and discriminants (multimodular over the integers) and the subresultants by Lazard's and Ducos's sequence; evaluation at many points by Horner's rule at many points at once and the scaled remainder tree, products of linear factors, and interpolation on the subproduct tree or by Lagrange's and Newton's forms; complex roots in double precision by the Aberth–Ehrlich iteration in exact conjugate pairs, certified complex roots of integer and rational polynomials to any precision, real roots isolated by Descartes's rule and continued fractions, counted, and correctly rounded at any precision; and square-free decompositions, factorisations and tests of irreducibility modulo any prime (Kaltofen and Shoup's baby steps and giant steps, Cantor and Zassenhaus's splitting, Berlekamp's method, Ben-Or's test, the roots) and over the integers and the rationals (Zassenhaus's method with Hensel's lifting) |
+
+Measured on an Apple M4 Max on one thread, in ns, µs, ms or s a call, against the fastest of FLINT 3.6, NTL 11.6, PARI/GP 2.19 and, for the roots, Arb in FLINT that has the function; the page has the conditions, every size and all the losses. Modulo a word the products take 0.54 to 1.0 of FLINT's time from 128 coefficients for 50- to 64-bit moduli, and `x.pow_mod(&e, &f)` (the Frobenius of a factorisation) 0.2 to 0.32 from 256; evaluation at many points, products of linear factors and interpolation take 0.3 to 0.7 of FLINT's time from 1024 points; the factorisations modulo word primes 0.34 to 0.75 of FLINT's from degree 30 (but modulo 3 at degree 1000, 1.5 times), and over the integers 0.1 to 0.9 on random polynomials; the certified complex roots 0.15 to 0.92 of Arb's time, and the isolation of real roots 0.03 to 0.79 of FLINT's from degree 50. FLINT is faster at products of `Polynomial<Rational>` (2.5 to 9.4 times: every coefficient is kept in lowest terms, where `fmpq_poly` keeps one denominator), over the integers for coefficients of 32 and 64 bits (1.1 to 5.5: each `Number` coefficient is a vector of its own, where `fmpz` keeps a small one in a word), modulo primes below `2³²` from 256 coefficients (1.04 to 1.6: two 29-bit transform primes and lengths of powers of two against one 50-bit prime and truncated transforms), and below about 8 coefficients (its timing loops reuse the result's storage); NTL's `ZZ_pX` is faster modulo primes of 4 to 16 limbs from 128 to 256 coefficients (1.1 to 1.8: its 60-bit primes need no pieces of the residues).
+
+| Operation | Size | `a` | Fastest reference |
+| --- | --- | ---: | --- |
+| `ModPolynomial` `*`, n = 2⁶³ − 25 | 10⁵ by 10⁵ | 5.74 ms | FLINT 7.04 ms |
+| | 10⁶ by 10⁶ | 54.5 ms | FLINT 77.1 ms |
+| `ModPolynomial` `*`, n = 65,521 | 10⁴ by 10⁴ | 208 µs | FLINT 153 µs |
+| `div_rem`, n = 2⁶³ − 25 | 2·10⁴ by 10⁴ | 2.09 ms | FLINT 1.94 ms |
+| `inv_series`, n = 2⁶³ − 25 | 10⁴ | 978 µs | FLINT 1.14 ms |
+| `x.pow_mod(&e, &f)`, n = e = 2⁶³ − 25 | deg f = 1,000 | 3.79 ms | FLINT 14.8 ms |
+| `compose_mod`, n = 2⁶³ − 25 | 1,000 | 5.23 ms | FLINT 7.67 ms |
+| `ModPolynomial` `*`, n = 2¹²⁷ − 1 | 1,000 by 1,000 | 128 µs | NTL 159 µs |
+| `Polynomial<Number>` `*`, 64-bit coefficients | 10⁴ by 10⁴ | 1.15 ms | FLINT 885 µs |
+| `Polynomial<Number>` `*`, 1,000-bit coefficients | 10⁴ by 10⁴ | 17.0 ms | NTL 24.4 ms |
+| `pseudo_div_rem`, 64-bit coefficients | 256 by 128 | 1.28 ms | NTL 1.44 ms |
+| `div_exact`, 64-bit coefficients | 4,000 by 2,000 | 680 µs | NTL 810 µs |
+| `gcd`, n = 2⁵⁰ − 27, a common factor | degree 10⁴ | 11.0 ms | NTL 12.8 ms |
+| `gcd` over the integers, 64 bits, a common factor | degree 1,000 | 887 µs | NTL 1.02 ms |
+| `resultant` over the integers, 64 bits | degree 100 | 1.51 ms | PARI 1.89 ms |
+| `eval_many_u64`, n = 2⁵⁰ − 27 | 4,096 at 4,096 points | 1.47 ms | FLINT 3.20 ms |
+| `interpolate_u64`, n = 2⁵⁰ − 27 | 4,096 points | 2.36 ms | FLINT 4.92 ms |
+| `Polynomial<f64>::roots` | degree 100 | 314 µs | FLINT `cd_poly_find_roots` 509 µs |
+| `complex_roots(53)`, 16-bit coefficients | degree 100 | 4.18 ms | Arb 14.9 ms |
+| `real_root_intervals`, 16-bit coefficients | degree 1,000 | 27.5 ms | FLINT 65.9 ms |
+| `factor`, n = 2⁶⁴ − 59 | degree 1,000 | 82.8 ms | FLINT 191 ms |
+| `factor` over the integers, 64-bit coefficients | degree 100 | 507 µs | FLINT 1.14 ms |
+| `factor`, Swinnerton-Dyer polynomial | degree 32 | 539 µs | FLINT 781 µs |
 
 ### Elliptic curves
 
