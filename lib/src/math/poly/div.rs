@@ -35,7 +35,11 @@ pub(super) fn schoolbook_div_rem<T: Field>(a: &mut Vec<T>, d: &[T], inv: &T) -> 
 
 impl<T: Field> Polynomial<T> {
     /// The quotient `q` and the remainder `r` of the division by `d`: `self = q·d + r` with `r` of
-    /// a degree below that of `d`.
+    /// a degree below that of `d`. Over the rationals, from a quotient of 16 coefficients, through
+    /// the integers: both brought to common denominators and the pseudo-division of their
+    /// numerators by Kronecker substitution, each coefficient then brought to lowest terms once;
+    /// over the floats by the schoolbook method, and by Newton's method (the reversed divisor's
+    /// inverse as a power series) from 512 coefficients in the quotient and the divisor.
     ///
     /// # Panics
     ///
@@ -57,6 +61,9 @@ impl<T: Field> Polynomial<T> {
     pub fn div_rem(&self, d: &Self) -> (Self, Self) {
         let lead = d.c.last().expect("division by the zero polynomial");
         let inv = T::inv(lead);
+        if let Some(qr) = T::poly_div_rem(self, d, &inv) {
+            return qr;
+        }
         let mut r = self.c.clone();
         let q = schoolbook_div_rem(&mut r, &d.c, &inv);
         (Polynomial::new(q), Polynomial { c: r })
@@ -132,6 +139,16 @@ impl Polynomial<Number> {
     /// coefficient `l` and the degree `n`, for `self` of the degree `m`: `lᵏ·self = q·d + r` with
     /// `k = max(m - n + 1, 0)` and `r` of a degree below `n`, all with integer coefficients.
     ///
+    /// By the schoolbook method on limbs, each coefficient multiplied by the powers of `l` it
+    /// misses only when a step changes it, and from 384 coefficients in the quotient (32 for
+    /// divisors of 1,000 bits) by the schoolbook method with the fewest factors of `l` (a step
+    /// whose top coefficient `l` divides needs none, as in FLINT, so an exact or nearly exact
+    /// division stays the size of its operands, its results multiplied by the missing powers of
+    /// `l` at the end) while at most four steps need one, otherwise by Kronecker substitution: `lᵏ·self` and `d` evaluated at `2^s`
+    /// for a field `s` that holds every coefficient of the quotient and of the remainder (bounded
+    /// from `|q_j| ≤ (|lᵏ a| + n H |q|) / |l|`), the quotient's value the nearest integer to the
+    /// quotient of the two values, read back, and the remainder by one product.
+    ///
     /// # Panics
     ///
     /// Panics if `d` is the zero polynomial.
@@ -154,6 +171,28 @@ impl Polynomial<Number> {
         let m = self.c.len();
         if m < n {
             return (Polynomial::zero(), self.clone());
+        }
+        if n == 1 {
+            // lᵏ·self = (lᵏ⁻¹·self)·l: one power and a product a coefficient.
+            return (
+                Polynomial::new(super::arith::zdiv::pseudo_by_constant(&self.c, l)),
+                Polynomial::zero(),
+            );
+        }
+        if super::arith::pseudo_by_ks(self, d) {
+            // The schoolbook method with the fewest factors of l first: an exact or nearly exact
+            // division keeps the size of its operands there, where the substitution's field must
+            // hold the largest coefficient of the pseudo-quotient.
+            if let Some((q, r)) =
+                super::arith::zdiv::pseudo_div_rem_lazy(&self.c, &d.c, super::arith::LAZY_FACTORS)
+            {
+                return (Polynomial::new(q), Polynomial::new(r));
+            }
+            return self.pseudo_div_rem_ks(d);
+        }
+        if super::arith::limb_school(m, n) {
+            let (q, r) = super::arith::zdiv::pseudo_div_rem(&self.c, &d.c);
+            return (Polynomial::new(q), Polynomial::new(r));
         }
         let mut r = self.c.clone();
         let mut q = vec![Number::default(); m - n + 1];
@@ -183,6 +222,13 @@ impl Polynomial<Number> {
     /// The quotient `self / d` when it has integer coefficients and no remainder, `None`
     /// otherwise.
     ///
+    /// By the schoolbook method on limbs, each quotient coefficient the top one divided by the
+    /// leading coefficient of `d`, and from 12 coefficients in the quotient (48 for divisors of
+    /// 512 bits) by Kronecker substitution: the values at `2^s` divide when the polynomials do, so
+    /// a remainder of the integers says `None`; the quotient read back from theirs is checked by a
+    /// product, and `s` doubled while the check fails, up to Mignotte's bound `2^(deg q)·‖self‖₂`
+    /// on the coefficients of a divisor.
+    ///
     /// # Panics
     ///
     /// Panics if `d` is the zero polynomial.
@@ -196,6 +242,12 @@ impl Polynomial<Number> {
         }
         if m < n {
             return None;
+        }
+        if super::arith::exact_by_ks(self, d) {
+            return self.div_exact_ks(d);
+        }
+        if super::arith::limb_school(m, n) {
+            return super::arith::zdiv::div_exact(&self.c, &d.c).map(Polynomial::new);
         }
         let mut r = self.c.clone();
         let mut q = vec![Number::default(); m - n + 1];

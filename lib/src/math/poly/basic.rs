@@ -143,7 +143,9 @@ impl<T: Coefficient> Polynomial<T> {
     }
 
     /// The value at `x`, by Horner's rule: a product and a sum for each coefficient below the
-    /// leading one.
+    /// leading one. Over the integers, from 32 coefficients, on limbs: Horner's rule on word
+    /// blocks, and divide and conquer (`lo(x) + x^h·hi(x)` with the powers `x^(2^k)` squared once)
+    /// when the value grows past a few thousand bits.
     ///
     /// # Examples
     ///
@@ -156,16 +158,7 @@ impl<T: Coefficient> Polynomial<T> {
     /// assert!(p.eval(&Rational::new(1.into(), 2.into())).is_zero());
     /// ```
     pub fn eval(&self, x: &T) -> T {
-        let mut it = self.c.iter().rev();
-        let Some(top) = it.next() else {
-            return T::zero();
-        };
-        let mut v = top.clone();
-        for c in it {
-            T::mul_assign(&mut v, x);
-            T::add_assign(&mut v, c);
-        }
-        v
+        T::poly_eval(&self.c, x)
     }
 
     /// The derivative.
@@ -180,7 +173,9 @@ impl<T: Coefficient> Polynomial<T> {
         Polynomial::new(c)
     }
 
-    /// The composition `self(g)`, by Horner's rule on polynomials.
+    /// The composition `self(g)`: by Horner's rule on polynomials for short ones, and by divide
+    /// and conquer beyond, `self = lo + x^h hi` giving `lo(g) + g^h hi(g)` with the powers
+    /// `g^(2^i)` computed once.
     ///
     /// # Examples
     ///
@@ -193,16 +188,7 @@ impl<T: Coefficient> Polynomial<T> {
     /// assert_eq!(p.compose(&g).coeffs(), [2.0, 2.0, 1.0]);
     /// ```
     pub fn compose(&self, g: &Self) -> Self {
-        let mut it = self.c.iter().rev();
-        let Some(top) = it.next() else {
-            return Polynomial::zero();
-        };
-        let mut v = Polynomial::constant(top.clone());
-        for c in it {
-            v = &v * g;
-            v.add_constant(c);
-        }
-        v
+        self.compose_dc(g)
     }
 
     /// Adds `c` to the constant coefficient.

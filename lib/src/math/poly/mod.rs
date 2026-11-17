@@ -6,16 +6,21 @@
 //! Both are dense: a vector of the coefficients, the constant first, without zeros at the top, so
 //! that the zero polynomial has none and every other its leading coefficient last.
 
+mod arith;
 mod basic;
 mod coeff;
 mod div;
+mod eval;
+mod factor;
 mod gcd;
 mod modular;
 mod ops;
+mod roots;
 mod text;
 
 pub use coeff::{Coefficient, Field};
 pub use modular::ModPolynomial;
+pub use roots::ComplexRoot;
 
 /// A polynomial in one variable with coefficients of the type `T`, held densely: the
 /// coefficients, the constant first, without zeros at the top.

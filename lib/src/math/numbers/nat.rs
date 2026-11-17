@@ -627,3 +627,68 @@ pub(crate) fn sqrt_into(s: &mut Vec<u64>, a: &[u64], scratch: &mut Vec<u64>) {
         s.pop();
     }
 }
+
+/// Products of polynomials modulo a word by the number-theoretic transforms of the
+/// multiplication: the plan of a product ([`word_poly_plan`]`(la, lb, bits)`, `lb = 0` for a
+/// square, `None` past [`WORD_POLY_MAX`] coefficients) and the product by it
+/// ([`word_poly_mul`]`(r, a, b, n, plan)`, `b` empty for a square), and the products modulo
+/// `x^(2^k) - 1` ([`word_poly_plan_cyclic`]`(m, k, bits)`, [`word_poly_mul_cyclic`]), and
+/// products of polynomials of small integer coefficients ([`int_poly_plan`], [`int_poly_mul`]),
+/// and of coefficients of several limbs cut into pieces ([`limb_poly_plan`], [`limb_poly_mul`]).
+pub(crate) use super::mul::fft::poly::{
+    MAX_LEN as WORD_POLY_MAX, SplitTransform as LimbPolyTransform, mul as word_poly_mul,
+    mul_cyclic as word_poly_mul_cyclic, mul_cyclic_range as word_poly_mul_cyclic_range,
+    mul_int as int_poly_mul, mul_split as limb_poly_mul, mul_split_ready as limb_poly_mul_ready,
+    plan as word_poly_plan, plan_cyclic as word_poly_plan_cyclic, plan_int as int_poly_plan,
+    plan_split as limb_poly_plan, split_transform as limb_poly_transform,
+};
+
+/// Montgomery's products modulo an odd `m` of `N` limbs, `R = B^N`, the residues fully reduced
+/// (below `m`): the kernels of `pow::montgomery` (inline assembly on aarch64 in registers up to
+/// eight limbs and with the operands in memory from nine to sixteen, the Rust rows elsewhere), for
+/// the polynomials' Horner's rule modulo several limbs.
+#[derive(Clone, Copy)]
+pub(crate) struct Mont<const N: usize> {
+    /// The arithmetic in registers.
+    r: super::pow::montgomery::MontN<N>,
+    /// The modulus then `-1/m mod B`, as the kernels in memory take it.
+    mk: [u64; 17],
+}
+
+impl<const N: usize> Mont<N> {
+    /// The products modulo the odd `m`, the low limb first.
+    #[inline(always)]
+    pub(crate) fn new(m: [u64; N]) -> Self {
+        let mut mk = [0u64; 17];
+        if N < 17 {
+            mk[..N].copy_from_slice(&m);
+            mk[N] = binvert_limb(m[0]).wrapping_neg();
+        }
+        Mont {
+            r: super::pow::montgomery::MontN::new(m),
+            mk,
+        }
+    }
+
+    /// `a b / R mod m` for `a, b < m`.
+    #[inline(always)]
+    pub(crate) fn mul(&self, a: [u64; N], b: [u64; N]) -> [u64; N] {
+        use super::pow::montgomery::registers;
+        use super::pow::window::Registers;
+        if N > 8 && registers::has_long(N) {
+            let mut r = [0u64; N];
+            // SAFETY: `N` limbs at `a`, `b` and `r`, and the `N + 1` at `mk`, the modulus and
+            // `-1/m`; `has_long(N)`.
+            unsafe { registers::long(r.as_mut_ptr(), a.as_ptr(), b.as_ptr(), self.mk.as_ptr(), N) };
+            return r;
+        }
+        self.r.mul(a, b)
+    }
+}
+
+/// The inverse of `a` modulo the word `m >= 1`, below `m`, or `None` when they have a common
+/// factor, by Euclid's algorithm on words (the quotients of 1 to 3 by subtractions).
+#[inline]
+pub(crate) fn inverse_word(a: u64, m: u64) -> Option<u64> {
+    super::modular::word::inverse(a, m)
+}

@@ -21,6 +21,10 @@ pub(crate) struct Modulus {
     pub(crate) n: Number,
     /// The `k` limbs of `n`, the least significant first, the top one not zero.
     pub(crate) d: Vec<u64>,
+    /// The arithmetic modulo `n` when it is a word.
+    pub(crate) w: Option<super::arith::nmod::WordMod>,
+    /// The division by `n` when it has several limbs.
+    pub(crate) l: Option<super::arith::lred::LimbRed>,
 }
 
 /// The working memory of the products of residues.
@@ -63,6 +67,8 @@ impl Modulus {
         let d = limbs_of(n);
         Modulus {
             n: from_limbs(&d, ByteOrder::LittleEndian),
+            w: (d.len() == 1).then(|| super::arith::nmod::WordMod::new(d[0])),
+            l: (d.len() >= 2).then(|| super::arith::lred::LimbRed::new(&d)),
             d,
         }
     }
@@ -73,6 +79,12 @@ impl Modulus {
         self.d.len()
     }
 
+    /// The arithmetic modulo `n` when it fits in a word.
+    #[inline]
+    pub(crate) fn word_mod(&self) -> Option<&super::arith::nmod::WordMod> {
+        self.w.as_ref()
+    }
+
     /// `n` when it fits in a word.
     #[inline]
     pub(crate) fn word(&self) -> Option<u64> {
@@ -81,6 +93,14 @@ impl Modulus {
 
     /// The residue of `x`, of `k` limbs.
     pub(crate) fn residue(&self, x: &Number) -> Vec<u64> {
+        if let Some(l) = &self.l {
+            let mut r = vec![0u64; self.k()];
+            l.reduce(&limbs_of(x), &mut r);
+            if x.is_negative() && r.iter().any(|&v| v != 0) {
+                nat::sub_from(&mut r, &self.d);
+            }
+            return r;
+        }
         let r = x.rem_euclid(&self.n);
         let mut l = limbs_of(&r);
         l.resize(self.k(), 0);
@@ -90,6 +110,10 @@ impl Modulus {
     /// The residue of the limbs `x`, of any length, without zeros at the top or with them, into
     /// `out` of `k` limbs.
     pub(crate) fn reduce(&self, out: &mut [u64], x: &[u64], w: &mut Work) {
+        if let Some(l) = &self.l {
+            l.reduce(x, out);
+            return;
+        }
         let n = x.iter().rposition(|&l| l != 0).map_or(0, |i| i + 1);
         out.fill(0);
         if n < self.k() || (n == self.k() && cmp_limbs(&x[..n], &self.d) == Ordering::Less) {
@@ -144,11 +168,19 @@ impl Modulus {
 
     /// `out = a·b mod n`.
     pub(crate) fn mul(&self, out: &mut [u64], a: &[u64], b: &[u64], w: &mut Work) {
-        if let Some(n) = self.word() {
-            out[0] = ((u128::from(a[0]) * u128::from(b[0])) % u128::from(n)) as u64;
+        if let Some(w) = &self.w {
+            out[0] = w.mul(a[0], b[0]);
             return;
         }
         let k = self.k();
+        if let Some(l) = &self.l
+            && k <= 8
+        {
+            let mut p = [0u64; 16];
+            nat::mul_to(&mut p[..2 * k], a, b, &mut w.s);
+            l.reduce(&p[..2 * k], out);
+            return;
+        }
         w.p.clear();
         w.p.resize(2 * k, 0);
         nat::mul_to(&mut w.p, a, b, &mut w.s);
@@ -159,6 +191,9 @@ impl Modulus {
 
     /// The inverse of `a` modulo `n`, `None` when it has none.
     pub(crate) fn inv(&self, a: &[u64]) -> Option<Vec<u64>> {
+        if let Some(w) = &self.w {
+            return w.inv(a[0]).map(|v| vec![v]);
+        }
         let x = self.number(a).mod_inverse(&self.n)?;
         Some(self.residue(&x))
     }
@@ -389,8 +424,13 @@ impl ModPolynomial {
         )
     }
 
-    /// The value at `x` modulo `n`, by Horner's rule.
+    /// The value at `x` modulo `n`, by Horner's rule: for a word modulus with the precomputed
+    /// quotient of `x` (Shoup's product) in two chains, the even and the odd coefficients.
     pub fn eval(&self, x: &Number) -> Number {
+        if let Some(w) = self.m.word_mod() {
+            let x = self.m.residue(x)[0];
+            return Number::from(super::arith::wmul::eval(&self.c, x, w));
+        }
         let k = self.m.k();
         let x = self.m.residue(x);
         let mut v = vec![0u64; k];
@@ -421,18 +461,12 @@ impl ModPolynomial {
         ModPolynomial::of(self.m.clone(), c)
     }
 
-    /// The composition `self(g)`, by Horner's rule on polynomials.
+    /// The composition `self(g)`: by Horner's rule on polynomials for short ones, and by divide
+    /// and conquer beyond, `self = lo + x^h hi` giving `lo(g) + g^h hi(g)` with the powers
+    /// `g^(2^i)` computed once.
     #[track_caller]
     pub fn compose(&self, g: &ModPolynomial) -> ModPolynomial {
-        self.same_modulus(g);
-        let mut v = self.zero_like();
-        for i in (0..self.length()).rev() {
-            v = &v * g;
-            let mut c0 = ModPolynomial::of(self.m.clone(), self.limbs(i).to_vec());
-            c0 += &v;
-            v = c0;
-        }
-        v
+        self.compose_fast(g)
     }
 
     /// The product by the constant `c`, reduced modulo `n`.
@@ -496,7 +530,10 @@ impl ModPolynomial {
     }
 
     /// The quotient `q` and the remainder `r` of the division by `d`: `self = q·d + r` with `r` of
-    /// a degree below that of `d`.
+    /// a degree below that of `d`. By the schoolbook method for a short quotient or divisor (for a
+    /// word modulus with the remainder's coefficients kept as unreduced sums, one reduction each),
+    /// and by Newton's method beyond: the reversed quotient is the reversed dividend times the
+    /// inverse of the reversed divisor as a power series.
     ///
     /// # Panics
     ///
@@ -504,90 +541,7 @@ impl ModPolynomial {
     /// the moduli differ.
     #[track_caller]
     pub fn div_rem(&self, d: &ModPolynomial) -> (ModPolynomial, ModPolynomial) {
-        self.same_modulus(d);
-        let dl = d.length();
-        assert!(dl > 0, "division by the zero polynomial");
-        let inv = self
-            .m
-            .inv(d.limbs(dl - 1))
-            .expect("the leading coefficient is not a unit modulo n");
-        let k = self.m.k();
-        let m = self.length();
-        if m < dl {
-            return (self.zero_like(), self.clone());
-        }
-        let mut r = self.c.clone();
-        let mut q = vec![0u64; (m - dl + 1) * k];
-        let mut t = vec![0u64; k];
-        let mut u = vec![0u64; k];
-        let mut w = Work::default();
-        for i in (0..=m - dl).rev() {
-            let top = (i + dl - 1) * k;
-            self.m.mul(&mut t, &r[top..top + k], &inv, &mut w);
-            if t.iter().any(|&l| l != 0) {
-                for j in 0..dl - 1 {
-                    self.m.mul(&mut u, &t, d.limbs(j), &mut w);
-                    self.m.sub(&mut r[(i + j) * k..(i + j + 1) * k], &u);
-                }
-            }
-            q[i * k..(i + 1) * k].copy_from_slice(&t);
-        }
-        r.truncate((dl - 1) * k);
-        (
-            ModPolynomial::of(self.m.clone(), q),
-            ModPolynomial::of(self.m.clone(), r),
-        )
-    }
-
-    /// The monic greatest common divisor; the zero polynomial when both are zero.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a leading coefficient that the algorithm divides by is not a unit modulo `n`
-    /// (never for a prime `n`), or the moduli differ.
-    #[track_caller]
-    pub fn gcd(&self, other: &ModPolynomial) -> ModPolynomial {
-        self.same_modulus(other);
-        let (mut a, mut b) = (self.clone(), other.clone());
-        while !b.is_zero() {
-            let r = &a % &b;
-            a = b;
-            b = r;
-        }
-        a.to_monic()
-    }
-
-    /// `(g, s, t)` with `g` the monic greatest common divisor and `g = s·self + t·other`;
-    /// `(0, 0, 0)` when both are zero.
-    ///
-    /// # Panics
-    ///
-    /// As [`gcd`](ModPolynomial::gcd).
-    #[track_caller]
-    pub fn xgcd(&self, other: &ModPolynomial) -> (ModPolynomial, ModPolynomial, ModPolynomial) {
-        self.same_modulus(other);
-        let (mut a, mut b) = (self.clone(), other.clone());
-        let (mut sa, mut sb) = (self.one_like(), self.zero_like());
-        let (mut ta, mut tb) = (self.zero_like(), self.one_like());
-        while !b.is_zero() {
-            let (q, r) = a.div_rem(&b);
-            let s = &sa - &(&q * &sb);
-            let t = &ta - &(&q * &tb);
-            (a, b) = (b, r);
-            (sa, sb) = (sb, s);
-            (ta, tb) = (tb, t);
-        }
-        match a.degree() {
-            None => (a.clone(), a.clone(), a),
-            Some(d) => {
-                let inv = self
-                    .m
-                    .inv(a.limbs(d))
-                    .expect("the leading coefficient is not a unit modulo n");
-                let inv = self.m.number(&inv);
-                (a.scale(&inv), sa.scale(&inv), ta.scale(&inv))
-            }
-        }
+        self.div_rem_fast(d)
     }
 
     /// `self · b mod f`.
@@ -597,10 +551,13 @@ impl ModPolynomial {
     /// As [`div_rem`](ModPolynomial::div_rem) by `f`.
     #[track_caller]
     pub fn mul_mod(&self, b: &ModPolynomial, f: &ModPolynomial) -> ModPolynomial {
-        &(self * b) % f
+        self.same_modulus(f);
+        (self * b).rem_fast(f)
     }
 
-    /// `selfᵉ mod f`, by repeated squaring modulo `f`.
+    /// `selfᵉ mod f`: the inverse of the reversed `f` computed once, then squares and products
+    /// modulo `f` by sliding windows of the exponent's bits (`x^e` by squares and shifts), each
+    /// remainder two products by Newton's method, or the schoolbook division for a short `f`.
     ///
     /// # Panics
     ///
@@ -620,16 +577,7 @@ impl ModPolynomial {
     #[track_caller]
     pub fn pow_mod(&self, e: &Number, f: &ModPolynomial) -> ModPolynomial {
         self.same_modulus(f);
-        assert!(!e.is_negative(), "a negative exponent");
-        let mut r = &self.one_like() % f;
-        let b = self % f;
-        for i in (0..e.bits()).rev() {
-            r = r.mul_mod(&r, f);
-            if e.bit(i) {
-                r = r.mul_mod(&b, f);
-            }
-        }
-        r
+        super::arith::mdiv::ModInverse::new(f).pow_mod(self, e)
     }
 }
 
@@ -699,29 +647,20 @@ impl SubAssign<&ModPolynomial> for ModPolynomial {
 
 impl Mul<&ModPolynomial> for &ModPolynomial {
     type Output = ModPolynomial;
-    /// The schoolbook product.
+    /// The product, by the method the lengths and the modulus call for. For a word modulus:
+    /// the schoolbook method with each coefficient a sum of products reduced once (in a word by
+    /// the vector kernels below `2^32`, in two or three words above), and from about 50 to 100
+    /// coefficients the number-theoretic transforms of the integers' multiplication applied to
+    /// the coefficients, modulo as many of its primes below `2^29` as make the convolution exact,
+    /// each coefficient brought back modulo `n` by the Chinese remainder theorem. For a modulus of
+    /// several limbs: the schoolbook method below 6 coefficients, from 48 the same transforms on
+    /// pieces of the coefficients of up to 112 bits (for 2 to 9 limbs and products of up to about
+    /// 6,000 coefficients), otherwise Kronecker substitution into the integers' multiplication;
+    /// one division by `n` a coefficient.
     #[track_caller]
     fn mul(self, rhs: &ModPolynomial) -> ModPolynomial {
         self.same_modulus(rhs);
-        let (a, b) = (self.length(), rhs.length());
-        if a == 0 || b == 0 {
-            return self.zero_like();
-        }
-        let k = self.m.k();
-        let mut c = vec![0u64; (a + b - 1) * k];
-        let mut t = vec![0u64; k];
-        let mut w = Work::default();
-        for i in 0..a {
-            let x = self.limbs(i);
-            if x.iter().all(|&l| l == 0) {
-                continue;
-            }
-            for j in 0..b {
-                self.m.mul(&mut t, x, rhs.limbs(j), &mut w);
-                self.m.add(&mut c[(i + j) * k..(i + j + 1) * k], &t);
-            }
-        }
-        ModPolynomial::of(self.m.clone(), c)
+        super::arith::mod_mul(self, rhs)
     }
 }
 
@@ -777,7 +716,7 @@ impl Rem<&ModPolynomial> for &ModPolynomial {
     type Output = ModPolynomial;
     #[track_caller]
     fn rem(self, rhs: &ModPolynomial) -> ModPolynomial {
-        self.div_rem(rhs).1
+        self.rem_fast(rhs)
     }
 }
 

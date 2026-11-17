@@ -39,6 +39,16 @@ impl<T: Coefficient> MulAssign<&Polynomial<T>> for Polynomial<T> {
 
 impl<T: Coefficient> Mul<&Polynomial<T>> for &Polynomial<T> {
     type Output = Polynomial<T>;
+    /// The product, by the method the coefficients call for: over the integers by Kronecker
+    /// substitution into the integers' multiplication (Karatsuba's, Toom's and the
+    /// number-theoretic transforms by the lengths), or from 48 coefficients of at most 112 bits
+    /// by the number-theoretic transforms on the coefficients with the Chinese remainder theorem
+    /// for signed values; over the rationals the same on common
+    /// denominators, each coefficient then in lowest terms; over the floats and the complex
+    /// floats by the schoolbook method, and from about 512 coefficients in the shorter operand (80
+    /// for complex floats) by a fast
+    /// Fourier transform of a length `N`, within `|ĉ_k - c_k| ≤ 11 log₂(N) ε ‖a‖₂ ‖b‖₂` (`ε =
+    /// 2⁻⁵³`) rather than the schoolbook's componentwise `γ_m Σ |a_i| |b_(k-i)|`.
     fn mul(self, rhs: &Polynomial<T>) -> Polynomial<T> {
         if self.c.is_empty() || rhs.c.is_empty() {
             return Polynomial::zero();
