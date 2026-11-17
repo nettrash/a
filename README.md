@@ -12,10 +12,11 @@ Algorithms in pure Rust, with no dependencies:
 - **Rational numbers** (`a::math::rational`): `Rational`, in lowest terms, with its arithmetic, conversions to and from floats and text, continued fractions, best approximations, rational reconstruction, and the Bernoulli and harmonic numbers.
 - **Arbitrary-precision floats** (`a::math::float`): `BigFloat` and `BigComplex`, correctly rounded in four modes as MPFR and GNU MPC, with their arithmetic, roots and powers, conversions and text, the exponential, logarithmic, circular and hyperbolic functions and their inverses, and the constants π, `e`, `ln 2`, `ln 10`, `γ` and Catalan's `G`.
 - **Polynomials** (`a::math::poly`): `Polynomial<T>` over the integers, the rationals, floats and complex floats, and `ModPolynomial` modulo any integer, with fast products and division, greatest common divisors and resultants, evaluation at many points and interpolation, roots in double precision, certified or correctly rounded, and factorisation modulo primes and over the integers and the rationals.
+- **Fourier transforms** (`a::math::fft`): complex transforms of any length, real transforms, the cosine and sine transforms of types I to IV, transforms of two and three dimensions, and linear and circular convolutions and correlations, on `f32` and `f64`.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers and rationals.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers on x86_64; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; everything else is portable Rust.
 
 ## Usage
 
@@ -356,6 +357,34 @@ Measured on an Apple M4 Max on one thread, in ns, µs, ms or s a call, against t
 | `factor`, n = 2⁶⁴ − 59 | degree 1,000 | 82.8 ms | FLINT 191 ms |
 | `factor` over the integers, 64-bit coefficients | degree 100 | 507 µs | FLINT 1.14 ms |
 | `factor`, Swinnerton-Dyer polynomial | degree 32 | 539 µs | FLINT 781 µs |
+
+### Fourier transforms
+
+| Page | Contents |
+| --- | --- |
+| [Fourier transforms](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/fft.md) | `a::math::fft`: `Fft<T>`, the complex transform of `f32` and `f64` values of any length, planned once, by Stockham passes of the radices 2, 4, 8, 3, 5, 7 and the primes to 19 (NEON, SSE2 or AVX2 with FMA chosen at run time, portable elsewhere), a larger prime factor by its own plan, and prime lengths by Rader's or Bluestein's algorithm with a smooth inner length; `RealFft<T>`, the transform of reals into the `n/2 + 1` values of the spectrum, by the half-length complex transform for even lengths and a split by the smallest factor for odd ones; `Dct<T>` and `Dst<T>`, the eight cosine and sine transforms of FFTW's `REDFT` and `RODFT` kinds by FFTW's accurate algorithms; `Fft2<T>` and `Fft3<T>` by tiles of columns; every inverse unscaled, every method on batches, and `_with_scratch` forms that never allocate; and `convolve`, `correlate`, `circular_convolve` and `circular_correlate` of real or complex sequences, by SIMD direct sums, padded transforms or overlap-add, chosen by a measured model of their costs, with the plans kept in a bounded cache shared by the threads |
+
+Measured on an Apple M4 Max on one thread, in ns, µs or ms a call, the median of three runs, against the fastest of FFTW 3.3.11 (Homebrew's build, which on arm64 has only its scalar codelets), rustfft 6.4.1 and realfft 3.5.1, and Apple's Accelerate vDSP that has the transform; the page has the conditions, every size and all the losses. The complex transform takes 0.52 to 0.70 of FFTW's time and 0.59 to 0.80 of rustfft's for powers of two from 64 in `f64` (0.55 to 1.04 of vDSP's), and 0.30 to 0.45 and 0.59 to 0.82 in `f32`; other smooth lengths from 25 take 0.24 to 0.89 of FFTW's time and 0.19 to 0.83 of rustfft's, and primes from 101 and twice primes 0.19 to 0.76 and 0.23 to 0.81. The real transforms of powers of two from 512 take 0.71 to 0.97 of FFTW's time in `f64` and 0.40 to 0.60 in `f32`, those of 10³ to 10⁶ values (`10^k`, 6,000 and 30,000) and of the primes 101 to 100,003 0.28 to 0.97 of the fastest reference's; the cosine and sine transforms of types II to IV from 1000 values (but 1023) 0.57 to 1.03 of FFTW's time in `f64` and 0.36 to 0.66 in `f32`; `Fft2` and `Fft3` from 128 values a side 0.43 to 0.99 of FFTW's (but 1024 × 1024 in `f64`, 1.19 times); and the convolutions against an operand of 10⁴ values or more 0.18 to 1.07 of the fastest reference's time. vDSP is faster in `f32`, 1.2 to 3.7 times, at the complex transform from 128 values, the real one from 64, the cosine transforms up to 16,384 and the two-dimensional one (it works on split complex data, `a` on interleaved values); FFTW and rustfft are faster at single complex transforms of up to 32 values and of 6 to 24, and rustfft at batches of 16 and 32 (1.1 to 3.7 times: about 5 ns of dispatch a call and no composite codelets); FFTW or realfft at real transforms of up to 64 values and their batches (1.2 to 7.1), at odd real lengths (1.1 to 6.2: real codelets for odd radices), at DCT-I and DST-I of `2^k ± 1` (1.1 to 1.5), at cosine and sine transforms of 255 and 1023 and short ones in `f64` (1.1 to 2.3), and at some two- and three-dimensional sizes (1.1 to 2.1; the tiles are copied value by value); vDSP at short convolutions (operands of up to 100 values, 1.1 to 1.8 times, and 1,000 by 64 in `f32`, 1.12); and FFTW and rustfft in three cells near the switch of the convolutions' paths (1.34 to 1.35). The x86_64 paths were tested under emulation only, never timed.
+
+| Operation | Size | `a` | Fastest reference |
+| --- | --- | ---: | --- |
+| `Fft::<f64>` forward | 1,024 | 1.33 µs | vDSP 1.41 µs |
+| | 2²⁰ | 4.22 ms | rustfft 5.51 ms |
+| | 10⁶ | 3.38 ms | FFTW 7.64 ms |
+| `Fft::<f64>` forward, prime | 100,003 | 1.60 ms | FFTW 2.24 ms |
+| `Fft::<f64>` forward | 16 | 19.0 ns | FFTW 12.0 ns |
+| `Fft::<f32>` forward | 1,024 | 705 ns | vDSP 306 ns |
+| `RealFft::<f64>` forward | 1,024 | 954 ns | vDSP 899 ns |
+| | 10⁶ | 1.87 ms | FFTW 2.85 ms |
+| | 2,187 | 5.00 µs | FFTW 3.53 µs |
+| `RealFft::<f32>` forward | 65,536 | 50.9 µs | vDSP 30.1 µs |
+| `Dct::<f64>`, DCT-II | 1,024 | 1.30 µs | FFTW 1.45 µs |
+| `Dct::<f32>`, DCT-II | 1,024 | 729 ns | vDSP 412 ns |
+| `Fft2::<f64>` forward | 1000 × 1000 | 3.80 ms | FFTW 5.47 ms |
+| `Fft3::<f64>` forward | 128 × 128 × 128 | 10.5 ms | FFTW 13.4 ms |
+| `convolve`, `f64` | 10⁵ by 3 | 18.2 µs | vDSP 42.1 µs |
+| | 10⁵ by 10⁵ | 1.15 ms | FFTW 1.46 ms |
+| `convolve`, `Complex<f32>` | 10⁴ by 16 | 12.3 µs | rustfft 25.0 µs |
 
 ### Elliptic curves
 

@@ -6,6 +6,9 @@
 //! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, whose
 //!   points add with `+`, subtract with `-` and multiply by a number with `*`, and the curves in
 //!   common use; on numbers, and not constant-time.
+//! * [`fft`]: fast Fourier transforms of real and complex sequences of any length, in one, two
+//!   and three dimensions and in batches; cosine and sine transforms of types I to IV; and linear
+//!   and circular convolutions and correlations.
 //! * [`float`]: binary floats of any precision, each result correctly rounded in four modes as
 //!   MPFR rounds it: their arithmetic, roots and powers, conversions and text, exponentials,
 //!   logarithms, hyperbolic and circular functions and constants; and complex numbers of two
@@ -29,6 +32,7 @@
 
 pub mod complex;
 pub mod ec;
+pub mod fft;
 pub mod float;
 pub mod matrix;
 pub mod numbers;
