@@ -1,6 +1,7 @@
 mod allocations;
 mod complex;
 mod ec;
+mod fft;
 mod float;
 mod matrix;
 mod numbers;
