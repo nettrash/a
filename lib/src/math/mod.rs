@@ -29,6 +29,10 @@
 //!   `-`, `*` and `/`, with numbers and primitive integers too, comparisons, rounding, and their
 //!   conversions from and to integers, text and floats; continued fractions, best approximations
 //!   and rational reconstruction; and the Bernoulli and harmonic numbers.
+//! * [`special`]: special functions of floats, and of complex numbers for some: the gamma family
+//!   with the incomplete gamma and beta functions and their inverses, the error functions,
+//!   Bessel and Airy functions, the Riemann and Hurwitz zeta functions and polylogarithms, the
+//!   Lambert W function, exponential and elliptic integrals and the orthogonal polynomials.
 
 pub mod complex;
 pub mod ec;
@@ -38,3 +42,4 @@ pub mod matrix;
 pub mod numbers;
 pub mod poly;
 pub mod rational;
+pub mod special;

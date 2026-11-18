@@ -13,6 +13,7 @@ Algorithms in pure Rust, with no dependencies:
 - **Arbitrary-precision floats** (`a::math::float`): `BigFloat` and `BigComplex`, correctly rounded in four modes as MPFR and GNU MPC, with their arithmetic, roots and powers, conversions and text, the exponential, logarithmic, circular and hyperbolic functions and their inverses, and the constants π, `e`, `ln 2`, `ln 10`, `γ` and Catalan's `G`.
 - **Polynomials** (`a::math::poly`): `Polynomial<T>` over the integers, the rationals, floats and complex floats, and `ModPolynomial` modulo any integer, with fast products and division, greatest common divisors and resultants, evaluation at many points and interpolation, roots in double precision, certified or correctly rounded, and factorisation modulo primes and over the integers and the rationals.
 - **Fourier transforms** (`a::math::fft`): complex transforms of any length, real transforms, the cosine and sine transforms of types I to IV, transforms of two and three dimensions, and linear and circular convolutions and correlations, on `f32` and `f64`.
+- **Special functions** (`a::math::special`): the gamma family, the error functions, Bessel and Airy functions of real order, the zeta function and polylogarithms, Lambert W and the exponential integrals, elliptic integrals, Jacobi elliptic functions and orthogonal polynomials — of `f32`, `f64` and complex arguments, each with a stated ulp bound.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers and rationals.
 
@@ -385,6 +386,30 @@ Measured on an Apple M4 Max on one thread, in ns, µs or ms a call, the median o
 | `convolve`, `f64` | 10⁵ by 3 | 18.2 µs | vDSP 42.1 µs |
 | | 10⁵ by 10⁵ | 1.15 ms | FFTW 1.46 ms |
 | `convolve`, `Complex<f32>` | 10⁴ by 16 | 12.3 µs | rustfft 25.0 µs |
+
+### Special functions
+
+| Page | Contents |
+| --- | --- |
+| [Special functions](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/special.md) | `a::math::special`, of `f32`, `f64` and complex arguments, every function with a stated ulp bound tested against mpmath at 80 digits: `gamma`, `lgamma` (with `lgamma_sign`), `digamma`, `polygamma`, `beta`, `lbeta`, `beta_inc` with its complement and their inverses, `gamma_p`, `gamma_q` and their inverses, `factorial`, `binomial`, `pochhammer`; `erf`, `erfc`, `erfcx`, `erf_inv`, `erfc_inv`, `faddeeva`, `fresnel`, `dawson`; `bessel_j`, `bessel_y`, `bessel_i`, `bessel_k` of integer and real order (with `bessel_i_scaled` and `bessel_k_scaled`) and the spherical `sph_bessel_j`, `sph_bessel_y`, `sph_bessel_i`, `sph_bessel_k`, and `airy_ai`, `airy_bi` with their derivatives; `zeta`, `hurwitz_zeta`, `dilog`, `polylog`, `lambert_w0`, `lambert_wm1`, `expint_e1`, `expint_ei`, `expint_en`; `ellip_k`, `ellip_e`, `ellip_pi`, `ellip_f`, `ellip_e_inc`, `ellip_pi_inc`, Carlson's `carlson_rc`, `carlson_rf`, `carlson_rd`, `carlson_rj`, `jacobi_elliptic` (the `sn`, `cn` and `dn` at once), and the orthogonal polynomials `legendre_p`, `assoc_legendre_p`, `chebyshev_t`, `chebyshev_u`, `gegenbauer_c`, `jacobi_p`, `laguerre_l`, `assoc_laguerre_l`, `hermite_h`, `hermite_he` |
+
+Measured on an Apple M4 Max on one thread with fat LTO, in ns a call, the median of three quiet rounds, against libm 0.2, GSL 2.8, Boost.Math 1.92 (without promotion to `long double`), Cephes and the crates statrs 0.18, special 0.11 and puruspe 0.4; the page has the conditions, every domain and all the losses, each beside the accuracy of the reference that is fastest there (several of them are 10³ ulps or more off in that cell). `lgamma` takes 0.52 to 0.71 of the fastest reference's time for arguments 0.5 to 8, `gamma_p` and `gamma_q` near the mean 0.33 from `a` of 200 to 10⁶ and `beta_inc_inv` 0.36 at `a` and `b` of 10⁵ to 10⁷; `erf` and `erfc` 0.49 to 0.66 of the fastest's, `dawson` 0.18 to 0.61 and `fresnel` 0.45 to 0.56; `zeta` 0.31 to 0.62, `polylog` of order 3 0.12 of Cephes's and `E₃` 0.15 of statrs's; `ellip_k` and `ellip_e` 0.35 to 0.53 of Boost's below `m` = 0.8; the Airy functions 0.24 to 0.56, `bessel_i` at large arguments and small orders 0.22 of puruspe's, and `chebyshev_t` of degree 1000 0.20 of Boost's. The references are faster at: puruspe's `bessel_j` and `bessel_y` of order 0 and 1 (1.7 to 1.8 times), and the general-order Bessel and Neumann functions of moderate order and argument (1.4 to 4.9: GSL, Cephes and puruspe — the last 10¹³ ulps off at the general-order `J`); Boost's `digamma` and `polygamma` at negative arguments (1.9 to 2.1); `binomial` of large arguments (2.9, Boost 386 ulps off) and `gamma_q_inv` for tiny `q` (3.2); GSL's `fermi_dirac_int` at `polylog` past `x` = −2 (84, GSL 10² ulps off there); puruspe's and special's Lambert W (2 to 3); statrs's `Eₙ` for large `n` (about 3, at 40 ulps); Boost's `carlson_rd` and `carlson_rj` (1.8 to 1.9) and `ellip_pi` at `n` > 1 (19 — Boost's principal value is 5·10¹¹ ulps off there); GSL's `jacobi_elliptic` (1.8, against its 10⁶ ulps); and Boost's closed forms for the orthogonal polynomials up to degree 20 (4 to 6 — `a` wins from degree 100 on). The x86_64 paths were tested under emulation only, never timed.
+
+| Function | Domain | `a` | Fastest reference |
+| --- | --- | ---: | --- |
+| `lgamma` | [3, 8] | 3.31 ns | puruspe 6.33 ns |
+| `gamma_p`, `gamma_q` | 200 < `a` < 10⁴, `x` ~ `a` | 47.8 ns | special 145.4 ns |
+| `beta_inc_inv` | `a`, `b` in [10⁵, 10⁷], `x` within 3σ of the mean | 776 ns | Boost 2175 ns |
+| `erfc` | [3, 8] | 4.66 ns | statrs 9.23 ns |
+| `dawson` | [0.5, 8] | 1.78 ns | cephes 10.01 ns |
+| `fresnel` | [8, 10⁴] | 11.11 ns | cephes 24.55 ns |
+| `zeta` | [−0.5, 0.9] | 4.26 ns | cephes 13.58 ns |
+| `polylog` | `s` = 3, `x` in [−1, 1] | 148 ns | cephes 1239 ns |
+| `expint_en` | `n` = 3, [0.1, 2] | 21.6 ns | statrs 148 ns |
+| `ellip_e` | `m` in [0, 0.8) | 2.40 ns | Boost 6.86 ns |
+| `airy_bi` | [−10, 10] | 11.29 ns | puruspe 46.58 ns |
+| `bessel_i` | ν in [0, 3], x in [30, 10³] | 28.3 ns | puruspe 128.5 ns |
+| `chebyshev_t` | degree 1000, [−1, 1] | 143 ns | Boost 699 ns |
 
 ### Elliptic curves
 

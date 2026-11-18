@@ -7,3 +7,4 @@ mod matrix;
 mod numbers;
 mod poly;
 mod rational;
+mod special;
