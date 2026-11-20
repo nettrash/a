@@ -2,6 +2,17 @@
 
 All notable changes to [`nettrash-a`](https://crates.io/crates/nettrash-a) are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `a::math::numerics`: the standard problems of numerical analysis on `f32` and `f64`, generic over the sealed trait `Real`, its linear algebra on `a::math::matrix`. A method returns `None`, or its best point with `converged` false, rather than an answer it has not verified; each comes with the default options and a `_with` form taking an options struct.
+  - The zeros of a function of one variable by bisection, Brent, the secant method, Newton and Halley, and of a system by Newton with a Jacobian and by Broyden's rank-one update.
+  - Definite integrals by adaptive Gauss–Kronrod (G7–K15 and G10–K21), Clenshaw–Curtis and tanh-sinh quadrature, over infinite intervals too, in several dimensions by cubature and by Sobol' Monte Carlo, and the nodes and weights of the Gauss–Legendre, Hermite, Laguerre and Jacobi rules by Golub and Welsch's method.
+  - The initial value problem `y′ = f(t, y)` by the classical fourth-order Runge–Kutta method, by Dormand and Prince's 5(4) pair and by the L-stable three-stage Radau IIA method, whose collocation system Newton's method solves on the LU decomposition, all with step doubling and the usual step-size controller.
+  - Minima by the golden section and by Brent's method in one variable, by Nelder and Mead's simplex, the Polak–Ribière conjugate gradient and BFGS in several, the last two on a strong-Wolfe line search, and sums of squares by Gauss–Newton and by Levenberg and Marquardt.
+  - Interpolation by the cubic, clamped, not-a-knot, Akima and PCHIP splines, by Chebyshev approximation evaluated with Clenshaw's recurrence, and by barycentric interpolation; differentiation by Richardson extrapolation on symmetric differences.
+
 ## [0.1.29](https://crates.io/crates/nettrash-a/0.1.29) - 2026-11-04
 
 The first release. Algorithms in pure Rust with no dependencies, each with a page of its own that gives its method, examples and measurements against the reference implementations.

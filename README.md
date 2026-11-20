@@ -16,6 +16,7 @@ Algorithms in pure Rust, with no dependencies:
 - **Special functions** (`a::math::special`): the gamma family, the error functions, Bessel and Airy functions of real order, the zeta function and polylogarithms, Lambert W and the exponential integrals, elliptic integrals, Jacobi elliptic functions and orthogonal polynomials — of `f32`, `f64` and complex arguments, each with a stated ulp bound.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers and rationals.
+- **Numerical methods** (`a::math::numerics`): the zeros of a function and of a system, definite integrals in one and several dimensions, initial value problems for stiff and non-stiff ordinary differential equations, minima and least-squares fits, splines, Chebyshev approximation and numerical differentiation, on `f32` and `f64`.
 
 Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; everything else is portable Rust.
 
@@ -476,6 +477,16 @@ In `f64` on one core of an Apple M4 Max, each of the twelve operations [measured
 | `exp()` | 512 | – | 778 |
 
 Apple's Accelerate, which runs its products on the M4's matrix unit, is faster than all three at this size; it has no `exp`.
+
+### Numerical methods
+
+[`a::math::numerics`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/numerics.md) solves the standard problems of numerical analysis on `f32` and `f64` in generic code, over the sealed trait `Real`; its linear algebra — the LU of the implicit corrector, the QR of the least-squares step, the Hermitian eigensolver of the Gaussian rules — is `a::math::matrix`. A method never reports an answer it has not verified: one that cannot reach its tolerance returns `None`, or, for the optimisers, its best point with `converged` false.
+
+| Page | Contents |
+| --- | --- |
+| [Numerical methods](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/numerics.md) | `a::math::numerics`: the zeros of a function by `bisect`, `brent`, `secant`, `newton` and `halley`, and of a system by `newton_system` and `broyden`; the integral of a function by `quad`, `quad_g7k15`, `clenshaw_curtis`, `tanh_sinh`, `quad_half_infinite`, `quad_infinite`, `cubature` and `monte_carlo`, and the nodes and weights of the Gauss–Legendre, Hermite, Laguerre and Jacobi rules by `legendre`, `hermite`, `laguerre` and `jacobi`; `y′ = f(t, y)` by `Rk4`, `DormandPrince5` and the stiff `RadauIia`, with `integrate` and `solve`; minima by `golden_section`, `minimize`, `nelder_mead`, `conjugate_gradient` and `bfgs`, and sums of squares by `gauss_newton` and `levenberg_marquardt`; `Spline` (cubic, clamped, not-a-knot, Akima, PCHIP), `chebyshev`, `barycentric_interpolate`, and `derivative` and `second_derivative` by Richardson extrapolation |
+
+The accuracy reported on the page is what the methods were measured to do in the crate's own tests — recovered orders, invariants held, and work done against the analytic answer — rather than a bound; no comparison against an external numerical library has yet been made for this area. Robertson's stiff chemical problem is integrated to `t = 40` in 24 steps at `rtol` `1e-6` and `atol` `1e-11`, where the explicit Dormand and Prince method gives up inside its 30,000-step budget even at `rtol` `1e-4`, and the forced problem `y′ = 1000(sin t − y)` takes `RadauIia` 38 steps against the same method's 3,759.
 
 ## Not constant-time
 

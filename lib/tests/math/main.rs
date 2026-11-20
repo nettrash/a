@@ -5,6 +5,7 @@ mod fft;
 mod float;
 mod matrix;
 mod numbers;
+mod numerics;
 mod poly;
 mod rational;
 mod special;

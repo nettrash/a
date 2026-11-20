@@ -40,6 +40,7 @@ pub mod fft;
 pub mod float;
 pub mod matrix;
 pub mod numbers;
+pub mod numerics;
 pub mod poly;
 pub mod rational;
 pub mod special;
