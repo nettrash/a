@@ -4,11 +4,13 @@
 //! * `3 ≤ s < 56`: `1 + 2⁻ˢ V(s)` with `V = (ζ − 1)·2ˢ` a rational minimax fit on each of
 //!   `[3, 8]`, `[8, 20]` and `[20, 56]`, weighted relative to `ζ`.
 //! * `−1/2 ≤ s < 3`: `1/(s − 1) + R(s)` with the entire `R = ζ(s) − 1/(s − 1)` a polynomial
-//!   minimax fit; the reciprocal and the head of `R` are double-doubles, so that the cancellation
-//!   for `s < 1` costs nothing.
+//!   minimax fit; the reciprocal, the head `c₀ + c₁(s − 1)` of `R` (the low part of `s − 1`
+//!   through `R′`) and the sum are double-doubles, so that the cancellation for `s < 1` costs
+//!   nothing.
 //! * `s < −1/2`: the reflection `ζ(s) = 2 (2π)^(s−1) sin(πs/2) Γ(1−s) ζ(1−s)`, `1 − s` taken
 //!   exactly as a double-double (its low part through `ζ′/ζ` and `ψ − ln 2π`), `(2π)^(s−1)` from
-//!   a double-double logarithm, and past the range of `Γ` Legendre's duplication formula. The
+//!   a double-double logarithm, and past the range of `Γ` (`1 − s > 171`)
+//!   `ln Γ(1 − s) − (1 − s) ln 2π` in double-double (Stirling's series) as one exponent. The
 //!   trivial zeros are exact.
 //!
 //! The fits were made for this crate (Remez exchange, and Lawson's iteration for the
@@ -16,7 +18,11 @@
 //!
 //! The tables are printed by `gen_real.py` in this directory (with `gen_fit.py`).
 
-use super::util::{exp_mul, horner, poly_tail, residual, sincos_pi, two_prod, two_sum};
+use super::util::{
+    STIRLING, exp_mul, horner, ln_dd, ln_dd_acc, mla, poly_tail, residual, sincos_pi, two_prod,
+    two_sum,
+};
+use crate::math::special::dd::Dd;
 use crate::math::special::gamma::gamma_f64;
 
 /// ζ(s) − 1/(s − 1): degree 16 on [-0.5, 3] in t − 1, error 1.4e-20 (6.9e-18 in doubles).
@@ -132,9 +138,14 @@ pub(super) fn zeta_right(s: f64) -> f64 {
     let q = 1.0 / d;
     let e = residual(q, d, 1.0) - q * dl;
     let ql = q * e;
-    let tail = poly_tail(d, &ZETA_R);
+    // R = c₀ + c₁d + d² T(d) with c₁d exact and the low part of d through R′ ≈ c₁ + 2c₂d: left of
+    // 0 the result is a third of 1/(s − 1), and rounding c₁d and dropping dl cost 1.7 ulps
+    let (p1, p1e) = two_prod(ZETA_R[1], d);
+    let rest = d * d * horner(d, &ZETA_R[2..]);
     let (h, l) = two_sum(q, ZETA_R[0]);
-    h + (l + (ql + (ZETA_R_LO + tail)))
+    let (h2, l2) = two_sum(h, p1);
+    let low = ZETA_R_LO + p1e + rest + dl * (ZETA_R[1] + 2.0 * ZETA_R[2] * d);
+    h2 + (l2 + (l + (ql + low)))
 }
 
 /// `R(s) = ζ(s) − 1/(s − 1)` for `−1/2 ≤ s ≤ 3` (entire).
@@ -151,8 +162,8 @@ fn zeta_log_derivative(s: f64) -> f64 {
     (zeta_right(s + h) - zeta_right(s - h)) / (2.0 * h * zeta_right(s))
 }
 
-/// `ψ(z)` to a few digits, for `z ≥ 1`.
-fn digamma_rough(z: f64) -> f64 {
+/// `ψ(z)` to a few digits, for `z > 0`.
+pub(super) fn digamma_rough(z: f64) -> f64 {
     let (mut z, mut acc) = (z, 0.0);
     while z < 6.0 {
         acc -= 1.0 / z;
@@ -161,6 +172,46 @@ fn digamma_rough(z: f64) -> f64 {
     let r = 1.0 / (z * z);
     acc + z.ln() - 0.5 / z - r * (1.0 / 12.0 - r * (1.0 / 120.0 - r / 252.0))
 }
+
+/// `ln Γ(z + zl)` of a double-double `z + zl > 0` as a double-double: from `z = 15` Stirling's
+/// series, its main terms `(z − ½) ln z − z + ½ ln 2π` in double-double (`ln z` by `ln_dd`, whose
+/// `2⁻⁷⁵` times `z` stays below `2⁻⁵⁵` to `z = 2²⁰`, then by `ln_dd_acc`) and eight terms of the
+/// rest; below, the logarithm of `gamma_f64`; the low part through `ψ(z)`.
+pub(super) fn lgamma_dd(z: f64, zl: f64) -> Dd {
+    let base = if z >= 15.0 {
+        let (l, ll) = if z < 1_048_576.0 {
+            ln_dd(z)
+        } else {
+            ln_dd_acc(z)
+        };
+        let r = 1.0 / z;
+        let r2 = r * r;
+        let mut tail = STIRLING[7];
+        for &b in STIRLING[..7].iter().rev() {
+            tail = mla(tail, r2, b);
+        }
+        Dd::new(z)
+            .add_f64(-0.5)
+            .mul(Dd { hi: l, lo: ll })
+            .add_f64(-z)
+            .add(HALF_LN_2PI)
+            .add_f64(tail * r)
+    } else {
+        let (l, ll) = ln_dd(gamma_f64(z).abs());
+        Dd { hi: l, lo: ll }
+    };
+    if zl == 0.0 {
+        base
+    } else {
+        base.add_f64(zl * digamma_rough(z))
+    }
+}
+
+/// `½ ln 2π` as a double-double.
+const HALF_LN_2PI: Dd = Dd {
+    hi: 0.918_938_533_204_672_8,
+    lo: -3.878_294_158_067_241_5e-17,
+};
 
 /// `e^(−z ln 2π) = (2π)^(−z)` with the logarithm as a double-double.
 #[inline]
@@ -196,11 +247,11 @@ fn zeta_reflect(s: f64) -> f64 {
         }
         corr += zl * (digamma_rough(z) - LN_2PI_HI);
     }
-    // The product 2 sin(πs/2) ζ(1 − s) (1 + …) Γ(…) as a double-double, and (2π)^(−z) through
+    // The product 2 sin(πs/2) ζ(1 − s) (1 + …) as a double-double, and Γ(…)(2π)^(−z) through
     // exp_mul from a double-double exponent, so that the result is rounded once.
     let (l, ll) = two_prod(2.0 * sin, zeta1);
-    let (l, ll) = (l, ll + l * (corr - 1.0));
     if z <= 171.0 {
+        let (l, ll) = (l, ll + l * (corr - 1.0));
         let gz = gamma_f64(z);
         let (p, pe) = two_prod(l, gz);
         let (a, ae) = two_prod(-z, LN_2PI_HI);
@@ -208,30 +259,16 @@ fn zeta_reflect(s: f64) -> f64 {
         let pl = pe + ll * gz;
         return exp_mul(a, p, pl + p * a_lo);
     }
-    // Γ(z) = 2^(z−1) Γ(z/2) Γ(z/2 + 1/2) / √π, each half with its (2π)^(−z/2):
-    // z/2 + 1/2 rounds where it crosses a power of 2, its low part through ψ
-    let half = 0.5 * z;
-    let (h2, h2l) = two_sum(half, 0.5);
-    let g2 = gamma_f64(h2) * (1.0 + h2l * digamma_rough(h2));
-    let g1 = gamma_f64(half);
-    let (a, ae) = two_prod(-half, LN_2PI_HI);
-    let a_lo = ae - half * LN_2PI_LO;
-    let (p1, p1e) = two_prod(l, g1);
-    let f1 = exp_mul(a, p1, p1e + ll * g1 + p1 * a_lo);
-    let f2 = exp_mul(a, g2, g2 * a_lo);
-    // × 2^(z−1)/√π = e^((z − 1) ln 2 − ln √π)
-    let (zm1, zm1l) = two_sum(z, -1.0);
-    let (b2, b2e) = two_prod(zm1, LN_2_HI);
-    let b2l = b2e + zm1 * LN_2_LO + zm1l * LN_2_HI;
-    let (c, ce) = two_sum(b2, -LN_SQRT_PI);
-    let (f, fe) = two_prod(f1, f2);
-    exp_mul(c, f, fe + f * (ce + b2l))
+    // past the range of Γ: ln Γ(z + zl) − (z + zl) ln 2π in double-double, one exponent
+    let e = lgamma_dd(z, zl).sub(
+        Dd {
+            hi: LN_2PI_HI,
+            lo: LN_2PI_LO,
+        }
+        .mul(Dd { hi: z, lo: zl }),
+    );
+    exp_mul(e.hi, l, ll + l * e.lo)
 }
-
-/// `ln 2` and `ln √π`.
-const LN_2_HI: f64 = core::f64::consts::LN_2;
-const LN_2_LO: f64 = 2.319_046_813_846_299_6e-17;
-const LN_SQRT_PI: f64 = 0.572_364_942_924_700_1;
 
 /// `ζ(s)` of an `f64`.
 pub(crate) fn zeta_f64(s: f64) -> f64 {

@@ -304,3 +304,37 @@ pieces_fit("LGAM_MID",
            lambda x: mpmath.loggamma(x), [(k + 0.5, 0.5) for k in range(3, 8)])
 open(TAB, "a").write("\n".join(extra4) + "\n")
 print("speed pass ok")
+
+# ---- appended (November 2026): the accurate argument and logarithm of the complex logarithm
+# (cplx.rs, ddm.rs ln_acc_of_dd): Stirling's series multiplies their errors by |z|.
+extra5 = []
+def arr5(name, vals, doc):
+    extra5.append(f"/// {doc}")
+    extra5.append(f"pub(super) static {name}: [f64; {len(vals)}] = [")
+    for v in vals: extra5.append(f"    {lit(v)},")
+    extra5.append("];")
+def dd5(name, v, doc):
+    h, l = dd(v)
+    extra5.append(f"/// {doc}")
+    extra5.append(f"pub(super) const {name}_HI: f64 = {lit(h)};\npub(super) const {name}_LO: f64 = {lit(l)};")
+ah, al = [], []
+for j in range(65):
+    v = mpmath.atan(mpf(j) / 64) / pi
+    h, l = dd(v)
+    # (checked: tan(π(h + l)) is j/64 to 2⁻¹⁰⁴ relative, at 400 bits)
+    with mpmath.workprec(400):
+        t = mpmath.tan(pi * (mpf(h) + mpf(l)))
+        assert j == 0 or abs(t * 64 / j - 1) < mpf(2) ** -104, (j, t)
+    ah.append(h); al.append(l)
+arr5("ATAN_J64_HI", ah, "`atan(j/64)/π`, `j = 0, 1, …, 64`, high parts.")
+arr5("ATAN_J64_LO", al, "`atan(j/64)/π`, low parts.")
+arr5("ATAN_TAIL", [float(mpf((-1) ** (k + 1)) / (2 * k + 7)) for k in range(4)], "`(atan(u) − u + u³/3 − u⁵/5)/u⁷` in `u²` (Taylor, `|u| ≤ 1/128`).")
+arr5("ATANH_TAIL", [float(mpf(2) / (2 * k + 7)) for k in range(4)], "`(2 atanh(s) − 2s − 2s³/3 − 2s⁵/5)/s⁷` in `s²` (Taylor, `|s| ≤ 0.0059`).")
+dd5("INV_PI", 1 / pi, "`1/π`.")
+dd5("THIRD", mpf(1) / 3, "`1/3`.")
+dd5("FIFTH", mpf(1) / 5, "`1/5`.")
+dd5("TWO_THIRDS", mpf(2) / 3, "`2/3`.")
+dd5("TWO_FIFTHS", mpf(2) / 5, "`2/5`.")
+dd5("LN2_DD", ln2, "`ln 2` (to `2⁻¹⁰⁶`; `LN2_HI` has 42 bits for exact multiples).")
+open(TAB, "a").write("\n".join(extra5) + "\n")
+print("argument ok")

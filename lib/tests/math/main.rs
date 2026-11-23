@@ -8,4 +8,5 @@ mod numbers;
 mod numerics;
 mod poly;
 mod rational;
+mod sparse;
 mod special;

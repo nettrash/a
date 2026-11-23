@@ -13,9 +13,11 @@
 mod tables;
 
 use super::Real;
-use super::bessel::kernels::{PIO4, exp_parts, ldexp, sin_cos_shifted_dd};
-use super::bessel::{about_zero, dd2, horner, poly_dd};
-use super::dd::{Dd, fast_two_sum};
+use super::bessel::kernels::{
+    PIO2, PIO4, exp_parts, ldexp, rem_pio2, sin_cos_quadrant_dd, sin_cos_shifted_dd,
+};
+use super::bessel::{about_zero, dd2, horner, poly_dd3};
+use super::dd::{Dd, fast_two_sum, two_sum};
 use super::via;
 use tables::*;
 
@@ -56,10 +58,13 @@ fn piece(x: f64, b: &[f64]) -> usize {
     j
 }
 
-/// `Σ cᵢ·uⁱ` of a row `[x₀, c₀ hi, c₀ lo, c₁ hi, c₁ lo, c₂, …]`, `u = x − x₀`.
+/// `Σ cᵢ·uⁱ` of a row `[x₀, c₀ hi, c₀ lo, c₁ hi, c₁ lo, c₂, …]`, `u = x − x₀` exactly (as a
+/// double-double: `x` and `x₀` may differ by more than a factor of 2), the last three steps of
+/// Horner's rule in double-double (`c₂u²` reaches the size of the value at the ends).
 #[inline(always)]
 fn piece_poly(x: f64, row: &[f64]) -> Dd {
-    poly_dd(x - row[0], 0.0, dd2(row, 1), dd2(row, 3), &row[5..])
+    let (uh, ul) = two_sum(x, -row[0]);
+    poly_dd3(uh, ul, dd2(row, 1), dd2(row, 3), row[5], &row[6..])
 }
 
 /// The interval `k` with `zb[k + 1] ≤ x < zb[k]` (bounds from the right, going down).
@@ -182,12 +187,31 @@ fn negative(x: f64, w: Which) -> f64 {
     } else {
         PIO4.neg()
     };
-    let phi = Dd::new(z.lo).add(base).add_f64(-alpha);
-    let (s, c) = sin_cos_shifted_dd(z.hi, phi);
+    let (s, c) = if z.lo.abs() < 0.785 {
+        let phi = Dd::new(z.lo).add(base).add_f64(-alpha);
+        sin_cos_shifted_dd(z.hi, phi)
+    } else {
+        far_phase(z, base, alpha)
+    };
     match w {
         Which::Ai | Which::AiP => amp.mul(c).value(),
         _ => amp.mul(s).neg().value(),
     }
+}
+
+/// `(sin, cos)` of `ζ + base − α` for `|x|` from about `10¹¹` on, where the low part of `ζ` passes
+/// `π/4` (and from about `6·10²¹` `2⁵³`): it is reduced modulo `π/2` as the high part is (left as it
+/// was, the quadrant of the sum was inexact there and the kernels got arguments far beyond `π/4`,
+/// for values beyond the modulus and from `1.7·10³⁶` NaN). The phase error stays that of `ζ`.
+#[cold]
+#[inline(never)]
+fn far_phase(z: Dd, base: Dd, alpha: f64) -> (Dd, Dd) {
+    let (n1, r1) = rem_pio2(z.hi);
+    let (n2, r2) = rem_pio2(z.lo);
+    let u = r1.add(r2).add(base).add_f64(-alpha);
+    let k = (u.hi * core::f64::consts::FRAC_2_PI).round_ties_even();
+    let u = u.sub(PIO2.mul_f64(k));
+    sin_cos_quadrant_dd(n1.wrapping_add(n2).wrapping_add(k as i64), u)
 }
 
 fn airy_f64(x: f64, w: Which) -> f64 {

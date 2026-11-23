@@ -6,8 +6,10 @@
 //! * `P` by its power series `P = x^a e^(−x)/Γ(a + 1) · Σ x^k/((a + 1)…(a + k))` when `x` is
 //!   below about `a`;
 //! * `Q` by the continued fraction of Legendre (modified Lentz) when `x` is above;
-//! * `Q` for small `a` and `x < 3` (`x < 1.1` as `a` nears 1) from `Γ(a, x) = (Γ(1 + a) − x^a)/a − x^a Σ (−x)ⁿ/(n!(a + n))`
-//!   with `Γ(1 + a) − 1` and `x^a − 1` computed without cancellation;
+//! * `Q` for small `a` and `x < 1.1` (`x < 2` for `a < 1/2`) from
+//!   `Γ(a, x) = (Γ(1 + a) − x^a)/a − x^a Σ (−x)ⁿ/(n!(a + n))` with `Γ(1 + a) − 1` and `x^a − 1`
+//!   computed without cancellation (further out `Q` is a small difference of these terms, which
+//!   would carry their rounding errors into it many times over: the fraction takes over);
 //! * Temme's uniform asymptotic expansion for `a ≥ 20` with `|z| ≤ 1/2` (`x` within about
 //!   `−42 %` and `+58 %` of `a`), written with `e^(−y) erfcx(√y)` so that the large exponent is the
 //!   only exponential; its coefficients `c_k(z)` are derived anew (series arithmetic after Temme
@@ -412,9 +414,15 @@ fn q_half(a: f64, x: f64) -> Scaled {
     let sum = if n == 0 {
         Scaled::ZERO
     } else {
-        let pre = prefix_p(a, x).mul_f64(a / x);
+        // x^(a−1) e^(−x)/Γ(a) = the prefix of P times a/x, a/x as a double-double.
+        let pre = prefix_p(a, x);
+        let q = a / x;
+        let r = Dd {
+            hi: q,
+            lo: rem_s(q, x, a) / x,
+        };
         Scaled {
-            d: pre.d.mul(horner_ratio(n, 0.5, x)),
+            d: pre.d.mul(r).mul(horner_ratio(n, 0.5, x)),
             m: pre.m,
         }
     };
@@ -431,10 +439,13 @@ fn q_half(a: f64, x: f64) -> Scaled {
     )
 }
 
-/// `eᵛ − 1` of a double-double, for `|v| < 700`.
+/// `eᵛ − 1` of a double-double, for `|v| < 700`: from the double-double exponential but for a
+/// small `v` (its absolute error, about `2⁻⁷⁵`, is relative to `v` there to `2⁻⁶⁵`), else by its
+/// series with the cube's tail in `f64` (`v⁴/24` below `2⁻⁴⁵`; from `|v|` a tenth or so the
+/// tail's rounding, about `2⁻⁵³ v³/6`, would be the result's largest error).
 #[inline]
 fn expm1_dd(v: Dd) -> Dd {
-    if v.hi.abs() > 0.5 {
+    if v.hi.abs() > EXPM1_SERIES {
         let (d, m) = exp_parts(v);
         let s = pow2i(m);
         return Dd {
@@ -451,7 +462,10 @@ fn expm1_dd(v: Dd) -> Dd {
     Dd { hi, lo }
 }
 
-/// `Q(a, x)` for small `a` (below about 0.83) and `x < 3`:
+/// Where `expm1_dd` changes from its series to the exponential: `2⁻¹⁰`.
+const EXPM1_SERIES: f64 = 0.000_976_562_5;
+
+/// `Q(a, x)` for small `a` (below about 0.83) and `x < 1.1`, or `a < 1/2` and `x < 2`:
 /// `Q = (Γ(1 + a) − 1 − (x^a − 1) − a x^a Σ (−x)ⁿ/(n!(a + n)))/Γ(1 + a)`.
 fn q_small_a(a: f64, x: f64) -> Scaled {
     let n = round_int(a);
@@ -589,8 +603,10 @@ fn smaller(a: f64, x: f64) -> (Scaled, bool) {
         } else {
             (q_small_a(a, x), true)
         }
-    } else if a < 0.75 && x < 3.0 {
-        // Still Q's side; its series beats the slowly converging fraction here.
+    } else if a < 0.5 && x < 2.0 {
+        // Still Q's side; its series beats the slowly converging fraction here. (Further out Q
+        // is the small difference of its terms, which then carry their rounding errors into it
+        // many times over: 7.7 ulps at a = 0.51, x = 2.97. The fraction, below, is at 0.57.)
         (q_small_a(a, x), true)
     } else if use_temme(a, x) {
         (temme(a, x), x >= a)
@@ -633,6 +649,22 @@ fn pq(a: f64, x: f64) -> (f64, f64) {
     let (v, is_q) = smaller(a, x);
     let small = scale(v.d, v.m).clamp(0.0, 1.0);
     // The complement in double-double.
+    let big = complement(v).value().clamp(0.0, 1.0);
+    if is_q { (big, small) } else { (small, big) }
+}
+
+/// `(P(a, x), Q(a, x))` at a double-double `x`, its low part to first order through the density
+/// `x^(a−1) e^(−x)/Γ(a)` (added to the smaller side, in its scale): for `beta_inc`'s incomplete
+/// gamma limit, whose argument is an exact product (rounded, its error would be carried into the
+/// result times the condition number of `P` or `Q`, up to `x`).
+pub(super) fn pq_of_dd(a: f64, x: Dd) -> (f64, f64) {
+    if x.lo == 0.0 || !(a > 0.0 && a < f64::INFINITY && x.hi > 0.0 && x.hi < f64::INFINITY) {
+        return pq(a, x.hi);
+    }
+    let (v, is_q) = smaller(a, x.hi);
+    let f = prefix_p(a, x.hi).mul_f64(a / x.hi);
+    let v = add_scaled(v, f.mul_f64(if is_q { -x.lo } else { x.lo }));
+    let small = scale(v.d, v.m).clamp(0.0, 1.0);
     let big = complement(v).value().clamp(0.0, 1.0);
     if is_q { (big, small) } else { (small, big) }
 }
@@ -847,15 +879,17 @@ fn inverse(a: f64, t: f64, upper: bool) -> f64 {
     };
     let lga = lg1 - ln(a);
     let mut x = first_guess(a, t, upper, lg1, lt.hi);
-    if x.is_nan() || x <= f64::MIN_POSITIVE {
+    if x.is_nan() || x < f64::MIN_POSITIVE {
         // The root is below the normal range (tiny a, P ≈ x^a/Γ(a + 1)): zero when even the
-        // least subnormal is past it.
+        // least subnormal is past it, else from the guess (if it is a subnormal).
         let ls = ln_side(a, f64::from_bits(1), upper);
         let h = ls.sub(lt).hi;
         if (h >= 0.0) != upper || h == 0.0 {
             return 0.0;
         }
-        x = f64::MIN_POSITIVE;
+        if x.is_nan() || x <= 0.0 {
+            x = f64::MIN_POSITIVE;
+        }
     }
     if x.is_nan() || x <= 0.0 || x == f64::INFINITY {
         x = a.max(1e-300);
@@ -900,16 +934,22 @@ fn inverse(a: f64, t: f64, upper: bool) -> f64 {
         } else {
             x * exp(du.clamp(-700.0, 700.0))
         };
+        if nx == x {
+            // The step is below the spacing of the floats at x (a subnormal x): x is the nearest
+            // to Newton's root.
+            return x;
+        }
         let mut nu = u + du;
         if nx.is_nan() || nx <= lo || nx >= hi || !du.is_finite() {
             nx = if lo == 0.0 {
-                hi * 1e-3
+                (hi * 1e-3).max(f64::from_bits(1))
             } else if hi == f64::INFINITY {
                 lo * 1e3
             } else {
                 (lo.sqrt() * hi.sqrt()).clamp(lo, hi)
             };
-            if nx == x {
+            if nx == x || nx == lo || nx == hi {
+                // (No float left inside the bracket.)
                 return x;
             }
             nu = ln(nx);

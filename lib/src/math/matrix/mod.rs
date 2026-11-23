@@ -6,7 +6,7 @@
 
 mod basic;
 mod bigfloat;
-mod blas;
+pub(crate) mod blas;
 mod cholesky;
 mod eigen;
 mod element;
@@ -14,7 +14,7 @@ mod exact;
 mod functions;
 mod gemm;
 mod hermitian;
-mod householder;
+pub(crate) mod householder;
 mod lu;
 mod ops;
 mod properties;
@@ -25,6 +25,7 @@ mod svd;
 mod tridiagonal;
 
 pub use cholesky::Cholesky;
+pub(crate) use cholesky::cholesky_in_place;
 pub use eigen::{Eigen, HermitianEigen};
 pub use element::{Element, Scalar};
 pub use lu::Lu;

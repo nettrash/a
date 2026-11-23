@@ -51,6 +51,50 @@ fn real(name: &str, text: &str, p: Prec, bound: f64, f: impl Fn(&[f64]) -> f64) 
     eprintln!("{name}: {e:.3} ulps (bound {bound})");
 }
 
+/// Checks a real function case by case against the bound of the region of its arguments,
+/// `region(args) = (name, bound)`, in ulps or (where `kappa` gives a condition number) in ulps
+/// divided by `1 + κ`; prints the largest error of each region.
+#[track_caller]
+fn by_region(
+    name: &str,
+    text: &str,
+    p: Prec,
+    region: impl Fn(&[f64]) -> (&'static str, f64),
+    kappa: impl Fn(&[f64], f64) -> f64,
+    f: impl Fn(&[f64]) -> f64,
+) {
+    let cases = cases(&thin(text));
+    assert!(!cases.is_empty(), "{name}: no cases");
+    let mut worst: Vec<(&'static str, f64, f64, Vec<f64>)> = Vec::new();
+    for c in &cases {
+        let (reg, bound) = region(&c.args);
+        let bound = miri(bound);
+        let got = f(&c.args);
+        let e = ulps(got, c.refs[0], p) / (1.0 + kappa(&c.args, c.refs[0].0));
+        assert!(
+            e <= bound,
+            "{name} [{reg}]: {e:.3} ulps > {bound} at {:?} ({:?}): got {got:e}, want {:e} + {:e}",
+            c.args,
+            c.args.iter().map(|a| a.to_bits()).collect::<Vec<_>>(),
+            c.refs[0].0,
+            c.refs[0].1
+        );
+        match worst.iter_mut().find(|w| w.0 == reg) {
+            Some(w) if e > w.2 => (w.2, w.3) = (e, c.args.clone()),
+            Some(_) => {}
+            None => worst.push((reg, bound, e, c.args.clone())),
+        }
+    }
+    for (reg, bound, e, at) in worst {
+        eprintln!("{name} [{reg}]: {e:.3} (bound {bound}) at {at:?}");
+    }
+}
+
+/// No condition number: plain ulps.
+fn plain(_: &[f64], _: f64) -> f64 {
+    0.0
+}
+
 /// The error of `y` in ulps of `max(|ref|, scale)`.
 fn scaled_ulps(y: f64, r: (f64, f64), scale: f64, p: Prec) -> f64 {
     if !r.0.is_finite() || !y.is_finite() || scale == 0.0 || r.0.abs() >= scale {
@@ -105,19 +149,34 @@ const RC_F32: &str = include_str!("data/elliptic_rc_f32.txt");
 const JAC_F64: &str = include_str!("data/elliptic_jacobi_f64.txt");
 const JAC_F32: &str = include_str!("data/elliptic_jacobi_f32.txt");
 
-const B_K: f64 = 1.0;
-const B_E: f64 = 0.75;
-const B_PI: f64 = 9.0; // 3 but where m ≤ n < 0, m < −1 (the direct form cancels)
-const B_F: f64 = 2.5;
-const B_EINC: f64 = 4.0;
-const B_PIINC: f64 = 4.0;
+// The bounds of `docs/math/special.md`, by region.
+const B_K: f64 = 0.6;
+const B_E: f64 = 0.6;
+const B_PI: f64 = 3.5;
+const B_F: f64 = 2.5; // m ≤ 1; m > 1 in units of 1 + κ
+const B_EINC: f64 = 3.5; // 0 ≤ m ≤ 1
+const B_EINC_NEG: f64 = 4.0; // m < 0
+const B_EINC_GT1: f64 = 4.0; // m > 1
+const B_PIINC_PLAIN: f64 = 3.0; // n < 1, 0 ≤ m < 1, |φ| ≤ π/2
+const B_PIINC: f64 = 4.0; // everywhere, in units of 1 + κ
 const B_RF: f64 = 0.75;
 const B_RD: f64 = 0.75;
-const B_RJ: f64 = 2.0;
+const B_RJ: f64 = 2.5;
 const B_RC: f64 = 2.5;
-const B_RJ_PV: f64 = 4.0;
+const B_RJ_PV: f64 = 4.5;
 
 const B_F32: f64 = 0.501;
+
+/// `κ = |φ/(Δ F)|`, the condition number of `F(φ, m)` in `φ` (unbounded at the edge of the real
+/// domain of `m > 1`, `Δ → 0`), for `m > 1`; 0 elsewhere.
+fn f_kappa(a: &[f64], f: f64) -> f64 {
+    let (phi, m) = (a[0], a[1]);
+    if m <= 1.0 {
+        return 0.0;
+    }
+    let d = (1.0 - m * phi.sin().powi(2)).abs().sqrt();
+    (phi / (d * f)).abs()
+}
 
 /// `Π(n; φ, m)` in ulps divided by `1 + κ`, `κ = |φ ∂Π/∂φ / Π| = |φ| / (|1 − n sin²φ| Δ |Π|)` its
 /// condition number in `φ`, which is large near the poles `n sin²φ = 1` and the zeros of the
@@ -151,24 +210,37 @@ fn pi_inc_conditioned(text: &str) {
 /// `max(|R_J|, R_J(x, y, z, |p|))`.
 fn rj_split(text: &str) {
     let cases = cases(&thin(text));
-    let (mut pos, mut pv) = (0.0f64, 0.0f64);
+    let (mut pos, mut pv) = ((0.0f64, vec![]), (0.0f64, vec![]));
     for c in &cases {
         let a = &c.args;
         let got = carlson_rj(a[0], a[1], a[2], a[3]);
-        if a[3] > 0.0 {
-            pos = pos.max(ulps(got, c.refs[0], F64));
+        let (w, e) = if a[3] > 0.0 {
+            (&mut pos, ulps(got, c.refs[0], F64))
         } else {
             let s = carlson_rj(a[0], a[1], a[2], -a[3]);
-            pv = pv.max(scaled_ulps(got, c.refs[0], s, F64));
+            (&mut pv, scaled_ulps(got, c.refs[0], s, F64))
+        };
+        if e > w.0 || e.is_nan() {
+            *w = (e, a.clone());
         }
     }
     let (b1, b2) = (miri(B_RJ), miri(B_RJ_PV));
-    assert!(pos <= b1, "carlson_rj f64 (p > 0): {pos:.3} ulps > {b1}");
     assert!(
-        pv <= b2,
-        "carlson_rj f64 (p < 0): {pv:.3} scaled ulps > {b2}"
+        pos.0 <= b1,
+        "carlson_rj f64 (p > 0): {:.3} ulps > {b1} at {:?}",
+        pos.0,
+        pos.1
     );
-    eprintln!("carlson_rj f64: p > 0 {pos:.3} ulps, p < 0 {pv:.3} scaled ulps");
+    assert!(
+        pv.0 <= b2,
+        "carlson_rj f64 (p < 0): {:.3} scaled ulps > {b2} at {:?}",
+        pv.0,
+        pv.1
+    );
+    eprintln!(
+        "carlson_rj f64: p > 0 {:.3} ulps, p < 0 {:.3} scaled ulps",
+        pos.0, pv.0
+    );
 }
 
 #[test]
@@ -189,11 +261,51 @@ fn complete_integrals() {
 
 #[test]
 fn incomplete_integrals() {
-    real("ellip_f f64", F_F64, F64, B_F, |a| ellip_f(a[0], a[1]));
-    real("ellip_e_inc f64", EINC_F64, F64, B_EINC, |a| {
+    let f_region = |a: &[f64]| {
+        if a[1] <= 1.0 {
+            ("m <= 1", B_F)
+        } else {
+            ("m > 1, ulps/(1 + κ)", B_F)
+        }
+    };
+    by_region("ellip_f f64", F_F64, F64, f_region, f_kappa, |a| {
+        ellip_f(a[0], a[1])
+    });
+    let e_region = |a: &[f64]| {
+        let m = a[1];
+        if (0.0..=1.0).contains(&m) {
+            ("0 <= m <= 1", B_EINC)
+        } else if m < 0.0 {
+            ("m < 0", B_EINC_NEG)
+        } else {
+            ("m > 1", B_EINC_GT1)
+        }
+    };
+    by_region("ellip_e_inc f64", EINC_F64, F64, e_region, plain, |a| {
         ellip_e_inc(a[0], a[1])
     });
     pi_inc_conditioned(PIINC_F64);
+    // The region of the plain bound: n < 1, 0 ≤ m < 1, |φ| ≤ π/2.
+    let plain_cases: String = PIINC_F64
+        .lines()
+        .filter(|l| {
+            let c = cases(l);
+            c.len() == 1 && {
+                let a = &c[0].args;
+                a[0] < 1.0
+                    && (0.0..1.0).contains(&a[2])
+                    && a[1].abs() <= core::f64::consts::FRAC_PI_2
+            }
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    real(
+        "ellip_pi_inc f64 (plain region)",
+        &plain_cases,
+        F64,
+        B_PIINC_PLAIN,
+        |a| ellip_pi_inc(a[0], a[1], a[2]),
+    );
     real("ellip_f f32", F_F32, F32, B_F32, |a| {
         ellip_f(a[0] as f32, a[1] as f32) as f64
     });
@@ -242,22 +354,34 @@ fn jacobi_scales(m: f64) -> [f64; 3] {
     }
 }
 
-/// The bounds of the Jacobi functions by region of `m` (`f64`): they grow as `m → 1`, where `cn`
-/// and `dn` are both about `m₁^(1/4)` near `u = K/2 (mod K)` and the condition number there is
-/// about `K/2`.
+/// The bounds of the Jacobi functions (`f64`) by the band of the parameter `μ` they are computed
+/// at: `m` itself in `[0, 1)`, `μ = −m/(1 − m)` for `m < 0` and `1/m` for `m > 1` (A&S 16.10–11).
+/// They grow as `μ → 1`, where `cn` and `dn` of `μ` are both about `μ₁^(1/4)` near `u ≡ K/2
+/// (mod K)` and the condition number there is about `K/2`. They are the core's for `0 ≤ m < 1`,
+/// for every form: the Landen ascent carries its values as double-doubles, rounded once. Rounded
+/// at each step, `μ < 0.9` reached 5.19 ulps for `m < 0`, 4.19 for `0 ≤ m < 1` (at `(74.3, 0.890)`)
+/// and 3.74 for `m > 1`, and `0.9 ≤ μ < 1 − 10⁻⁶` 34.7 (at `(−0.274, −552330)`); 2.05, 1.55, 2.49
+/// and 10.8 now, on 60,000 points of each.
 fn jacobi_bound(m: f64) -> f64 {
-    if m < 0.0 {
-        12.0 // |m| ≤ 10⁶; the parameter μ = −m/(1 − m) of the transformation near 1
-    } else if m < 0.9 {
-        3.5
-    } else if m < 1.0 - 1e-6 {
-        20.0
-    } else if m < 1.0 {
-        80.0
+    let mu = if m < 0.0 {
+        -m / (1.0 - m)
+    } else if m > 1.0 {
+        1.0 / m
     } else {
-        4.0
+        m
+    };
+    if mu < 0.9 {
+        B_JAC
+    } else if mu < 1.0 - 1e-6 {
+        B_JAC_09
+    } else {
+        B_JAC_1
     }
 }
+
+const B_JAC: f64 = 3.5; // μ < 0.9
+const B_JAC_09: f64 = 20.0; // 0.9 ≤ μ < 1 − 10⁻⁶
+const B_JAC_1: f64 = 80.0; // 1 − 10⁻⁶ ≤ μ < 1
 
 fn check_jacobi(
     name: &str,
@@ -461,9 +585,21 @@ fn complete_special_values() {
 #[test]
 fn incomplete_special_values() {
     use core::f64::consts::{FRAC_PI_2, PI};
-    for &phi in &[0.0, 1e-300, 0.3, 1.0, 1.5, 3.0, -7.0, 100.0] {
-        assert!(close(ellip_f(phi, 0.0f64), phi, 4e-16), "{phi}");
-        assert!(close(ellip_e_inc(phi, 0.0f64), phi, 4e-16), "{phi}");
+    // (0.030236235303514835 is the audit's: s R_F(c², 1, 1) of the rounded s, c is 2 ulps off.)
+    for &phi in &[
+        0.0,
+        1e-300,
+        0.3,
+        0.030_236_235_303_514_835,
+        1.0,
+        1.5,
+        3.0,
+        -7.0,
+        100.0,
+        1e300,
+    ] {
+        assert_eq!(ellip_f(phi, 0.0f64), phi);
+        assert_eq!(ellip_e_inc(phi, 0.0f64), phi);
     }
     assert!(ellip_f(-0.0f64, 0.5).is_sign_negative());
     for &m in &[-10.0, 0.0, 0.3, 0.99] {
@@ -501,6 +637,66 @@ fn incomplete_special_values() {
     assert_eq!(ellip_pi_inc(1.0f64, FRAC_PI_2 + 3.0, 0.3), f64::INFINITY);
     assert!(ellip_f(f64::NAN, 0.5).is_nan() && ellip_pi_inc(0.5, 1.0, f64::NAN).is_nan());
     assert_eq!(ellip_f(f64::INFINITY, 0.5), f64::INFINITY);
+    // F(φ, 1) = asinh(tan φ) is finite up to the f64 next to π/2, below it.
+    assert!(close(
+        ellip_f(FRAC_PI_2, 1.0f64),
+        38.025_003_373_828_87,
+        1e-15
+    ));
+    assert_eq!(ellip_f(f32::from_bits(0x3fc9_0fda), 1.0), 17.092_308);
+    // Π(n → −∞) → 0, odd in φ, as for n → +∞ and the complete integral.
+    let p = ellip_pi_inc(f64::NEG_INFINITY, 1.0, 0.5);
+    assert!(p == 0.0 && p.is_sign_positive());
+    let p = ellip_pi_inc(f64::NEG_INFINITY, -1.0, 0.5);
+    assert!(p == 0.0 && p.is_sign_negative());
+    assert_eq!(ellip_pi_inc(f64::NEG_INFINITY, 0.1, 20.0), 0.0);
+    // m = 1 past ±π/2: 2jΠ(n, 1) diverges, to −∞ for n > 1 (as Π(n, 1) and Π(n; φ → π/2, 1) do).
+    assert_eq!(ellip_pi_inc(2.0f64, 2.0, 1.0), f64::NEG_INFINITY);
+    assert_eq!(ellip_pi_inc(2.0f64, -2.0, 1.0), f64::INFINITY);
+    assert_eq!(ellip_pi_inc(0.5f64, 2.0, 1.0), f64::INFINITY);
+    assert!(ellip_pi_inc(2.0f64, FRAC_PI_2 - 1e-4, 1.0) < -8.0);
+    // m > 1 within the rounding of sin φ of the edge of the real domain: the value at the edge
+    // (1 − m sin²φ = 5.0e−17 there, where the computed one is negative).
+    let f = ellip_f(0.119_272_229_864_690_45f64, 70.628_780_048_130_31);
+    assert!(close(f, 0.187_575_396_222_624_12, 1e-8), "{f}");
+    assert!(ellip_e_inc(0.119_272_229_864_690_45f64, 70.628_780_048_130_31).is_finite());
+    assert!(ellip_f(0.2f64, 70.6).is_nan());
+    // m = 1 + 2^−52: FRAC_PI_2 is past the edge (sin φ = 1/√m at π/2 − 1.5e−8) within the rounding
+    // of its sine, 1: the values at the edge, K(1/m)/√m, √m E(1/m) − ((m − 1)/√m) K(1/m) and
+    // Π(n/m, 1/m)/√m (mpmath), not those of the point's own cosine (F was 38.7 there).
+    let m = 1.0 + f64::EPSILON;
+    assert!(close(ellip_f(FRAC_PI_2, m), 19.408_121_055_678_468, 1e-15));
+    assert!(close(
+        ellip_e_inc(FRAC_PI_2, m),
+        0.999_999_999_999_997_9,
+        1e-15
+    ));
+    assert!(close(
+        ellip_pi_inc(0.5, FRAC_PI_2, m),
+        37.569_791_631_076_47,
+        1e-15
+    ));
+    assert!(close(
+        ellip_f(-FRAC_PI_2, m),
+        -19.408_121_055_678_468,
+        1e-15
+    ));
+    // |φ| > 2^52, the reduction without j: a result beyond f64::MAX is ±∞ (not NaN), one next to
+    // it finite, and Π(1; φ, m) past π/2 diverges with the sign of φ.
+    assert_eq!(ellip_f(1.7e308f64, 0.9), f64::INFINITY);
+    assert_eq!(ellip_f(-1.7e308f64, 0.5), f64::NEG_INFINITY);
+    assert_eq!(ellip_e_inc(-3.2e239f64, -5.35e219), f64::NEG_INFINITY);
+    assert_eq!(ellip_e_inc(1.7e308f64, -1.0), f64::INFINITY);
+    assert_eq!(ellip_pi_inc(0.9f64, 1.7e308, 0.5), f64::INFINITY);
+    assert!(close(
+        ellip_f(1.5e308f64, -0.1),
+        1.464_473_267_685_807_2e308,
+        1e-15
+    ));
+    assert!(ellip_pi_inc(-0.5f64, -1.7e308, -2.0).is_finite());
+    assert_eq!(ellip_pi_inc(1.0f64, 1e16, 0.5), f64::INFINITY);
+    assert_eq!(ellip_pi_inc(1.0f64, -1e300, -3.0), f64::NEG_INFINITY);
+    assert_eq!(ellip_pi_inc(1.0f32, 1e20, 0.5), f32::INFINITY);
 }
 
 #[test]
@@ -539,6 +735,83 @@ fn carlson_special_values() {
     assert!(carlson_rj(1.0f64, 2.0, 3.0, -0.5).is_finite());
     assert!(carlson_rf(f64::NAN, 1.0, 1.0).is_nan());
     assert!((carlson_rf(1.0f32, 2.0, 3.0) as f64 - carlson_rf(1.0, 2.0, 3.0)).abs() < 1e-7);
+    // Results beyond f64::MAX are ∞, and none below is lost to the scaling of the arguments.
+    assert_eq!(carlson_rd(5e-324, 1.0, 5e-324), f64::INFINITY);
+    assert_eq!(carlson_rj(1e-310, 1e-310, 1e-310, 1e-310), f64::INFINITY);
+    let m = f64::MAX;
+    assert!(close(carlson_rf(m, m, m), 1.0 / m.sqrt(), 3e-16));
+    assert!(close(carlson_rc(m, m), 1.0 / m.sqrt(), 3e-16));
+    assert!(close(
+        carlson_rf(5e-324, 5e-324, 5e-324),
+        4.498_913_794_543_196_4e161,
+        3e-16
+    ));
+    // R_J(x, x, x, p) = 3(1/√x − R_C(x, p))/(p − x) ≈ 3/(p √x) for p ≫ x.
+    assert!(close(
+        carlson_rj(1e-300, 1e-300, 1e-300, 1e300),
+        3e-150,
+        1e-15
+    ));
+    // Principal values with x, y far below max(y, −p): finite (ρ = p'q/(xy) and √z/(√x √y) beyond
+    // the range), the limit −0 of one below the range, and one whose (z − p) R_J is beyond it.
+    assert!(close(
+        carlson_rj(
+            2.556_170_558e-314,
+            2.557_064_187_5e-314,
+            0.003_301_674_300_142_264_4,
+            -0.003_301_674_300_142_264_4
+        ),
+        -5_665_077.279_996_699,
+        1e-15
+    ));
+    let v = carlson_rj(
+        2.494_427_078_406_156e-278f64,
+        1.004_119_275_926_421_1e-135,
+        5.105_809_125_734_171e228,
+        -5.105_809_111_706_431e228,
+    );
+    assert!(v == 0.0 && v.is_sign_negative(), "{v}");
+    assert!(close(
+        carlson_rj(
+            2.164_225_721_491_554e-273,
+            1.706_943_946_995_611_7e-271,
+            1.524_684_731_269_045_9e212,
+            -6.883_237_039_464_134e-294
+        ),
+        3.057_157_391_908_898_3e167,
+        1e-15
+    ));
+    // Spans beyond 2^1600 with z the largest: finite (R_D by its expansion for z ≫ x, y; R_J's
+    // duplication with its terms' factors apart), where they were 1.3e−317 (for 1.8e−315), +∞ or
+    // NaN (references mpmath, rounded to f64; the first is subnormal, to a unit of its last place).
+    assert!(close(
+        carlson_rd(1e-316f64, 1e-316, 1e212),
+        1.822_726_837e-315,
+        3e-9
+    ));
+    assert!(close(
+        carlson_rj(0.0f64, 1e-310, 1e200, 1e-310),
+        3.000_000_000_000_009e210,
+        1e-15
+    ));
+    let v = carlson_rj(0.0f64, 1e-310, 1e200, -1e300);
+    assert!(v == 0.0 && v.is_sign_negative(), "{v}");
+    // A documented limit (an open defect): two arguments above about 2^1022 and a third below
+    // 2^−1000, a spread no scaling brings into the range, give NaN for a finite integral.
+    let h = f64::MAX / 2.0;
+    assert!(carlson_rd(h, h, 5e-324).is_nan());
+    assert!(carlson_rj(h, h, 1.0, 5e-324).is_nan());
+    // A documented limit: arguments spanning beyond 2^1600 and a result just above 2^−1022, where
+    // the duplication runs on subnormal arguments: 14.8 ulps (of 2^−1074) here, up to about 24
+    // measured, not a value outside that loss (reference by Arb).
+    let v = carlson_rj(
+        1.520_179_05e-315f64,
+        5.11e-321,
+        6.644_927_698_423_634e262,
+        2.538_944_011_659_919_7e179,
+    );
+    let r = 2.611_312_042_229_738_4e-308;
+    assert!((v - r).abs() <= 32.0 * f64::from_bits(1), "{v:e}");
 }
 
 #[test]
@@ -570,6 +843,34 @@ fn jacobi_identities() {
             let t = tol(1e-14);
             assert!((s1 - s0).abs() < t && (c1 - c0).abs() < t && (d1 - d0).abs() < t);
         }
+    }
+    // Huge arguments, reduced with K to their bits (sn² + cn² = 1 holds to rounding anyway; the
+    // values are checked against mpmath in the data): no collapse to (±1, 0, √m₁).
+    // (Under Miri, whose many-word arithmetic of the reduction is slow, two of them.)
+    let us: &[f64] = if cfg!(miri) {
+        &[1e20, -2.5e307]
+    } else {
+        &[1e16, 1e20, 1e100, 1e300, -2.5e307]
+    };
+    for &m in &[0.5f64, 1e-300, -3.0, 4.0] {
+        for &u in us {
+            let (s, c, d) = jacobi_elliptic(u, m);
+            assert!((s * s + c * c - 1.0).abs() < tol(1e-14), "u {u} m {m}");
+            assert!(
+                s.abs() < 0.999_999 || c.abs() > 1e-6,
+                "u {u} m {m}: collapsed"
+            );
+            assert!(d.is_finite());
+        }
+    }
+    // Next to 21K (m = ½): cn is 1.7e−15 just below, of the sign of cos, not ∓0.
+    let (s, c, _) = jacobi_elliptic(f64::from_bits(0x4043_77c0_b315_2fe1), 0.5);
+    assert!(s == 1.0 && c > 1.7e-15 && c < 1.8e-15, "{c}");
+    // m = 1e−300: cn(u | m) = cos u to 1e−300.
+    for b in [0x4073_bbae_5529_8768u64, 0x40a8_8e53_afb5_1c8f] {
+        let u = f64::from_bits(b);
+        let c = jacobi_elliptic(u, 1e-300).1;
+        assert!((c - u.cos()).abs() < tol(1e-28), "{u}: {c:e}");
     }
     let (s, c, d) = jacobi_elliptic(f64::NAN, 0.5);
     assert!(s.is_nan() && c.is_nan() && d.is_nan());
@@ -631,4 +932,34 @@ fn polynomial_identities() {
     // Degenerate Jacobi parameters (a recurrence coefficient vanishes): the explicit sum.
     // P_3^(−1,−1)(x) = Σ_s C(2, 3 − s) C(2, s) ((x − 1)/2)^s ((x + 1)/2)^(3 − s): −0.168 at 0.4.
     assert!(close(jacobi_p(3, -1.0f64, -1.0, 0.4), -0.168, 1e-15));
+    // P_n^(−1,−1)(x) = ((x² − 1)/4) P_(n−2)^(1,1)(x), for all n ≥ 2.
+    for n in [2u32, 5, 20, 50, 300] {
+        for &x in &[-0.9f64, -0.3, 0.0, 0.5, 0.99, 1.7] {
+            let p = jacobi_p(n, -1.0, -1.0, x);
+            let q = (x * x - 1.0) / 4.0 * jacobi_p(n - 2, 1.0, 1.0, x);
+            assert!(
+                (p - q).abs() <= 1e-15 * q.abs().max(0.1),
+                "n {n} x {x}: {p} {q}"
+            );
+        }
+    }
+    // Gegenbauer of α = −l vanishes identically above the degree 2l; Laguerre of α = −l is
+    // (−x)^l (n − l)!/n! L_(n−l)^(l)(x).
+    for (n, a) in [(7u32, -3.0f64), (300, -3.0), (9, -4.0), (128, -3.0)] {
+        for &x in &[-0.7f64, 0.0, 0.3, 1.0, 1.36] {
+            assert_eq!(gegenbauer_c(n, a, x), 0.0, "C_{n}^({a})({x})");
+        }
+    }
+    let l = assoc_laguerre_l(200, -2.0f64, 1e-9);
+    assert!(close(l, 4.999_999_670_000_009e-19, 1e-15), "{l}");
+    // No NaN from the low words where the plain recurrence meets an exact zero.
+    assert!(gegenbauer_c(200, -1.5f64, 0.999_999_999).is_finite());
+    assert!(gegenbauer_c(400, -2.5f64, 1.0).is_finite());
+    // |x| > 2^400: the leading term, finite where it is (P₂(1e154) = 1.5e308), and ±∞ past MAX.
+    assert!(close(legendre_p(2, 1e154f64), 1.5e308, 1e-15));
+    assert_eq!(legendre_p(3, -1e200f64), f64::NEG_INFINITY);
+    assert_eq!(chebyshev_t(1, 1e300f64), 1e300);
+    assert_eq!(chebyshev_u(1, 1.5e158f64), 3e158);
+    assert_eq!(hermite_h(2, 1e200f64), f64::INFINITY);
+    assert_eq!(laguerre_l(3, 1e200f64), f64::NEG_INFINITY);
 }

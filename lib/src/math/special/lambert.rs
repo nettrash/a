@@ -3,8 +3,9 @@
 //! Near the branch point `−1/e` both branches are polynomials in `p = √(2(1 + e·x))` (`p ≥ 0` for
 //! `W₀`, `p ≤ 0` for `W₋₁`), with `1 + e·x` computed without the cancellation (`e` as a
 //! double-double), for `|p| ≤ 0.66` (`x ≤ −0.29`); `W₋₁` goes on to `x = −0.2` with a polynomial
-//! in `s = √(2(−ln(−x) − 1))`, `s²` computed as `−2 ln(1 − q)` from the accurate `q = 1 + e·x`.
-//! These pieces are full precision (each polynomial's head a double-double). Elsewhere a starting value good to
+//! in `s = √(2(−ln(−x) − 1))`, `s = √(−2 ln(1 − q))` a double-double from `q = 1 + e·x` as one.
+//! These pieces are full precision (each polynomial's first two terms a double-double, the
+//! argument's low part through the slope). Elsewhere a starting value good to
 //! `3·10⁻⁷` (a polynomial in `p`, in `ln x` or in `s`, or the asymptotic series in `ln |x|`) and
 //! one step of Halley's iteration, with the residual `w eʷ − x` from a double-double `eʷ`, give
 //! full precision; for `|w| > 40`, where `eʷ` would leave the range, one step of Fritsch's
@@ -13,7 +14,10 @@
 //!
 //! The tables are printed by `zeta/gen_lambert.py` (with `zeta/gen_fit.py`).
 
-use super::zeta::util::{exp_parts, horner, mla, poly_tail, residual, scale, two_prod, two_sum};
+use super::dd::Dd;
+use super::zeta::util::{
+    exp_parts, horner, ln_dd, mla, poly_tail, residual, scale, two_prod, two_sum,
+};
 use super::{Real, via};
 use core::f64::consts::LN_2;
 
@@ -284,6 +288,25 @@ fn branch_p(x: f64) -> (f64, f64) {
     (p, r / (2.0 * p))
 }
 
+/// `s = √(−2 ln(1 − q))`, `q = 1 + e·x`, as a double-double: `q` and `1 − q` as double-doubles,
+/// `ln` by `ln_dd`.
+#[inline]
+fn branch_s(x: f64) -> (f64, f64) {
+    let (m, me) = two_prod(E_HI, x);
+    let (s, se) = two_sum(1.0, m);
+    let (q, ql) = two_sum(s, se + me + E_LO * x);
+    // 1 − q (exact as a double-double)
+    let (v, ve) = two_sum(1.0, -q);
+    let vl = ve - ql;
+    let (l, ll) = ln_dd(v);
+    let s2 = Dd {
+        hi: -2.0 * l,
+        lo: -2.0 * (ll + vl / v),
+    }
+    .sqrt();
+    (s2.hi, s2.lo)
+}
+
 /// `x e^(−W)` from a piece `c` of `e^(−W)` in `p` at `t + tl`, rounded once.
 #[inline(always)]
 fn w0_piece<const N: usize>(x: f64, t: f64, tl: f64, c: &[f64; N], lo: f64) -> f64 {
@@ -292,11 +315,16 @@ fn w0_piece<const N: usize>(x: f64, t: f64, tl: f64, c: &[f64; N], lo: f64) -> f
     mla(x, c[0], x * hl)
 }
 
-/// The piece `c` at `t + tl`: [`full`] at `t` and its slope (from four terms) times `tl`.
+/// The piece `c` at `t + tl`: `c[0] + lo + c[1] t` as a double-double (`c[1] t` exact), the rest
+/// `t² Σ c[k] tᵏ⁻²` in double, and the slope (from four terms) times `tl`, rounded once (with
+/// `c[1] t` rounded too, these pieces reached 1.14 ulps).
 #[inline(always)]
 fn full_dd(t: f64, tl: f64, c: &[f64], lo: f64) -> f64 {
     let slope = c[1] + t * (2.0 * c[2] + t * (3.0 * c[3] + t * 4.0 * c[4]));
-    c[0] + (lo + (slope * tl + poly_tail(t, c)))
+    let (p1, p1e) = two_prod(c[1], t);
+    let rest = t * t * horner(t, &c[2..]);
+    let (h, l) = two_sum(c[0], p1);
+    h + (l + (lo + (p1e + (slope * tl + rest))))
 }
 
 /// `W₀(x)` for `|x| < 2⁻¹⁰`: its series `Σ (−n)ⁿ⁻¹ xⁿ/n!` to `x⁷`.
@@ -311,12 +339,6 @@ fn w0_small(x: f64) -> f64 {
         16807.0 / 720.0,
     ];
     x + x * (x * horner(x, &c))
-}
-
-/// `c[0] + lo + Σ_{k≥1} c[k] tᵏ`, a piece of full precision.
-#[inline(always)]
-fn full(t: f64, c: &[f64], lo: f64) -> f64 {
-    c[0] + (lo + poly_tail(t, c))
 }
 
 /// One step of Halley's iteration for `w eʷ = x` from `w`.
@@ -436,7 +458,9 @@ pub(crate) fn wm1_f64(x: f64) -> f64 {
         let s2 = -2.0 * (-q).ln_1p();
         let s = s2.sqrt();
         if s <= 1.12 {
-            return full(s - 0.86, &FULL_S1, FULL_S1_LO);
+            // s as a double-double, from q as one: its rounding would cost 0.6 ulps of W
+            let (sh, sl) = branch_s(x);
+            return full_dd(sh - 0.86, sl, &FULL_S1, FULL_S1_LO);
         }
         (s, 0.5 * s2 + 1.0)
     } else {
@@ -465,11 +489,30 @@ pub(crate) fn wm1_f64(x: f64) -> f64 {
 
 /// The principal branch `W₀(x)` of the Lambert W function, the `w ≥ −1` with `w e^w = x`, for
 /// `x ≥ −1/e`.
+///
+/// # Examples
+///
+/// ```
+/// use a::math::special::lambert_w0;
+///
+/// let w = lambert_w0(1.0f64); // the omega constant
+/// assert!((w * w.exp() - 1.0).abs() < 1e-15);
+/// assert_eq!(lambert_w0(-1.0f64 / core::f64::consts::E), -1.0);
+/// ```
 pub fn lambert_w0<T: Real>(x: T) -> T {
     via(x, w0_f64)
 }
 
 /// The other real branch `W₋₁(x)`, the `w ≤ −1` with `w e^w = x`, for `−1/e ≤ x < 0`.
+///
+/// # Examples
+///
+/// ```
+/// use a::math::special::lambert_wm1;
+///
+/// assert!((lambert_wm1(-0.1f64) + 3.577_152_063_957_297).abs() < 1e-14);
+/// assert_eq!(lambert_wm1(0.0f64), f64::NEG_INFINITY);
+/// ```
 pub fn lambert_wm1<T: Real>(x: T) -> T {
     via(x, wm1_f64)
 }

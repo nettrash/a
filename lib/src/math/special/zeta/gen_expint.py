@@ -1,6 +1,7 @@
-"""Prints the tables of expint.rs: E₁ + ln x on (0, 1]; x eˣ E₁(x) − H₀ on [1, 2.5] (rational);
+"""Prints the tables of expint.rs: E₁ + ln x on (0, 1]; x eˣ E₁(x) − H₀ on [1, 2.5] (rational, fitted in
+u = (x − 1.75)/0.75 and printed again in v = (x − 1)/0.75, the form expint.rs evaluates);
 (Ei(x) − ln(x/x₀))/(x − x₀) on four pieces of (0, 6]; x e⁻ˣ Ei(x) − 1 on four pieces of [6, 48]
-(rationals in scaled variables) and (x e⁻ˣ Ei(x) − 1)·x in 1/x past 48. E₁ past 2.5 is Boost.Math's
+(rationals fitted in u = (x − c)/h and printed again in v = u + 1, the form expint.rs evaluates) and (x e⁻ˣ Ei(x) − 1)·x in 1/x past 48. E₁ past 2.5 is Boost.Math's
 rational (expint.hpp), not fitted here. The rationals take tens of minutes."""
 
 import os
@@ -27,11 +28,25 @@ def poly(name, f, a, b, d, x0, full=True, rel=True, w=None, doc=""):
 
 
 def rat(name, f, a, b, m, n, x0=0, w=None, doc="", iters=200, npts=300):
-    """Prints the Rust tables of a rational near-minimax fit p/q in t − x0."""
+    """Prints the Rust tables of a rational near-minimax fit p/q in t − x0, and returns them."""
     p, q, e = lawson_rat(f, a, b, m, n, x0=x0, w=w, iters=iters, npts=npts)
     print(f"// {name}: {doc} [{a}, {b}] in t − {x0!r}, degree {m}/{n}, error {mpmath.nstr(e, 3)}")
     print(f"const {name}_P: [f64; {m + 1}] = [{rs(p)}];")
     print(f"const {name}_Q: [f64; {n + 1}] = [{rs(q)}];")
+    return p, q
+
+
+def shifted(name, p, q, d):
+    """Prints the f64 coefficients of p(u) and q(u) re-expanded in v = u + d (exactly from the f64
+    coefficients, then rounded): at u = −d both cancel by up to 25 in u, in v they do not."""
+
+    def sh(c):
+        c = [mpf(float(x)) for x in c]
+        return [mpmath.fsum(c[k] * mpmath.binomial(k, j) * (-d) ** (k - j) for k in range(j, len(c))) for j in range(len(c))]
+
+    print(f"// {name}: the same in v = u + {d}")
+    print(f"const {name}_P: [f64; {len(p)}] = [{rs(sh(p))}];")
+    print(f"const {name}_Q: [f64; {len(q)}] = [{rs(sh(q))}];")
 
 X0 = mpmath.findroot(mpmath.ei, 0.37)
 
@@ -62,10 +77,14 @@ for nm, a, b, d in [("EI_R1", 0, 1.5, 12), ("EI_R2", 1.5, 3, 13), ("EI_R3", 3, 4
 c, h = mpf(1.75), mpf(0.75)
 h0 = h_e1(c)
 print(f"// E1_MID_H0 = {float(h0)!r}, low part {float(h0 - float(h0))!r}")
-rat("E1_MID", lambda u: h_e1(c + h * u) - h0, -1, 1, 6, 6, w=lambda u: abs(h_e1(c + h * u)), doc="in u = (x − 1.75)/0.75,")
+p, q = rat("E1_MID", lambda u: h_e1(c + h * u) - h0, -1, 1, 6, 6, w=lambda u: abs(h_e1(c + h * u)), doc="in u = (x − 1.75)/0.75,")
+shifted("E1_MID_V", p, q, 1)
 for nm, a, b, m in [("EI_K1", 6, 10, 7), ("EI_K2", 10, 20, 8), ("EI_K3", 20, 30, 7), ("EI_K4", 30, 48, 7)]:
     cc, hh = mpf(a + b) / 2, mpf(b - a) / 2
-    rat(nm, lambda u: h_ei(cc + hh * u) - 1, -1, 1, m, m, w=lambda u: abs(h_ei(cc + hh * u)), doc=f"in u = (x − {cc})/{hh},")
+    p, q = rat(nm, lambda u: h_ei(cc + hh * u) - 1, -1, 1, m, m, w=lambda u: abs(h_ei(cc + hh * u)), doc=f"in u = (x − {cc})/{hh},")
+    # expint.rs evaluates these in v = u + 1 = (x − a)/h: in u both polynomials cancel at u = −1
+    # (by up to 58 and 95), which cost up to 1.6 ulps of Ei at x = 10
+    shifted(nm + "_V", p, q, 1)
 g = lambda t: (h_ei(1 / t) - 1) / t
 poly("EI_T1", g, 1 / 128.0, 1 / 48.0, 10, 0, full=False)
 poly("EI_T2", g, 1 / 717.0, 1 / 128.0, 7, 0, full=False)

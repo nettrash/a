@@ -1,0 +1,13 @@
+# pattern general, 5 x 4: the matrix scipy.io.mmread reads from
+# scipy/coordinate_pattern_general.mtx (scipy 1.18.0), by gen_matrix_market.py.
+# Each nonzero cell: row and column from 0, the bits of the real and the imaginary
+# part as f64, and the bits of the two parts of the nearest f32 to each number of
+# the file (a cell named twice summed in f32), all in hexadecimal. The values of a
+# file that isn't complex have the imaginary part +0.
+5 4
+0 0 3ff0000000000000 0000000000000000 3f800000 00000000
+0 3 3ff0000000000000 0000000000000000 3f800000 00000000
+1 2 3ff0000000000000 0000000000000000 3f800000 00000000
+2 0 4000000000000000 0000000000000000 40000000 00000000
+3 3 3ff0000000000000 0000000000000000 3f800000 00000000
+4 1 3ff0000000000000 0000000000000000 3f800000 00000000

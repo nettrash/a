@@ -21,6 +21,10 @@ mp = mpmath.mp
 mp.prec = 160
 PI = mpmath.pi
 TARGET = 2.0 ** -61
+# A plain piece also meets this with its coefficients rounded to f64 (the first two kept as
+# double-doubles), else it is halved: on the widest ones, at whose ends c₂u² and c₃u³ reach the
+# size of the value, the rounding alone cost up to 0.85 ulp (Bi′ on [−1.17, −0.087]).
+FINAL = 2.0 ** -57
 LOG = sys.stderr
 XP = mpf(4)       # asymptotic from here on (x ≥ XP)
 XN = mpf(8)       # modulus/phase for x ≤ −XN... (beyond the zero tables)
@@ -95,7 +99,7 @@ def plain_pieces(f, lo, hi, name, maxdeg=16):
         for deg in range(6, maxdeg + 1):
             cf, err, e2, mpc = fit(lambda u, a=a: f(a + u), 0, b - a, deg, center=0, grid=400,
                                    exact=2, want_mp=True)
-            if e2 < TARGET:
+            if e2 < TARGET and err < FINAL:
                 ok = (deg, err, e2, mpc)
                 break
         if ok is None:

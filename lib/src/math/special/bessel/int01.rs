@@ -62,21 +62,38 @@ pub(crate) fn poly_dd(dh: f64, dl: f64, c0: Dd, c1: Dd, rest: &[f64]) -> Dd {
     Dd { hi: q0h, lo: q0l }
 }
 
+/// `c₀ + d·(c₁ + d·(c₂ + d·P(d)))` for `d = dh + dl`, as `poly_dd` with a third step in
+/// double-double (`c₂` an `f64`): for wide pieces, at whose ends `c₂d²` reaches the size of the
+/// value and the rounding of an `f64` `c₂ + d·P(d)` costs half an ulp or more.
+#[inline(always)]
+pub(crate) fn poly_dd3(dh: f64, dl: f64, c0: Dd, c1: Dd, c2: f64, rest: &[f64]) -> Dd {
+    let d = dh + dl;
+    let (q2h, q2l) = two_sum(c2, d * horner(d, rest));
+    let (p, pe) = two_prod(dh, q2h);
+    let (q1h, q1l) = two_sum(c1.hi, p);
+    let q1l = q1l + (pe + c1.lo + dh.mul_add(q2l, dl * q2h));
+    let (p, pe) = two_prod(dh, q1h);
+    let (q0h, q0l) = two_sum(c0.hi, p);
+    let q0l = q0l + (pe + c0.lo + dh.mul_add(q1l, dl * q1h));
+    Dd { hi: q0h, lo: q0l }
+}
+
 /// `f(x)` from the expansion `f(z + d) = d·(c₀ + c₁d + …)` about the zero `z` (double-double),
-/// `c = [c₀ hi, c₀ lo, c₁ hi, c₁ lo, c₂, …]`, by Horner's rule with its last two steps in
-/// double-double (for wide intervals, as the Airy functions').
+/// `c = [c₀ hi, c₀ lo, c₁ hi, c₁ lo, c₂, …]`, by Horner's rule with its last three steps in
+/// double-double (for wide intervals, as the Airy functions': two left up to 1.3 ulps of the
+/// modulus at their ends).
 #[inline(always)]
 pub(crate) fn about_zero(x: f64, z: &[f64; 2], c: &[f64]) -> f64 {
     let dh = x - z[0];
     let zl = z[1];
-    let q = poly_dd(dh, -zl, dd2(c, 0), dd2(c, 2), &c[4..]);
+    let q = poly_dd3(dh, -zl, dd2(c, 0), dd2(c, 2), c[4], &c[5..]);
     dh.mul_add(q.hi, dh.mul_add(q.lo, -zl * q.hi))
 }
 
 /// `f(x)` on a piece `[centre hi, centre lo, c₀ hi, c₀ lo, c₁ hi, c₁ lo, c₂, …]`: about a zero
-/// (`zero`), `f(z + d) = d·(c₀ + d·(c₁ + d·P(d)))`, else `f(m + u) = c₀ + c₁u + u²·P(u)`; `P` by
-/// Estrin's scheme, the leading terms exactly, and about a zero the product with the exact
-/// `x − z_hi`.
+/// (`zero`), `f(z + d) = d·(c₀ + d·(c₁ + d·P(d)))`, the product with the exact `x − z_hi`, else
+/// `f(m + u) = c₀ + u·(c₁ + u·(c₂ + u·P(u)))` with its three outer steps in double-double; `P`
+/// by Estrin's scheme.
 #[inline(always)]
 fn piece_eval<const W: usize>(x: f64, r: &[f64; W], zero: bool) -> f64 {
     let dh = x - r[0];
@@ -87,11 +104,16 @@ fn piece_eval<const W: usize>(x: f64, r: &[f64; W], zero: bool) -> f64 {
         let (ph, pl) = two_prod(dh, r[2]);
         ph + (pl + mla(d, t, -r[1] * r[2]))
     } else {
-        // c₀ + c₁u + u²·P(u), the first two terms exactly.
-        let t2 = (d * d) * estrin_at(d, r, 6);
-        let (p, pe) = two_prod(d, r[4]);
+        // c₀ + u·(c₁ + u·(c₂ + u·P(u))), P from c₃, u = dh − zl kept exact, the last three steps in
+        // double-double: at the outer ends of the pieces c₁u and c₂u² are −0.53 and −0.23 of the
+        // value, and the roundings of u and of u²·(c₂ + …) in f64 cost up to an ulp there.
+        let (q2h, q2l) = two_sum(r[6], d * estrin_at(d, r, 7));
+        let (p, pe) = two_prod(dh, q2h);
+        let (q1h, q1l) = two_sum(r[4], p);
+        let q1l = q1l + (pe + r[5] + mla(dh, q2l, -r[1] * q2h));
+        let (p, pe) = two_prod(dh, q1h);
         let (s, se) = two_sum(r[2], p);
-        s + (se + (pe + mla(d, r[5], r[3] + t2)))
+        s + (se + (pe + r[3] + mla(dh, q1l, -r[1] * q1h)))
     }
 }
 
@@ -172,10 +194,12 @@ fn y_log_form<const W: usize>(
         let inv = 1.0 / x;
         let (q, qe) = two_prod(x, inv);
         let e = (1.0 - q) - qe;
-        let h = g.hi * inv;
+        // The error of g.hi·inv exactly, on every target: `mla` is a plain product and sum where
+        // there is no fused instruction, which left this term 0 there (Y₁ up to 1.95 ulps).
+        let (h, he) = two_prod(g.hi, inv);
         Dd {
             hi: h,
-            lo: mla(g.hi, inv, -h) + (g.lo * inv + h * e),
+            lo: he + (g.lo * inv + h * e),
         }
     } else {
         g

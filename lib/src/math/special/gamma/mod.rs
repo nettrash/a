@@ -50,9 +50,9 @@ pub fn polygamma<T: Real>(n: u32, x: T) -> T {
     via(x, |x| psi::polygamma_f64(n, x))
 }
 
-/// The beta function `B(a, b) = Γ(a) Γ(b) / Γ(a + b)`, of any real `a` and `b` (accurate to the
-/// stated bound for `a, b > 0`): `±∞` at `a = ±0` (or `b`), zero where only `a + b` is a pole of
-/// `Γ`, NaN at the other poles.
+/// The beta function `B(a, b) = Γ(a) Γ(b) / Γ(a + b)`, of any real `a` and `b`: `±∞` at
+/// `a = ±0` (or `b`), zero where only `a + b` is a pole of `Γ` (exactly: a sum that only rounds to
+/// a pole is not one), NaN at the other poles.
 pub fn beta<T: Real>(a: T, b: T) -> T {
     T::from_f64(beta::beta_f64(a.to_f64(), b.to_f64()))
 }

@@ -4,7 +4,8 @@
 //!   `ψ(x) = ψ(2 + t) + Σ 1/(t + k)` over exact `t + k` down to two minimax pieces of `ψ(2 + t)`;
 //!   `(x − x₀)·Q(x)` on `[1, 2]` in four pieces, with the positive zero `x₀` in double-double;
 //!   `ψ(x) = ψ(1 + x) − 1/x` below 1; and for `x < 0` the reflection
-//!   `ψ(−u) = ψ(u) + 1/u + π cot(πu)`, with `ψ(u) + 1/u = ψ(1 + u)` for `u < 1`.
+//!   `ψ(−u) = ψ(u) + 1/u + π cot(πu)`, with `ψ(u) + 1/u = ψ(1 + u)` for `u < 1`; `∓∞` for
+//!   `0 < |x| ≤ 2⁻¹⁰²⁴`, where `−1/x` overflows, and `ψ(−u) = 1/u − γ` below `2⁻⁶⁰`.
 //! * `ψ⁽ⁿ⁾(x) = (−1)ⁿ⁺¹ n! ζ(n + 1, x)`: the Hurwitz zeta function by direct terms up to where
 //!   its Euler–Maclaurin tail converges (or the rest is negligible); for `x < 0` the sum over all
 //!   the terms `(x + j)^(−n−1)` split into three Hurwitz zeta functions of exact arguments. Large
@@ -95,13 +96,19 @@ pub(super) fn psi_pos_dd(x: f64) -> Dd {
         return psi1p(x - 1.0, d);
     }
     // ψ(x) = ψ(1 + x) − 1/x; 1 + x − x₀ = x − (x₀ − 1), with x₀ − 1 exact.
-    let d = shifted(x);
-    let r = recip(x);
-    if r.hi.is_infinite() {
-        return Dd::new(-r.hi);
+    if x <= TWO_M1024 {
+        // −1/x − γ is below −f64::MAX: −∞ (`recip`'s remainder would be NaN).
+        return Dd::new(f64::NEG_INFINITY);
     }
-    add_light(psi1p(x, d), r.neg())
+    let d = shifted(x);
+    add_light(psi1p(x, d), recip(x).neg())
 }
+
+/// `2⁻¹⁰²⁴`: `1/x` overflows from it down (and `1/x²` from its square root, `2⁻⁵¹²`, down).
+const TWO_M1024: f64 = f64::from_bits(1 << 50);
+
+/// `2⁻⁶⁰`: below it `ψ(−u) = 1/u − γ` to far below an ulp (the next term is `−(π²/6)u`).
+const PSI_TINY: f64 = 8.673_617_379_884_035e-19;
 
 /// `ψ(x)` of an `f64`: `∓∞` at `±0`, NaN at the negative integers and at `−∞`.
 pub(super) fn digamma_f64(x: f64) -> f64 {
@@ -126,6 +133,18 @@ pub(super) fn digamma_f64(x: f64) -> f64 {
     }
     // ψ(−u) = ψ(u) + 1/u + π cot(πu).
     let u = -x;
+    if u < PSI_TINY {
+        // 1/u − γ, rounded once (π cot(πu) would take its sine into the subnormals).
+        if u <= TWO_M1024 {
+            return f64::INFINITY;
+        }
+        return recip(u)
+            .add(Dd {
+                hi: -EULER_HI,
+                lo: -EULER_LO,
+            })
+            .value();
+    }
     let base = if u < 1.0 {
         let d = shifted(u);
         psi1p(u, d)
@@ -297,8 +316,14 @@ fn trigamma_pos(x: f64) -> f64 {
             let f = y.floor();
             (f as usize, f + 0.5)
         };
-        let [yc, r @ ..] = TRIG_PIECES[i.min(9)];
-        Dd::new(yc).add_f64(poly(y - c, &r))
+        // Y + c₁s + (c₀ + s²R(s)), the first two terms without error (in f64 the linear term
+        // rounds to nearly half an ulp of the result at the pieces' ends).
+        let s = y - c;
+        let [yc, c0, c1, r @ ..] = TRIG_PIECES[i.min(9)];
+        let (p, e) = two_prod(c1, s);
+        let (h, e2) = fast_two_sum(yc, p);
+        let (hi, lo) = fast_two_sum(h, e2 + (e + fma(s * s, poly(s, &r), c0)));
+        Dd { hi, lo }
     };
     if x >= 2.0 {
         return piece(x).value();
@@ -306,13 +331,17 @@ fn trigamma_pos(x: f64) -> f64 {
     // Below 2: the terms 1/(x + j)², each x + j a double-double, then ψ′ at y = x + m ∈ [2, 3)
     // with the rounding of y corrected through ψ″(y) ≈ −1/y² − 1/y³.
     if x < 1e-150 {
-        // 1/x², rounded once (ψ′(1 + x) is below its last bit).
-        if x < 7.458_340_731_200_207e-155 {
+        // 1/x², rounded once (ψ′(1 + x) is below its last bit); it overflows from 2⁻⁵¹² down
+        // (where the square of 1/x would be infinite and its error term NaN).
+        if x <= f64::from_bits(511 << 52) {
             return f64::INFINITY;
         }
+        // (At a quarter of 1/x: beside the overflow Dekker's product, without a fused
+        // multiply-add, would overflow in its partial products.)
         let q = recip(x);
-        let (p, e) = two_prod(q.hi, q.hi);
-        return p + (e + 2.0 * q.hi * q.lo);
+        let (h, l) = (0.25 * q.hi, 0.25 * q.lo);
+        let (p, e) = two_prod(h, h);
+        return (p + (e + 2.0 * h * l)) * 16.0;
     }
     let m = if x < 1.0 { 2.0 } else { 1.0 };
     // 1/(x + j)² for j < m, x + j = h + l exactly: q = 1/h with its residual, then q².

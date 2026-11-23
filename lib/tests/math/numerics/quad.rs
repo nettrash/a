@@ -1,210 +1,239 @@
-//! The quadrature of [`a::math::numerics::quad`]: the adaptive Kronrod rules, Clenshaw and Curtis,
-//! the double exponential rule, the infinite intervals, the cubature and the Monte Carlo.
+//! The quadrature of `a::math::numerics`: the adaptive Kronrod rules (QAGS, QAGI), Clenshaw and
+//! Curtis, the double exponential rules, the cubature and the Monte Carlo rules.
 //!
-//! Every rule is held to a value known independently of it, and its own error estimate is held to
-//! the truth: an estimate that understates the error is worse than no estimate at all.
+//! Every rule is held to values known independently of it — closed forms and mpmath, through the
+//! data of `quad/data` — and its error estimate is held to the truth: a converged result whose
+//! true error exceeds its estimate is a failure, however accurate it is. The contract the rules
+//! share is tested here; each rule has a file of its own.
+
+mod battery;
+mod clenshaw;
+mod cubature;
+mod kronrod;
+mod monte_carlo;
+mod tanh_sinh;
 
 use a::math::numerics::{
-    QuadOptions, clenshaw_curtis, cubature, monte_carlo, quad, quad_g7k15, quad_g10k21,
-    quad_half_infinite, quad_infinite, tanh_sinh,
+    QuadOptions, QuadResult, clenshaw_curtis, cubature, monte_carlo, quad, quad_g7k15, quad_g10k21,
+    quad_half_infinite, quad_infinite, quasi_monte_carlo, tanh_sinh,
 };
 
-const PI: f64 = core::f64::consts::PI;
-const SQRT_PI: f64 = 1.772_453_850_905_516_7;
+/// An integrand of the tables of cases.
+type F = fn(f64) -> f64;
 
-/// The integral of sin over [0, π], which is 2.
-fn sine(_x: f64) -> f64 {
-    _x.sin()
+/// Pairs of narrow Gaussian peaks of width `w` on `[0, 1]`, as the confirmation of review round 2
+/// drew them: 400 draws of a fixed linear congruential sequence, the first centre in
+/// `[0.05, 0.45]`, the second there too or, if `split`, in `[0.55, 0.95]`, and the second
+/// peak's height in `[0.05, 1]` (the first's is 1); pairs closer than 20 widths are left out.
+/// Each pair is `(c₁, c₂, h₂)`, its integral `w√π(1 + h₂)`, the peaks lying 50 widths and more
+/// inside the interval.
+fn peak_pairs(w: f64, split: bool) -> Vec<(f64, f64, f64)> {
+    let mut s = 987_654_321u64;
+    let mut next = move || {
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (s >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut pairs = Vec::new();
+    for _ in 0..400 {
+        let c1 = 0.05 + 0.4 * next();
+        let c2 = if split { 0.55 } else { 0.05 } + 0.4 * next();
+        let h2 = 0.05 + 0.95 * next();
+        if (c1 - c2).abs() >= 20.0 * w {
+            pairs.push((c1, c2, h2));
+        }
+    }
+    pairs
 }
 
-/// The five rules, on the same integrand and the same interval.
+/// A rule of one variable on `[0, 1]`, for [`pair_sweep`].
+type OnUnit<'a> = &'a dyn Fn(&dyn Fn(f64) -> f64, &QuadOptions<f64>) -> QuadResult<f64>;
+
+/// `rule` on the pairs of peaks of [`peak_pairs`] at the tolerance `tol`: how many runs saw both
+/// peaks at more than `10⁻³` of their heights at some point, and those of them that converged
+/// beyond their error estimates, described.
+fn pair_sweep(rule: OnUnit<'_>, w: f64, split: bool, tol: f64) -> (usize, Vec<String>) {
+    let sqrt_pi = core::f64::consts::PI.sqrt();
+    let opts = QuadOptions::new().with_epsabs(tol).with_epsrel(tol);
+    let (mut seen, mut beyond) = (0, Vec::new());
+    for (c1, c2, h2) in peak_pairs(w, split) {
+        let (s1, s2) = (std::cell::Cell::new(0.0f64), std::cell::Cell::new(0.0f64));
+        let f = |x: f64| {
+            let (t, u) = ((x - c1) / w, (x - c2) / w);
+            let (v1, v2) = ((-t * t).exp(), h2 * (-u * u).exp());
+            s1.set(s1.get().max(v1));
+            s2.set(s2.get().max(v2 / h2));
+            v1 + v2
+        };
+        let r = rule(&f, &opts);
+        if s1.get() > 1e-3 && s2.get() > 1e-3 {
+            seen += 1;
+            let exact = w * sqrt_pi * (1.0 + h2);
+            if r.converged && (r.value - exact).abs() > r.error + 4.0 * f64::EPSILON * exact {
+                beyond.push(format!(
+                    "w {w:e} split {split} tol {tol:e}: c1 {c1} c2 {c2} h2 {h2}: {r:?} for {exact:e}, \
+                     the peaks seen at {:.3e} and {:.3e} of their heights",
+                    s1.get(),
+                    s2.get()
+                ));
+            }
+        }
+    }
+    (seen, beyond)
+}
+
+/// The four rules of one variable, on the same integrand and interval.
 fn rules(
-    f: impl FnMut(f64) -> f64,
+    f: fn(f64) -> f64,
     a: f64,
     b: f64,
     opts: &QuadOptions<f64>,
-) -> Vec<(&'static str, f64, f64)> {
-    let mut f = f;
+) -> Vec<(&'static str, Option<a::math::numerics::QuadResult<f64>>)> {
     vec![
-        ("g7k15", quad_g7k15(&mut f, a, b, opts).unwrap().value, 0.0),
-        (
-            "g10k21",
-            quad_g10k21(&mut f, a, b, opts).unwrap().value,
-            0.0,
-        ),
-        (
-            "clenshaw-curtis",
-            clenshaw_curtis(&mut f, a, b, opts).unwrap().value,
-            0.0,
-        ),
-        (
-            "tanh-sinh",
-            tanh_sinh(&mut f, a, b, opts).unwrap().value,
-            0.0,
-        ),
+        ("quad_g7k15", quad_g7k15(f, a, b, opts)),
+        ("quad_g10k21", quad_g10k21(f, a, b, opts)),
+        ("clenshaw_curtis", clenshaw_curtis(f, a, b, opts)),
+        ("tanh_sinh", tanh_sinh(f, a, b, opts)),
     ]
 }
 
 #[test]
-fn every_rule_on_a_smooth_integral_agrees_with_the_exact_value() {
+fn an_empty_interval_is_the_integral_zero_and_a_reversed_one_its_negation() {
+    // Audit n_quad-16: both were None. ∫₁¹ = 0 with no evaluation, ∫₁⁰ eˣ dx = 1 − e.
     let opts = QuadOptions::new();
-    for (name, value, _) in rules(sine, 0.0, PI, &opts) {
-        assert!((value - 2.0).abs() < 1e-12, "{name} got {value}");
+    let e = core::f64::consts::E;
+    for (name, r) in rules(|x| x.exp(), 1.0, 1.0, &opts) {
+        let r = r.unwrap_or_else(|| panic!("{name} refused an empty interval"));
+        assert_eq!((r.value, r.error, r.evaluations), (0.0, 0.0, 0), "{name}");
+        assert!(r.converged, "{name}");
     }
-    let r = quad(|x: f64| x.sin(), 0.0, PI).unwrap();
-    assert!((r.value - 2.0).abs() < 1e-12);
-    assert!(r.converged, "the default tolerance was not met");
-    assert!(
-        r.evaluations >= 21,
-        "the rule did no work: {} evaluations",
-        r.evaluations
-    );
-}
-
-#[test]
-fn the_error_estimate_is_an_estimate_and_not_a_formality() {
-    // For each of a family of integrals the estimate must be above the error the test can see,
-    // and not absurdly above it either.
-    // name, the interval and the integrand, and the value the integral is known to have.
-    type Case<'a> = (&'a str, f64, f64, fn(f64) -> f64, f64);
-    let cases: [Case; 5] = [
-        ("sin", 0.0, PI, |x| x.sin(), 2.0),
-        (
-            "exp",
-            -1.0,
-            1.0,
-            |x| x.exp(),
-            core::f64::consts::E - 1.0 / core::f64::consts::E,
-        ),
-        ("1/(1+x²)", 0.0, 1.0, |x| 1.0 / (1.0 + x * x), PI / 4.0),
-        ("x¹⁰", 0.0, 1.0, |x| x.powi(10), 1.0 / 11.0),
-        (
-            "sin(30x)",
-            0.0,
-            1.0,
-            |x| (30.0 * x).sin(),
-            (30.0f64).cos().mul_add(-1.0, 1.0) / 30.0,
-        ),
-    ];
-    for (name, a, b, f, want) in cases {
-        let r = quad(f, a, b).unwrap();
-        let true_error = (r.value - want).abs();
-        assert!(
-            true_error <= r.error.max(1e-12),
-            "{name}: error {true_error} exceeds the stated {}",
-            r.error
-        );
-        assert!(
-            r.error <= 1e3 * true_error.max(1e-15),
-            "{name}: the estimate {} is wildly pessimistic",
-            r.error
-        );
-        assert!(r.converged, "{name} gave up");
+    for (name, r) in rules(|x| x.exp(), 1.0, 0.0, &opts) {
+        let r = r.unwrap();
+        assert!((r.value - (1.0 - e)).abs() < 1e-14, "{name}: {}", r.value);
+        assert!(r.converged, "{name}");
     }
+    // Infinite limits the other way round: ∫_∞^0 e⁻ˣ dx = −1.
+    let r = quad(|x: f64| (-x).exp(), f64::INFINITY, 0.0).unwrap();
+    assert!((r.value + 1.0).abs() < 1e-14 && r.converged);
+    let r = tanh_sinh(|x: f64| (-x).exp(), f64::INFINITY, 0.0, &opts).unwrap();
+    assert!((r.value + 1.0).abs() < 1e-14 && r.converged);
 }
 
 #[test]
-fn quadrature_finds_pi() {
-    let r = quad(|x: f64| 4.0 / (1.0 + x * x), 0.0, 1.0).unwrap();
-    assert!((r.value - PI).abs() < 1e-12);
-    // arctan's series converges at exactly this rate, so the estimate must be tight.
-    assert!(r.error < 1e-11);
-}
-
-#[test]
-fn an_integrable_singularity_at_an_end_is_not_a_stopping_point() {
-    // ∫₀¹ x^(−1/2) dx = 2 and ∫₀¹ ln x dx = −1, both infinite at the left end.
+fn a_limit_that_is_not_a_number_answers_nothing() {
     let opts = QuadOptions::new();
-    let r = tanh_sinh(|x: f64| x.sqrt().recip(), 0.0, 1.0, &opts).unwrap();
-    assert!(
-        (r.value - 2.0).abs() < 1e-6,
-        "the square-root singularity got {}",
-        r.value
-    );
-    let r = tanh_sinh(|x: f64| x.ln(), 0.0, 1.0, &opts).unwrap();
-    assert!(
-        (r.value + 1.0).abs() < 1e-6,
-        "the logarithm got {}",
-        r.value
-    );
-    // A pole is not integrable and must not be reported as though it were.
-    let pole = tanh_sinh(|x: f64| 1.0 / x, 0.0, 1.0, &opts).unwrap();
-    assert!(
-        !pole.converged || pole.value.abs() > 1e6,
-        "a pole was accepted quietly"
-    );
+    for (a, b) in [(f64::NAN, 1.0), (0.0, f64::NAN), (f64::NAN, f64::NAN)] {
+        for (name, r) in rules(|x| x, a, b, &opts) {
+            assert!(r.is_none(), "{name} answered {r:?}");
+        }
+        assert!(quad(|x: f64| x, a, b).is_none());
+    }
+    // An infinite limit is for the rules that map one: Clenshaw–Curtis refuses it.
+    assert!(clenshaw_curtis(|x: f64| (-x).exp(), 0.0, f64::INFINITY, &opts).is_none());
 }
 
 #[test]
-fn infinite_intervals_are_mapped_onto_a_finite_one() {
-    let opts = QuadOptions::new();
-    // ∫₀^∞ e⁻ˣ dx = 1.
-    let r = quad_half_infinite(|x: f64| (-x).exp(), 0.0, &opts).unwrap();
-    assert!(
-        (r.value - 1.0).abs() < 1e-10,
-        "the decaying exponential got {}",
-        r.value
-    );
+fn options_that_ask_for_nothing_answer_nothing() {
+    // Audit n_quad-16: at tolerances 0 the old rule reported an error of 0, converged.
+    for opts in [
+        QuadOptions::new().with_epsabs(0.0).with_epsrel(0.0),
+        QuadOptions::new().with_epsabs(-1e-10),
+        QuadOptions::new().with_epsrel(f64::NAN),
+        QuadOptions::new().with_max_subintervals(0),
+        QuadOptions::new().with_max_evaluations(0),
+    ] {
+        for (name, r) in rules(|x| (30.0 * x).sin(), 0.0, 1.0, &opts) {
+            assert!(r.is_none(), "{name} with {opts:?} answered {r:?}");
+        }
+    }
+    // One tolerance zero is a pure absolute or relative test, and fine.
+    let r = quad_g10k21(
+        |x: f64| x.exp(),
+        0.0,
+        1.0,
+        &QuadOptions::new().with_epsabs(0.0),
+    )
+    .unwrap();
     assert!(r.converged);
-    // ∫₀^∞ e^(−x²) dx = √π/2.
-    let r = quad_half_infinite(|x: f64| (-x * x).exp(), 0.0, &opts).unwrap();
-    assert!(
-        (r.value - SQRT_PI / 2.0).abs() < 1e-10,
-        "the half gaussian got {}",
-        r.value
-    );
-    // ∫ over all the line of e^(−x²) = √π.
-    let r = quad_infinite(|x: f64| (-x * x).exp(), &opts).unwrap();
-    assert!(
-        (r.value - SQRT_PI).abs() < 1e-10,
-        "the gaussian got {}",
-        r.value
-    );
-    assert!(r.converged);
-    // ∫ over all the line of 1/(1 + x²) = π.
-    let r = quad_infinite(|x: f64| 1.0 / (1.0 + x * x), &opts).unwrap();
-    assert!((r.value - PI).abs() < 1e-9, "the cauchy got {}", r.value);
 }
 
 #[test]
-fn an_interval_that_is_not_one_answers_nothing() {
-    let opts = QuadOptions::new();
-    assert!(quad_g7k15(|x: f64| x, 1.0, 1.0, &opts).is_none());
-    assert!(quad_g10k21(|x: f64| x, 2.0, 1.0, &opts).is_none());
-    assert!(clenshaw_curtis(|x: f64| x, 1.0, 0.0, &opts).is_none());
-    assert!(tanh_sinh(|x: f64| x, 1.0, 1.0, &opts).is_none());
-    assert!(quad(|x: f64| x, 1.0, 1.0).is_none());
-}
-
-#[test]
-fn an_integrand_that_is_not_a_number_is_not_an_answer() {
-    let r = quad(|x: f64| if x > 0.5 { f64::NAN } else { 1.0 }, 0.0, 1.0);
-    match r {
-        None => {}
-        Some(r) => assert!(!r.converged, "a NaN integrand converged to {}", r.value),
-    }
-    let r = quad(|_: f64| f64::INFINITY, 0.0, 1.0);
-    assert!(r.is_none() || !r.unwrap().converged);
-}
-
-#[test]
-fn integrals_add_and_scale_as_they_should() {
-    let f = |x: f64| x * x * (1.0 - x);
-    let g = |x: f64| x.exp();
-    let i = quad(f, 0.0, 1.0).unwrap().value;
-    let j = quad(g, 0.0, 1.0).unwrap().value;
-    let both = quad(|x: f64| f(x) + g(x), 0.0, 1.0).unwrap().value;
-    assert!((both - (i + j)).abs() < 1e-11);
-    let scaled = quad(|x: f64| 3.0 * f(x), 0.0, 1.0).unwrap().value;
-    assert!((scaled - 3.0 * i).abs() < 1e-11);
-    // Additivity over the halves, for all five rules.
-    for (name, one, _) in rules(f, 0.0, 1.0, &QuadOptions::new()) {
-        let left = quad(f, 0.0, 0.5).unwrap().value;
-        let right = quad(f, 0.5, 1.0).unwrap().value;
+fn the_default_tolerances_suit_the_type() {
+    // Audit n_quad-11: QuadOptions::<f32>::new() asked for 1e-12, which no f32 sum can meet, and
+    // quad::<f32>(cos 200x) spent 8379 evaluations to fail.
+    assert_eq!(QuadOptions::<f64>::new().epsabs, 1e-12);
+    assert_eq!(QuadOptions::<f32>::new().epsabs, 1e-5);
+    let r = quad(|x: f32| (200.0 * x).cos(), 0.0, 1.0).unwrap();
+    let want = 200f64.sin() / 200.0;
+    assert!(r.converged, "cos 200x in f32 did not converge");
+    assert!((f64::from(r.value) - want).abs() <= f64::from(r.error));
+    assert!(r.evaluations < 1000, "{} evaluations", r.evaluations);
+    for (name, r) in [
+        (
+            "tanh_sinh",
+            tanh_sinh(|x: f32| x.exp(), 0.0, 1.0, &QuadOptions::new()),
+        ),
+        (
+            "clenshaw_curtis",
+            clenshaw_curtis(|x: f32| x.exp(), 0.0, 1.0, &QuadOptions::new()),
+        ),
+    ] {
+        let r = r.unwrap();
+        assert!(r.converged && r.evaluations < 200, "{name}: {r:?}");
+        let e = core::f64::consts::E - 1.0;
         assert!(
-            (one - (left + right)).abs() < 1e-10,
-            "{name} is not additive"
+            (f64::from(r.value) - e).abs() <= f64::from(r.error),
+            "{name}"
         );
+    }
+}
+
+#[test]
+fn the_budget_bounds_the_work_of_every_rule() {
+    // Audit n_quad-16: tanh_sinh ignored max_subintervals. Every rule now stops at
+    // max_evaluations, and the adaptive ones at max_subintervals.
+    let hard = |x: f64| (x - 0.3).abs().sqrt() * (1.0 / (1e-3 + x * x)).sin();
+    for limit in [40usize, 333, 1000] {
+        let opts = QuadOptions::new().with_max_evaluations(limit);
+        for (name, r) in rules(hard, 0.0, 1.0, &opts) {
+            if let Some(r) = r {
+                assert!(
+                    r.evaluations <= limit,
+                    "{name}: {} > {limit}",
+                    r.evaluations
+                );
+            }
+        }
+    }
+    for m in [1usize, 2, 7] {
+        let opts = QuadOptions::new().with_max_subintervals(m);
+        let r = quad_g7k15(hard, 0.0, 1.0, &opts).unwrap();
+        assert!(r.evaluations <= 15 * (2 * m - 1), "{m}: {}", r.evaluations);
+        assert!(!r.converged);
+    }
+    // Every budget, not only round ones (review round 1): the round-1 tanh_sinh spent 74
+    // evaluations of a budget of 73 on ∫₀¹ 1 dx, the first side's nodes past its reach eating
+    // what the level had set aside for the other side's.
+    let limits = if cfg!(miri) { 30..=40 } else { 1..=400 };
+    for limit in limits {
+        let opts = QuadOptions::new().with_max_evaluations(limit);
+        for f in [hard, |_: f64| 1.0, |x: f64| (-x).exp() / x.sqrt()] {
+            for (name, r) in rules(f, 0.0, 1.0, &opts) {
+                if let Some(r) = r {
+                    assert!(
+                        r.evaluations <= limit,
+                        "{name}: {} > {limit}",
+                        r.evaluations
+                    );
+                }
+            }
+            let r = tanh_sinh(f, 0.0, f64::INFINITY, &opts).unwrap();
+            assert!(
+                r.evaluations <= limit,
+                "tanh_sinh on [0, ∞): {r:?} > {limit}"
+            );
+        }
     }
 }
 
@@ -215,139 +244,210 @@ fn a_rule_with_no_room_to_subdivide_says_so() {
         .with_epsabs(1e-14)
         .with_epsrel(1e-14)
         .with_max_subintervals(1);
-    let r = quad_g10k21(
-        |x: f64| (-100.0 * (x - 0.5) * (x - 0.5)).exp(),
-        0.0,
-        1.0,
-        &opts,
-    );
-    match r {
-        None => {}
-        Some(r) => assert!(!r.converged, "one panel claimed convergence at {}", r.value),
+    let f = |x: f64| (-100.0 * (x - 0.5) * (x - 0.5)).exp();
+    let r = quad_g10k21(f, 0.0, 1.0, &opts).unwrap();
+    assert!(!r.converged, "one panel claimed convergence at {}", r.value);
+    assert_eq!(r.evaluations, 21);
+    // The same integral with room to work converges: √π/10 · erf(5).
+    let r = quad(f, 0.0, 1.0).unwrap();
+    let want = 0.177_245_385_090_279_1;
+    assert!(r.converged && (r.value - want).abs() <= r.error);
+}
+
+#[test]
+fn an_integrand_that_is_not_a_number_ends_the_integration_unconverged() {
+    let opts = QuadOptions::new();
+    let cases: [(&str, F); 3] = [
+        ("NaN on half", |x| if x > 0.5 { f64::NAN } else { 1.0 }),
+        ("infinite everywhere", |_| f64::INFINITY),
+        ("NaN everywhere", |_| f64::NAN),
+    ];
+    for (what, f) in cases {
+        for (name, r) in rules(f, 0.0, 1.0, &opts) {
+            let r = r.unwrap();
+            assert!(!r.converged, "{name} on {what} converged to {}", r.value);
+            assert!(
+                !r.value.is_finite() || !r.error.is_finite(),
+                "{name} on {what}"
+            );
+        }
     }
-    // The same integral with room to work does converge.
-    let r = quad(|x: f64| (-100.0 * (x - 0.5) * (x - 0.5)).exp(), 0.0, 1.0).unwrap();
-    assert!(r.converged);
-    assert!(
-        (r.value - SQRT_PI / 10.0).abs() < 1e-9,
-        "the layer got {}",
-        r.value
-    );
+}
+
+/// Whether a result whose value or error is not a finite number says so: not converged, and an
+/// infinite error beside a value that is not finite.
+fn refused<T: a::math::numerics::Real>(r: &QuadResult<T>) -> bool {
+    let finite = r.value.is_finite() && r.error.is_finite();
+    !finite && !r.converged && (r.value.is_finite() || r.error.is_infinite())
 }
 
 #[test]
-fn cubature_integrates_over_a_box() {
-    let opts = QuadOptions::new().with_epsabs(1e-11).with_epsrel(1e-11);
-    // ∫₀¹∫₀¹ x² + y² dx dy = 2/3.
-    let r = cubature(
-        |v: &[f64]| v[0] * v[0] + v[1] * v[1],
-        &[0.0, 0.0],
-        &[1.0, 1.0],
-        &opts,
-    )
-    .unwrap();
-    assert!(
-        (r.value - 2.0 / 3.0).abs() < 1e-10,
-        "the square got {}",
-        r.value
-    );
-    assert!(r.converged);
-    // ∫₀¹∫₀¹ xy dx dy = 1/4, and the same function over a box of sides 2 and 3.
-    let r = cubature(|v: &[f64]| v[0] * v[1], &[0.0, 0.0], &[1.0, 1.0], &opts).unwrap();
-    assert!((r.value - 0.25).abs() < 1e-10);
-    let r = cubature(|v: &[f64]| v[0] * v[1], &[0.0, 0.0], &[2.0, 3.0], &opts).unwrap();
-    assert!((r.value - 9.0).abs() < 1e-9, "the wide box got {}", r.value);
-    // ∫ over the unit cube of x + y + z = 3/2.
-    let r = cubature(
-        |v: &[f64]| v[0] + v[1] + v[2],
-        &[0.0, 0.0, 0.0],
-        &[1.0, 1.0, 1.0],
-        &opts,
-    )
-    .unwrap();
-    assert!((r.value - 1.5).abs() < 1e-10, "the cube got {}", r.value);
-    // A degenerate box, and a mismatched one, answer nothing.
-    assert!(cubature(|_: &[f64]| 1.0, &[0.0, 1.0], &[1.0, 1.0], &opts).is_none());
-    assert!(cubature(|_: &[f64]| 1.0, &[0.0], &[1.0, 1.0], &opts).is_none());
+fn a_result_beyond_the_range_of_its_type_is_never_converged() {
+    // Review round 1, B2. Clenshaw–Curtis in f64 accepted ∞ ± ∞ (∞ ≤ epsrel·∞), and every rule
+    // in f32 works in f64 and rounded a value above f32::MAX to ∞ after its test: ∫₀¹⁵⁰⁰ x¹²
+    // = 1.5·10⁴⁰ came back ∞, error 8.9·10³⁴, converged, though every value of the integrand
+    // fits an f32.
+    let opts = QuadOptions::new();
+    for (what, r) in [
+        (
+            "1e308 on [0, 10]",
+            clenshaw_curtis(|_: f64| 1e308, 0.0, 10.0, &opts),
+        ),
+        (
+            "2 on [0, 1.7e308]",
+            clenshaw_curtis(|_: f64| 2.0, 0.0, 1.7e308, &opts),
+        ),
+    ] {
+        let r = r.unwrap();
+        assert!(refused(&r), "clenshaw_curtis on {what}: {r:?}");
+    }
+    let opts = QuadOptions::<f32>::new();
+    let power = |x: f32| x.powi(12);
+    for (name, r) in [
+        ("quad", quad(power, 0.0, 1500.0)),
+        ("quad_g7k15", quad_g7k15(power, 0.0, 1500.0, &opts)),
+        (
+            "clenshaw_curtis",
+            clenshaw_curtis(power, 0.0, 1500.0, &opts),
+        ),
+        ("tanh_sinh", tanh_sinh(power, 0.0, 1500.0, &opts)),
+        ("quad, x on [0, 1e20]", quad(|x: f32| x, 0.0, 1e20)),
+        (
+            "quad_half_infinite",
+            quad_half_infinite(|x: f32| 1e38 * (-x / 100.0).exp(), 0.0, &opts),
+        ),
+        (
+            "cubature",
+            cubature(|_: &[f32]| 1e38, &[0.0; 2], &[10.0; 2], &opts),
+        ),
+        (
+            "monte_carlo",
+            monte_carlo(|_: &[f32]| 1e38, &[0.0], &[10.0], 1000),
+        ),
+        (
+            "quasi_monte_carlo",
+            quasi_monte_carlo(|_: &[f32]| 1e38, &[0.0], &[10.0], 1024),
+        ),
+    ] {
+        let r = r.unwrap();
+        assert!(refused(&r), "{name} in f32: {r:?}");
+    }
+    // An integral just inside the range still converges: ∫₀¹⁰⁰⁰ x¹² dx = 7.7·10³⁷.
+    let want = 1e39 / 13.0;
+    for (name, r) in [
+        ("quad", quad(power, 0.0, 1000.0)),
+        ("quad_g7k15", quad_g7k15(power, 0.0, 1000.0, &opts)),
+        (
+            "clenshaw_curtis",
+            clenshaw_curtis(power, 0.0, 1000.0, &opts),
+        ),
+        ("tanh_sinh", tanh_sinh(power, 0.0, 1000.0, &opts)),
+    ] {
+        let r = r.unwrap();
+        let err = (f64::from(r.value) - want).abs();
+        assert!(r.converged, "{name}: {r:?}");
+        assert!(err <= f64::from(r.error) + 1e-6 * want, "{name}: {r:?}");
+    }
 }
 
 #[test]
-fn monte_carlo_finds_a_volume_and_becomes_no_better_by_wishing() {
-    // The estimate is deterministic: the same sample count gives the same answer, because the
-    // samples are the points of a Sobol sequence rather than draws of a generator.
-    let square = |n: usize| {
-        monte_carlo(
-            &mut |v: &[f64]| v[0] * v[1],
-            &[0.0f64, 0.0],
-            &[1.0f64, 1.0],
-            n,
-        )
+fn a_feature_the_nodes_only_grazed_is_not_passed_off_as_converged() {
+    // Review round 1 (the limits of tanh_sinh): a result whose error estimate exceeds the result
+    // itself is refused by tanh_sinh and clenshaw_curtis as by QAGS, unless the error is at the
+    // round-off of the sums (since review round 2, one whose error is a tenth of it or more). The round-1 code accepted ∫₀^∞ e^(−(x−40)²) dx = √π from tanh_sinh
+    // as 3.1e-58 ± 6.1e-58 after 38 evaluations (centre 35: 1.7e-18, 45: 1.1e-119, and the
+    // bump of width 3 about 52 as 2.7e-26), and a peak of width 0.0035 about 2/3 from
+    // clenshaw_curtis as 1.8e-18 ± 1.2e-12 after 35, at every tolerance; now each is found.
+    let sqrt_pi = core::f64::consts::PI.sqrt();
+    let honest = |r: &QuadResult<f64>, exact: f64| {
+        r.converged && (r.value - exact).abs() <= r.error + 4.0 * f64::EPSILON * exact
     };
-    assert_eq!(square(4096).value, square(4096).value);
-    assert!(
-        (square(4096).value - 0.25).abs() < 0.01,
-        "the square got {}",
-        square(4096).value
-    );
-    assert!(
-        (square(65_536).value - 0.25).abs() <= (square(4096).value - 0.25).abs() + 1e-12,
-        "more samples made the square worse"
-    );
-    // The volume of the unit cube under x + y + z ≤ 1 is 1/6.
-    let simplex = monte_carlo(
-        |v: &[f64]| if v[0] + v[1] + v[2] <= 1.0 { 1.0 } else { 0.0 },
-        &[0.0f64, 0.0, 0.0],
-        &[1.0f64, 1.0, 1.0],
-        1 << 15,
-    );
-    // The simplex's indicator is discontinuous, which is the hardest case a low-discrepancy
-    // sequence is given; the bound below is what this sequence achieves, and is about the
-    // accuracy of a plain random sample of the same size.
-    assert!(
-        (simplex.value - 1.0 / 6.0).abs() < 0.06,
-        "the simplex got {}",
-        simplex.value
-    );
-    // Scaling the box scales the integral by its volume.
-    let scaled = monte_carlo(|_: &[f64]| 1.0, &[0.0f64, 0.0], &[2.0f64, 3.0], 256);
-    assert_eq!(scaled.value, 6.0);
+    for c in [35.0, 40.0, 45.0] {
+        let bump = move |x: f64| (-(x - c) * (x - c)).exp();
+        for tol in [1e-12, 1e-8, 1e-4] {
+            let opts = QuadOptions::new().with_epsabs(tol).with_epsrel(tol);
+            let r = tanh_sinh(bump, 0.0, f64::INFINITY, &opts).unwrap();
+            assert!(
+                honest(&r, sqrt_pi),
+                "tanh_sinh, centre {c} at {tol:e}: {r:?}"
+            );
+        }
+    }
+    let wide = |x: f64| (-((x - 52.0) / 3.0) * ((x - 52.0) / 3.0)).exp();
+    let r = tanh_sinh(wide, 0.0, f64::INFINITY, &QuadOptions::new()).unwrap();
+    assert!(honest(&r, 3.0 * sqrt_pi), "tanh_sinh, width 3: {r:?}");
+    for (c, w, tols) in [
+        (2.0 / 3.0, 0.0035, &[1e-9, 1e-6, 1e-3][..]),
+        (0.4, 0.003, &[1e-3][..]),
+        (0.31, 0.0031, &[1e-6, 1e-3][..]),
+    ] {
+        let peak = move |x: f64| (-((x - c) / w) * ((x - c) / w)).exp();
+        for &tol in tols {
+            let opts = QuadOptions::new().with_epsabs(tol).with_epsrel(tol);
+            let r = clenshaw_curtis(peak, 0.0, 1.0, &opts).unwrap();
+            assert!(
+                honest(&r, w * sqrt_pi),
+                "clenshaw_curtis, peak at {c} at {tol:e}: {r:?}"
+            );
+        }
+    }
 }
 
 #[test]
-fn f32_quadrature_reaches_f32_precision() {
-    let opts = QuadOptions::<f32>::new()
-        .with_epsabs(1e-6)
-        .with_epsrel(1e-6);
-    let r = quad_g7k15(|x: f32| x.sin(), 0.0, std::f32::consts::PI, &opts).unwrap();
-    assert!(
-        (f64::from(r.value) - 2.0).abs() < 1e-5,
-        "f32 got {}",
-        r.value
-    );
-    assert!(r.converged);
-    let r = quad(|x: f32| 4.0 / (1.0 + x * x), 0.0, 1.0).unwrap();
-    assert!((f64::from(r.value) - std::f32::consts::PI as f64).abs() < 1e-5);
+fn integrals_add_and_scale_as_they_should() {
+    let f = |x: f64| x * x * (1.0 - x);
+    let g = |x: f64| x.exp();
+    let i = quad(f, 0.0, 1.0).unwrap().value;
+    let j = quad(g, 0.0, 1.0).unwrap().value;
+    let both = quad(|x: f64| f(x) + g(x), 0.0, 1.0).unwrap().value;
+    assert!((both - (i + j)).abs() < 1e-15);
+    let scaled = quad(|x: f64| 3.0 * f(x), 0.0, 1.0).unwrap().value;
+    assert!((scaled - 3.0 * i).abs() < 1e-15);
+    // Additivity over the halves, for all four rules.
+    let opts = QuadOptions::new();
+    for (name, r) in rules(f, 0.0, 1.0, &opts) {
+        let one = r.unwrap().value;
+        let left = quad(f, 0.0, 0.5).unwrap().value;
+        let right = quad(f, 0.5, 1.0).unwrap().value;
+        assert!(
+            (one - (left + right)).abs() < 1e-15,
+            "{name} is not additive"
+        );
+    }
 }
 
 #[test]
-fn a_result_carries_its_estimate_and_its_counts() {
-    let r = quad(|_x: f64| 1.0, 0.0, 5.0).unwrap();
-    assert_eq!(r.value, 5.0);
-    assert_eq!(r.as_tuple(), (r.value, r.error));
-    assert!(r.evaluations > 0);
-    assert!(r.error <= 1e-12);
-    // A tight tolerance costs evaluations and buys nothing else.
-    let loose = QuadOptions::new().with_epsabs(1e-3).with_epsrel(1e-3);
-    let cheap = quad_g7k15(|x: f64| (10.0 * x).sin(), 0.0, 1.0, &loose).unwrap();
-    let dear = quad_g7k15(
-        |x: f64| (10.0 * x).sin(),
-        0.0,
-        1.0,
-        &QuadOptions::new().with_epsabs(1e-14).with_epsrel(1e-14),
-    )
-    .unwrap();
-    assert!(
-        dear.evaluations >= cheap.evaluations,
-        "work did not buy accuracy"
+fn the_shorthands_for_infinite_intervals_are_quad_with_infinite_limits() {
+    let opts = QuadOptions::new();
+    let f = |x: f64| (-x * x).exp();
+    assert_eq!(
+        quad_half_infinite(f, 0.0, &opts),
+        quad_g10k21(f, 0.0, f64::INFINITY, &opts)
     );
+    assert_eq!(
+        quad_infinite(f, &opts),
+        quad_g10k21(f, f64::NEG_INFINITY, f64::INFINITY, &opts)
+    );
+    // Audit n_quad-16: quad_half_infinite(eˣ, −∞) was 0, converged; it is the whole line now,
+    // and eˣ over the line diverges.
+    let r = quad_half_infinite(|x: f64| x.exp(), f64::NEG_INFINITY, &opts).unwrap();
+    assert!(!r.converged, "{r:?}");
+}
+
+#[test]
+fn cubature_contract_matches_the_one_dimensional_rules() {
+    let opts = QuadOptions::new();
+    // A degenerate box is the integral 0, a reversed side negates it.
+    let r = cubature(|_: &[f64]| 1.0, &[0.0, 1.0], &[1.0, 1.0], &opts).unwrap();
+    assert_eq!((r.value, r.evaluations), (0.0, 0));
+    let r = cubature(|v: &[f64]| v[0] * v[1], &[1.0, 0.0], &[0.0, 1.0], &opts).unwrap();
+    assert!((r.value + 0.25).abs() < 1e-15 && r.converged);
+    assert!(cubature(|_: &[f64]| 1.0, &[f64::NAN, 0.0], &[1.0, 1.0], &opts).is_none());
+    assert!(cubature(|_: &[f64]| 1.0, &[0.0, 0.0], &[1.0, f64::INFINITY], &opts).is_none());
+}
+
+#[test]
+#[should_panic(expected = "different dimensions")]
+fn a_cubature_box_with_mismatched_corners_panics() {
+    let _ = cubature(|_: &[f64]| 1.0, &[0.0], &[1.0, 1.0], &QuadOptions::new());
 }
