@@ -186,9 +186,9 @@ fn aaa_chooses_scipys_support_points_on_real_problems() {
     // SciPy's default tolerance, clean-up off: the same terms, the same support points (|x|: the
     // first 36 of 39; its step 36 is ill-conditioned, the error jumping from 1.2e-10 to 2e-8 in
     // both codes and the two differing by a third there, and the 37th support points are
-    // neighbouring samples), values within 1e-13 of SciPy's relative to max|f| (2·rtol when the
-    // support points part) and weights within 1e-4 (a singular vector of a nearly singular
-    // matrix: it is the values that are well determined).
+    // neighbouring samples), values within 1e-13 of SciPy's relative to max|f| (Γ's within rtol,
+    // below; 2·rtol when the support points part) and weights within 1e-4 (a singular vector of a
+    // nearly singular matrix: it is the values that are well determined).
     let opts = AaaOptions::new().with_clean_up(false);
     for (name, text) in REAL {
         let r = reference(text);
@@ -207,7 +207,19 @@ fn aaa_chooses_scipys_support_points_on_real_problems() {
         same_poles(name, &r, &a.poles());
         let tied = agree < got.len();
         assert!(tied || dw < 1e-4, "{name}: weights {dw:e} from SciPy's");
-        let limit = if tied { 2.0 * opts.rtol } else { 1e-13 };
+        // Γ's values between the samples, near its poles, are determined by the data only to a few
+        // 1e-13 of max|f|: changing each sample by 1 to 4 ulps, with the support points the same,
+        // moves them by up to 4.0e-13 (a quarter of 400 trials by more than 1e-13), and the last
+        // bits of `hypot` in the decompositions do as much (1.6e-13 on x86_64 with Ubuntu's
+        // x86-64-v3 glibc, as in CI). They are held to rtol, what the method promises at the
+        // samples. The other problems move by 1.7e-14 at most in the same trials.
+        let limit = if tied {
+            2.0 * opts.rtol
+        } else if name == "gamma" {
+            opts.rtol
+        } else {
+            1e-13
+        };
         assert!(dv < limit, "{name}: values {dv:e} from SciPy's");
         if !tied {
             // The errors of the early steps, with a pole among the samples, are sensitive to the

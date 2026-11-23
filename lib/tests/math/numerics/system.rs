@@ -2387,8 +2387,15 @@ fn the_rounding_test_judges_the_point_it_returns_along_its_own_correction() {
     // step; broyden the end of the step. Either way the test is made at the point returned, along
     // its own correction. The residuals are those of the points the methods stop on (Brown's
     // function is sums and a product, evaluated alike everywhere).
+    //
+    // The steps are not: they come from QR factorisations whose Householder reflections call
+    // `hypot`, which the platforms' libms round differently in the last bit. newton_system ends
+    // as above on aarch64 macOS and on x86_64 with either of Ubuntu's glibc builds. broyden's last
+    // step lands on an exact zero of f with the x86-64-v3 build (CI's), where it stops on the
+    // residual test, a root, before the rounding test is made; that ending is allowed too.
     let (f, j) = brown(10);
     let x0 = col(&[0.5; 10]);
+    let at = |x: &Matrix<f64>| f(x).as_slice().iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let r = newton_system(&x0, &f, &j).unwrap();
     assert!(
         r.converged && r.stop == SystemStop::Rounding,
@@ -2396,13 +2403,18 @@ fn the_rounding_test_judges_the_point_it_returns_along_its_own_correction() {
         r.stop
     );
     assert_eq!(r.residual, 2.220446049250313e-16);
+    assert_eq!(r.residual, at(&r.x));
     let b = broyden(&x0, &f).unwrap();
     assert!(
-        b.converged && b.stop == SystemStop::Rounding,
-        "{:?}",
-        b.stop
+        b.converged
+            && (b.stop == SystemStop::Rounding
+                || (b.stop == SystemStop::Residual && b.residual == 0.0)),
+        "{:?} at residual {:e}",
+        b.stop,
+        b.residual
     );
     assert!(b.residual <= 1.8e-15, "{:e}", b.residual);
+    assert_eq!(b.residual, at(&b.x));
     // A probe of the test where f is not finite is no agreement with the model: (u − 1/3)² + 1 at
     // x = 10¹⁴ + u, with f not finite beyond u = 10, ends on the rounding test with converged
     // false by both methods with the line search, as without the wall, where every probe of the
