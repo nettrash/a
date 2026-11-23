@@ -602,9 +602,17 @@ unsafe fn chunk_steps<T: Ord>(p: *mut T, carry: &mut Carry<T>) -> u64 {
             carry,
         };
         ptr::copy_nonoverlapping(chunk.carry.val.as_ptr(), chunk.even[0].as_mut_ptr(), 1);
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "`i` is also the offset of the read, in the tuned loop of the sort"
+        )]
         for i in 1..CHUNK {
             chunk.even[i] = ptr::read(p.add(2 * i).cast());
         }
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "`i` is also the offset of the read, in the tuned loop of the sort"
+        )]
         for i in 0..CHUNK {
             chunk.odd[i] = ptr::read(p.add(2 * i + 1).cast());
         }

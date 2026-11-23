@@ -18,9 +18,11 @@
 //! Matrices of up to 8 rows whose elements are in words and whose minors stay below `2^61` by
 //! Hadamard's bound run in registers on the stack instead ([`registers`]), with nothing allocated
 //! but the result. Large systems with few right-hand sides, and large determinants, go by Dixon's
-//! p-adic lifting ([`dixon`]), whose work is `O(n³)` operations on words. The product of matrices
-//! of rationals clears the rows of the left one and the columns of the right one the same way, and
-//! multiplies integers, in registers when the elements are in words.
+//! p-adic lifting ([`dixon`]), whose work is `O(n³)` operations on words; determinants in a band
+//! of orders that widens with the length of the integers, and those of matrices the lifting
+//! finds singular, from their residues modulo word primes ([`multimodular`]). The product of
+//! matrices of rationals clears the rows of the left one and the columns of the right one the
+//! same way, and multiplies integers, in registers when the elements are in words.
 //!
 //! The parts of a rational in words are read from its words in place, never through
 //! [`Rational::numer`], which makes and keeps two numbers for it; the results are written in
@@ -29,6 +31,7 @@
 use super::Matrix;
 
 mod dixon;
+mod multimodular;
 mod registers;
 use crate::math::numbers::{ByteOrder, Magnitude, Number, fraction, nat};
 use crate::math::rational::{Rational, in_order};
@@ -1122,20 +1125,30 @@ fn solve_rows(
     order: ByteOrder,
 ) -> Option<Matrix<Rational>> {
     let cols = n + k;
-    if k <= n / 8
-        && dixon_pays(&m, n, DIXON_SOLVE)
-        && let Some((y, _)) = dixon::solve(&m, n, k)
-    {
-        let mut x = Vec::with_capacity(n * k);
-        for (j, y) in y.chunks_exact(n).enumerate() {
-            match scale.map(|s| &s[j]) {
-                Some(s) if !s.is_one() => {
-                    x.extend(y.iter().map(|(y, d)| reduce(&mul(y, s), d, None, order)))
+    if dixon_pays(&m, n, DIXON_SOLVE) {
+        if k <= n / 8 {
+            match dixon::solve(&m, n, k) {
+                dixon::Solved::Solution(y) => {
+                    let mut x = Vec::with_capacity(n * k);
+                    for (j, y) in y.chunks_exact(n).enumerate() {
+                        match scale.map(|s| &s[j]) {
+                            Some(s) if !s.is_one() => {
+                                x.extend(y.iter().map(|(y, d)| reduce(&mul(y, s), d, None, order)))
+                            }
+                            _ => x.extend(y.iter().map(|(y, d)| reduce(y, d, None, order))),
+                        }
+                    }
+                    return Some(Matrix::from_column_major(n, k, x));
                 }
-                _ => x.extend(y.iter().map(|(y, d)| reduce(y, d, None, order))),
+                dixon::Solved::Singular => return None,
+                dixon::Solved::Failed => {}
             }
+        } else if dixon::singular(&m, n, cols) {
+            // Bareiss's elimination of a singular matrix runs to its last column with integers
+            // as long as the minors before it finds no pivot there; the search proves the
+            // matrix singular in about the time of a solution.
+            return None;
         }
-        return Some(Matrix::from_column_major(n, k, x));
     }
     eliminate(&mut m, n, cols, n, true)?;
     if n == 0 {
@@ -1154,14 +1167,17 @@ fn solve_rows(
 }
 
 /// The determinant of the `n × n` matrix of integers held row after row in `m`, which this
-/// changes: from the orders of [`DIXON_DET`] by Dixon's lifting and the residues of the quotient
-/// by the divisor it finds ([`dixon::det`]), and otherwise, or when that fails, by Bareiss's
-/// elimination.
+/// changes, by the method of [`DET_BANDS`] for its order and the length of its longest integer:
+/// Bareiss's elimination, the residues modulo primes ([`multimodular`]), or Dixon's lifting and
+/// the residues of the quotient by the divisor it finds ([`dixon::det`]), which also proves a
+/// singular matrix singular (and, should its reconstruction fail, the residues).
 fn det_rows(m: &mut [Int], n: usize) -> Int {
-    if dixon_pays(m, n, DIXON_DET)
-        && let Some(d) = dixon::det(m, n, n)
-    {
-        return d;
+    let (residues, divisor) = det_band(m);
+    if n >= divisor {
+        return dixon::det(m, n, n).unwrap_or_else(|| multimodular::det(m, n));
+    }
+    if n >= residues {
+        return multimodular::det(m, n);
     }
     let Some(e) = eliminate(m, n, n, n, true) else {
         return S(0);
@@ -1179,12 +1195,89 @@ fn det_rows(m: &mut [Int], n: usize) -> Int {
 /// rows 6.18 ms against 7.59.
 const DIXON_SOLVE: (usize, usize) = (24, 16);
 
-/// The orders from which a determinant is Dixon's divisor times residues ([`dixon::det`]), as
-/// [`DIXON_SOLVE`]: for integers in `-99..=99`, 28 rows took 95.2 µs against 96.0 by the
-/// elimination, 24 rows 71.4 against 50.6; for fractions, 24 rows 358 µs against 426, 20 rows
-/// 236 against 196; for parts of 64 bits, 20 rows 10.6 ms against 16.9, 16 rows 4.63 against
-/// 4.41.
-const DIXON_DET: (usize, usize) = (28, 22);
+/// The methods of the determinant of a matrix of integers by the length of its longest integer:
+/// for integers of up to `bits` bits, `(residues, divisor)`, Bareiss's elimination below
+/// `residues` rows, the residues modulo primes ([`multimodular`]) from there to `divisor` rows,
+/// and Dixon's divisor from `divisor` rows. Measured on an Apple M4 Max in the release profile,
+/// random `n × n` matrices of elements of 8 to 600 000 bits, the three methods each at the
+/// orders 12, 16, 20, 24, 28, 32, 40, 48, 64 and 96 and at the edges of the bands: for 8 bits
+/// the residues were never the fastest (the elimination to 24 rows, 0.075 ms against 0.086,
+/// then Dixon's divisor, ahead from 28 rows: 95.2 µs against 96.0 for integers in `-99..=99`);
+/// for 32 and 48 bits they were faster than the elimination from 20 rows, to 28 where Dixon's
+/// divisor takes over (0.146 ms for 48 bits at 20 rows by the divisor, 0.152 by the residues,
+/// about 0.2 by the elimination); for 64 and 128 bits from 20 rows (0.214 ms against 0.264 by
+/// the elimination) to 28 (0.507 against 0.525 by the divisor, which was ahead at 32); for 256
+/// bits from 16 to 40, for 512 bits from 16 to 48, for 1024 bits from 16 to 64 (114 ms against
+/// 125), for 2048 bits to 96 (981 ms against 1115; 2614 against 2351 at 128), and for 4096 bits
+/// from 12 (8.2 ms against 10.3) to 128 (6.95 s against 8.53). Longer elements go by
+/// `DET_LONG` and `DET_LONGER` below.
+const DET_BANDS: [(u64, usize, usize); 7] = [
+    (24, 28, 28),
+    (63, 20, 28),
+    (192, 20, 32),
+    (384, 16, 40),
+    (768, 16, 56),
+    (1536, 16, 80),
+    (3072, 12, 112),
+];
+
+/// Beyond 3072 bits, the order from which the residues are taken for integers of up to the
+/// given bits: their residues cost about `n³·M(L)·log L` for `L` limbs, Bareiss's elimination
+/// about `n⁴·M(n·L) / (n·L)`, so the elimination keeps the matrices of fewer rows the longer the
+/// integers. Measured as [`DET_BANDS`], the residues against the elimination at the first orders
+/// where the residues were faster and at the order below: for 6144 bits 14.5 ms against 16.6 at
+/// 12 rows; for 8192 bits a tie at 12 (23.1 against 23.4), 33.2 against 42.6 at 14; for 12 288
+/// bits 41.6 against 35.9 at 12, 60.5 against 68.1 at 14; for 16 384 bits 98.7 against 92.4 at
+/// 14, 137 against 158 at 16; for 24 576 bits 288 against 258 at 16, 528 against 1296 at 20; for
+/// 32 768 bits 1.49 s against 0.93 at 20, 2.84 against 3.52 at 24 (and at 28 and 32); for 49 152
+/// bits 2.68 s against 2.54 at 24, 4.31 against 5.00 at 28; for 65 536 bits 2.64 s against 1.67
+/// at 20, 6.83 against 10.5 at 28; for 131 072 bits 19.6 s against 16.2 at 28, 49.6 against 64.2
+/// at 40; for 262 144 bits 66.9 s against 54.9 at 32, 183 against more than 400 at 44. For
+/// 600 000 bits, 9.87 s against 3.76 at 12 rows and 80.5 against 42.4 at 24, the residues growing
+/// as `n³` and the elimination as `n^3.5`, which puts the edge near 85 rows; the edge is set at
+/// 80 and, beyond, grown as from 262 144 to 600 000 bits. The machine was shared and loaded:
+/// single timings varied by up to two times, and the edges are those of repeated runs.
+const DET_LONG: [(u64, usize); 9] = [
+    (6144, 12),
+    (12288, 14),
+    (16384, 16),
+    (24576, 20),
+    (32768, 24),
+    (65536, 28),
+    (131072, 36),
+    (262144, 40),
+    (600_000, 80),
+];
+
+/// Beyond the lengths of [`DET_LONG`] the residues are taken from `bits / 7500` rows, the
+/// growth from 262 144 to 600 000 bits continued.
+const DET_LONGER: u64 = 7500;
+
+/// The band of [`DET_BANDS`] and [`DET_LONG`] for the longest integer of `m`:
+/// `(residues, divisor)`. Beyond 3072 bits Dixon's divisor takes the matrices of at least three
+/// rows a limb (and at least 160): its lifting costs about `2·n·L` steps of `n²·(L + 1)`
+/// products of words, the residues `n·L` primes of `n²·L + n³/3`, so that the divisor is the
+/// faster from about `3·L` rows, as the measured edges at 1024 to 4096 bits bear out (at 4096
+/// bits, 64 limbs, the residues were still faster at 128 rows, 6.95 s against 8.53).
+fn det_band(m: &[Int]) -> (usize, usize) {
+    let bits = m
+        .iter()
+        .map(|x| match x {
+            S(v) => 64 - v.unsigned_abs().leading_zeros() as u64,
+            B(b) => 64 * b.d.len() as u64 - b.d.last().map_or(64, |t| t.leading_zeros() as u64),
+        })
+        .max()
+        .unwrap_or(0);
+    if let Some(&(_, r, d)) = DET_BANDS.iter().find(|&&(b, _, _)| bits <= b) {
+        return (r, d);
+    }
+    let divisor = (3 * bits.div_ceil(64) as usize).max(160);
+    let residues = DET_LONG
+        .iter()
+        .find(|&&(b, _)| bits <= b)
+        .map_or((bits / DET_LONGER) as usize, |&(_, r)| r);
+    (residues.min(divisor), divisor)
+}
 
 /// Whether Dixon's lifting pays for the `n` rows of the matrix of integers `m` by the orders
 /// `from`: with every integer in a register, and with one beyond.
@@ -1202,12 +1295,15 @@ impl Matrix<Rational> {
     /// The determinant, exactly: the rows multiplied by the least common multiples `l_i` of
     /// their denominators, the determinant of that matrix of integers, and one division,
     /// `det(A) = det(L·A) / ∏ l_i`, with no fraction in between. The determinant of the integers
-    /// is Bareiss's fraction-free elimination, about `n³/3` steps of two products and an exact
-    /// division of integers no longer than the minors; from 28 rows (22 when an integer passes
-    /// 63 bits) it is the least common multiple of the denominators of the solution of a system
-    /// by Dixon's p-adic lifting, a divisor of the determinant, times the quotient's residues
-    /// modulo primes, `O(n³)` operations on words (FLINT's method). Up to 8 rows of rationals in
-    /// words whose minors stay below `2^61`, all of it runs in registers on the stack; a `2 × 2`
+    /// is that of [`Matrix::<Number>::det`]: Bareiss's fraction-free elimination, about `n³/3`
+    /// steps of two products and an exact division of integers no longer than the minors; in a
+    /// band of orders that widens with the length of the integers, their residues modulo word
+    /// primes past twice Hadamard's bound, joined by the Chinese remainder theorem; and above
+    /// it the least common multiple of the denominators of the solution of a system by Dixon's
+    /// p-adic lifting, a divisor of the determinant, times the quotient's residues modulo primes
+    /// (FLINT's method), or 0 when the lifting's search for a prime proves the matrix singular.
+    /// Up to 8 rows of rationals in words whose minors stay below `2^61`, all of it runs in
+    /// registers on the stack; a `2 × 2`
     /// matrix with a fraction is `a·d - b·c` by the rationals' arithmetic. The determinant of the
     /// `0 × 0` matrix is 1; the result is in the byte order of the top left element.
     ///
@@ -1276,9 +1372,13 @@ impl Matrix<Rational> {
     /// when an integer passes 63 bits), with at most an eighth as many columns in `B`, Dixon's
     /// p-adic lifting instead: `A` factored once modulo a prime of 62 bits, the solution lifted
     /// to a power of it past Hadamard's bounds, and each element reconstructed as a fraction,
-    /// `O(n³)` operations on words. Up to 8 rows of rationals in words whose minors stay below
-    /// `2^61`, the elimination and the back substitution run in registers on the stack (Cramer's
-    /// rule for 2 rows). The result is in the byte order of the top left element of `A`.
+    /// `O(n³)` operations on words. From the same orders, whatever the number of columns of `B`,
+    /// a matrix singular modulo the first primes the lifting tries is proved singular by a
+    /// vector of its null space, checked exactly, rather than by the whole elimination, or
+    /// lifted modulo a later prime when it is not singular. Up to 8 rows of rationals in words
+    /// whose minors stay below `2^61`, the elimination and the back substitution run in registers
+    /// on the stack (Cramer's rule for 2 rows). The result is in the byte order of the top left
+    /// element of `A`.
     ///
     /// # Panics
     ///
@@ -1485,6 +1585,10 @@ pub(super) fn inverse_of_integers(a: &Matrix<Number>) -> Option<(Matrix<Number>,
         Outcome::Ints(m, _) => m,
         _ => integers(&[a]),
     };
+    // As for the solutions: a singular matrix is proved so without the whole elimination.
+    if dixon_pays(&m, n, DIXON_SOLVE) && dixon::singular(&m, n, n) {
+        return None;
+    }
     let mut m = beside_identity(m, n);
     let e = eliminate(&mut m, n, 2 * n, n, true)?;
     let odd = e.swaps % 2 == 1;
@@ -1541,7 +1645,8 @@ impl Matrix<Number> {
     /// singular: Bareiss's elimination of `[A | B]` to an echelon form with the last pivot
     /// `D = ±det(A)`, a fraction-free back substitution to the integers `D·X` (Cramer's rule),
     /// and one reduction of each element by a greatest common divisor; for the larger systems
-    /// with few right-hand sides Dixon's p-adic lifting, as for
+    /// with few right-hand sides Dixon's p-adic lifting, and for every larger system a proof of
+    /// singularity before the elimination, as for
     /// [`Matrix::<Rational>::solve`](Matrix::<Rational>::solve). The result is in the byte order
     /// of the top left element of `A`.
     ///

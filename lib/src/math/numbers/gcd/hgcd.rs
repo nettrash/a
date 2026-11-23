@@ -186,10 +186,10 @@ impl Matrix {
         unsafe {
             let n = self.n;
             let mut grow = false;
-            for row in 0..2 {
-                let (c0, c1) = extend_row(self.p[row][0], self.p[row][1], n, m1);
-                *self.p[row][0].add(n) = c0;
-                *self.p[row][1].add(n) = c1;
+            for [r0, r1] in self.p {
+                let (c0, c1) = extend_row(r0, r1, n, m1);
+                *r0.add(n) = c0;
+                *r1.add(n) = c1;
                 grow |= c0 | c1 != 0;
             }
             self.n = n + usize::from(grow);
@@ -214,8 +214,7 @@ impl Matrix {
         unsafe {
             let (x, t) = t.split(len + 1);
             let (y, w) = t.split(len);
-            for row in 0..2 {
-                let (r0, r1) = (self.p[row][0], self.p[row][1]);
+            for [r0, r1] in self.p {
                 // r0' = r0 q00 + r1 q10 and r1' = r0 q01 + r1 q11.
                 mul_any(x, r0, rn, m1.p[0][0], mn, w);
                 mul_any(y, r1, rn, m1.p[1][0], mn, w);

@@ -15,11 +15,12 @@ Algorithms in pure Rust, with no dependencies:
 - **Fourier transforms** (`a::math::fft`): complex transforms of any length, real transforms, the cosine and sine transforms of types I to IV, transforms of two and three dimensions, and linear and circular convolutions and correlations, on `f32` and `f64`.
 - **Special functions** (`a::math::special`): the gamma family, the error functions, Bessel and Airy functions of real order, the zeta function and polylogarithms, Lambert W and the exponential integrals, elliptic integrals, Jacobi elliptic functions and orthogonal polynomials — of `f32`, `f64` and complex arguments, each with a stated ulp bound.
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
-- **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers, and exact algorithms on matrices of integers and rationals.
+- **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers; exact determinants, solutions and inverses of matrices of integers and rationals, and the Hermite and Smith normal forms; and matrices over `GF(p)` and `GF(2)`.
+- **Lattices** (`a::math::lattice`): LLL reduction, exactly and by the L² algorithm, with deep insertions, and BKZ; shortest and closest vectors and short vectors by enumeration, exactly; and integer relations among real numbers by PSLQ.
 - **Sparse matrices** (`a::math::sparse`): compressed row, compressed column and coordinate storage of floats and complex numbers, Matrix Market files, fill-reducing orderings, sparse Cholesky, `L·D·Lᴴ`, LU and QR factorisations, Krylov solvers with preconditioners, and a few eigenvalues by the Lanczos and Arnoldi methods.
 - **Numerical methods** (`a::math::numerics`): the zeros of a function and of a system, integrals in one and several dimensions and the Gaussian rules, initial value problems for stiff and non-stiff ordinary differential equations with dense output and events, minima with and without bounds, least squares and linear programming, splines, Chebyshev and rational approximation, and numerical differentiation, on `f32` and `f64`.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate, SciPy and others); the tables below link to them. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate, SciPy and others); the tables below link to them. The pages of the lattices and of the newest exact linear algebra say what they were verified against (fplll, FLINT, PARI, NTL, M4RI, mpmath and sympy), and have no timings yet. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; everything else is portable Rust.
 
 ## Usage
 
@@ -449,7 +450,7 @@ Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation ove
 
 ### Matrices
 
-[`a::math::matrix::Matrix<T>`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) is a dense matrix of any size, column after column, of `f32`, `f64`, `Complex<f32>`, `Complex<f64>`, `Number`, `Rational`, [`BigFloat` or `BigComplex`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/float.md#matrices-of-floats). The algorithms are LAPACK's, arranged so that most of their work is products of blocks, and the products run on NEON kernels; real matrices stay in real arithmetic. Costs are for `n × n` matrices.
+[`a::math::matrix::Matrix<T>`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) is a dense matrix of any size, column after column, of `f32`, `f64`, `Complex<f32>`, `Complex<f64>`, `Number`, `Rational`, [`BigFloat` or `BigComplex`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/float.md#matrices-of-floats). The algorithms are LAPACK's, arranged so that most of their work is products of blocks, and the products run on NEON kernels; real matrices stay in real arithmetic. `ModMatrix` and `BitMatrix` are dense matrices over `GF(p)`, a word an element, and over `GF(2)`, a bit an element, row after row. Costs are for `n × n` matrices.
 
 | Operations | Functions | Method | Cost |
 | --- | --- | --- | --- |
@@ -461,7 +462,10 @@ Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation ove
 | Hermitian eigenvalues | `hermitian_eigen`, `hermitian_eigenvalues` | a blocked reduction to tridiagonal form, then divide and conquer | 4.7n³, the values 4n³/3 |
 | Eigenvalues | `schur`, `eigen`, `eigenvalues`, `characteristic_polynomial` | a blocked reduction to Hessenberg form, then the multishift QR algorithm with aggressive early deflation | about 25n³, the values 10n³ |
 | Functions | `exp`, `sqrt`, `log` | scaling and squaring with Padé approximants; the Schur method; inverse scaling and squaring | `exp` a few products, `sqrt` and `log` a Schur decomposition |
-| Exactly, on `Number` and `Rational` | `det`, `rank`, `solve`, `inverse`, `inverse_rational`, `null_space`, `characteristic_polynomial`, `adjugate`, the product of rationals | Bareiss's elimination on the rows cleared of their denominators, then one division per element; Dixon's p-adic lifting for large systems and determinants; Berkowitz's method for the polynomial | n³/3 products of numbers as long as the minors, or Dixon's O(n³) operations on words; 3n⁴/2 for the polynomial |
+| Exactly, on `Number` and `Rational` | `det`, `rank`, `solve`, `inverse`, `inverse_rational`, `null_space`, `characteristic_polynomial`, `adjugate`, `*` | Bareiss's elimination on the rows cleared of their denominators; for larger matrices the determinant by residues modulo primes or by Dixon's divisor, by the order and the length of the integers, and the systems by Dixon's p-adic lifting, a singular matrix proved singular; Strassen–Winograd's product of numbers; Berkowitz's method for the polynomial | n³/3 products of numbers as long as the minors, or O(n³) operations on words for each prime or step of the lifting; 3n⁴/2 for the polynomial |
+| [Normal forms](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#normal-forms), on `Number` | `hermite_normal_form`, `hermite_form`, `smith_normal_form`, `elementary_divisors` | rank profiles modulo a prime, proved; the Hermite form modulo the determinant `D` of a minor (Domich, Kannan and Trotter); the elementary divisors modulo it; the Smith transformations by alternating Hermite forms (Kannan and Bachem) | n³ operations on numbers below `D` |
+| [Over GF(p)](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#matrices-over-gfp), `ModMatrix` | `+`, `-`, `*`, `ple`, `rank`, `det`, `inverse`, `solve`, `rref`, `null_space` | products reduced once, Strassen–Winograd from 128; the recursive PLE decomposition | n³/3 products of words, O(n^2.81) from 128 |
+| [Over GF(2)](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#matrices-over-gf2), `BitMatrix` | `+`, `*`, `mul_strassen`, `transpose`, `rank`, `det`, `inverse`, `solve`, `null_space`, `reduced_row_echelon_form` | the method of the Four Russians (M4RM), Strassen–Winograd from 3072; Bard's elimination (M4RI) | n³/(64·log n) word additions, O(n^2.81) from 3072 |
 
 In `f64` on one core of an Apple M4 Max, each of the twelve operations [measured](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#measurements) was at least as fast as faer's and nalgebra's at every size from 8 × 8 to 1024 × 1024; at 1024 × 1024, in milliseconds:
 
@@ -478,6 +482,32 @@ In `f64` on one core of an Apple M4 Max, each of the twelve operations [measured
 | `exp()` | 512 | – | 778 |
 
 Apple's Accelerate, which runs its products on the M4's matrix unit, is faster than all three at this size; it has no `exp`.
+
+### Lattices and exact linear algebra
+
+[`a::math::lattice`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/lattice.md) reduces the bases of integer lattices, the rows of a `Matrix<Number>`, which may be dependent; finds their shortest and closest vectors; and finds integer relations among real numbers. A reduction returns the reduced basis, a zero row first for each dependency, and the unimodular `U` with `U·B = B'`. The reductions and the enumerations are exact: floating point steers them, and its results are proved or computed again in integers. The normal forms and the matrices over `GF(p)` and `GF(2)` are in the table of matrices above. Costs are for `n` rows of entries of `log B` bits.
+
+| Operations | Functions | Method | Cost |
+| --- | --- | --- | --- |
+| LLL | `lll`, `is_lll_reduced` | the integral LLL of de Weger and Cohen, Pohst's MLLL for dependent rows | O(n²·log B) exchanges on integers of O(n·log B) bits |
+| L² | `lll_fp` | Nguyen and Stehlé's L², in 53-bit floats with an exponent, then in `BigFloat`s; the result proved by interval arithmetic | quadratic in log B |
+| Deep insertions | `deep_lll` | Schnorr and Euchner, on the machinery of L² | no polynomial bound |
+| Enumeration | `shortest_vector`, `closest_vector`, `short_vectors` | Fincke and Pohst in Schnorr and Euchner's order, in floats with rigorous error bounds or in integers | 2^O(n²) nodes, to a rank of about 45 |
+| BKZ | `bkz` | Schnorr and Euchner, as fplll's BKZ 1.0 without pruning: tours in floats, then exact ones | an enumeration of rank β a block, β up to about 30 |
+| Integer relations | `pslq`, `pslq_f64` | Ferguson and Bailey's PSLQ, `H` in fixed point and `A`, `B` and `y` exact; the bound proved | O(n²) multipliers an iteration |
+
+What the pages verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| [LLL, L², deep insertions](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/lattice.md#lll-reduction) | fplll 5.5, FLINT 3.6, NTL 11.6 | the ranks of 66 bases; fplll's first vector from `lll` on all 49 bases of up to 12 rows, NTL's from `deep_lll` on 24 of 24; every result reduced by the exact test, with `U·B = B'` and `det U = ±1` |
+| [Enumeration](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/lattice.md#shortest-and-closest-vectors) | fplll 5.5, PARI 2.19, an exact rational enumeration | the norms of 138 shortest vectors, the distances of 91 closest ones, and 75 lists of short vectors |
+| [BKZ](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/lattice.md#bkz) | fplll 5.5, two exact checks of every block | every block's first vector a shortest one of its block; the first vector's squared norm within 1.0044 times fplll's on 36 bases |
+| [PSLQ](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/lattice.md#integer-relations) | mpmath 1.3, PARI's `lindep`, a reference PSLQ | the relations and bounds of 17 cases; 1,000 random vectors (20,000 in a longer run), every relation and bound checked exactly |
+| [Normal forms](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#normal-forms) | FLINT 3.6, PARI 2.19 | `H`, `U` and the Smith form of 46 matrices and of 1,800 more in sweeps, of up to 3000 bits |
+| [GF(p)](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#matrices-over-gfp) | FLINT 3.6, NTL 11.6 | the rank, determinant, reduced form, inverse, null space and product of 456 matrices modulo 13 primes from 2 to `2^64 − 59` |
+| [GF(2)](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#matrices-over-gf2) | M4RI, NTL 11.6, sympy 1.14 | 235 products, echelon forms, inverses and systems, as M4RI's to the last bit, up to `4096 × 4096` |
+| [Determinants and Dixon's lifting](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md#verified-products-determinants-and-systems-of-integers) | FLINT 3.6 | 58 determinants across the three methods; 34 systems, the singular ones proved singular |
 
 ### Sparse matrices
 

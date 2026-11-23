@@ -10,19 +10,31 @@
 //! words: `O(n³ + n²·L)` operations on words, against Bareiss's `n³/3` products of numbers as
 //! long as the minors. The denominators are found by reconstructing the first element alone,
 //! as a rule, and the others from the common denominator so far.
+//!
+//! The prime is the first, from the top down below `2^62`, modulo which `A` is nonsingular
+//! ([`search`]). A matrix singular modulo the first [`FIRST`] primes is singular as a rule,
+//! and the search then proves it: the rank profile modulo the last prime gives a nonsingular
+//! square block `A[R, Q]` and a column `c` outside `Q`; the lifting solves
+//! `A[R, Q]·y = -A[R, c]` over the rationals, and `w = (y, 1)` with zeros elsewhere is checked
+//! against every row of `A`, exactly. If `A·w = 0`, `A` is singular; if not, the rank modulo
+//! that prime was below the rank, and the search goes on with the next primes (a nonsingular
+//! `A` whose determinant they divide is lifted modulo the first one that does not), trying a
+//! null vector again whenever the rank modulo a prime is the highest so far, until the primes
+//! modulo which `A` was singular have a product past twice Hadamard's bound, which leaves
+//! `det(A) = 0`. So a singular system costs about what a nonsingular one of the same size does,
+//! and every answer is certain.
 
+use super::super::modp::{Field as Residues, decompose};
+use super::multimodular::{Primes, hadamard_bits};
 use super::{Acc, B, Exact, Int, S, Work, combine, mul, trim};
 use crate::math::numbers::{ByteOrder, Number, nat};
 use core::cmp::Ordering;
 
-/// Primes just below `2^62`: their products of two fit in 124 bits, sums of four of those below
-/// `p·2^64`, as Montgomery's reduction needs.
-const PRIMES: [u64; 4] = [
-    0x3fff_ffff_ffff_ffc7,
-    0x3fff_ffff_ffff_ffa9,
-    0x3fff_ffff_ffff_ff8b,
-    0x3fff_ffff_ffff_ff71,
-];
+/// The primes modulo which a matrix must be singular before the search tries to prove it
+/// singular: they are the four largest below `2^62`, whose products of two fit in 124 bits,
+/// sums of four of those below `p·2^64`, as Montgomery's reduction needs (as do those of every
+/// prime the search takes, all above `2^61`).
+const FIRST: usize = 4;
 
 /// The bits each step gains: `p > 2^61`.
 const STEP_BITS: u64 = 61;
@@ -366,34 +378,164 @@ fn squares(a: &[Int], rows: usize, stride: usize, from: usize, n: usize) -> Vec<
         .collect()
 }
 
+/// What [`search`] finds.
+enum Search {
+    /// The factors modulo a prime for which `A` is nonsingular, and the primes after it.
+    Factors(Factors, Primes),
+    /// `A` is singular, for certain.
+    Singular,
+}
+
+/// The residue modulo `f` of the integer `x`.
+fn residue(f: Residues, x: &Int) -> u64 {
+    match x {
+        S(v) => f.of_i64(*v),
+        B(b) => f.of_limbs(b.neg, &b.d),
+    }
+}
+
+/// The factors of the `n × n` matrix `A` whose rows start every `stride` elements of `m` modulo
+/// the first prime below `2^62` modulo which it is nonsingular, or the proof that it is singular,
+/// as the module's overview describes.
+fn search(m: &[Int], n: usize, stride: usize) -> Search {
+    let mut primes = Primes::new();
+    // Hadamard's bound on `|det A|` once it is needed, and the highest rank modulo a prime so
+    // far.
+    let mut bound = None;
+    let mut best: Option<usize> = None;
+    for i in 0u64.. {
+        let p = primes.next().expect("primes without end");
+        if let Some(fs) = Factors::new(Field::new(p), m, n, stride) {
+            return Search::Factors(fs, primes);
+        }
+        if i + 1 < FIRST as u64 {
+            continue;
+        }
+        // `A` was singular modulo each of the `i + 1` primes so far, so `det A` is 0 modulo
+        // their product, which has more than `61·(i + 1)` bits; past `h + 1`, more than twice
+        // `|det A| < 2^h`.
+        let bits = STEP_BITS * (i + 1);
+        let h = *bound.get_or_insert_with(|| hadamard_bits(m, n, stride));
+        match h {
+            None => return Search::Singular,
+            Some(h) if bits > h => return Search::Singular,
+            Some(_) => {}
+        }
+        let f = Residues::new(p);
+        let mut a: Vec<u64> = (0..n)
+            .flat_map(|r| m[r * stride..r * stride + n].iter().map(|x| residue(f, x)))
+            .collect();
+        let e = decompose(f, &mut a, n, n);
+        if best.is_none_or(|b| e.rank > b) {
+            best = Some(e.rank);
+            if null_vector(m, n, stride, &e.perm[..e.rank], &e.pivots, p) {
+                return Search::Singular;
+            }
+        }
+    }
+    unreachable!("the loop returns")
+}
+
+/// Whether the integers `w` with `w_c = d` for a column `c` outside `cols` and the solution
+/// `w_Q = d·y` of `A[rows, cols]·y = -A[rows, c]` (`d` its common denominator), zero elsewhere,
+/// satisfy `A·w = 0` for every row of `A`: a proof that `A` is singular. `A[rows, cols]` is
+/// nonsingular modulo `p`, which the lifting takes.
+fn null_vector(m: &[Int], n: usize, stride: usize, rows: &[usize], cols: &[usize], p: u64) -> bool {
+    let r = cols.len();
+    let Some(c) = (0..n).find(|j| !cols.contains(j)) else {
+        return false;
+    };
+    let mut w: Vec<(usize, Number)> = Vec::with_capacity(r + 1);
+    if r == 0 {
+        w.push((c, Number::from(1u8)));
+    } else {
+        let mut sub = Vec::with_capacity(r * (r + 1));
+        for &i in rows {
+            sub.extend(cols.iter().map(|&q| m[i * stride + q].clone()));
+            sub.push(m[i * stride + c].clone().neg());
+        }
+        let Some(fs) = Factors::new(Field::new(p), &sub, r, r + 1) else {
+            return false;
+        };
+        let rhs = vec![(0..r).map(|t| sub[t * (r + 1) + r].clone()).collect()];
+        let Some((y, d)) = solve_by(&fs, &sub, r, r + 1, rhs) else {
+            return false;
+        };
+        let d = d.number(ByteOrder::LittleEndian);
+        for ((num, den), &q) in y.iter().zip(cols) {
+            let den = den.number(ByteOrder::LittleEndian);
+            let scale = if den == d {
+                Number::from(1u8)
+            } else {
+                d.div_exact(&den)
+            };
+            w.push((q, &num.number(ByteOrder::LittleEndian) * &scale));
+        }
+        w.push((c, d));
+    }
+    (0..n).all(|i| {
+        let row = &m[i * stride..];
+        w.iter()
+            .fold(Number::default(), |s, (j, x)| {
+                if row[*j].is_zero() {
+                    s
+                } else {
+                    s + &(&row[*j].number(ByteOrder::LittleEndian) * x)
+                }
+            })
+            .is_zero()
+    })
+}
+
+/// What [`solve`] finds.
+pub(super) enum Solved {
+    /// The elements of the solution column after column as fractions `y / d` with `d` positive,
+    /// not always in lowest terms.
+    Solution(Vec<(Int, Int)>),
+    /// `A` is singular, for certain.
+    Singular,
+    /// The rational reconstruction found no fraction, which Hadamard's bounds rule out: the
+    /// caller falls back to the elimination.
+    Failed,
+}
+
 /// The solution of `A·X = B` for the `n × n` matrix of integers `A` beside the `n × k` one `B`,
-/// held row after row in `m`: its elements column after column as fractions `y / d` with `d`
-/// positive, not always in lowest terms, and the least common multiple of their denominators,
-/// a divisor of `det(A)`; or `None` when
-/// `A` is singular modulo each of the primes tried, which the caller then leaves to Bareiss's
-/// elimination (a singular `A` is singular modulo every prime).
-pub(super) fn solve(m: &[Int], n: usize, k: usize) -> Option<(Vec<(Int, Int)>, Int)> {
+/// held row after row in `m`, by the lifting modulo the prime [`search`] finds, or the proof
+/// that `A` is singular.
+pub(super) fn solve(m: &[Int], n: usize, k: usize) -> Solved {
     let stride = n + k;
-    let factors = PRIMES
-        .iter()
-        .find_map(|&p| Factors::new(Field::new(p), m, n, stride))?;
+    let factors = match search(m, n, stride) {
+        Search::Factors(fs, _) => fs,
+        Search::Singular => return Solved::Singular,
+    };
     let rhs: Vec<Vec<Int>> = (0..k)
         .map(|c| (0..n).map(|i| m[i * stride + n + c].clone()).collect())
         .collect();
-    solve_by(&factors, m, n, stride, rhs)
+    match solve_by(&factors, m, n, stride, rhs) {
+        Some((y, _)) => Solved::Solution(y),
+        None => Solved::Failed,
+    }
+}
+
+/// Whether the `n × n` matrix whose rows start every `stride` elements of `m` is singular, for
+/// certain either way, by [`search`]: one factorisation modulo a prime for a nonsingular
+/// matrix, as a rule, and a lifting for a singular one.
+pub(super) fn singular(m: &[Int], n: usize, stride: usize) -> bool {
+    matches!(search(m, n, stride), Search::Singular)
 }
 
 /// The determinant of the `n × n` matrix of integers held row after row every `stride` elements
 /// of `m`: the least common multiple `l` of the denominators of the solution of
 /// `A·x = b` for a fixed pseudorandom `b`, which divides `det(A)` and is most of it as a rule,
 /// then `det(A) / l` from the determinants modulo primes, by the Chinese remainder theorem, until
-/// their product passes twice Hadamard's bound over `l` (one prime, as a rule). `None` when `A` is
-/// singular modulo each of the first primes tried, which the caller leaves to Bareiss's
-/// elimination.
+/// their product passes twice Hadamard's bound over `l` (one prime, as a rule); 0 when [`search`]
+/// proves `A` singular. `None` when the rational reconstruction finds no fraction, which
+/// Hadamard's bounds rule out, and the caller then takes another method.
 pub(super) fn det(m: &[Int], n: usize, stride: usize) -> Option<Int> {
-    let factors = PRIMES
-        .iter()
-        .find_map(|&p| Factors::new(Field::new(p), m, n, stride))?;
+    let (factors, primes) = match search(m, n, stride) {
+        Search::Factors(fs, primes) => (fs, primes),
+        Search::Singular => return Some(S(0)),
+    };
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let b: Vec<Int> = (0..n)
         .map(|_| {
@@ -416,11 +558,12 @@ pub(super) fn det(m: &[Int], n: usize, stride: usize) -> Option<Int> {
     };
     let mut c = Number::from(residue(&factors));
     let mut q = Number::from(factors.f.p);
-    let mut p = Number::from(*PRIMES.last().unwrap());
+    // The primes below the one of the lifting.
+    let mut primes = primes;
     while q <= &bound * 2u8 {
-        p = p.prev_prime()?;
-        let pw = u64::try_from(&p).ok()?;
+        let pw = primes.next().expect("primes without end");
         let f = Field::new(pw);
+        // A prime of `l` gives no residue of `det / l`.
         if f.of(&l) == 0 {
             continue;
         }

@@ -897,8 +897,8 @@ where
         let nodes = [T::ONE, T::from_f64(C[1]), T::from_f64(C[0])];
         out.reset(self.t_old, self.t, n, &nodes);
         out.coefficient_mut(0).copy_from_slice(self.y.as_slice());
-        for k in 0..3 {
-            out.coefficient_mut(k + 1).copy_from_slice(&self.cont[k]);
+        for (k, c) in self.cont.iter().enumerate() {
+            out.coefficient_mut(k + 1).copy_from_slice(c);
         }
         Ok(())
     }

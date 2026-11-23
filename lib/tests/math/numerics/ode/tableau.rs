@@ -56,9 +56,9 @@ impl Trees {
     /// stages: `Φᵢ(•) = 1` and `Φᵢ([t₁ … tₘ]) = Π_k Σⱼ aᵢⱼ·Φⱼ(t_k)`.
     fn weights(&self, a: &[&[f64]], s: usize) -> Vec<Vec<f64>> {
         let mut phi: Vec<Vec<f64>> = Vec::with_capacity(self.len());
-        for t in 0..self.len() {
+        for children in self.children.iter().take(self.len()) {
             let mut v = vec![1.0; s];
-            for &c in &self.children[t] {
+            for &c in children {
                 for (i, vi) in v.iter_mut().enumerate() {
                     let row = a[i];
                     let sum: f64 = row.iter().zip(&phi[c]).map(|(x, p)| x * p).sum();
