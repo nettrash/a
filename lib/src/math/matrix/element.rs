@@ -285,6 +285,11 @@ impl sealed::Element for Number {
             *c += a * b;
         }
     }
+    /// Classically below a crossover that falls as the elements grow, and by Strassen–Winograd's
+    /// recursion above it ([`strassen`](super::strassen)), with the same result.
+    fn product(c: &mut [Self], a: &[Self], b: &[Self], m: usize, k: usize, n: usize) {
+        super::strassen::numbers(c, a, b, m, k, n);
+    }
 }
 
 /// [`sealed::Scalar::gemm`] by the function `$f` of [`gemm`](super::gemm).

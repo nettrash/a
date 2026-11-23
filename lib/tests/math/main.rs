@@ -3,6 +3,7 @@ mod complex;
 mod ec;
 mod fft;
 mod float;
+mod lattice;
 mod matrix;
 mod numbers;
 mod numerics;

@@ -13,10 +13,14 @@
 //!   MPFR rounds it: their arithmetic, roots and powers, conversions and text, exponentials,
 //!   logarithms, hyperbolic and circular functions and constants; and complex numbers of two
 //!   such parts, as GNU MPC's, with their elementary functions.
+//! * [`lattice`]: the reduction of lattice bases by LLL, exactly or by the L² algorithm, by LLL
+//!   with deep insertions and by BKZ; shortest and closest vectors by enumeration; and integer
+//!   relations among real numbers by PSLQ.
 //! * [`matrix`]: matrices of floats, complex numbers, numbers or rationals, their arithmetic with
 //!   `+`, `-` and `*`, transposes, row and column operations, determinants, decompositions,
-//!   eigenvalues and functions of matrices, and the exact determinants, solutions and inverses of
-//!   matrices of numbers and rationals.
+//!   eigenvalues and functions of matrices, the exact determinants, solutions and inverses of
+//!   matrices of numbers and rationals, the Hermite and Smith normal forms, and matrices over the
+//!   prime fields `GF(p)` and over `GF(2)`.
 //! * [`numbers`]: integers of any size, stored as a sign and the bytes of the absolute value
 //!   in either byte order; they add with `+` and `+=`, subtract with `-` and `-=`, multiply
 //!   with `*` and `*=`, divide with `/`, `/=`, `%` and `%=`, shift with `<<`, `>>`, `<<=` and
@@ -48,6 +52,7 @@ pub mod complex;
 pub mod ec;
 pub mod fft;
 pub mod float;
+pub mod lattice;
 pub mod matrix;
 pub mod numbers;
 pub mod numerics;

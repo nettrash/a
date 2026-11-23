@@ -93,8 +93,8 @@ impl Sieve {
             return;
         }
         let (w0, w1) = ((first / 64) as usize, (last / 64) as usize);
-        for w in w0..=w1 {
-            let mut bits = !self.composite[w];
+        for (w, &c) in self.composite.iter().enumerate().take(w1 + 1).skip(w0) {
+            let mut bits = !c;
             if w == w0 {
                 bits &= u64::MAX << (first % 64);
             }

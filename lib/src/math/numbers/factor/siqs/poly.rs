@@ -174,11 +174,12 @@ impl Chooser {
         let at = self.log[first..end].partition_point(|&l| l < rest) + first;
         let mut best = None;
         let mut best_d = f64::INFINITY;
-        for j in at.saturating_sub(2).max(first)..(at + 2).min(end) {
+        let (lo, hi) = (at.saturating_sub(2).max(first), (at + 2).min(end));
+        for (j, &l) in self.log.iter().enumerate().take(hi).skip(lo) {
             if chosen.contains(&(j as u32)) {
                 continue;
             }
-            let d = (self.log[j] - rest).abs();
+            let d = (l - rest).abs();
             if d < best_d {
                 best_d = d;
                 best = Some(j as u32);
