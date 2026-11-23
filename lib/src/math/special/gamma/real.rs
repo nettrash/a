@@ -2,11 +2,12 @@
 //!
 //! * `Γ`: `1/Γ(1 + t)` on `|t| ≤ 1/2` by a minimax polynomial, carried in double-double, with the
 //!   recurrence over exact factors `t + k` up to `x < 8` (and down to `x > −8`); Stirling's series
-//!   in double-double with an accurate exponential beyond, and the reflection formula below `−8`.
+//!   in double-double with an accurate exponential beyond, and the reflection formula below `−8`;
+//!   `1/x − γ` rounded once below `2⁻⁵⁴`.
 //! * `ln Γ`: `ln Γ(2 + t) = t(1 + t)·F(t)` on `−1/2 ≤ t < 1` by three minimax pieces (the zeros at
 //!   1 and 2 are the factors), the recurrences `ln Γ(x) = ln Γ(x + 1) − ln x` below and
 //!   `ln Γ(x) = ln Γ(x − k) + ln Π(x − j)` above, Stirling's series from 8 on, and the reflection
-//!   formula for `x < −1/2`.
+//!   formula for `x < −1/2` (beside its zeros with the more accurate `ln Γ(−x)`).
 
 use super::super::dd::{Dd, fast_two_sum, two_prod, two_sum};
 use super::ddm::*;
@@ -109,8 +110,13 @@ pub(super) fn gamma_shift(x: f64, k: i32) -> f64 {
         return gamma_reflected(x, k);
     }
     if k == 0 && x.abs() < 5.551_115_123_125_783e-17 {
-        // Γ(x) = 1/x − γ + O(x): ±∞ at ±0.
-        return 1.0 / x - EULER_HI;
+        // Γ(x) = 1/x − γ + O(x) (the next term is below 2⁻¹⁰⁸ of it), rounded once: 1/x with its
+        // remainder (1 − x·q)/x. ±∞ at ±0, and where 1/x overflows.
+        let q = 1.0 / x;
+        if !q.is_finite() {
+            return q;
+        }
+        return q + (rem(q, x, 1.0) * q - EULER_HI);
     }
     let r = round_int(x);
     let t = x - r;
@@ -156,19 +162,29 @@ fn gamma_reflected(x: f64, k: i32) -> f64 {
 /// `ln Γ(2 + t)` for `−1/2 ≤ t < 1`, as a double-double.
 #[inline]
 pub(super) fn lgamma2p(t: f64) -> Dd {
-    // F(t) = Y + R(s) on the piece of t.
+    // F(t) = Y + c₁s + (c₀ + s²R(s)) on the piece of t, the first two terms without error (in
+    // f64 the linear term would round to a sixth of an ulp of the result at the pieces' ends).
     let f = if t < 0.0 {
-        let [y, r @ ..] = LGAM_A;
-        Dd::new(y).add_f64(poly(t + 0.25, &r))
+        let [y, c0, c1, r @ ..] = LGAM_A;
+        piece_sum(y, c0, c1, t + 0.25, poly(t + 0.25, &r))
     } else if t < 0.5 {
-        let [y, r @ ..] = LGAM_B;
-        Dd::new(y).add_f64(poly(t - 0.25, &r))
+        let [y, c0, c1, r @ ..] = LGAM_B;
+        piece_sum(y, c0, c1, t - 0.25, poly(t - 0.25, &r))
     } else {
-        let [y, r @ ..] = LGAM_C;
-        Dd::new(y).add_f64(poly(t - 0.75, &r))
+        let [y, c0, c1, r @ ..] = LGAM_C;
+        piece_sum(y, c0, c1, t - 0.75, poly(t - 0.75, &r))
     };
     // t(1 + t) = t + t² (|t| ≥ t² on the pieces but t = −1/2… where both are 1/4: exact).
     f.mul(x_plus_x2(t))
+}
+
+/// `Y + c₁s + (c₀ + s²r)` with `r = R(s)`, the first two terms without error.
+#[inline(always)]
+fn piece_sum(y: f64, c0: f64, c1: f64, s: f64, r: f64) -> Dd {
+    let (p, e) = two_prod(c1, s);
+    let (h, e2) = fast_two_sum(y, p);
+    let (hi, lo) = fast_two_sum(h, e2 + (e + fma(s * s, r, c0)));
+    Dd { hi, lo }
 }
 
 /// `x + x²` as a double-double (`x(1 + x)` without rounding `1 + x`).
@@ -229,13 +245,19 @@ pub(super) fn lgamma_pos_dd(x: f64) -> Dd {
 #[inline]
 fn lgamma_small_dd(x: f64) -> Dd {
     if x >= 3.0 {
-        // Y + c₁s + s²R(s), the first two terms without error.
+        // Y + c₁s + (c₀ + c₂s² + s³R(s)), the first two terms without error and c₂s² with the
+        // rounding of s² (rounded, c₂s² reaches a tenth of an ulp of the result on [3, 3.5)).
         let f = x.floor();
         let s = x - (f + 0.5);
-        let [y, c0, c1, r @ ..] = LGAM_MID[f as usize - 3];
+        let [y, c0, c1, c2, r @ ..] = LGAM_MID[f as usize - 3];
         let (p, e) = two_prod(c1, s);
         let (h, e2) = fast_two_sum(y, p);
-        let (hi, lo) = fast_two_sum(h, e2 + (e + fma(s * s, poly(s, &r), c0)));
+        let (sh, sl) = two_prod(s, s);
+        let q = c2 * sh;
+        let ql = fma(c2, sl, prod_err(c2, sh, q));
+        let (u, e3) = fast_two_sum(h, q);
+        let lo = (e2 + e3) + (e + (ql + fma(sh * s, poly(s, &r), c0)));
+        let (hi, lo) = fast_two_sum(u, lo);
         return Dd { hi, lo };
     }
     if x >= 1.5 {
@@ -283,7 +305,8 @@ pub(crate) fn lgamma_f64(x: f64) -> f64 {
 }
 
 /// `ln |Γ(x)|` for a negative non-integer `x`, as a double-double (`fast`: `ln Γ(−x)` from the
-/// result's pieces, to about `2⁻⁵⁸`, enough for `lgamma` itself).
+/// result's pieces, to about `2⁻⁵⁸` relative, enough for `lgamma` itself but where the result is
+/// a small difference of its terms).
 pub(super) fn lgamma_neg_dd(x: f64, fast: bool) -> Dd {
     if x > -0.5 {
         // ln |Γ(x)| = ln Γ(1 + x) − ln(−x).
@@ -292,16 +315,23 @@ pub(super) fn lgamma_neg_dd(x: f64, fast: bool) -> Dd {
     // ln |Γ(x)| = ln π − ln |x sin(πx)| − ln Γ(−x).
     let s = sin_pi_dd(x).mul_f64(x);
     let s = if s.hi < 0.0 { s.neg() } else { s };
-    Dd {
+    let head = Dd {
         hi: LN_PI_HI,
         lo: LN_PI_LO,
     }
-    .sub(ln_of_dd(s))
-    .sub(if fast && x > -STIRLING_X {
-        lgamma_small_dd(-x)
-    } else {
-        lgamma_pos_dd(-x)
-    })
+    .sub(ln_of_dd(s));
+    if fast && x > -STIRLING_X {
+        let g = lgamma_small_dd(-x);
+        let r = head.sub(g);
+        // The pieces' absolute error, about 2.5·10⁻¹⁸ ln Γ(−x) + 1.2·10⁻¹⁸, is below a tenth
+        // of an ulp of a result above 1/8 + |ln Γ(−x)|/4. Beside the zeros, where the result is
+        // a small difference of its terms, ln Γ(−x) is taken instead from the logarithm of the
+        // exact product and ln Γ(2 + t) (at most 0.7), better absolutely.
+        if r.hi.abs() >= 0.125 + 0.25 * g.hi.abs() {
+            return r;
+        }
+    }
+    head.sub(lgamma_pos_dd(-x))
 }
 
 /// `sin(πx)`, exact at the integers and correctly rounded nearly always (for the other areas).

@@ -21,6 +21,11 @@
 //!   in either byte order; they add with `+` and `+=`, subtract with `-` and `-=`, multiply
 //!   with `*` and `*=`, divide with `/`, `/=`, `%` and `%=`, shift with `<<`, `>>`, `<<=` and
 //!   `>>=`, and are written and read as text in any radix from 2 to 36.
+//! * [`numerics`]: numerical methods on `f32` and `f64`: the zeros of functions and of systems of
+//!   equations, integrals in one and several dimensions and the Gaussian rules, initial value
+//!   problems for stiff and non-stiff ordinary differential equations with dense output and
+//!   events, minima with and without bounds, least squares and linear programming, splines,
+//!   Chebyshev and rational approximation, and derivatives.
 //! * [`poly`]: polynomials in one variable with coefficients that are numbers, rationals, floats,
 //!   complex numbers or residues modulo an integer, their arithmetic, division and powers modulo a
 //!   polynomial, greatest common divisors and resultants, evaluation at many points and
@@ -29,6 +34,11 @@
 //!   `-`, `*` and `/`, with numbers and primitive integers too, comparisons, rounding, and their
 //!   conversions from and to integers, text and floats; continued fractions, best approximations
 //!   and rational reconstruction; and the Bernoulli and harmonic numbers.
+//! * [`sparse`]: sparse matrices of floats and complex numbers in compressed row, compressed
+//!   column and coordinate form, read and written as Matrix Market files, their products and
+//!   other operations, the orderings that keep the fill of a factorisation low, the sparse
+//!   Cholesky, `L·D·Lᴴ`, LU and QR factorisations, the Krylov methods with their preconditioners,
+//!   and a few eigenvalues by the Lanczos and Arnoldi methods.
 //! * [`special`]: special functions of floats, and of complex numbers for some: the gamma family
 //!   with the incomplete gamma and beta functions and their inverses, the error functions,
 //!   Bessel and Airy functions, the Riemann and Hurwitz zeta functions and polylogarithms, the
@@ -43,4 +53,5 @@ pub mod numbers;
 pub mod numerics;
 pub mod poly;
 pub mod rational;
+pub mod sparse;
 pub mod special;

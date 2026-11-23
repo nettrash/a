@@ -96,4 +96,54 @@ for k in range(1, 13):
     row = [float(U[k].get(k + 2 * j, 0)) for j in range(k + 1)] + [0.0] * (12 - k)
     w("    [" + ", ".join(repr(v) for v in row) + "],\n")
 w("];\n")
+# Debye's exponent eta(z) = sqrt(1 + z²) + ln(z/(1 + sqrt(1 + z²))) vanishes at z0 = 0.6627…
+# (Laplace's limit): the bits of z0 after the binary point (for x − z0·ν exactly), and its Taylor
+# coefficients eta^(k)(z0)/k!, k = 1..16, the first three as double-doubles.
+with mpmath.workprec(1600):
+    def eta(z):
+        s = mpmath.sqrt(1 + z * z)
+        return s + mpmath.log(z / (1 + s))
+
+    z0 = mpmath.findroot(eta, mpf("0.66274341934918158"))
+    assert abs(eta(z0)) < mpf(2) ** -1500
+    nw = 18
+    zb = int(mpmath.floor(z0 * mpf(2) ** (64 * nw)))
+    w("/// The bits of `z₀ = 0.6627…`, the root of Debye's `η(z) = √(1 + z²) + ln(z/(1 + √(1 + z²)))`\n")
+    w(f"/// (Laplace's limit), after the binary point: {64 * nw} of them.\n")
+    w(f"pub(super) const Z0_BITS: [u64; {nw}] = [\n")
+    for i in range(nw):
+        w(f"    0x{(zb >> (64 * (nw - 1 - i))) & ((1 << 64) - 1):016x},\n")
+    w("];\n")
+    c = mpmath.taylor(eta, z0, 16)
+    w("/// `η^(k)(z₀)/k!` for `k = 1..=3` as double-doubles, then `k = 4..=16`.\n")
+    w("pub(super) const ETA_Z0_DD: [[f64; 2]; 3] = [\n")
+    for k in range(1, 4):
+        h = float(c[k])
+        w(f"    [{h!r}, {float(c[k] - h)!r}],\n")
+    w("];\n")
+    arr("ETA_Z0", [c[k] for k in range(4, 17)], "`η^(k)(z₀)/k!` for `k = 4..=16`.")
+    # eta(z) + z vanishes at z1 = 0.4477…: about x = z1·ν the term e^(−x)·K_ν(x) of the scaled
+    # reflection of I is within the range. Its bits and the Taylor coefficients of eta(z) + z
+    # about z1 likewise (the first three as double-doubles).
+    z1 = mpmath.findroot(lambda z: eta(z) + z, mpf("0.4477432"))
+    assert abs(eta(z1) + z1) < mpf(2) ** -1500
+    zb = int(mpmath.floor(z1 * mpf(2) ** (64 * nw)))
+    w("/// The bits of `z₁ = 0.4477…`, the root of `η(z) + z` (`η` as for `z₀`), after the binary\n")
+    w(f"/// point: {64 * nw} of them.\n")
+    w(f"pub(super) const Z1_BITS: [u64; {nw}] = [\n")
+    for i in range(nw):
+        w(f"    0x{(zb >> (64 * (nw - 1 - i))) & ((1 << 64) - 1):016x},\n")
+    w("];\n")
+    c = mpmath.taylor(lambda z: eta(z) + z, z1, 17)
+    # The series is used for |D| ≤ 1300 from ν = 2¹⁶ on, |u| = |D|/ν ≤ 0.02 (the result is in
+    # range only for |D| below about 250): the first term left out, ν·c₁₇·u¹⁷, below 2⁻⁶⁰ there.
+    assert abs(c[17]) * mpf("0.0199") ** 17 * 2 ** 16 < mpf(2) ** -60
+    w("/// `(η + z)^(k)(z₁)/k!` for `k = 1..=3` as double-doubles, then `k = 4..=16`.\n")
+    w("pub(super) const ETA_Z1_DD: [[f64; 2]; 3] = [\n")
+    for k in range(1, 4):
+        h = float(c[k])
+        w(f"    [{h!r}, {float(c[k] - h)!r}],\n")
+    w("];\n")
+    arr("ETA_Z1", [c[k] for k in range(4, 17)], "`(η + z)^(k)(z₁)/k! = η^(k)(z₁)/k!` for `k = 4..=16`.")
+    w(f"/// `z₁` rounded to `f64`.\npub(super) const Z1_HI: f64 = {float(z1)!r};\n")
 sys.stdout.write("".join(out))

@@ -5,7 +5,7 @@
 //! recurrence of positive terms.
 
 use super::dd::{Dd, two_prod, two_sum};
-use super::general::{i as bessel_i_general, jy, k as k_general, ln_gamma_large};
+use super::general::{debye_parts, jy, k as k_general, ln_gamma_large, ratio_j};
 use super::kernels::{exp_parts, ldexp, ln_dd, mla, pow2i, rem_pio2, sin_cos_quadrant_dd};
 use core::f64::consts::FRAC_PI_2;
 
@@ -13,10 +13,6 @@ const EPS: f64 = 1.0 / (1u64 << 55) as f64;
 const BIG: i32 = 600;
 /// Beyond this order the recurrences (of cost `O(n)`) are not run: see `general::NU_MAX`.
 const HUGE_N: u32 = 10_000_000;
-/// Up to this order the forward recurrences run in `f64` (beyond, in double-double).
-const SMALL_N: u32 = 12;
-/// The same for `yₙ`, whose `f64` run gathers its error faster.
-const SMALL_N_Y: u32 = 4;
 
 /// `(sin(x − nπ/2), cos(x − nπ/2))` as double-doubles.
 #[inline]
@@ -153,41 +149,34 @@ pub(crate) fn sph_j(n: u32, x: f64) -> f64 {
         return combine(p, s, q, c, x);
     }
     if x > nf {
-        // Up from j₀, j₁ (x > n ≥ 2, so j₁ by its closed form).
-        let (mut a, mut b) = (sph_j(0, x), sph_j(1, x));
-        if n <= SMALL_N && x >= 2.0 * nf {
-            for m in 1..n {
-                let t = ((2 * m + 1) as f64) * b / x - a;
-                a = b;
-                b = t;
-            }
-            return b;
-        }
+        // Up from j₀ = sin x/x and j₁ = (j₀ − cos x)/x, in double-double from the start (an `f64`
+        // run, or rounded starts, gathered up to 3.3 ulps of M by n = 12).
+        let (s, c) = sin_cos_shift(x, 0);
         let xd = Dd::new(x);
-        let (mut a, mut b) = (Dd::new(a), Dd::new(b));
+        let xi = Dd::new(1.0).div(xd);
+        let j0 = s.mul(xi);
+        let (mut a, mut b) = (j0, j0.sub(c).mul(xi));
         for m in 1..n {
-            let t = b.mul_f64((2 * m + 1) as f64).div(xd).sub(a);
+            let t = b.mul(xi).mul_f64((2 * m + 1) as f64).sub(a);
             a = b;
             b = t;
         }
         return b.value();
     }
-    // x ≤ n: the ratio jₙ/jₙ₋₁ by its continued fraction, then down to j₀ or j₁ to normalise.
-    let mut r = 0.0f64;
-    let mut m = n + 40 + (2.0 * x) as u32;
-    while m > n {
-        r = x / ((2 * m + 1) as f64 - x * r);
-        m -= 1;
-    }
-    let r = x / ((2 * n + 1) as f64 - x * r);
+    // x ≤ n: the ratio jₙ/jₙ₋₁ = J_(n+1/2)/J_(n−1/2) by its continued fraction, then down to j₀
+    // or j₁ to normalise. The run down passes the ratio's relative error to jₙ whole, so the
+    // fraction is summed from its tail in double-double at every x (near x = n an `f64` sum loses
+    // a few ulps, and below x = n/2 Lentz's forward `f64` value is 5 to 11 ulps off).
+    let r = ratio_j(nf - 0.5, x, true);
     // jₙ = r·jₙ₋₁; run down with fₙ = 1·2^e.
     let xd = Dd::new(x);
-    let (mut hi, mut lo) = (Dd::new(1.0), Dd::new(1.0).div(Dd::new(r))); // f_n, f_(n−1)
+    let xi = Dd::new(1.0).div(xd);
+    let (mut hi, mut lo) = (Dd::new(1.0), Dd::new(1.0).div(r)); // f_n, f_(n−1)
     let mut e = 0i32;
     let mut k = n - 1;
     while k >= 1 {
         // f_(k−1) = (2k + 1)/x·f_k − f_(k+1).
-        let t = lo.mul_f64((2 * k + 1) as f64).div(xd).sub(hi);
+        let t = lo.mul(xi).mul_f64((2 * k + 1) as f64).sub(hi);
         hi = lo;
         lo = t;
         if lo.hi.abs() > pow2i(BIG) {
@@ -197,16 +186,16 @@ pub(crate) fn sph_j(n: u32, x: f64) -> f64 {
         }
         k -= 1;
     }
-    let (hi, lo) = (hi.value(), lo.value());
-    // lo = f₀, hi = f₁ (scaled by 2^−e relative to fₙ = 1).
-    let (j0v, j1v) = (sph_j(0, x), sph_j(1, x));
-    // Normalise by the larger of f₀, f₁ (a small one carries the recurrence's absolute error).
-    let scale = if lo.abs() >= hi.abs() {
-        j0v / lo
+    // lo = f₀, hi = f₁ (scaled by 2^−e relative to fₙ = 1). Normalise by the larger of them (a
+    // small one carries the recurrence's absolute error), with j₀ and j₁ in double-double.
+    let (s, c) = sin_cos_shift(x, 0);
+    let j0 = s.div(xd);
+    let scale = if lo.hi.abs() >= hi.hi.abs() {
+        j0.div(lo)
     } else {
-        j1v / hi
+        j0.sub(c).div(xd).div(hi)
     };
-    ldexp(scale, -e)
+    ldexp(scale.value(), -e)
 }
 
 /// `yₙ(x)` (`−∞` at 0; `yₙ(−x) = (−1)^(n+1) yₙ(x)`).
@@ -228,6 +217,12 @@ pub(crate) fn sph_y(n: u32, x: f64) -> f64 {
     if n > HUGE_N {
         return jy(nf + 0.5, x, false, true).1 * (FRAC_PI_2 / x).sqrt();
     }
+    if x < TINY_X {
+        return match tiny_lead(n, x) {
+            Some((m, e)) => -ldexp(m.value(), e),
+            None => f64::NEG_INFINITY,
+        };
+    }
     let (s, c) = sin_cos_shift(x, 0);
     if n == 0 {
         return c.div(Dd::new(x)).neg().value();
@@ -238,34 +233,61 @@ pub(crate) fn sph_y(n: u32, x: f64) -> f64 {
         return combine(q, s, p.neg(), c, x);
     }
     // Up from y₀ = −cos x/x, y₁ = −(cos x/x + sin x)/x.
+    // Up from y₀, y₁ in double-double (an `f64` run gathered 2 ulps of M by n = 4).
     let xd = Dd::new(x);
-    let y0 = c.div(xd).neg();
-    let y1 = c.div(xd).add(s).div(xd).neg();
-    if n <= SMALL_N_Y && x >= nf {
-        // f64 for the first orders (an overflow is caught by the result).
-        let (mut a, mut b) = (y0.value(), y1.value());
-        for m in 1..n {
-            let t = ((2 * m + 1) as f64) * b / x - a;
-            a = b;
-            b = t;
-        }
-        if b.is_finite() {
-            return b;
-        }
-    }
+    let xi = Dd::new(1.0).div(xd);
+    let y0 = c.mul(xi).neg();
+    let y1 = c.mul(xi).add(s).mul(xi).neg();
     let (mut a, mut b) = (y0, y1);
     let mut e = 0i32;
     for m in 1..n {
-        let t = b.mul_f64((2 * m + 1) as f64).div(xd).sub(a);
-        a = b;
-        b = t;
-        if b.hi.abs() > pow2i(BIG) {
+        // Rescale before the step that would overflow (x ≥ 2⁻⁵⁰⁰, so (2m + 1)/x is finite).
+        let c = (2 * m + 1) as f64 / x;
+        while b.hi.abs() * c > pow2i(900) {
             a = a.mul_f64(pow2i(-BIG));
             b = b.mul_f64(pow2i(-BIG));
             e += BIG;
         }
+        let t = b.mul(xi).mul_f64((2 * m + 1) as f64).sub(a);
+        a = b;
+        b = t;
     }
     ldexp(b.value(), e)
+}
+
+/// Below this `x` the spherical `yₙ` and `kₙ` are their leading terms (`1/x`, `1/x²` and so on
+/// would overflow on the way).
+const TINY_X: f64 = 3.054_936_363_499_605e-151; // 2⁻⁵⁰⁰
+
+/// `x = f·2^e`, `f` in `[1, 2)`, for a positive finite `x` (the subnormals too).
+fn frexp(x: f64) -> (f64, i32) {
+    let (x, e0) = if x < f64::MIN_POSITIVE {
+        (x * pow2i(64), -64)
+    } else {
+        (x, 0)
+    };
+    let b = x.to_bits();
+    let e = ((b >> 52) as i32) - 1023 + e0;
+    (
+        f64::from_bits((b & ((1u64 << 52) - 1)) | (1023u64 << 52)),
+        e,
+    )
+}
+
+/// `(2n − 1)!!/x^(n+1)` as `m·2^e` for `x < 2⁻⁵⁰⁰`, the leading term of `−yₙ(x)` and of
+/// `(2/π)·kₙ(x)` (the next is `x²/2` of it), for `n ≤ 1`; `None` for `n ≥ 2`, where it is beyond
+/// `3·2¹⁵⁰⁰`.
+fn tiny_lead(n: u32, x: f64) -> Option<(Dd, i32)> {
+    if n >= 2 {
+        return None;
+    }
+    let (f, e) = frexp(x);
+    Some(if n == 0 {
+        (Dd::new(1.0).div(Dd::new(f)), -e)
+    } else {
+        let (p, pe) = two_prod(f, f);
+        (Dd::new(1.0).div(Dd { hi: p, lo: pe }), -2 * e)
+    })
 }
 
 /// `iₙ(x)` (`iₙ(−x) = (−1)ⁿ iₙ(x)`).
@@ -284,12 +306,24 @@ pub(crate) fn sph_i(n: u32, x: f64) -> f64 {
         return f64::INFINITY;
     }
     let nf = n as f64;
-    if x <= 20.0 + 0.5 * nf || x * x <= 2.0 * (2.0 * nf + 3.0) {
+    let by_series = if n < I_DEBYE_N {
+        // Up to n²/28 (from n = 34 on above 20 + n/2) the closed form below cancels by more than
+        // 2⁴⁰; the series takes 70 terms at most there.
+        x <= 20.0 + 0.5 * nf || x * x <= 2.0 * (2.0 * nf + 3.0) || 28.0 * x <= nf * nf
+    } else {
+        // Its terms grow first by (x²/2)/(2n + 3): no more than 4 times, so that it stays short.
+        x * x <= 16.0 * (nf + 1.5) || x < 30.0
+    };
+    if by_series {
         return series(n, x, false);
     }
     if x >= 0.5 * nf * (nf + 1.0) {
         // (e^x·Σ(−1)^k aₖ/xᵏ − (−1)ⁿ e^(−x)·Σ aₖ/xᵏ)/(2x); the second part is below 2⁻⁵⁸ of the
-        // first here (x > 20).
+        // first here (x > 20). Beyond x = 720 it overflows (iₙ(x) > e^(x − 1)/(2x) from
+        // n(n + 1)/2 on), which is known before the O(n) sum (orders from 38 on start there).
+        if x > 720.0 {
+            return f64::INFINITY;
+        }
         let xi = 1.0 / x;
         let mut s = Dd::new(1.0);
         let mut term = 1.0f64;
@@ -298,20 +332,73 @@ pub(crate) fn sph_i(n: u32, x: f64) -> f64 {
             term *= -(nf + kf) * (nf - kf + 1.0) * xi / (2.0 * kf);
             s = s.add_f64(term);
         }
-        if x > 720.0 {
-            return f64::INFINITY;
-        }
         let (m, k) = exp_parts(x, 0.0);
         return ldexp(m.mul(s).div(Dd::new(2.0 * x)).value(), k);
     }
-    // √(π/(2x))·I_(n+1/2)(x).
-    let v = bessel_i_general(nf + 0.5, x, true);
-    if x > 720.0 {
-        return f64::INFINITY;
+    if n < I_DEBYE_N {
+        return i_closed(n, x);
     }
-    let (m, k) = exp_parts(x, 0.0);
-    let a = Dd::new(FRAC_PI_2 / x).sqrt();
-    ldexp(m.mul(a).mul_f64(v).value(), k)
+    // √(π/(2x))·I_(n+1/2)(x) by Debye's expansion, the scale apart (I alone may overflow or
+    // underflow where iₙ does not).
+    let (v, k) = debye_parts(nf + 0.5, x, true, false);
+    if !v.hi.is_finite() || v.hi == 0.0 {
+        // Beyond the range by far, as Debye's exponent decided (its ∞ times a double-double
+        // would be NaN).
+        return v.hi;
+    }
+    let a = PIO2_DD.div(Dd::new(x)).sqrt();
+    ldexp(v.mul(a).value(), k)
+}
+
+/// From this order on `iₙ` comes from Debye's expansion of `I_(n+1/2)` between the series and the
+/// closed form (see `general::DEBYE_NU`).
+const I_DEBYE_N: u32 = 50;
+
+/// `π/2` as a double-double.
+const PIO2_DD: Dd = Dd {
+    hi: FRAC_PI_2,
+    lo: 6.123_233_995_736_766e-17,
+};
+
+/// `iₙ(x) = (e^x·Σ(−1)ᵏ aₖ/xᵏ − (−1)ⁿ e^(−x)·Σ aₖ/xᵏ)/(2x)`, `aₖ = (n + k)!/(k!(n − k)!·2ᵏ)`, both
+/// sums and their terms in double-double, for `n < 50` from the end of the series on, where the
+/// terms cancel by `2⁴⁰` at most (the error of a term, about `2⁻⁹⁸` of it, stays below `2⁻⁵⁸` of
+/// the value); both exponentials are kept (`e^(−2x)` is `2⁻⁵⁵` of the value at `n = 49`,
+/// `x = 44.5`).
+fn i_closed(n: u32, x: f64) -> f64 {
+    let nf = n as f64;
+    let mut term = Dd::new(1.0);
+    let mut alt = Dd::new(1.0);
+    let mut pos = Dd::new(1.0);
+    for k in 1..=n {
+        let kf = k as f64;
+        // (n + k)(n − k + 1) is an exact integer, 2k·x an exact double-double.
+        let (dh, dl) = two_prod(2.0 * kf, x);
+        term = term
+            .mul_f64((nf + kf) * (nf - kf + 1.0))
+            .div(Dd { hi: dh, lo: dl });
+        pos = pos.add(term);
+        alt = if !k.is_multiple_of(2) {
+            alt.sub(term)
+        } else {
+            alt.add(term)
+        };
+    }
+    let (mp, kp) = exp_parts(x, 0.0);
+    let (mm, km) = exp_parts(-x, 0.0);
+    // e^(−x)·Σ aₖ/xᵏ relative to the scale 2^kp of e^x.
+    let t = mm.mul(pos);
+    let t = Dd {
+        hi: ldexp(t.hi, km - kp),
+        lo: ldexp(t.lo, km - kp),
+    };
+    let a = mp.mul(alt);
+    let s = if n.is_multiple_of(2) {
+        a.sub(t)
+    } else {
+        a.add(t)
+    };
+    ldexp(s.div(Dd::new(2.0 * x)).value(), kp)
 }
 
 /// `kₙ(x) = √(π/(2x))·K_(n+1/2)(x)` (`∞` at 0, NaN for `x < 0`).
@@ -331,6 +418,12 @@ pub(crate) fn sph_k(n: u32, x: f64) -> f64 {
     }
     if n > HUGE_N {
         return k_general(n as f64 + 0.5, x, false) * (FRAC_PI_2 / x).sqrt();
+    }
+    if x < TINY_X {
+        return match tiny_lead(n, x) {
+            Some((m, e)) => ldexp(m.mul(PIO2_DD).value(), e),
+            None => f64::INFINITY,
+        };
     }
     if n <= 10 && (1.0e-3..=700.0).contains(&x) {
         // kₙ = (π/(2x))·e^(−x)·Σ aₖ tᵏ, aₖ = (n + k)!/(k!(n − k)!) (exact integers), t = 1/(2x):
@@ -369,14 +462,16 @@ pub(crate) fn sph_k(n: u32, x: f64) -> f64 {
         let (mut a, mut b) = (s0, s1);
         let mut e = 0i32;
         for m in 1..n {
-            let t = b.mul_f64((2 * m + 1) as f64).div(xd).add(a);
-            a = b;
-            b = t;
-            if b.hi > pow2i(BIG) {
+            // Rescale before the step that would overflow (x ≥ 2⁻⁵⁰⁰).
+            let c = (2 * m + 1) as f64 / x;
+            while b.hi * c > pow2i(900) {
                 a = a.mul_f64(pow2i(-BIG));
                 b = b.mul_f64(pow2i(-BIG));
                 e += BIG;
             }
+            let t = b.mul_f64((2 * m + 1) as f64).div(xd).add(a);
+            a = b;
+            b = t;
         }
         (b, e)
     };

@@ -1,18 +1,24 @@
 //! The exponential integrals.
 //!
 //! * `E₁(x)`, `0 < x ≤ 1`: `F(x) − ln x` with the entire `F = E₁(x) + ln x = −γ + x − x²/4 + …` a
-//!   polynomial minimax fit with a double-double head (no cancellation: `F ≥ 0` where `ln x`
-//!   nears 0). `1 < x ≤ 2.5`: `e⁻ˣ (H₀ + K(x))/x` with `K` a rational fit; `x > 2.5`:
+//!   polynomial minimax fit, `ln x` a double-double and the terms of `F` to the third degree by
+//!   Horner's rule in double-double, so that the sum (near 1 the difference of two numbers four
+//!   times the result) is rounded once. `1 < x ≤ 2.5`: `e⁻ˣ (H₀ + K(x))/x` with `K` a rational
+//!   fit, evaluated in `(x − 1)/0.75` where its terms are of one sign; `x > 2.5`:
 //!   `e⁻ˣ (1 + P(1/x)/Q(1/x))/x`, the rational of degree 10/11 of Boost.Math (`expint.hpp`,
 //!   53-bit, Boost Software License 1.0); `e⁻ˣ` to double-double accuracy and the product
 //!   rounded once.
 //! * `Ei(x)`, `0 < x ≤ 6`: `ln(x/x₀) + (x − x₀) R(x)` about the zero `x₀ = 0.3725…` of `Ei`, the
-//!   entire `R` a polynomial minimax fit on each of four pieces, `x − x₀` as a double-double and
-//!   `ln(x/x₀)` by `ln_1p` near `x₀`; `x > 6`: `eˣ (1 + K(x))/x` with `K` a rational fit on each
-//!   of four pieces to 48 and a polynomial in `1/x` on two past it; `x < 0`: `−E₁(−x)`.
+//!   entire `R` a polynomial minimax fit on each of four pieces with its first two terms as a
+//!   double-double, `x − x₀` as a double-double, `ln(x/x₀)` as a double-double (by `ln_1p` and a
+//!   Newton step near `x₀`, by `ln_dd` up to 1.5), and the sum rounded once; `x > 6`:
+//!   `eˣ (1 + K(x))/x` with `K` a rational fit on each of four pieces to 48 (in a variable from
+//!   the left end of its piece, where the terms of both polynomials are positive) and a
+//!   polynomial in `1/x` on two past it; `x < 0`: `−E₁(−x)`.
 //! * `Eₙ(x)`, `n ≥ 2`: for `x ≤ 2` and `n < 50`, the recurrence `Eₖ₊₁ = (e⁻ˣ − x Eₖ)/k` up from
 //!   `E₁` (stable there); else the continued fraction of `Eₙ`, its depth found by Lentz's method
-//!   and its value from the bottom up in double-double arithmetic.
+//!   and its value from the bottom up in double-double arithmetic. `E₀(x) = e⁻ˣ/x`, `+∞` where it
+//!   overflows.
 //!
 //! The fits but Boost's were made for this crate (Remez exchange, and Lawson's iteration for the
 //! rationals, mpmath at 128 bits).
@@ -20,7 +26,7 @@
 //! The tables but Boost's are printed by `zeta/gen_expint.py` (with `zeta/gen_fit.py`).
 
 use super::zeta::util::{
-    exp_mul, exp_parts, horner, ln_dd, mla, poly_tail, residual, scale, two_prod, two_sum,
+    exp_mul, exp_parts, horner, ln_dd, mla, residual, scale, two_prod, two_sum,
 };
 use super::{Real, via};
 
@@ -119,101 +125,108 @@ const EI_R4: [f64; 14] = [
 ];
 const EI_R4_LO: f64 = 3.564849093755043e-16;
 
-/// x e⁻ˣ Ei(x) − 1 on [6, 10] in u = (x − 8)/2: numerator (u 6 10 c=8.0 h=2.0 7 7 7.02e-18 2.17e-17)
+/// x e⁻ˣ Ei(x) − 1 on [6, 10]: numerator of the rational 7/7 fitted in u = (x − 8)/2 (u 6 10 c=8.0
+/// h=2.0 7 7 7.02e-18 2.17e-17), re-expanded in v = u + 1 = (x − 6)/2, as are the next three
+/// pieces: in u both polynomials alternate and cancel at the left end (here by 3 and 6, on the
+/// others by up to 58 and 95, which cost up to 1.6 ulps of Ei at x = 10), in v (almost) all their
+/// terms are positive.
 const EI_K1_P: [f64; 8] = [
-    0.18184798698720797,
-    0.0997621507953273,
-    0.03282756157959268,
-    0.007176861012563044,
-    0.0007003286557098008,
-    8.584184725127461e-05,
-    1.294326029574128e-07,
+    0.10835107440018348,
+    0.05326527889014875,
+    0.014640822897139206,
+    0.0052341272027687045,
+    0.00027030991590652325,
+    8.67158471882895e-05,
+    -4.207659152957124e-07,
     7.859978832187504e-08,
 ];
 
 /// Its denominator.
 const EI_K1_Q: [f64; 8] = [
-    1.0,
-    0.9238272625737608,
-    0.4019400528235068,
-    0.10597922569715629,
-    0.018314987393667714,
-    0.0020678868967899575,
-    0.0001402779170662248,
+    0.38851683353056193,
+    0.37415141747690017,
+    0.17523130172673043,
+    0.050736417008073194,
+    0.009935891406698616,
+    0.0013125175498002188,
+    0.00011151186526368812,
     4.109435971790956e-06,
 ];
 
-/// x e⁻ˣ Ei(x) − 1 on [10, 20] in u = (x − 15)/5: numerator (u 10 20 c=15.0 h=5.0 8 8 6.17e-18 3.87e-17)
+/// x e⁻ˣ Ei(x) − 1 on [10, 20] in v = (x − 10)/5 (fitted in u = v − 1 = (x − 15)/5): numerator
+/// (u 10 20 c=15.0 h=5.0 8 8 6.17e-18 3.87e-17)
 const EI_K2_P: [f64; 9] = [
-    0.07810310738616064,
-    0.13375238305285364,
-    0.11297098429608435,
-    0.05905360558946569,
-    0.02075175839344994,
-    0.004894840789156828,
-    0.000727426065542015,
-    5.3778777393626515e-05,
+    0.014798670865647588,
+    0.022450273183326246,
+    0.02115442878653472,
+    0.012328551541466844,
+    0.005306893551649078,
+    0.0016594744574669124,
+    0.00035105675563862034,
+    5.3755311150200545e-05,
     2.933280428246536e-09,
 ];
 
 /// Its denominator.
 const EI_K2_Q: [f64; 9] = [
-    1.0,
-    2.111314428327374,
-    2.1247578851189326,
-    1.3273100547791483,
-    0.5636833416528872,
-    0.1671103512237959,
-    0.03392118754262716,
-    0.004333866797583724,
+    0.11256292553569228,
+    0.24920345546852873,
+    0.27916881462712706,
+    0.20186589591619408,
+    0.10410892519819899,
+    0.039518537165039815,
+    0.011122065735666757,
+    0.0021801680044049613,
     0.0002692123491473454,
 ];
 
-/// x e⁻ˣ Ei(x) − 1 on [20, 30] in u = (x − 25)/5: numerator (u 20 30 7 7 5.63e-20 2.12e-17)
+/// x e⁻ˣ Ei(x) − 1 on [20, 30] in v = (x − 20)/5 (fitted in u = v − 1 = (x − 25)/5): numerator
+/// (u 20 30 7 7 5.63e-20 2.12e-17)
 const EI_K3_P: [f64; 8] = [
-    0.04366193626661325,
-    0.07155548253903724,
-    0.05207610616950055,
-    0.0216556260458408,
-    0.005426888345082539,
-    0.0007756997742267238,
-    4.895582135963935e-05,
+    0.007227078225290164,
+    0.01424735902733155,
+    0.012647897299218577,
+    0.006725954616222025,
+    0.0022827261587065797,
+    0.0004819652274510462,
+    4.8955694232253175e-05,
     1.8161055167369244e-11,
 ];
 
 /// Its denominator.
 const EI_K3_Q: [f64; 8] = [
-    1.0,
-    1.85820381678355,
-    1.551933086593327,
-    0.7572443474954816,
-    0.23286809118207227,
-    0.044956036128706314,
-    0.005004469909326457,
+    0.12915666628401565,
+    0.2910651494934296,
+    0.29777487769973465,
+    0.18381028062175106,
+    0.07458762442441304,
+    0.020069617525162287,
+    0.0032910029585215524,
     0.00024478099297212927,
 ];
 
-/// x e⁻ˣ Ei(x) − 1 on [30, 48] in u = (x − 39)/9: numerator (u 30 48 7 7 4.09e-22 5.55e-17)
+/// x e⁻ˣ Ei(x) − 1 on [30, 48] in v = (x − 30)/9 (fitted in u = v − 1 = (x − 39)/9): numerator
+/// (u 30 48 7 7 4.09e-22 5.55e-17)
 const EI_K4_P: [f64; 8] = [
-    0.02706905348794879,
-    0.05429052411223543,
-    0.04712686180972114,
-    0.02247384425370071,
-    0.006156099810262076,
-    0.0009099982884847485,
-    5.6213415292461145e-05,
+    0.002733861868771195,
+    0.007046644963742675,
+    0.008385146254050704,
+    0.0058251595927843345,
+    0.002449309596091584,
+    0.0005727177974101817,
+    5.62134150657278e-05,
     3.239047770468901e-14,
 ];
 
 /// Its denominator.
 const EI_K4_Q: [f64; 8] = [
-    1.0,
-    2.2496564244697272,
-    2.23030645778342,
-    1.2549025542235814,
-    0.4298866470926823,
-    0.08906234339716292,
-    0.01026988091953594,
+    0.07633574296169597,
+    0.22143845987579694,
+    0.29771912187729144,
+    0.23828900745524295,
+    0.1209159178784264,
+    0.03806739349283554,
+    0.00672843571523985,
     0.0005059207434708701,
 ];
 
@@ -244,25 +257,27 @@ const EI_T2: [f64; 8] = [
     57157.19941203625,
 ];
 
-/// `x eˣ E₁(x) − H₀` on [1, 2.5] in `u = (x − 1.75)/0.75`, `H₀` its value at 1.75: numerator
-/// of the rational 6/6, error 9.29e-18 relative to `x eˣ E₁(x)` (Lawson's iteration).
+/// `x eˣ E₁(x) − H₀` on [1, 2.5], `H₀` its value at 1.75: numerator of the rational 6/6 (error
+/// 9.29e-18 relative to `x eˣ E₁(x)`, Lawson's iteration in `u = (x − 1.75)/0.75`), re-expanded
+/// in `v = u + 1 = (x − 1)/0.75`: in `u` both polynomials cancel by up to 25 at `x = 1`, which cost
+/// an ulp of `E₁` there, in `v` the denominator's terms are all positive.
 const E1_MID_P: [f64; 7] = [
-    2.5653749302979253e-18,
-    0.07475202640456856,
-    0.09671347307086288,
-    0.04781618967357025,
-    0.011203996140949397,
-    0.0012326092416137138,
+    -0.015832951819083993,
+    -0.01418171480531297,
+    0.008918852812555127,
+    0.014318211748784795,
+    0.005797014265724582,
+    0.0009301835084762122,
     5.040428885625026e-05,
 ];
 /// Its denominator.
 const E1_MID_Q: [f64; 7] = [
-    1.0,
-    1.5642326915900775,
-    0.9845314796441281,
-    0.3176953208096724,
-    0.055140859123402094,
-    0.004851421069812081,
+    0.15306080432987118,
+    0.3509419693948728,
+    0.31629494673594666,
+    0.1422881143761262,
+    0.03340223925288566,
+    0.0038440268783944942,
     0.0001678990319029312,
 ];
 /// `H₀ = 1.75 e^1.75 E₁(1.75)` as a double-double.
@@ -308,28 +323,20 @@ const EI_X0_LO2: f64 = 6.472_568_844_595_414_5e-34;
 const LN_EI_X0_HI: f64 = -0.987_498_346_645_341_9;
 const LN_EI_X0_LO: f64 = 1.050_470_761_430_787_5e-17;
 
-/// `c[0] + lo + Σ_{k≥1} c[k] tᵏ`.
-#[inline(always)]
-fn full(t: f64, c: &[f64], lo: f64) -> f64 {
-    c[0] + (lo + poly_tail(t, c))
-}
-
 /// `E₁(x)` of an `f64`.
 pub(crate) fn e1_f64(x: f64) -> f64 {
     if x.is_nan() || x <= 0.0 {
         return if x == 0.0 { f64::INFINITY } else { f64::NAN };
     }
     if x <= 1.0 {
-        // F(x) − ln x, F's head −γ added to −ln x exactly.
-        let (h, l) = two_sum(E1_SMALL[0], -x.ln());
-        return h + (l + (E1_SMALL_LO + poly_tail(x, &E1_SMALL)));
+        return e1_small(x);
     }
     if x > 746.0 {
         return 0.0;
     }
     let (h, hl) = if x <= 2.5 {
-        let u = (x - 1.75) / 0.75;
-        let k = horner(u, &E1_MID_P) / horner(u, &E1_MID_Q);
+        let v = (x - 1.0) / 0.75;
+        let k = horner(v, &E1_MID_P) / horner(v, &E1_MID_Q);
         two_sum(E1_MID_H0, k + E1_MID_H0_LO)
     } else {
         let t = 1.0 / x;
@@ -337,6 +344,29 @@ pub(crate) fn e1_f64(x: f64) -> f64 {
     };
     let (g, gl) = div(h, hl, x);
     exp_mul(-x, g, gl)
+}
+
+/// `E₁(x) = F(x) − ln x` on `(0, 1]`, `F = −γ + x − x²/4 + c₃x³ + x⁴ T(x)` (the fit keeps the
+/// first two coefficients exact): `ln x` a double-double, `x − x²/4 + c₃x³` exact to `2⁻¹⁰⁵`,
+/// `x⁴ T(x)` (below 0.01) in double, and the sum rounded once (near 1 the result, about 0.22, is
+/// the difference of numbers four times as large, whose roundings in double cost up to 9 ulps).
+#[inline]
+fn e1_small(x: f64) -> f64 {
+    let c = &E1_SMALL;
+    debug_assert!(c[1] == 1.0 && c[2] == -0.25);
+    let (x2, x2e) = two_prod(x, x);
+    // c₃x³ as a double-double
+    let (x3, x3e) = two_prod(x2, x);
+    let (k3, k3e) = two_prod(c[3], x3);
+    let k3l = k3e + c[3] * (x3e + x2e * x);
+    let quartic = x2 * (x2 * horner(x, &c[4..]));
+    let (lx, lxl) = ln_dd(x);
+    // (−γ − ln x) + x − x²/4 + c₃x³, each step exact
+    let (a, ae) = two_sum(c[0], -lx);
+    let (b, be) = two_sum(a, x);
+    let (d, de) = two_sum(b, -0.25 * x2);
+    let (f, fe) = two_sum(d, k3);
+    f + (fe + (de + be + ae + (E1_SMALL_LO - lxl - 0.25 * x2e + k3l + quartic)))
 }
 
 /// `(h + hl)/x` as a double-double.
@@ -359,19 +389,28 @@ pub(crate) fn ei_f64(x: f64) -> f64 {
         };
     }
     if x <= 6.0 {
-        // d + dl = x − x₀ (x − x₀ʰⁱ is exact near x₀).
-        let (d, dl) = two_sum(x - EI_X0_HI, -EI_X0_LO);
+        // d + dl = x − x₀ exactly but for x₀'s third part: x − x₀ʰⁱ is exact only near x₀, and
+        // its rounding further off (up to 2⁻⁵¹ at x = 4.5, times R ≈ 6) cost 0.8 ulp of Ei
+        let (a, ae) = two_sum(x, -EI_X0_HI);
+        let (d, dl) = two_sum(a, ae - EI_X0_LO);
         let dl = dl - EI_X0_LO2;
-        let r = if x <= 1.5 {
-            full(x - 0.75, &EI_R1, EI_R1_LO)
+        let (t, c, lo) = if x <= 1.5 {
+            (x - 0.75, &EI_R1[..], EI_R1_LO)
         } else if x <= 3.0 {
-            full(x - 2.25, &EI_R2, EI_R2_LO)
+            (x - 2.25, &EI_R2[..], EI_R2_LO)
         } else if x <= 4.5 {
-            full(x - 3.75, &EI_R3, EI_R3_LO)
+            (x - 3.75, &EI_R3[..], EI_R3_LO)
         } else {
-            full(x - 5.25, &EI_R4, EI_R4_LO)
+            (x - 5.25, &EI_R4[..], EI_R4_LO)
         };
-        let l = if d.abs() < 0.1 {
+        // R = c₀ + c₁t + t² Q(t) with its first two terms as a double-double (their roundings
+        // in double, times x − x₀ up to 5.6, cost up to an ulp of Ei)
+        let (p1, p1e) = two_prod(c[1], t);
+        let (r, rl) = two_sum(c[0], p1);
+        let rl = rl + (lo + p1e + t * t * horner(t, &c[2..]));
+        // ln(x/x₀) as a double-double where Ei is small against it (to 1.5; its rounding would
+        // cost up to two ulps), else in double (a quarter of an ulp at most)
+        let (l, ll) = if d.abs() < 0.1 {
             // ln(1 + t), t = d/x₀ as a double-double.
             let t = d / EI_X0_HI;
             let tl = (residual(t, EI_X0_HI, d) + dl - t * EI_X0_LO) / EI_X0_HI;
@@ -379,27 +418,34 @@ pub(crate) fn ei_f64(x: f64) -> f64 {
             let l = t.ln_1p();
             let (m, ml, q) = exp_parts(l);
             let (m, ml) = (scale(m, q), scale(ml, q));
-            l - (((m - 1.0) - t) + (ml - tl)) / (1.0 + t)
+            (l, -(((m - 1.0) - t) + (ml - tl)) / (1.0 + t))
+        } else if x <= 1.5 {
+            let (lx, lxl) = ln_dd(x);
+            let (h, e) = two_sum(lx, -LN_EI_X0_HI);
+            (h, e + (lxl - LN_EI_X0_LO))
         } else {
-            (x.ln() - LN_EI_X0_HI) - LN_EI_X0_LO
+            ((x.ln() - LN_EI_X0_HI) - LN_EI_X0_LO, 0.0)
         };
-        return mla(d, r, l + dl * r);
+        // Ei = (d + dl) R + l, the products and the sum as double-doubles, rounded once
+        let (p, pe) = two_prod(d, r);
+        let (h, hl) = two_sum(p, l);
+        return h + (hl + (pe + (ll + (d * rl + dl * r))));
     }
     ei_large(x)
 }
 
-/// `Ei(x)` for `x > 6`: `eˣ (1 + K)/x`.
+/// `Ei(x)` for `x > 6`: `eˣ (1 + K)/x`, `K` from the left end of its piece (`x − a` exact).
 #[inline]
 fn ei_large(x: f64) -> f64 {
     let rat = |u: f64, p: &[f64], q: &[f64]| horner(u, p) / horner(u, q);
     let k = if x <= 10.0 {
-        rat((x - 8.0) * 0.5, &EI_K1_P, &EI_K1_Q)
+        rat((x - 6.0) * 0.5, &EI_K1_P, &EI_K1_Q)
     } else if x <= 20.0 {
-        rat((x - 15.0) / 5.0, &EI_K2_P, &EI_K2_Q)
+        rat((x - 10.0) / 5.0, &EI_K2_P, &EI_K2_Q)
     } else if x <= 30.0 {
-        rat((x - 25.0) / 5.0, &EI_K3_P, &EI_K3_Q)
+        rat((x - 20.0) / 5.0, &EI_K3_P, &EI_K3_Q)
     } else if x <= 48.0 {
-        rat((x - 39.0) / 9.0, &EI_K4_P, &EI_K4_Q)
+        rat((x - 30.0) / 9.0, &EI_K4_P, &EI_K4_Q)
     } else {
         if x > 717.0 {
             return f64::INFINITY;
@@ -430,8 +476,8 @@ fn e1_dd(x: f64) -> (f64, f64) {
         let (s, se) = two_sum(h, -lx);
         return two_sum(s, se + l - lxl);
     }
-    let u = (x - 1.75) / 0.75;
-    let k = horner(u, &E1_MID_P) / horner(u, &E1_MID_Q);
+    let v = (x - 1.0) / 0.75;
+    let k = horner(v, &E1_MID_P) / horner(v, &E1_MID_Q);
     let (h, hl) = two_sum(E1_MID_H0, k + E1_MID_H0_LO);
     let (g, gl) = div(h, hl, x);
     let (e, el, q) = exp_parts(-x);
@@ -501,17 +547,46 @@ fn en_f64(n: u32, x: f64) -> f64 {
 }
 
 /// The exponential integral `E₁(x) = ∫₁^∞ e^(−xt)/t dt`, for `x > 0` (`∞` at 0).
+///
+/// # Examples
+///
+/// ```
+/// use a::math::special::expint_e1;
+///
+/// assert!((expint_e1(1.0f64) - 0.219_383_934_395_520_27).abs() < 1e-16);
+/// assert_eq!(expint_e1(0.0f64), f64::INFINITY);
+/// ```
 pub fn expint_e1<T: Real>(x: T) -> T {
     via(x, e1_f64)
 }
 
 /// The exponential integral `Ei(x) = −PV ∫₋ₓ^∞ e^(−t)/t dt`, for `x ≠ 0` (`−∞` at 0).
+///
+/// # Examples
+///
+/// ```
+/// use a::math::special::{expint_e1, expint_ei};
+///
+/// assert!((expint_ei(1.0f64) - 1.895_117_816_355_936_8).abs() < 1e-15);
+/// assert_eq!(expint_ei(-2.0f64), -expint_e1(2.0f64));
+/// ```
 pub fn expint_ei<T: Real>(x: T) -> T {
     via(x, ei_f64)
 }
 
 /// The generalised exponential integral `Eₙ(x) = ∫₁^∞ e^(−xt)/tⁿ dt`, for `x ≥ 0` (`x > 0` when
 /// `n ≤ 1`).
+///
+/// # Examples
+///
+/// ```
+/// use a::math::special::expint_en;
+///
+/// assert!((expint_en(2, 1.0f64) - 0.148_495_506_775_922_05).abs() < 1e-16);
+/// assert_eq!(expint_en(3, 0.0f64), 0.5);
+/// // E₀(x) = e⁻ˣ/x, an infinity past the range
+/// assert_eq!(expint_en(0, 1e-310f64), f64::INFINITY);
+/// ```
 pub fn expint_en<T: Real>(n: u32, x: T) -> T {
     via(x, |x| {
         if x.is_nan() || x < 0.0 {
@@ -523,6 +598,9 @@ pub fn expint_en<T: Real>(n: u32, x: T) -> T {
                     f64::INFINITY
                 } else if x > 746.0 {
                     0.0
+                } else if 1.0 / x == f64::INFINITY {
+                    // e⁻ˣ/x past the range (x < 2⁻¹⁰²⁴, where e⁻ˣ rounds to 1)
+                    f64::INFINITY
                 } else {
                     // e⁻ˣ · (1/x as a double-double), rounded once
                     let (g, gl) = div(1.0, 0.0, x);

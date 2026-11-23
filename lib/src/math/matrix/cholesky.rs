@@ -161,6 +161,21 @@ impl<T: Scalar> Cholesky<T> {
     }
 }
 
+/// The Cholesky decomposition of the `n × n` block at the start of `a`, column after column
+/// with the leading dimension `ld`, in place: its lower triangle becomes `L` and its upper
+/// triangle zeros, or `None` when the block is not positive definite. Only the lower triangle is
+/// read. For the dense blocks of the sparse factorisations.
+pub(crate) fn cholesky_in_place<T: Scalar>(a: &mut [T], n: usize, ld: usize) -> Option<()> {
+    if n == 0 {
+        return Some(());
+    }
+    if n <= narrow_order::<T>() {
+        return narrow(a, n, ld);
+    }
+    let n1 = split::<T>(n);
+    with_scratch(n1 * n1, |work| factor(a, n, ld, work))
+}
+
 /// Blocks up to this order are factored without recursion: 32 for real elements, whose leaves
 /// keep their columns in vector registers, and 16 for complex ones.
 const fn narrow_order<T: Scalar>() -> usize {

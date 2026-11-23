@@ -166,3 +166,6 @@ struct MathMatrix;
 
 #[doc = include_str!("../docs/math/numerics.md")]
 struct MathNumerics;
+
+#[doc = include_str!("../docs/math/sparse.md")]
+struct MathSparse;

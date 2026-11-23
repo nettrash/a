@@ -129,8 +129,10 @@ fn gamma_of_reals() {
         0.6,
         |a| gamma(a[0]),
     );
-    // A subnormal result is rounded twice.
-    real("gamma f64 subnormal", GAMMA_F64, subnormal, F64, 1.0, |a| {
+    // A subnormal result is rounded once too (from the double-double). (Its reference, a
+    // double-double too, is itself resolved only to 2⁻¹⁰⁷⁴, so 0.6 here is in effect a check of
+    // the correct rounding: an error of 0.7 ulps reads as 1.)
+    real("gamma f64 subnormal", GAMMA_F64, subnormal, F64, 0.6, |a| {
         gamma(a[0])
     });
     real("gamma f32", GAMMA_F32, all, F32, 0.501, |a| {
@@ -138,16 +140,50 @@ fn gamma_of_reals() {
     });
 }
 
+/// Checks `lgamma` of `f64`s: to 0.6 ulps (for `x > 0` also beside the zeros 1 and 2), but for
+/// `x < 0` where `|ln |Γ(x)|| < 1/4` (beside the zeros on the negative axis) to an absolute
+/// 0.1 ε.
+#[track_caller]
+fn lgamma_f64_check(name: &str, text: &str) {
+    let negative = |c: &Case| c.args[0] < 0.0;
+    let rest = select(text, |c| !negative(c));
+    if !rest.is_empty() {
+        check_real(name, &rest, F64, 0.6, |a| lgamma(a[0]));
+    }
+    let cs = cases(&select(text, negative));
+    assert!(!cs.is_empty(), "{name}: no cases with x < 0");
+    let w = worst(
+        &cs,
+        |a| vec![lgamma(a[0])],
+        |g, r| {
+            let (h, l) = r[0];
+            if h.abs() < 0.25 {
+                // In units of 0.1 ε / 0.6 ulps, so that both bounds read as 0.6.
+                ((g[0] - h) - l).abs() / f64::EPSILON * 6.0
+            } else {
+                ulps(g[0], (h, l), F64)
+            }
+        },
+    );
+    assert!(
+        w.max <= 0.6,
+        "{name}, x < 0: {:.3} (ulps, or 0.1 ε as 0.6) at {:?}: got {:?}, want {:?}",
+        w.max,
+        w.args,
+        w.got,
+        w.want
+    );
+}
+
 #[test]
 fn lgamma_of_reals() {
-    real("lgamma f64", LGAMMA_F64, all, F64, 0.6, |a| lgamma(a[0]));
+    lgamma_f64_check("lgamma f64", LGAMMA_F64);
     real("lgamma f32", LGAMMA_F32, all, F32, 0.501, |a| {
         lgamma(a[0] as f32) as f64
     });
-    // Beside the zeros of ln |Γ| on the negative axis the error is absolute.
-    absolute("lgamma near its negative zeros", LGAMMA_NEGZERO, 0.1, |a| {
-        lgamma(a[0])
-    });
+    // Beside the zeros of ln |Γ| on the negative axis the error is absolute (where the value is
+    // below 1/4).
+    lgamma_f64_check("lgamma near its negative zeros", LGAMMA_NEGZERO);
 }
 
 #[test]
@@ -247,12 +283,39 @@ fn gamma_identities() {
 const GAMMA_C64: &str = include_str!("data/gamma_gamma_c64.txt");
 const LGAMMA_C64: &str = include_str!("data/gamma_lgamma_c64.txt");
 
+/// `|z|` of a complex case.
+fn modulus(c: &Case) -> f64 {
+    c.args[0].hypot(c.args[1])
+}
+
 #[test]
 fn gamma_of_complex() {
-    complex("gamma c64", GAMMA_C64, all, 1.25, |re, im| {
-        let z = gamma(Complex::new(re, im));
-        (z.re, z.im)
-    });
+    complex(
+        "gamma c64",
+        GAMMA_C64,
+        |c| modulus(c) < 1e14,
+        1.25,
+        |re, im| {
+            let z = gamma(Complex::new(re, im));
+            (z.re, z.im)
+        },
+    );
+    // The documented limit: from |z| = 10¹⁴ on (where the condition number |z ψ(z)| of Γ passes
+    // 1/ε) the relative error is that of ln Γ(z) in double-double, whose main terms are of the size
+    // |z| ln |z|: an allowance of |z| ln |z| · 2⁻¹⁰⁴.
+    let far = cases(&select(GAMMA_C64, |c| modulus(c) >= 1e14));
+    assert!(!far.is_empty(), "gamma c64: no cases beyond 1e14");
+    for c in &far {
+        let m = modulus(c);
+        let allow = (m * m.ln() * f64::EPSILON).max(1.25);
+        let z = gamma(Complex::new(c.args[0], c.args[1]));
+        let e = rel_eps((z.re, z.im), c.refs[0], c.refs[1], F64);
+        assert!(
+            e <= allow,
+            "gamma c64 at {:?}: {e:.3} ε > {allow:.3}: got {z:?}",
+            c.args
+        );
+    }
     complex("lgamma c64", LGAMMA_C64, all, 1.25, |re, im| {
         let z = lgamma(Complex::new(re, im));
         (z.re, z.im)
@@ -296,6 +359,28 @@ fn complex_gamma_branches_and_special_values() {
         let p = gamma(Complex::new(x, y));
         let q = gamma(Complex::new(x, -y));
         assert!(near(p, q), "gamma conj at {x} {y}: {p:?} {q:?}");
+    }
+    // Where both parts underflow, the zeros keep the conjugate's signs (they were both +0 for z
+    // and its conjugate: the second review's cases). Not under Miri: there the phase of such a
+    // z, about |z| ln |z| in size, depends on its perturbed atan2.
+    if !cfg!(miri) {
+        for &(x, y) in &[
+            (-1.1816180553724866e236f64, -2.1391109902859666e235f64),
+            (-9.858351493080197e34, -1.5722588066541558e35),
+            (-3.7296713787713606e155, 5.085252663361583e155),
+            (-5.314226948048298e116, -1.130186739063547e115),
+        ] {
+            let p = gamma(Complex::new(x, y));
+            let q = gamma(Complex::new(x, -y));
+            assert!(
+                p.re == 0.0 && p.im == 0.0,
+                "gamma at {x} {y} should underflow: {p:?}"
+            );
+            assert!(
+                p.re.to_bits() == q.re.to_bits() && p.im.to_bits() == (-q.im).to_bits(),
+                "gamma conj (signed zeros) at {x} {y}: {p:?} {q:?}"
+            );
+        }
     }
     // The recurrence ln Γ(z + 1) = ln Γ(z) + ln z holds on the principal branch where Im z > 0
     // and z is in the right half-plane.
@@ -417,6 +502,22 @@ fn digamma_and_polygamma_special_values() {
     assert_eq!(digamma(2.0f32), 0.422_784_34f32);
 }
 
+#[test]
+fn psi_at_the_edges_of_the_range() {
+    // −1/x − γ is beyond the range from 2⁻¹⁰²⁴ down (1/x overflows): ∓∞, not NaN.
+    let edge = f64::from_bits(1 << 50);
+    for x in [f64::from_bits(1), 1e-320, 1e-310, edge] {
+        assert_eq!(digamma(x), f64::NEG_INFINITY, "digamma({x:e})");
+        assert_eq!(digamma(-x), f64::INFINITY, "digamma(-{x:e})");
+    }
+    let above = f64::from_bits((1 << 50) + 1);
+    assert!(digamma(above).is_finite() && digamma(-above).is_finite());
+    // ψ′(x) = 1/x² overflows from 2⁻⁵¹² down.
+    let x = f64::from_bits(511 << 52);
+    assert_eq!(polygamma(1, x), f64::INFINITY);
+    assert!(polygamma(1, f64::from_bits(x.to_bits() + 1)).is_finite());
+}
+
 // ---------------------------------------------------------------- B, ln B, x!, C(n, k), (x)ₙ
 
 const BETA_F64: &str = include_str!("data/gamma_beta_f64.txt");
@@ -519,6 +620,97 @@ fn beta_family_special_values() {
     assert_eq!(pochhammer(1.0f64, 10.0), 3_628_800.0);
     assert_eq!(pochhammer(1.0f32, 5.0), 120.0f32);
     assert_eq!(binomial(10.0f32, 3.0), 120.0f32);
+}
+
+/// `f32` values spread over the arguments of the area (log-uniform from 2⁻²⁰ to 2²⁰ of either
+/// sign, and a few integers).
+fn f32_points() -> Vec<f32> {
+    let mut v = Vec::new();
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..if cfg!(miri) { 40 } else { 600 } {
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let u = (s >> 11) as f64 / (1u64 << 53) as f64;
+        let x = (2.0f64).powf(40.0 * u - 20.0) as f32;
+        v.push(if s & 1 == 0 { x } else { -x });
+    }
+    v.extend([1.0f32, 2.0, 3.0, -1.0, 0.5, -0.5, 10.0, 170.0]);
+    v
+}
+
+/// The same bits, NaN for NaN.
+fn same(a: f32, b: f32) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}
+
+#[test]
+fn f32_forms_are_the_f64_results_rounded_once() {
+    // So an f32 result is within 0.5 + 2⁻²⁹·(the f64 error) f32 ulps: 0.501 wherever the f64
+    // bound is relative.
+    let xs = f32_points();
+    for (i, &x) in xs.iter().enumerate() {
+        let y = xs[(i * 7 + 3) % xs.len()];
+        let (xd, yd) = (x as f64, y as f64);
+        assert!(same(lbeta(x, y), lbeta(xd, yd) as f32), "lbeta({x}, {y})");
+        assert!(same(factorial(x), factorial(xd) as f32), "factorial({x})");
+        assert!(
+            same(binomial(x, y), binomial(xd, yd) as f32),
+            "binomial({x}, {y})"
+        );
+        assert!(
+            same(pochhammer(x, y), pochhammer(xd, yd) as f32),
+            "pochhammer({x}, {y})"
+        );
+        let (l, sg) = lgamma_sign(x);
+        let (ld, sd) = lgamma_sign(xd);
+        assert!(
+            same(l, ld as f32) && same(sg, sd as f32),
+            "lgamma_sign({x})"
+        );
+        for n in [1u32, 2, 5, 30] {
+            assert!(
+                same(polygamma(n, x), polygamma(n, xd) as f32),
+                "polygamma({n}, {x})"
+            );
+        }
+        let z = gamma(Complex::new(x, y));
+        let w = gamma(Complex::new(xd, yd));
+        assert!(
+            same(z.re, w.re as f32) && same(z.im, w.im as f32),
+            "gamma({x} + {y}i)"
+        );
+        let z = lgamma(Complex::new(x, y));
+        let w = lgamma(Complex::new(xd, yd));
+        assert!(
+            same(z.re, w.re as f32) && same(z.im, w.im as f32),
+            "lgamma({x} + {y}i)"
+        );
+    }
+}
+
+#[test]
+fn beta_family_beside_the_poles_of_the_sum() {
+    // a + b rounds to −1 but is not −1 exactly: B is finite (its exact value, by mpmath), not NaN.
+    let b = beta(-0.3f64, -0.7);
+    assert!(
+        (b / -1.026_486_323_837_799_5e-15 - 1.0).abs() < 4e-16,
+        "{b:e}"
+    );
+    assert!((lbeta(-0.3f64, -0.7) + 34.512_634_760_622_64).abs() < 1e-14);
+    let p = pochhammer(-0.3f64, -0.7);
+    assert!((p / 4_163_396_903_752_755.5 - 1.0).abs() < 4e-16, "{p:e}");
+    let c = binomial(0.1f64, 19.1);
+    assert!(
+        (c / -5.264_875_749_448_132e-17 - 1.0).abs() < 4e-16,
+        "{c:e}"
+    );
+    // a + b exactly −1: a pole of Γ(a + b) alone, so B = 0.
+    assert_eq!(beta(-0.6f64, -0.4), 0.0);
+    // Both arguments beyond 1.3·10³⁰⁸: B underflows, ln B overflows.
+    assert_eq!(beta(1.3e308f64, 1.3e308), 0.0);
+    assert_eq!(lbeta(f64::MAX, f64::MAX), f64::NEG_INFINITY);
+    assert!(lbeta(10.0f64, f64::MAX).is_finite());
 }
 
 // ===== igamma (P, Q and inverses) =====
@@ -847,5 +1039,37 @@ fn beta_inc_extremes() {
     assert!(
         (x / 9.999_999_999_927_277e-301 - 1.0).abs() < 1e-15,
         "{x:e}"
+    );
+    // Roots in the subnormals (by the leading terms, to 1e-300): the nearest subnormal, not the
+    // least one or zero.
+    let x = beta_inc_inv(
+        0.693_109_705_948_962_4f64,
+        1_283.903_673_112_845_8,
+        7.138_512_485_316_517e-212,
+    );
+    assert!((x - 1.564_140_930_735_766_5e-308).abs() <= 5e-324, "{x:e}");
+    let x = gamma_p_inv(0.156_312_500_449_204_2f64, 3.993_821_593_293_502_6e-51);
+    assert_eq!(x, 5.0 * 5e-324);
+    // Beside the least subnormal (a subnormal x beside b ≥ 8, review round 1): I at 5e-324 is p
+    // (0.35 ulps; it was 1 % off), and a target two ulps below p has its root just below 2⁻¹⁰⁷⁴
+    // (so 0, the documented rule), two ulps above it just above (so 5e-324, where 0 was given).
+    let (a, b) = (0.715_728_087_772_465_8f64, 11.269_352_670_023_864);
+    let p = 2.453_475_550_700_287_7e-231;
+    assert!((beta_inc(a, b, 5e-324) / p - 1.0).abs() < 3e-16);
+    assert_eq!(beta_inc_inv(a, b, f64::from_bits(p.to_bits() - 2)), 0.0);
+    assert_eq!(beta_inc_inv(a, b, f64::from_bits(p.to_bits() + 2)), 5e-324);
+    // A small a beside 8 <= b < 15 at a tiny x: the series (once NaN).
+    let (a, b, x) = (
+        0.001_805_913_590_426_878f64,
+        13.552_467_641_142_972,
+        7.838_550_122_480_618e-50,
+    );
+    assert!((beta_inc(a, b, x) - 0.819_947_165_055_452_1).abs() < 2e-16);
+    assert!((beta_inc_c(a, b, x) - 0.180_052_834_944_547_9).abs() < 6e-17);
+    // A parameter beyond 2⁹⁹⁶: I_c(1, b, x) = (1 − x)^b, the product b·x exact.
+    let q = beta_inc_c(1.0f64, 1e300, 7.000_000_000_000_001e-298);
+    assert!(
+        (q / 9.859_676_543_758_132e-305 - 1.0).abs() < 4e-16,
+        "{q:e}"
     );
 }

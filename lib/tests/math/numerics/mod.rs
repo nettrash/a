@@ -1,6 +1,9 @@
+mod aaa;
 mod diff;
 mod gauss;
 mod interp;
+mod lbfgsb;
+mod lp;
 mod ode;
 mod opt;
 mod quad;

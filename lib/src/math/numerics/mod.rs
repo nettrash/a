@@ -1,37 +1,54 @@
 //! Numerical methods on `f32` and `f64`: roots, integration, ordinary differential equations,
 //! optimisation, interpolation and differentiation.
 //!
-//! * [`root`]: the zeros of a function of one real variable — [`bisect`](root::bisect),
-//!   [`brent`](root::brent), [`secant`](root::secant), [`newton`](root::newton) and
-//!   [`halley`](root::halley) — and of a system of equations, by Newton's method with a Jacobian
-//!   and by Broyden's method.
-//! * [`quad`]: the integral of a function of one real variable, by adaptive Gauss–Kronrod
-//!   quadrature (G7–K15 and G10–K21), by Clenshaw–Curtis, and by the tanh-sinh double exponential
-//!   method; over infinite intervals too, and in several dimensions by cubature and by Monte
-//!   Carlo.
-//! * [`gauss`]: the nodes and weights of Gauss–Legendre, Gauss–Hermite, Gauss–Laguerre and
-//!   Gauss–Jacobi quadrature, by Golub and Welsch's method on
-//!   [`hermitian_eigen`](crate::math::matrix::Matrix::hermitian_eigen) and by Newton's method for
-//!   the largest orders.
-//! * [`ode`]: the initial value problem `y′ = f(t, y)` — explicit Runge–Kutta methods (the
-//!   classical fourth order and Dormand and Prince's 5(4)) and a stiff one (Radau IIA of three
-//!   stages, whose corrector is solved on [`lu`](crate::math::matrix::Matrix::lu)) — all of them
-//!   with step-size control.
-//! * [`opt`]: the minimum of a function — of one variable by the golden section and by Brent's
-//!   method; of several by Nelder and Mead's simplex, by the conjugate gradient, and by BFGS; of a
-//!   sum of squares by Gauss–Newton and by Levenberg and Marquardt, the latter's damped corrector
-//!   and the former's least squares step solved on
-//!   [`lu`](crate::math::matrix::Matrix::lu) and
-//!   [`qr`](crate::math::matrix::Matrix::qr).
-//! * [`interp`]: interpolation and approximation — the cubic splines (natural, clamped and
-//!   not-a-knot), Akima's and the shape-preserving PCHIP, Chebyshev approximation on Chebyshev
-//!   nodes, and barycentric interpolation with its weights.
-//! * [`diff`]: numerical differentiation by Richardson extrapolation.
+//! * Roots: the zeros of a function of one real variable — [`bisect`], [`brent`], [`secant`],
+//!   [`newton`] and [`halley`] — and of a system of equations, by Newton's method with a Jacobian
+//!   ([`newton_system`]) and by Broyden's method ([`broyden`]).
+//! * Quadrature: the integral of a function of one real variable, by adaptive Gauss–Kronrod
+//!   quadrature as QUADPACK's QAGS and QAGI do it ([`quad`] on G10–K21, [`quad_g10k21`],
+//!   [`quad_g7k15`]), by Clenshaw–Curtis ([`clenshaw_curtis`]), and by the tanh-sinh double
+//!   exponential method with its exp-sinh and sinh-sinh forms ([`tanh_sinh`]); over infinite
+//!   intervals too ([`quad_half_infinite`], [`quad_infinite`], or an infinite limit to any of
+//!   them but Clenshaw–Curtis); in several dimensions by Genz and Malik's [`cubature`], by plain
+//!   Monte Carlo ([`monte_carlo`]) and by quasi-Monte Carlo on the [`Sobol`] sequence
+//!   ([`quasi_monte_carlo`]). A result the rule could not bring within its tolerances comes back
+//!   with `converged` false and its error estimate; `None` is for a NaN limit or options that
+//!   ask for nothing.
+//! * Gaussian rules: the nodes and weights of Gauss–Legendre ([`legendre`]), Gauss–Hermite
+//!   ([`hermite`], [`hermite_scaled`]), Gauss–Laguerre ([`laguerre`], [`laguerre_scaled`]) and
+//!   Gauss–Jacobi ([`jacobi`]) quadrature, by Golub and Welsch's method up to
+//!   [`GOLUB_WELSCH_LARGEST`] points and by Newton's method from asymptotic first guesses above.
+//! * Differential equations: the initial value problem `y′ = f(t, y)` by [`solve`],
+//!   [`integrate`], [`solve_at`] and [`solve_ivp`], the last with dense output ([`DenseOutput`])
+//!   and event location ([`Event`]); by the explicit Runge–Kutta methods [`Rk4`],
+//!   [`DormandPrince5`] and [`DormandPrince853`] and the stiff [`RadauIia`] and [`Bdf`], each
+//!   controlling its own step size.
+//! * Optimisation: the minimum of a function — of one variable by the golden section
+//!   ([`golden_section`]) and by Brent's method ([`minimize`]); of several by Nelder and Mead's
+//!   simplex ([`nelder_mead`]), by the conjugate gradient ([`conjugate_gradient`]) and by
+//!   [`bfgs`]; of several within bounds by L-BFGS-B ([`lbfgsb`]); of a sum of squares by
+//!   [`gauss_newton`] and by [`levenberg_marquardt`], both on the QR decomposition.
+//! * Linear programming: the optimum of a linear objective under linear inequalities, equations
+//!   and bounds, by the simplex method in two phases ([`LinearProgram`]).
+//! * Interpolation and approximation: the cubic splines, Akima's and the shape-preserving PCHIP
+//!   ([`Spline`]), Chebyshev approximation ([`chebyshev`]), polynomial interpolation in
+//!   barycentric form ([`barycentric_interpolate`]), and rational approximation by the AAA
+//!   algorithm ([`aaa`], [`aaa_complex`]).
+//! * Differentiation: [`derivative`] and [`second_derivative`] by Richardson extrapolation.
 //!
-//! Everything is generic over [`Real`], `f32` and `f64`; an `f32` problem is usually solved
-//! through `f64` where that is cheaper than the loss of accuracy. A method that cannot reach its
-//! tolerance returns `None` rather than a wrong answer, and a call with inputs of the wrong shape
-//! panics.
+//! Everything is generic over [`Real`], `f32` and `f64`. Where `f32` would lose too much, an
+//! `f32` problem is computed in `f64`: the Gaussian rules, the nodes of the quadrature rules and
+//! the sums of the Monte Carlo rules, and the poles and zeros of AAA.
+//!
+//! A method never returns an answer it has not verified. One that cannot reach its tolerance says
+//! so: by `None` (the methods for one equation, [`solve`], [`integrate`] and [`solve_at`], the
+//! derivatives), by a result with `converged` false and the best point or estimate it reached
+//! (the systems, the quadrature rules, the optimisers and the fits), by [`OdeStatus::Failed`]
+//! ([`solve_ivp`]), by [`LpStatus::IterationLimit`] or `None` (the simplex method), or by
+//! [`Aaa::converged`] false. A call with inputs of the wrong shape panics. A method that takes
+//! options comes with the defaults as `name` and with an options struct, built by `new()` and
+//! `with_*` calls, as `name_with`; the quadrature rules other than [`quad`], [`monte_carlo`] and
+//! [`quasi_monte_carlo`] take their [`QuadOptions`] as an argument.
 //!
 //! # Examples
 //!
@@ -223,26 +240,37 @@ macro_rules! real {
 real!(f32);
 real!(f64);
 
+mod aaa;
 mod diff;
 mod gauss;
 mod interp;
+mod lbfgsb;
+mod lp;
 mod ode;
 mod opt;
 mod quad;
 mod root;
 mod system;
 
+pub use aaa::{Aaa, AaaOptions, aaa, aaa_complex, aaa_complex_with, aaa_with};
 pub use diff::{
     DiffOptions, derivative, derivative_with, second_derivative, second_derivative_with,
 };
-pub use gauss::{NodesWeights, hermite, jacobi, laguerre, legendre};
+pub use gauss::{
+    GOLUB_WELSCH_LARGEST, NodesWeights, hermite, hermite_scaled, jacobi, laguerre, laguerre_scaled,
+    legendre,
+};
 pub use interp::{
     Chebyshev, Spline, barycentric_interpolate, barycentric_weights, chebyshev, chebyshev_nodes,
 };
+pub use lbfgsb::{Bound, LbfgsbOptions, LbfgsbResult, LbfgsbStop, lbfgsb, lbfgsb_with};
+pub use lp::{LinearProgram, LpOptions, LpResult, LpStatus};
 
 pub use ode::{
-    DormandPrince5, OdeMethod, OdeResult, RadauIia, Rk4, RkOptions, integrate, integrate_with,
-    solve, solve_with,
+    Bdf, ButcherTableau, DenseOutput, DenseStep, DormandPrince5, DormandPrince853, Event,
+    EventDirection, EventPoint, NoJacobian, OdeFailure, OdeMethod, OdeOptions, OdeResult,
+    OdeSolution, OdeStatus, RadauIia, Rk4, integrate, integrate_with, solve, solve_at,
+    solve_at_with, solve_ivp, solve_ivp_with, solve_with,
 };
 pub use opt::{
     FitResult, MinResult, OneDimResult, OptOptions, bfgs, bfgs_with, conjugate_gradient,
@@ -251,29 +279,22 @@ pub use opt::{
     nelder_mead_with,
 };
 pub use quad::{
-    QuadOptions, QuadResult, clenshaw_curtis, cubature, monte_carlo, quad, quad_g7k15, quad_g10k21,
-    quad_half_infinite, quad_infinite, tanh_sinh,
+    MonteCarloOptions, QuadOptions, QuadResult, SOBOL_MAX_DIMENSION, Sobol, clenshaw_curtis,
+    cubature, monte_carlo, monte_carlo_with, quad, quad_g7k15, quad_g10k21, quad_half_infinite,
+    quad_infinite, quasi_monte_carlo, quasi_monte_carlo_with, tanh_sinh,
 };
 pub use root::{
     RootOptions, bisect, bisect_with, brent, brent_with, halley, halley_with, newton, newton_with,
     secant, secant_with,
 };
 pub use system::{
-    SystemOptions, broyden, broyden_with, newton as newton_system,
-    newton_with as newton_system_with,
+    SystemOptions, SystemResult, SystemStop, broyden, broyden_with, broyden_with_jacobian,
+    newton as newton_system, newton_with as newton_system_with,
 };
 
 /// The largest number of iterations a method runs before it gives up, when it is not told
 /// otherwise.
 pub(crate) const DEFAULT_MAX_ITER: usize = 100;
-
-/// Whether `x` is within `tol` of `y`, relatively and absolutely, the test every convergence check
-/// here makes: `|x − y| ≤ tol · max(|x|, |y|, 1)`.
-#[inline]
-pub(crate) fn close<T: Real>(x: T, y: T, tol: T) -> bool {
-    let d = (x - y).abs();
-    d <= tol * x.abs().max(y.abs().max(T::ONE))
-}
 
 /// Whether `a` is truly below `b`, with the answer every method wants when it decides whether it
 /// was given something it can work with: a NaN on either side is not below anything, and so is

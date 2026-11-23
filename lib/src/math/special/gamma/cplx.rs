@@ -10,7 +10,7 @@
 //! of the double-double logarithm, so that its relative error stays near ε even where `|ln Γ|` is
 //! large.
 
-use super::super::dd::{Dd, two_sum};
+use super::super::dd::{Dd, two_prod, two_sum};
 use super::ddm::*;
 use super::real::{gamma_f64, lgamma_f64};
 use super::tab::*;
@@ -71,22 +71,53 @@ impl Cdd {
     }
 }
 
-/// `θ/π` with `θ = arg(x + iy)`, as a double-double, for a finite nonzero `x + iy`: the rounded
-/// `atan2` corrected by one Newton step with the double-double sine and cosine.
+/// `θ/π` with `θ = arg(x + iy) ∈ [−π, π]` (the signs of the zeros as for `atan2`), as a
+/// double-double to about `2⁻¹⁰⁰` absolute, for a finite nonzero `x + iy`. The octant from the
+/// signs and the order of `|x|` and `|y|` (exactly), then `φ = atan(n/d) ∈ [0, π/4]` of the
+/// smaller `n` and the larger `d` as `atan(j/64) + atan(u)`, `j/64` the nearest to `n/d` and
+/// `u = (n − (j/64)d)/(d + (j/64)n)` in double-double (`|u| ≤ 1/128`), and
+/// `atan(u) = u − u³/3 + u⁵/5 − u⁷T(u²)` with the first three terms in double-double. (Stirling's
+/// series multiplies the error of the argument by `|z|`: a rounded `atan2` corrected by the sine
+/// and cosine, which are good to `2⁻⁵⁷`, gave errors of 2.4 ε at `|z| = 130`.)
 fn arg_over_pi(x: Dd, y: Dd) -> Dd {
-    let t0 = y.hi.atan2(x.hi);
-    let qh = t0 / PI_HI;
-    let r = rem(qh, PI_HI, t0) - qh * PI_LO;
-    let ql = r / PI_HI;
-    let s = sin_pi_dd(qh);
-    let c = cos_pi_dd(qh);
-    let d = PI_HI * ql;
-    let s1 = s.add_f64(d * c.hi);
-    let c1 = c.add_f64(-d * s.hi);
-    // tan(θ − θ₀) = (y cos θ₀ − x sin θ₀)/(x cos θ₀ + y sin θ₀).
-    let num = y.mul(c1).sub(x.mul(s1));
-    let den = x.hi * c1.hi + y.hi * s1.hi;
-    Dd::new(qh).add_f64(ql + num.value() / den / PI_HI)
+    let ax = if x.hi < 0.0 { x.neg() } else { x };
+    let ay = if y.hi < 0.0 { y.neg() } else { y };
+    // |y| > |x|: φ is the angle from the imaginary axis.
+    let steep = ay.hi > ax.hi || (ay.hi == ax.hi && ay.lo > ax.lo);
+    let (n, d) = if steep { (ax, ay) } else { (ay, ax) };
+    let j = round_int(64.0 * (n.hi / d.hi));
+    let c = j * 0.015_625;
+    let u = n.sub(d.mul_f64(c)).div(d.add(n.mul_f64(c)));
+    let u2 = u.mul(u);
+    let u3 = u2.mul(u);
+    let u5 = u3.mul(u2);
+    let tail = u5.hi * u2.hi * poly(u2.hi, &ATAN_TAIL);
+    let at = u
+        .sub(u3.mul(Dd {
+            hi: THIRD_HI,
+            lo: THIRD_LO,
+        }))
+        .add(u5.mul(Dd {
+            hi: FIFTH_HI,
+            lo: FIFTH_LO,
+        }))
+        .add_f64(tail);
+    let k = j as usize;
+    let mut q = Dd {
+        hi: ATAN_J64_HI[k],
+        lo: ATAN_J64_LO[k],
+    }
+    .add(at.mul(Dd {
+        hi: INV_PI_HI,
+        lo: INV_PI_LO,
+    }));
+    if steep {
+        q = Dd::new(0.5).sub(q);
+    }
+    if x.hi < 0.0 {
+        q = Dd::new(1.0).sub(q);
+    }
+    if y.hi.is_sign_negative() { q.neg() } else { q }
 }
 
 /// `2^e` for any `e` in `−2044..=2046`, as two factors in range.
@@ -112,7 +143,13 @@ fn ln_c(w: Cdd) -> Cdd {
     };
     let (xs, ys) = (sc(w.re), sc(w.im));
     let n2 = xs.mul(xs).add(ys.mul(ys));
-    let l = ln_of_dd(n2);
+    // (From |w| = 2¹² on, ln_dd's 2⁻⁷² would be more than 2⁻⁶⁰ once Stirling's series has
+    // multiplied it by |w|.)
+    let l = if k >= 12 {
+        ln_acc_of_dd(n2)
+    } else {
+        ln_of_dd(n2)
+    };
     let re = Dd {
         hi: 0.5 * l.hi,
         lo: 0.5 * l.lo,
@@ -291,8 +328,12 @@ pub(crate) fn gamma_c64(z: Complex<f64>) -> Complex<f64> {
         return Complex::new(gamma_f64(x), y);
     }
     let g = lgamma_upper(if y > 0.0 { z } else { z.conj() });
-    let im = if y > 0.0 { g.im } else { g.im.neg() };
-    let (s, c) = (sin_of(im), cos_of(im));
+    // The phase of the upper half-plane, the sine's sign changed below the axis: Γ(z̄) is the
+    // conjugate of Γ(z) bit for bit, the signs of the zeros of underflowed parts included (from
+    // the sine of −θ both were +0 where sin θ is an exact zero, as for a z so far out that θ/π
+    // is an integer).
+    let (s, c) = (sin_of(g.im), cos_of(g.im));
+    let s = if y > 0.0 { s } else { s.neg() };
     if g.re.hi > 1500.0 {
         // Far beyond the range: the infinities in the directions of the phase.
         return Complex::new(f64::INFINITY * c.hi, f64::INFINITY * s.hi);
@@ -304,21 +345,23 @@ pub(crate) fn gamma_c64(z: Complex<f64>) -> Complex<f64> {
     Complex::new(scale(d.mul(c), m), scale(d.mul(s), m))
 }
 
-/// `θ/π` of a double-double angle `θ`, as a double-double.
+/// `θ/π` of a double-double angle `θ`, as a double-double (`θ − q_h·π` exact, `q_h·π_lo` with
+/// its rounding error: `θ` is `Im ln Γ(z)`, of the size of `|z| ln |z|`).
 fn over_pi(t: Dd) -> Dd {
     let qh = t.hi / PI_HI;
-    let r = rem(qh, PI_HI, t.hi) - qh * PI_LO + t.lo;
+    let (p, e) = two_prod(qh, PI_LO);
+    let r = (rem(qh, PI_HI, t.hi) - p) + (t.lo - e);
     Dd::new(qh).add_f64(r / PI_HI)
 }
 
-/// `sin θ` of a double-double angle, to about `2⁻⁶⁰` relative.
+/// `sin θ` of a double-double angle, to about `2⁻⁵⁷` relative: `sin(πq)` with both parts of
+/// `q = θ/π` reduced exactly (from `|q|` of about 10⁷ on, the low part alone is too large for a
+/// first-order step).
 fn sin_of(t: Dd) -> Dd {
-    let q = over_pi(t);
-    sin_pi_dd(q.hi).add_f64(PI_HI * q.lo * cos_pi_dd(q.hi).hi)
+    sin_pi_of_dd(over_pi(t))
 }
 
-/// `cos θ` of a double-double angle, to about `2⁻⁶⁰` relative.
+/// `cos θ` of a double-double angle, to about `2⁻⁵⁷` relative (as `sin_of`).
 fn cos_of(t: Dd) -> Dd {
-    let q = over_pi(t);
-    cos_pi_dd(q.hi).add_f64(-PI_HI * q.lo * sin_pi_dd(q.hi).hi)
+    cos_pi_of_dd(over_pi(t))
 }

@@ -7,7 +7,8 @@
 //! * `|x| < 1/2`: `erf(x) = x + x·q(x²)`, a minimax polynomial of degree 9;
 //! * `1/2 ≤ x < 8`: `erfcx(x)` from 32 polynomials of degree 10, one per eighth of a binade,
 //!   found from the bits of `x`;
-//! * `x ≥ 8`: `x·erfcx(x)` as a polynomial of degree 9 in `1/x²`;
+//! * `x ≥ 8`: `x·erfcx(x)` as a polynomial of degree 9 in `1/x²` (from `2⁹⁶⁰` its limit
+//!   `1/(√π x)`, from `1/x` of `x·2⁻⁵¹²` so that no low word is subnormal);
 //! * `e^a` of a double-double `a` to about 2⁻⁶⁰ ([`exp_dd`]), so that
 //!   `erfc(x) = e^(−x²)·erfcx(x)` loses nothing to the exponential.
 //!
@@ -88,11 +89,11 @@ fn scale_dd(p: Dd, k: i64) -> f64 {
 const ROUND: f64 = 6_755_399_441_055_744.0;
 
 /// `e^(a_hi + a_lo) = m·2^k` with `m` a double-double in `[0.98, 2.03)`, to about 2⁻⁶⁰, for
-/// `|a_hi| < 2⁹·ln 2·2⁸` (far beyond the needs here: `|a| ≤ 750`).
+/// `|a_hi| < 2¹²·ln 2 ≈ 2839` (the complex functions need it to 1460, the real ones to 750).
 #[inline(always)]
 fn exp_dd(a_hi: f64, a_lo: f64) -> (Dd, i64) {
     const INV: f64 = 64.0 / LN_2;
-    // ln 2/64 = L1 + L2, L1 with 35 significant bits so that k·L1 is exact for |k| < 2¹⁷.
+    // ln 2/64 = L1 + L2, L1 with 35 significant bits so that k·L1 is exact for |k| < 2¹⁸.
     const L1: f64 = 0.010_830_424_696_450_791;
     const L2: f64 = -2.016_456_292_199_553_7e-13;
     let z = a_hi * INV + ROUND;
@@ -221,11 +222,43 @@ pub(crate) fn erfc_f64(x: f64) -> f64 {
     s + (e - pl)
 }
 
+/// `erfcx(x)` for `2⁹⁶⁰ ≤ x < ∞`: `1/(√π x)` to the last bit (`1/(2x²) < 2⁻¹⁹²⁰`), with `x`
+/// scaled by `2⁻⁵¹²` first, so that `1/x` and the product stay double-doubles of normal words
+/// (beyond about `2¹⁰¹⁵` their low words would fall into the subnormals), and the result scaled
+/// back with one rounding, also where it is subnormal.
+#[cold]
+#[inline(never)]
+fn erfcx_huge(x: f64) -> f64 {
+    // 1/√π as a double-double (the exact limit, not the fit's constant term).
+    const C: Dd = Dd {
+        hi: 0.564_189_583_547_756_3,
+        lo: 7.667_729_806_582_94e-18,
+    };
+    let p = mul_dd(recip_dd(x * pow2(-512)), C);
+    let (hi, lo) = fast_two_sum(p.hi, p.lo);
+    scale_dd(Dd { hi, lo }, -512)
+}
+
+/// `F(x)` for `2⁹⁶⁰ ≤ x < ∞`: `1/(2x)` to the last bit, `1/x` of `x·2⁻⁵¹²` as a double-double
+/// scaled back with one rounding, as in [`erfcx_huge`].
+#[cold]
+#[inline(never)]
+fn dawson_huge(x: f64) -> f64 {
+    let p = recip_dd(x * pow2(-512));
+    let (hi, lo) = fast_two_sum(p.hi, p.lo);
+    scale_dd(Dd { hi, lo }, -513)
+}
+
 /// `erfcx(x) = e^(x²)·erfc(x)` of an `f64`.
 pub(crate) fn erfcx_f64(x: f64) -> f64 {
     if x >= 0.5 {
-        if x == f64::INFINITY {
-            return 0.0;
+        // 2⁹⁶⁰.
+        if x >= 9.745_314_011_4e288 {
+            return if x == f64::INFINITY {
+                0.0
+            } else {
+                erfcx_huge(x)
+            };
         }
         return erfcx_pos(x).value();
     }
@@ -387,15 +420,19 @@ pub(crate) fn dawson_f64(x: f64) -> f64 {
     let a = x.abs();
     if a < 0.5 {
         let t = x * x;
-        return (x * t).mul_add(poly(t, &DAWSON_SMALL), x);
+        // x·(1 + t·P(t)) has the sign of x (|t·P| < 1/6); the sum alone would make −0 into +0
+        // (x·t·P is +0 there).
+        return (x * t).mul_add(poly(t, &DAWSON_SMALL), x).copysign(x);
     }
     let v = if a < 8.0 {
         let (i, r) = piece(a, B_HALF);
         head(&DAWSON_T[i], r).value()
-    } else if a < f64::INFINITY {
-        // x·F(x) = P(1/x²).
+    } else if a < 9.745_314_011_4e288 {
+        // x·F(x) = P(1/x²), up to 2⁹⁶⁰.
         let ix = recip_dd(a);
         mul_dd(ix, head(&DAWSON_ASYM, ix.hi * ix.hi)).value()
+    } else if a < f64::INFINITY {
+        dawson_huge(a)
     } else if a.is_nan() {
         return x;
     } else {
@@ -455,7 +492,9 @@ pub(crate) fn fresnel_f64(x: f64) -> (f64, f64) {
             return (scale_dd(Dd { hi, lo }, -990).copysign(x), x);
         }
         let (x2, x2l) = two_prod(a, a);
-        let w = x2 * x2;
+        // x⁴ from the exact x² = x2 + x2l, rounded once: its error is a fifth to a third of the
+        // errors of C and S (the square of the rounded x² would carry three times as much).
+        let w = fma(x2, x2, 2.0 * x2 * x2l);
         // C = x + x·w·Q(w); S = x³·P(w) with x³ and P as double-doubles.
         let c = (a * w).mul_add(poly(w, &FRESNEL_C_SMALL), a);
         let (x3, x3l) = two_prod(x2, a);

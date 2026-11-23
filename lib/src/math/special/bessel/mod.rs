@@ -11,8 +11,9 @@ mod tables_olver;
 
 use super::Real;
 use super::dd;
-use general::sin_cos_pi;
-pub(crate) use int01::{about_zero, dd2, horner, poly_dd};
+use dd::Dd;
+use general::sin_cos_pi_dd;
+pub(crate) use int01::{about_zero, dd2, horner, poly_dd3};
 
 /// Whether `v` is an integer, and whether it is odd.
 #[inline]
@@ -47,11 +48,12 @@ pub(crate) fn j_f64(nu: f64, x: f64) -> f64 {
             let v = j_f64(-nu, x);
             return if odd { -v } else { v };
         }
-        // J_(−a) = cos(aπ)·J_a − sin(aπ)·Y_a.
+        // J_(−a) = cos(aπ)·J_a − sin(aπ)·Y_a, the terms in double-double, Y_a's scale apart (it
+        // may overflow where sin(aπ)·Y_a does not).
         let a = -nu;
-        let (s, c) = sin_cos_pi(a);
+        let (s, c) = sin_cos_pi_dd(a);
         if x == 0.0 {
-            return f64::INFINITY.copysign(s);
+            return f64::INFINITY.copysign(s.hi);
         }
         if x.is_infinite() {
             return 0.0;
@@ -59,11 +61,18 @@ pub(crate) fn j_f64(nu: f64, x: f64) -> f64 {
         if x < 1.0e-150 && a >= 0.5 {
             // −sin(aπ)·Y_a dominates; formed before the rounding, as Y_a may overflow alone.
             let (m, e) = general::y_tiny(a, x);
-            return kernels::ldexp(m.mul_f64(-s).value(), e);
+            return kernels::ldexp(m.mul(s).neg().value(), e);
         }
-        let (j, y) = general::jy(a, x, c != 0.0, true);
-        let jt = if c != 0.0 { c * j } else { 0.0 };
-        return jt - s * y;
+        let (j, ym, ye) = general::jy_parts(a, x, c.hi != 0.0, true);
+        if !ym.hi.is_finite() {
+            return -s.hi * ym.hi;
+        }
+        let jt = if c.hi != 0.0 {
+            c.mul_f64(j)
+        } else {
+            Dd::new(0.0)
+        };
+        return general::add_scaled(jt, s.mul(ym).neg(), ye);
     }
     if x == 0.0 {
         return if nu == 0.0 { 1.0 } else { 0.0 };
@@ -91,26 +100,31 @@ pub(crate) fn y_f64(nu: f64, x: f64) -> f64 {
             let v = y_f64(-nu, x);
             return if odd { -v } else { v };
         }
-        // Y_(−a) = sin(aπ)·J_a + cos(aπ)·Y_a.
+        // Y_(−a) = sin(aπ)·J_a + cos(aπ)·Y_a, as J_(−a).
         let a = -nu;
-        let (s, c) = sin_cos_pi(a);
+        let (s, c) = sin_cos_pi_dd(a);
         if x == 0.0 {
-            return if c == 0.0 {
+            return if c.hi == 0.0 {
                 0.0
             } else {
-                f64::NEG_INFINITY * c.signum()
+                f64::NEG_INFINITY * c.hi.signum()
             };
         }
         if x.is_infinite() {
             return 0.0;
         }
-        if x < 1.0e-150 && a >= 0.5 && c != 0.0 {
+        if x < 1.0e-150 && a >= 0.5 && c.hi != 0.0 {
             let (m, e) = general::y_tiny(a, x);
-            return kernels::ldexp(m.mul_f64(c).value(), e);
+            return kernels::ldexp(m.mul(c).value(), e);
         }
-        let (j, y) = general::jy(a, x, true, c != 0.0);
-        let yt = if c != 0.0 { c * y } else { 0.0 };
-        return s * j + yt;
+        let (j, ym, ye) = general::jy_parts(a, x, true, c.hi != 0.0);
+        if c.hi == 0.0 {
+            return s.mul_f64(j).value();
+        }
+        if !ym.hi.is_finite() {
+            return c.hi * ym.hi;
+        }
+        return general::add_scaled(s.mul_f64(j), c.mul(ym), ye);
     }
     if x == 0.0 {
         return f64::NEG_INFINITY;
@@ -144,28 +158,41 @@ pub(crate) fn i_f64(nu: f64, x: f64, scaled: bool) -> f64 {
         if is_int {
             return i_f64(-nu, x, scaled);
         }
-        // I_(−a) = I_a + (2/π)·sin(aπ)·K_a.
+        // I_(−a) = I_a + (2/π)·sin(aπ)·K_a, the terms in double-double, K_a's scale apart (it may
+        // overflow where the sum does not; scaled, e^(−x)·K_a = (e^x·K_a)·e^(−2x) with the scales
+        // apart, see k_exp_neg_parts, as either factor alone may be out of range).
         let a = -nu;
-        let (s, _) = sin_cos_pi(a);
+        let (s, _) = sin_cos_pi_dd(a);
         if x == 0.0 {
-            return f64::INFINITY.copysign(s);
+            return f64::INFINITY.copysign(s.hi);
         }
         if x.is_infinite() {
             return if scaled { 0.0 } else { f64::INFINITY };
         }
+        let s2 = s.mul(int01::TWO_OVER_PI);
         if x < 1.0e-150 && a >= 0.5 {
             // (2/π)·sin(aπ)·K_a dominates (e^(∓x) = 1 here).
             let (m, e) = general::k_tiny(a, x);
-            return kernels::ldexp(m.mul_f64(core::f64::consts::FRAC_2_PI * s).value(), e);
+            return kernels::ldexp(m.mul(s2).value(), e);
         }
         let iv = general::i(a, x, scaled);
-        let kv = if scaled {
-            // e^(−x)·K = e^(−2x)·(e^x K).
-            general::k(a, x, true) * general::exp(-2.0 * x)
+        let (km, ke) = if scaled {
+            general::k_exp_neg_parts(a, x)
         } else {
-            general::k(a, x, false)
+            general::k_parts(a, x, false)
         };
-        return iv + core::f64::consts::FRAC_2_PI * s * kv;
+        if !km.hi.is_finite() {
+            return s2.hi * km.hi;
+        }
+        let t = s2.mul(km);
+        let v = general::add_scaled(Dd::new(iv), t, ke);
+        // Near the zero of I_(−a) (one, for a in (2m − 1, 2m)) the two terms cancel, by more than a
+        // bit here: there its power series in double-double, whose terms cancel far less.
+        let tv = kernels::ldexp(t.hi, ke);
+        if v.abs() < 0.5 * iv.abs().max(tv.abs()) && a < 100.0 && x <= 2.0 * a + 30.0 {
+            return general::i_neg_series(a, x, scaled);
+        }
+        return v;
     }
     if x == 0.0 {
         return if nu == 0.0 { 1.0 } else { 0.0 };
