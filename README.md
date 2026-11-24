@@ -14,13 +14,16 @@ Algorithms in pure Rust, with no dependencies:
 - **Polynomials** (`a::math::poly`): `Polynomial<T>` over the integers, the rationals, floats and complex floats, and `ModPolynomial` modulo any integer, with fast products and division, greatest common divisors and resultants, evaluation at many points and interpolation, roots in double precision, certified or correctly rounded, and factorisation modulo primes and over the integers and the rationals.
 - **Fourier transforms** (`a::math::fft`): complex transforms of any length, real transforms, the cosine and sine transforms of types I to IV, transforms of two and three dimensions, and linear and circular convolutions and correlations, on `f32` and `f64`.
 - **Special functions** (`a::math::special`): the gamma family, the error functions, Bessel and Airy functions of real order, the zeta function and polylogarithms, Lambert W and the exponential integrals, elliptic integrals, Jacobi elliptic functions and orthogonal polynomials — of `f32`, `f64` and complex arguments, each with a stated ulp bound.
-- **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them.
+- **Finite fields** (`a::math::field`): prime fields of any size, their extensions and the towers of pairings, binary fields in polynomial and normal bases, and the fields of AES and GCM.
+- **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them; curves over binary fields, with the 18 of SEC 2; and hashing to curves by the suites of RFC 9380.
+- **Pairings** (`a::math::pairing`): the optimal ate pairing on BN254 and BLS12-381, with its groups, their encodings and Ethereum's precompiles, and hashing to `G1` and `G2`.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers; exact determinants, solutions and inverses of matrices of integers and rationals, and the Hermite and Smith normal forms; and matrices over `GF(p)` and `GF(2)`.
 - **Lattices** (`a::math::lattice`): LLL reduction, exactly and by the L² algorithm, with deep insertions, and BKZ; shortest and closest vectors and short vectors by enumeration, exactly; and integer relations among real numbers by PSLQ.
 - **Sparse matrices** (`a::math::sparse`): compressed row, compressed column and coordinate storage of floats and complex numbers, Matrix Market files, fill-reducing orderings, sparse Cholesky, `L·D·Lᴴ`, LU and QR factorisations, Krylov solvers with preconditioners, and a few eigenvalues by the Lanczos and Arnoldi methods.
 - **Numerical methods** (`a::math::numerics`): the zeros of a function and of a system, integrals in one and several dimensions and the Gaussian rules, initial value problems for stiff and non-stiff ordinary differential equations with dense output and events, minima with and without bounds, least squares and linear programming, splines, Chebyshev and rational approximation, and numerical differentiation, on `f32` and `f64`.
+- **Hash functions** (`a::hash`): SHA-224, SHA-256, SHA-384 and SHA-512, and RFC 9380's `expand_message_xmd`.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate, SciPy and others); the tables below link to them. The pages of the lattices and of the newest exact linear algebra say what they were verified against (fplll, FLINT, PARI, NTL, M4RI, mpmath and sympy), and have no timings yet. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate, SciPy and others); the tables below link to them. The pages of the lattices, of the newest exact linear algebra, of the finite fields, the pairings, the curves over binary fields, the hashing to curves and SHA-2 say what they were verified against (fplll, FLINT, PARI, NTL, M4RI, mpmath, sympy, OpenSSL, arkworks, the `bls12_381` crate, blst, py_ecc, RustCrypto, and the published test vectors of NIST, the RFCs, Ethereum and gnark-crypto), and have no timings yet. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; the binary fields multiply by the carry-less products `PMULL` and `PCLMULQDQ` where the CPU has them; everything else is portable Rust.
 
 ## Usage
 
@@ -414,13 +417,40 @@ Measured on an Apple M4 Max on one thread with fat LTO, in ns a call, the median
 | `bessel_i` | ν in [0, 3], x in [30, 10³] | 28.3 ns | puruspe 128.5 ns |
 | `chebyshev_t` | degree 1000, [−1, 1] | 143 ns | Boost 699 ns |
 
+### Finite fields
+
+[`a::math::field`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/field.md) holds finite fields and their elements. A field is built once, checks what it is given and chooses the form of its arithmetic; its elements borrow it and combine with `+`, `-`, `*` and `/`. Elements of different fields do not mix: an operation on two of them panics.
+
+| Operations | Functions | Method | Cost |
+| --- | --- | --- | --- |
+| [Prime fields](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/field.md#prime-fields) | `PrimeField::new`, `Fp`: `+`, `-`, `*`, `/`, `pow`, `inverse`, `batch_invert`, bytes; the fields of BN254, BLS12-381 and the named curves | a form chosen from `p`: `GF(2)`, P-256's, P-384's, P-521's, `2^k − c`, Montgomery's up to nine limbs, `Number` beyond; inverses by Lehmer's extended Euclid; batches by Montgomery's trick | O(n²) products of words a product |
+| Square roots | `sqrt`, `legendre`, `is_square`, `sgn0` | by `p`: a power for 3 mod 4, Atkin's for 5 mod 8, Tonelli and Shanks's or Cipolla and Lehmer's for 1 mod 8 | a power, and up to `s(s + 1)/2 − 1` squarings for Tonelli and Shanks's |
+| [Extension fields](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/field.md#extension-fields) | `ExtensionField::new`, `with_degree`, `first_irreducible`, `Fpk` | `GF(p)[x]/g`, `g` checked by Ben-Or's test, or the smallest irreducible `g`; schoolbook products, `ModPolynomial`'s from a degree set by `p`; inverses by the extended Euclidean algorithm | `k² + (k − 1)·w` products of `GF(p)` a product, `w` the terms of `g` |
+| Frobenius, norm, trace | `frobenius`, `norm`, `trace`, `sqrt`, `multiplicative_order`, `primitive_element` | the matrix of `a ↦ aᵖ`; the resultant; Newton's identities; Tonelli and Shanks's method in `GF(pᵏ)`; the factorisation of `pᵏ − 1` | `O(i·k²)`, `O(k²)`, `k` products |
+| [Towers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/field.md#towers) | `Tower`, `Fp2`, `Fp6`, `Fp12`, BN254's and BLS12-381's | `F_p²[v]/(v³ − ξ)`, `F_p⁶[w]/(w² − v)`: Karatsuba's products, Chung and Hasan's squares, sparse products by lines, Frobenius maps by constants, Granger and Scott's cyclotomic squares, the complex method for roots in `F_p²` | 54 products of `F_p` a product of `F_p¹²` |
+| [Binary fields](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/field.md#binary-fields) | `BinaryField::new`, `F2m`: `+`, `*`, `/`, `sqrt`, `trace`, `half_trace`, `quadratic_root`, `is_irreducible` | `PMULL`, `PCLMULQDQ` or a portable window method, Karatsuba's across words; a sparse or Barrett's reduction; Euclid's inverse; Rabin's test | O(n^1.58) products of words a product |
+| Normal bases | `NormalBasis`, `NormalElement`, `BasisConversion` | Gaussian normal bases as FIPS 186-4 has them: Massey and Omura's products, Itoh and Tsujii's inverses, conversions by Berlekamp's trace algorithm | a square is a rotation |
+| AES and GCM | `Gf2_8` with `aes_sbox`, `Gf2_128` with `ghash` and `gcm_ghash` | tables of logarithms; a carry-less product of 128 bits and its reduction | |
+
+What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/field.md) verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| Prime fields | `Number`, PARI/GP 2.19 | 79 primes in all 17 forms and 5 methods of square roots, on 2,188 pairs of inputs; 896 Legendre symbols and 489 square roots as PARI's |
+| Extension fields | PARI/GP 2.19, FLINT 3.6 | 148 elements of 34 fields: products, inverses, powers, Frobenius maps, norms, traces, roots and orders; the smallest irreducible polynomial for 140 pairs `(p, k)` |
+| Towers | arkworks 0.5, PARI/GP 2.19 | 28 operations on 16 elements of each curve's tower as arkworks'; 84 towers of other non-residues against schoolbook products |
+| Binary fields | NTL 11.6, OpenSSL 4.1, PARI/GP 2.19, FIPS 186-4 | 16,432 outputs in 83 fields as NTL's, 12,677 of them also OpenSSL's; normal bases with FIPS 186-4's values and 121 of PARI's minimal polynomials |
+| AES and GCM | FIPS 197, the GCM specification, OpenSSL 4.1 | both S-boxes at all 256 bytes; GHASH of all 18 test cases, and 64 random AES-GCM tags |
+
 ### Elliptic curves
 
 | Page | Contents |
 | --- | --- |
 | [Elliptic curves](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/ec.md) | `a::math::ec`: short Weierstrass, Montgomery and twisted Edwards curves over prime fields of any length; `+`, `-`, `*`, compression, `multi_mul`, prepared points and maps between the forms; secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 ready made |
+| [Curves over binary fields](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/ec.md#curves-over-binary-fields) | `a::math::ec::binary`: `y² + x·y = x³ + a·x² + b` over `GF(2ᵐ)`, in López–Dahab coordinates; the τ-adic non-adjacent form on Koblitz curves, the ladder on `x` alone, SEC 1's three encodings; the 18 curves of SEC 2 ready made, NIST's K- and B- curves among them |
+| [Hashing to curves](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/ec.md#hashing-to-curves) | `a::math::ec::hash`: RFC 9380's twelve suites for P-256, P-384, P-521, secp256k1, curve25519 and edwards25519; `hash_to_field`, and the Shallue–van de Woestijne, simplified SWU and Elligator 2 maps and isogenies for other curves |
 
-Measured on an Apple M4 Max in cycles, against OpenSSL 3.6 and curve25519-dalek 4.1; `k·P` multiplies a point, `k·G` the generator, by a table where the library has one. OpenSSL's and dalek's products of a point are constant-time, which costs them time this crate doesn't spend:
+The curves over prime fields, measured on an Apple M4 Max in cycles, against OpenSSL 3.6 and curve25519-dalek 4.1; `k·P` multiplies a point, `k·G` the generator, by a table where the library has one. OpenSSL's and dalek's products of a point are constant-time, which costs them time this crate doesn't spend:
 
 | Curve | Against | `k·P` | theirs | `k·G` | theirs |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -430,6 +460,34 @@ Measured on an Apple M4 Max in cycles, against OpenSSL 3.6 and curve25519-dalek 
 | P-521 | OpenSSL | 358,000 | 496,000 | 52,500 | 269,000 |
 | Ed25519 | dalek | 45,300 | 72,000 | 5,350 | 22,100 |
 | Curve25519, X25519 | dalek | 55,400 | 78,500 | | |
+
+The curves over binary fields and the hashing to curves have no timings yet; what the page verified them against:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| [Curves over binary fields](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/ec.md#curves-over-binary-fields) | SEC 2, OpenSSL 4.1, PARI/GP 2.19, an exhaustive search | the 126 parameters of the 18 curves; on every curve, 108 products, 54 sums, 162 encodings and 432 verdicts on encodings as OpenSSL's; the 4,116 points of 55 curves over `GF(2)` to `GF(2⁸)` against the textbook's group law |
+| [Hashing to curves](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/ec.md#hashing-to-curves) | RFC 9380, RustCrypto's `p256` and `p384` | the 60 vectors of appendix J for the twelve suites; 20,000 points of 5,000 random messages |
+
+### Pairings
+
+[`a::math::pairing`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pairing.md) computes the optimal ate pairing `e: G1 × G2 → GT` on BN254 and BLS12-381, with their groups and their encodings, and hashes to `G1` and `G2`. Its values are arkworks' on both curves, and those of the `bls12_381` crate, blst and RELIC on BLS12-381. There is no protocol layer: no BLS signatures, keys or random numbers.
+
+| Operations | Functions | Method | Cost |
+| --- | --- | --- | --- |
+| [The pairing](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pairing.md#the-pairing) | `pairing`, `multi_pairing`, `miller_loop`, `final_exponentiation` | Vercauteren's optimal ate pairing: Miller's loop on the twist with the lines of Costello, Lange and Naehrig, then the hard part of the exponentiation by Hayashida, Hayasaka and Teruya (BLS12-381) and by Fuentes-Castañeda, Knapp and Rodríguez-Henríquez (BN254) | 63 doublings and 5 additions (BLS12-381), 65 and 21 (BN254); five or three powers by `x` |
+| [The groups](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pairing.md#the-groups) | `G1`, `G2`, `Gt`: `+`, `-`, `*`, `is_in_subgroup`, `clear_cofactor`, `psi` | Jacobian coordinates and the width-4 non-adjacent form; membership by endomorphisms (Scott; El Housni, Guillevic and Piellard); RFC 9380's and Budroni and Pintore's clearings on BLS12-381 | at most two products by 64 or 128 bits a membership test |
+| Encodings | `to_zcash_compressed`, `from_zcash`, `to_ethereum`, `from_ethereum`, `ethereum::{ec_add, ec_mul, ec_pairing}` | ZCash's for BLS12-381, EIP-196 and EIP-197 for BN254, every decoding checked | |
+| [Hashing to G1 and G2](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pairing.md#hashing-to-g1-and-g2) | `hash::bls12_381_g1()`, `hash::bls12_381_g2()`, `hash::bn254_g1()` | RFC 9380's four suites for BLS12-381: the simplified SWU map, over `F_p²` for `G2`, and the 11- and 3-isogenies; for BN254's `G1`, gnark-crypto's suite by the Shallue–van de Woestijne map | `hash_to_curve`: two maps, an addition and a clearing |
+
+What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/pairing.md) verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| The pairing | arkworks 0.5, the `bls12_381` crate 0.8, blst 0.3, RELIC, py_ecc 8, the IETF draft | 6 seeded pairings of each curve and their product as arkworks', and the six on BLS12-381 as the other two crates'; `e(g₁, g₂)` as RELIC's; the IETF draft's and py_ecc's values by the documented power |
+| Ethereum | go-ethereum's tests of the precompiles | 16 vectors of `ecAdd`, 19 of `ecMul` and 14 of `ecPairing` |
+| ZCash encodings | the `bls12_381` crate | the compressed and uncompressed encodings of the first 1,000 multiples of each generator, byte for byte; 123 corrupted encodings accepted or refused as it does |
+| Subgroups | arkworks 0.5, PARI/GP 2.19 | membership and clearing of points outside the subgroups; points of every prime order dividing the cofactors refused |
+| Hashing to G1 and G2 | RFC 9380, arkworks 0.5, the `bls12_381` crate 0.8, gnark-crypto's vectors | the 20 vectors of appendices J.9 and J.10; 5,000 random messages, 20,000 elements and 30,000 points as theirs; BN254's 10 published vectors |
 
 ### Complex numbers
 
@@ -546,9 +604,24 @@ What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/sparse.md)
 
 The page measures the methods against SciPy 1.18 and the codes behind it, and against mpmath. `brent` takes exactly the steps of `brentq` on 57 of 63 brackets; `quad` converges on all 46 integrable integrals of a battery of 48, one more than `scipy.integrate.quad`, none of them beyond its own error estimate; `DormandPrince5` takes the steps of DOPRI5 in every run, `RadauIia` 0.92 to 1.01 times those of SciPy's `Radau` and `Bdf` 0.94 to 1.00 times those of its `BDF` on five stiff problems; `lbfgsb` ends on SciPy's active set on 42 of 43 problems; and the simplex method gives HiGHS's status on 600 random programmes and its optima to 5.0·10⁻¹³.
 
+## Hash
+
+[`a::hash`](https://github.com/nettrash/a/blob/HEAD/lib/docs/hash/sha2.md) computes the hash functions SHA-224, SHA-256, SHA-384 and SHA-512 of FIPS 180-4 and RFC 9380's `expand_message_xmd`, which hashing to curves builds on. The compression functions are portable Rust, and not constant-time.
+
+| Page | Contents |
+| --- | --- |
+| [SHA-2](https://github.com/nettrash/a/blob/HEAD/lib/docs/hash/sha2.md) | `Sha224`, `Sha256`, `Sha384` and `Sha512`, streaming hashers (`new`, `update`, `finalize`; `Clone` forks a hash midway); `sha224`, `sha256`, `sha384` and `sha512` in one call; the trait `Digest` over them; `expand_message_xmd::<H>` on any `Digest`, with the hashing of tags longer than 255 bytes |
+
+What the page verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| SHA-2 | FIPS 180-4, NIST's CAVP vectors, OpenSSL 4.1, RustCrypto's `sha2` 0.10 | FIPS 180-4's examples, a million `a`s and 1 GiB; 44 short and 8 long messages and 40 Monte Carlo checkpoints of CAVP; 1,204 digests of every length to 300 bytes as OpenSSL's; 10,005 as RustCrypto's |
+| `expand_message_xmd` | RFC 9380, RustCrypto's `elliptic-curve` 0.13 | the 30 vectors of appendix K; 20 more cases up to 255 blocks; 3,000 random messages and tags as RustCrypto's |
+
 ## Not constant-time
 
-Nothing here is written to take the same time whatever its operands: `pow_mod` and the elliptic curves in particular branch on the values of their exponents and scalars. Use them on public data, for verification and research, not on secret keys or scalars.
+Nothing here is written to take the same time whatever its operands: `pow_mod`, the finite fields, the elliptic curves, the pairings and the hashing to curves in particular branch on the values of their exponents, scalars and elements, and the hash functions on the lengths of their messages. Use them on public data, for verification and research, not on secret keys or scalars.
 
 ## Changelog
 

@@ -5,7 +5,8 @@ use crate::math::numbers::Number;
 
 /// The field of a NIST prime: the arithmetic of [`Mont`], whose elements are in the same form, with
 /// the products of the kernels where a target has them.
-pub(in super::super) struct Nist<const N: usize> {
+#[derive(Clone)]
+pub(crate) struct Nist<const N: usize> {
     /// The arithmetic.
     mont: Mont<N>,
 }
@@ -14,6 +15,11 @@ impl<const N: usize> Nist<N> {
     /// The field modulo `mont`'s prime.
     pub(in super::super) fn new(mont: Mont<N>) -> Self {
         Nist { mont }
+    }
+
+    /// The arithmetic of [`Mont`], whose elements are this field's.
+    pub(crate) fn mont(&self) -> &Mont<N> {
+        &self.mont
     }
 }
 
@@ -41,7 +47,7 @@ macro_rules! products {
 }
 
 /// The products of a field of `N` limbs.
-pub(in super::super) trait Products<const N: usize> {
+pub(crate) trait Products<const N: usize> {
     /// `a b`.
     fn product(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N];
     /// `a^2`.

@@ -3,12 +3,16 @@
 //! * [`complex`]: complex numbers with `f32` or `f64` parts, their arithmetic with `+`, `-`, `*`
 //!   and `/`, and their absolute values, arguments, exponentials, logarithms, square roots and
 //!   powers.
-//! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, whose
-//!   points add with `+`, subtract with `-` and multiply by a number with `*`, and the curves in
-//!   common use; on numbers, and not constant-time.
+//! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, and
+//!   over binary fields, whose points add with `+`, subtract with `-` and multiply by a number
+//!   with `*`; the curves in common use and the 18 of SEC 2; hashing to curves (RFC 9380); not
+//!   constant-time.
 //! * [`fft`]: fast Fourier transforms of real and complex sequences of any length, in one, two
 //!   and three dimensions and in batches; cosine and sine transforms of types I to IV; and linear
 //!   and circular convolutions and correlations.
+//! * [`field`]: finite fields: prime fields `GF(p)` with batch inversion, square roots and the
+//!   Legendre symbol, extensions `GF(pᵏ)` and the towers `F_p² → F_p⁶ → F_p¹²`, binary fields
+//!   `GF(2ᵐ)` in polynomial and normal bases, and `GF(2⁸)` and `GF(2¹²⁸)` of AES and GCM.
 //! * [`float`]: binary floats of any precision, each result correctly rounded in four modes as
 //!   MPFR rounds it: their arithmetic, roots and powers, conversions and text, exponentials,
 //!   logarithms, hyperbolic and circular functions and constants; and complex numbers of two
@@ -30,6 +34,9 @@
 //!   problems for stiff and non-stiff ordinary differential equations with dense output and
 //!   events, minima with and without bounds, least squares and linear programming, splines,
 //!   Chebyshev and rational approximation, and derivatives.
+//! * [`pairing`]: the optimal ate pairing on BN254 and BLS12-381, with their groups `G1`, `G2`
+//!   and `GT`; hashing to BLS12-381's `G1` and `G2` (RFC 9380) and to BN254's `G1` (gnark-crypto's
+//!   suite).
 //! * [`poly`]: polynomials in one variable with coefficients that are numbers, rationals, floats,
 //!   complex numbers or residues modulo an integer, their arithmetic, division and powers modulo a
 //!   polynomial, greatest common divisors and resultants, evaluation at many points and
@@ -51,11 +58,13 @@
 pub mod complex;
 pub mod ec;
 pub mod fft;
+pub mod field;
 pub mod float;
 pub mod lattice;
 pub mod matrix;
 pub mod numbers;
 pub mod numerics;
+pub mod pairing;
 pub mod poly;
 pub mod rational;
 pub mod sparse;
