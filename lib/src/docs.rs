@@ -181,3 +181,12 @@ struct MathNumerics;
 
 #[doc = include_str!("../docs/math/sparse.md")]
 struct MathSparse;
+
+#[doc = include_str!("../docs/math/quaternion.md")]
+struct MathQuaternion;
+
+#[doc = include_str!("../docs/math/dual.md")]
+struct MathDual;
+
+#[doc = include_str!("../docs/math/uint.md")]
+struct MathUint;

@@ -9,6 +9,7 @@ Algorithms in pure Rust, with no dependencies:
 
 - **Sorting** (`a::sort`): 23 sorting algorithms by comparison and by key, and a default sort.
 - **Integers of any size** (`a::math::numbers`): `Number`, with its arithmetic up to transforms for the longest products, roots, powers modulo a number, greatest common divisors, primes and text in any radix; prime sieves and counting, factorisation up to the quadratic sieve, arithmetic functions, modular arithmetic and discrete logarithms, and integer sequences.
+- **Fixed-width integers** (`a::math::uint`): `Uint<N>` and `Int<N>`, unsigned and signed integers of `N` 64-bit limbs on the stack, with the methods of the primitive integers and their behaviour on overflow, text and conversions; Montgomery multiplication, and `pow_mod` modulo any number.
 - **Rational numbers** (`a::math::rational`): `Rational`, in lowest terms, with its arithmetic, conversions to and from floats and text, continued fractions, best approximations, rational reconstruction, and the Bernoulli and harmonic numbers.
 - **Arbitrary-precision floats** (`a::math::float`): `BigFloat` and `BigComplex`, correctly rounded in four modes as MPFR and GNU MPC, with their arithmetic, roots and powers, conversions and text, the exponential, logarithmic, circular and hyperbolic functions and their inverses, and the constants π, `e`, `ln 2`, `ln 10`, `γ` and Catalan's `G`.
 - **Polynomials** (`a::math::poly`): `Polynomial<T>` over the integers, the rationals, floats and complex floats, and `ModPolynomial` modulo any integer, with fast products and division, greatest common divisors and resultants, evaluation at many points and interpolation, roots in double precision, certified or correctly rounded, and factorisation modulo primes and over the integers and the rationals.
@@ -18,12 +19,14 @@ Algorithms in pure Rust, with no dependencies:
 - **Elliptic curves** (`a::math::ec`): Weierstrass, Montgomery and Edwards curves over prime fields, secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519 among them; curves over binary fields, with the 18 of SEC 2; and hashing to curves by the suites of RFC 9380.
 - **Pairings** (`a::math::pairing`): the optimal ate pairing on BN254 and BLS12-381, with its groups, their encodings and Ethereum's precompiles, and hashing to `G1` and `G2`.
 - **Complex numbers** (`a::math::complex`) and **matrices** (`a::math::matrix`): decompositions, eigenvalues, singular values and functions of matrices of floats and complex numbers; exact determinants, solutions and inverses of matrices of integers and rationals, and the Hermite and Smith normal forms; and matrices over `GF(p)` and `GF(2)`.
+- **Quaternions** (`a::math::quaternion`): their algebra, exponentials, logarithms and powers, and rotations: axes and angles, rotation vectors and matrices, slerp and nlerp, shortest arcs, and Euler angles in SciPy's 24 conventions.
+- **Dual numbers** (`a::math::dual`): forward-mode automatic differentiation by dual and hyper-dual numbers, which nest: first and second derivatives, higher ones by nesting, gradients, Jacobians and Hessians, in the shapes the numerical methods take.
 - **Lattices** (`a::math::lattice`): LLL reduction, exactly and by the L² algorithm, with deep insertions, and BKZ; shortest and closest vectors and short vectors by enumeration, exactly; and integer relations among real numbers by PSLQ.
 - **Sparse matrices** (`a::math::sparse`): compressed row, compressed column and coordinate storage of floats and complex numbers, Matrix Market files, fill-reducing orderings, sparse Cholesky, `L·D·Lᴴ`, LU and QR factorisations, Krylov solvers with preconditioners, and a few eigenvalues by the Lanczos and Arnoldi methods.
 - **Numerical methods** (`a::math::numerics`): the zeros of a function and of a system, integrals in one and several dimensions and the Gaussian rules, initial value problems for stiff and non-stiff ordinary differential equations with dense output and events, minima with and without bounds, least squares and linear programming, splines, Chebyshev and rational approximation, and numerical differentiation, on `f32` and `f64`.
 - **Hash functions** (`a::hash`): SHA-224, SHA-256, SHA-384 and SHA-512, and RFC 9380's `expand_message_xmd`.
 
-Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate, SciPy and others); the tables below link to them. The pages of the lattices, of the newest exact linear algebra, of the finite fields, the pairings, the curves over binary fields, the hashing to curves and SHA-2 say what they were verified against (fplll, FLINT, PARI, NTL, M4RI, mpmath, sympy, OpenSSL, arkworks, the `bls12_381` crate, blst, py_ecc, RustCrypto, and the published test vectors of NIST, the RFCs, Ethereum and gnark-crypto), and have no timings yet. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; the binary fields multiply by the carry-less products `PMULL` and `PCLMULQDQ` where the CPU has them; everything else is portable Rust.
+Every algorithm has a page with its method, examples and measurements against the reference implementations (GMP, MPFR, GNU MPC, PARI, FLINT, Arb, NTL, primesieve, GMP-ECM, OpenSSL, malachite, faer, nalgebra, FFTW, rustfft, Apple's Accelerate, SciPy and others); the tables below link to them. The pages of the lattices, of the newest exact linear algebra, of the finite fields, the pairings, the curves over binary fields, the hashing to curves, SHA-2, the fixed-width integers, the quaternions and the dual numbers say what they were verified against (fplll, FLINT, PARI, NTL, M4RI, GMP, mpmath, sympy, SciPy, OpenSSL, arkworks, the `bls12_381` crate, blst, py_ecc, RustCrypto, ruint, crypto-bigint, bnum, glam, nalgebra, num-dual, and the published test vectors of NIST, the RFCs, Ethereum and gnark-crypto), and have no timings yet. The API reference is on [docs.rs](https://docs.rs/nettrash-a). The crate needs Rust 1.88 (edition 2024). Its fastest paths are NEON and assembly kernels on aarch64, and assembly for the products of integers and SSE2 and AVX2 kernels for the Fourier transforms on x86_64; the binary fields multiply by the carry-less products `PMULL` and `PCLMULQDQ` where the CPU has them; everything else is portable Rust.
 
 ## Usage
 
@@ -202,6 +205,25 @@ Number theory, measured on an Apple M4 Max on one thread (the references too), a
 | `fibonacci` | n = 10⁶ | 1.99 M | GMP 4.17 M |
 | `primorial` | n = 10⁶ | 13.3 M | FLINT 20.1 M |
 | `partitions` | n = 10⁶ | 138 µs | FLINT 196 µs (244 µs with its caches cleared) |
+
+### Fixed-width integers
+
+[`a::math::uint`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md) has `Uint<N>` and `Int<N>`, unsigned and signed integers of `N` 64-bit limbs, on the stack and `Copy`, which behave as a `u{64·N}` and an `i{64·N}` would: the operators panic on overflow when the crate is built with debug assertions and wrap without, as the primitive integers do under the default profiles, and the arithmetic has its `checked_*`, `wrapping_*`, `overflowing_*` and `saturating_*` forms. `Montgomery<N>` is the arithmetic modulo an odd number in Montgomery form, and `pow_mod` takes any nonzero modulus. Costs are for `N` limbs.
+
+| Operations | Functions | Method | Cost |
+| --- | --- | --- | --- |
+| [Arithmetic](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md#methods) | `+`, `-`, `*`, `/`, `%`, `&`, `\|`, `^`, `!`, shifts, rotations; `widening_mul`, `carrying_mul`, `div_rem`, `div_euclid` | carries along the limbs; schoolbook products; Knuth's algorithm D | O(N) a sum, O(N²) a product or a quotient |
+| Powers, roots, logarithms | `pow`, `isqrt`, `ilog`, `ilog2`, `ilog10` | squaring and multiplying; Newton's iteration; division by the largest power of the base in a limb | O(N²·log e) a power |
+| [Text and conversions](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md#conversions) | `Display`, `{:x}`, `{:o}`, `{:b}` with the formatter's flags, `to_str_radix`, `from_str_radix` (`const`); the primitive integers, `Number`, `resize`, floats, bytes | the bits, or divisions by the largest power of the radix in a limb; one rounding to the nearest float | O(N²) |
+| [Montgomery](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md#montgomery-multiplication-and-pow_mod) | `Montgomery::new`, `mul`, `square`, `pow`, `inverse`, `to_montgomery`, `from_montgomery` | Montgomery's REDC interleaved with the product (CIOS); sliding windows of 1 to 6 bits; binary inversion | 2N² + N products of limbs a product |
+| Modular arithmetic | `pow_mod`, `mul_mod`, `add_mod`, `sub_mod`, `mod_inverse` | an odd modulus in Montgomery form; an even one `2ᵏ·q` modulo `q` and `2ᵏ`, then the Chinese remainder theorem | O(N²·ℓ) for an exponent of ℓ bits |
+
+What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md) verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| [The integers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md#the-integers) | `u64`, `i64`, `u128`, `i128`, `Number`, ruint 1.21, bnum 0.12, crypto-bigint 0.6 | about 1.4 million comparisons with the primitives, method by method, in both profiles; every width from 1 to 9 limbs, 16 and 32 against `Number`; 4,190,175 comparisons with the three crates, every difference explained |
+| [Montgomery and `pow_mod`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/uint.md#montgomery-multiplication-and-pow_mod) | `Number`, GMP 6.3, Python's `pow`, ruint 1.21, crypto-bigint 0.6, bnum 0.13 | odd and even moduli of every bit length at 1 to 9 and 16 limbs; 2,312,500 random cases as GMP's; 185,000 as the three crates' |
 
 ### Rational numbers
 
@@ -506,6 +528,45 @@ Measured on an Apple M4 Max for `Complex<f64>`, in nanoseconds per operation ove
 | `ln` | 7.54 | 7.40 |
 | `powc` | 15.75 | 15.48 |
 
+### Quaternions
+
+[`a::math::quaternion`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quaternion.md) has `Quaternion<f32>` and `Quaternion<f64>`, `w + x·i + y·j + z·k` with Hamilton's rules, for the algebra and for rotations: a unit quaternion is a rotation of three-dimensional space, and the methods that read a quaternion as a rotation take it as `q/|q|`, whatever its norm.
+
+| Operations | Functions | Method |
+| --- | --- | --- |
+| [The algebra](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quaternion.md#the-algebra) | `+`, `-`, `*` (Hamilton's product), `/` (on the right), `conj`, `norm`, `normalize`, `recip`, `dot` | the norm and quotients scaled by powers of two at the ends of the range; a product that overflows has infinities in its parts, not NaNs |
+| Functions | `exp`, `ln`, `sqrt`, `powi`, `powf`, `powq` | the principal values, those of the complex functions with the vector's direction for `i`, and `Complex`'s branch cuts |
+| [Rotations](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quaternion.md#rotations) | `from_axis_angle`, `to_axis_angle`, `from_rotation_vector`, `to_rotation_vector`, `rotate`, `to_rotation_matrix`, `from_rotation_matrix`, `slerp`, `nlerp`, `angle_to`, `from_rotation_arc` | `q·v·q⁻¹`, the right factor first; Shepperd's method for matrices; Shoemake's slerp on the shorter arc |
+| [Euler angles](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quaternion.md#euler-angles) | `from_euler`, `to_euler`: 12 sequences, intrinsic or extrinsic | SciPy's conventions, ranges and choice at gimbal lock; Bernardes and Viollet's direct method |
+
+What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/quaternion.md) verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| The algebra | mpmath at 60 digits, 160-bit `BigFloat`, `Complex` | `exp`, `ln`, `sqrt` and powers on 24 hard inputs, the largest error seen 1.00 ε times the condition; identities on 2,000 random triples; 4,000 products with parts up to `2¹⁰⁰⁰`, 2,555 of them overflowing, against 160-bit ones |
+| Rotations | SciPy 1.18, glam 0.33, nalgebra 0.35 | matrices, rotation vectors, `apply`, `Slerp` and `align_vectors` within `5.3·10⁻¹⁶` of SciPy's on random rotations; 20,000 random cases as each crate's |
+| Euler angles | SciPy 1.18, glam 0.33, nalgebra 0.35 | all 24 conventions within `4.4·10⁻¹⁶` of SciPy's, and its choice at gimbal lock |
+
+### Dual numbers
+
+[`a::math::dual`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md) differentiates functions by forward-mode automatic differentiation: `Dual<T>` is `re + eps·ε` with `ε² = 0`, and `HyperDual<T>` carries a second derivative too. Both are generic over the trait `DualNum` and nest, so that a function written once over `D: DualNum` gives its value for `f64` and its derivatives for the dual types, exact up to the rounding of the arithmetic but for [one rule at `0·∞`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md#limits).
+
+| Operations | Functions | Method | Passes |
+| --- | --- | --- | --- |
+| Arithmetic | `+`, `-`, `*`, `/`, with a float on the right (and on the left for the concrete types), comparisons of the values | the rules of the algebra | |
+| [Functions](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md#the-derivatives-at-the-edges) | powers and roots, exponentials and logarithms, the circular and hyperbolic functions and their inverses, `atan2`, `hypot` | the value from the standard library, the derivatives formed so that they keep their digits | |
+| [Derivatives](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md#forward-mode-and-what-it-costs) | `derivative`, `second_derivative` | a dual pass; a hyper-dual pass (Fike and Alonso) | 1 |
+| Gradients, Jacobians | `gradient`, `jacobian` | a dual pass a variable | `n` |
+| Hessians | `hessian`, `value_gradient_and_hessian` | a hyper-dual pass an entry | `n(n + 1)/2` |
+
+What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md) verified, without timings yet:
+
+| Part | Against | Verified |
+| --- | --- | --- |
+| The functions | SymPy 1.14 and mpmath 1.3 at 600 digits | 514 points of 54 functions in `f64` and `f32`, through every form: 8,733 components within their bounds, 4 ulps for values and 8, 16 and 32 for the first three derivatives (eight times that for high powers and compositions) |
+| num-dual | num-dual 0.16 | 417 points of 45 functions: within 2 ulps in the first derivative and 7 in the second, but where num-dual's own error is the larger |
+| [With the solvers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md#with-the-numerical-methods) | `a::math::numerics` | Newton's and Halley's methods, BFGS, L-BFGS-B, Levenberg–Marquardt, Newton's method for systems and the stiff methods, with exact derivatives, gradients and Jacobians |
+
 ### Matrices
 
 [`a::math::matrix::Matrix<T>`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/matrix.md) is a dense matrix of any size, column after column, of `f32`, `f64`, `Complex<f32>`, `Complex<f64>`, `Number`, `Rational`, [`BigFloat` or `BigComplex`](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/float.md#matrices-of-floats). The algorithms are LAPACK's, arranged so that most of their work is products of blocks, and the products run on NEON kernels; real matrices stay in real arithmetic. `ModMatrix` and `BitMatrix` are dense matrices over `GF(p)`, a word an element, and over `GF(2)`, a bit an element, row after row. Costs are for `n × n` matrices.
@@ -602,6 +663,8 @@ What the [page](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/sparse.md)
 | --- | --- |
 | [Numerical methods](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/numerics.md) | `a::math::numerics`, with `_with` forms that take options: the zeros of a function by `bisect`, `brent`, `secant`, `newton` and `halley`, and of a system by `newton_system`, `broyden` and `broyden_with_jacobian`; integrals by `quad`, `quad_g10k21`, `quad_g7k15`, `quad_half_infinite`, `quad_infinite`, `clenshaw_curtis`, `tanh_sinh`, `cubature`, `monte_carlo` and `quasi_monte_carlo` on `Sobol`, and the Gaussian rules `legendre`, `hermite`, `hermite_scaled`, `laguerre`, `laguerre_scaled` and `jacobi`; `y′ = f(t, y)` by `solve`, `integrate`, `solve_at` and `solve_ivp`, with `DenseOutput` and `Event`, by `Rk4`, `DormandPrince5`, `DormandPrince853` and the stiff `RadauIia` and `Bdf`; minima by `golden_section`, `minimize`, `nelder_mead`, `conjugate_gradient`, `bfgs` and, within bounds, `lbfgsb`, sums of squares by `gauss_newton` and `levenberg_marquardt`, and linear programmes by `LinearProgram`; `Spline` (cubic, clamped, not-a-knot, Akima, PCHIP), `chebyshev`, `chebyshev_nodes`, `barycentric_weights`, `barycentric_interpolate`, `aaa` and `aaa_complex`; and `derivative` and `second_derivative` by Richardson extrapolation |
 
+Exact derivatives for these methods, gradients, Jacobians and Hessians, come from the [dual numbers](https://github.com/nettrash/a/blob/HEAD/lib/docs/math/dual.md#with-the-numerical-methods) of `a::math::dual`, with no step to choose.
+
 The page measures the methods against SciPy 1.18 and the codes behind it, and against mpmath. `brent` takes exactly the steps of `brentq` on 57 of 63 brackets; `quad` converges on all 46 integrable integrals of a battery of 48, one more than `scipy.integrate.quad`, none of them beyond its own error estimate; `DormandPrince5` takes the steps of DOPRI5 in every run, `RadauIia` 0.92 to 1.01 times those of SciPy's `Radau` and `Bdf` 0.94 to 1.00 times those of its `BDF` on five stiff problems; `lbfgsb` ends on SciPy's active set on 42 of 43 problems; and the simplex method gives HiGHS's status on 600 random programmes and its optima to 5.0·10⁻¹³.
 
 ## Hash
@@ -621,7 +684,7 @@ What the page verified, without timings yet:
 
 ## Not constant-time
 
-Nothing here is written to take the same time whatever its operands: `pow_mod`, the finite fields, the elliptic curves, the pairings and the hashing to curves in particular branch on the values of their exponents, scalars and elements, and the hash functions on the lengths of their messages. Use them on public data, for verification and research, not on secret keys or scalars.
+Nothing here is written to take the same time whatever its operands: `pow_mod` (of `Number` and of the fixed-width `Uint<N>`, with `Montgomery<N>`'s arithmetic), the finite fields, the elliptic curves, the pairings and the hashing to curves in particular branch on the values of their exponents, scalars and elements; the fixed-width integers' products, quotients and inverses take a time that depends on their values; and the hash functions on the lengths of their messages. The quaternions and the dual numbers are no exception. Use them on public data, for verification and research, not on secret keys or scalars.
 
 ## Changelog
 

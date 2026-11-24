@@ -34,7 +34,9 @@
 //!   ([`Spline`]), Chebyshev approximation ([`chebyshev`]), polynomial interpolation in
 //!   barycentric form ([`barycentric_interpolate`]), and rational approximation by the AAA
 //!   algorithm ([`aaa`], [`aaa_complex`]).
-//! * Differentiation: [`derivative`] and [`second_derivative`] by Richardson extrapolation.
+//! * Differentiation: [`derivative`] and [`second_derivative`] by Richardson extrapolation; exact
+//!   derivatives, gradients, Jacobians and Hessians by dual numbers are in
+//!   [`a::math::dual`](crate::math::dual).
 //!
 //! Everything is generic over [`Real`], `f32` and `f64`. Where `f32` would lose too much, an
 //! `f32` problem is computed in `f64`: the Gaussian rules, the nodes of the quadrature rules and
