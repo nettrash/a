@@ -167,6 +167,15 @@ struct MathMatrix;
 #[doc = include_str!("../docs/math/lattice.md")]
 struct MathLattice;
 
+#[doc = include_str!("../docs/math/field.md")]
+struct MathField;
+
+#[doc = include_str!("../docs/math/pairing.md")]
+struct MathPairing;
+
+#[doc = include_str!("../docs/hash/sha2.md")]
+struct HashSha2;
+
 #[doc = include_str!("../docs/math/numerics.md")]
 struct MathNumerics;
 

@@ -1,8 +1,8 @@
 [package]
 name = "nettrash-a"
-version = "0.2.43"
+version = "0.2.44"
 edition = "2024"
-description = "Algorithms in pure Rust with no dependencies: 23 sorting algorithms; arbitrary-precision integers with fast multiplication and division, roots, GCDs, primes, factorisation and modular arithmetic; elliptic curves with secp256k1, P-256, P-384, P-521, Curve25519 and Ed25519; rational numbers; correctly rounded real and complex floats of any precision; polynomials with fast products, GCDs, resultants, certified roots and factorisation; FFTs of any length; matrices of floats, complex numbers, integers or rationals with LAPACK's decompositions, exact determinants, solutions and inverses, and Hermite and Smith normal forms; matrices over GF(p) and GF(2); lattice reduction by LLL, L² and BKZ, shortest and closest vectors, and integer relations by PSLQ; sparse matrices with direct and Krylov solvers and eigenvalues; numerical methods: roots, quadrature, ODEs, optimisation, linear programming, interpolation; special functions with stated ulp bounds. Not constant-time."
+description = "Algorithms in pure Rust with no dependencies: 23 sorts; big integers with fast multiplication and division, roots, GCDs, primes, factorisation, modular arithmetic; rationals; correctly rounded real and complex floats of any precision; polynomials with fast products, GCDs, resultants, certified roots, factorisation; FFTs of any length; prime, extension, binary, AES and GCM finite fields; elliptic curves over prime and binary fields: secp256k1, P-256, P-384, P-521, Curve25519, Ed25519, SEC 2's curves; pairings on BN254 and BLS12-381; hashing to curves (RFC 9380); SHA-2; matrices with LAPACK's decompositions, exact determinants, solutions, inverses, Hermite and Smith forms, and over GF(p) and GF(2); lattice reduction by LLL, L² and BKZ, shortest and closest vectors, PSLQ; sparse matrices with direct and Krylov solvers and eigenvalues; numerical methods: roots, quadrature, ODEs, optimisation, linear programming, interpolation; special functions with stated ulp bounds. Not constant-time."
 license = "MIT"
 repository = "https://github.com/nettrash/a"
 readme = "../README.md"

@@ -30,7 +30,8 @@ const fn invert_limb(m: u64) -> u64 {
 
 /// The field modulo an odd prime `m` of `N` limbs, `R = 2^(64 N)`, whose elements are `x R mod m`,
 /// fully reduced, below `m`.
-pub(in super::super) struct Mont<const N: usize> {
+#[derive(Clone)]
+pub(crate) struct Mont<const N: usize> {
     /// The prime, the low limb first.
     m: [u64; N],
     /// `-1 / m mod 2^64`.
@@ -109,6 +110,21 @@ impl<const N: usize> Mont<N> {
             };
         }
         self.rows(a, a)
+    }
+
+    /// The limbs of the number `x` stands for, below `m`: `x / R mod m`, one reduction.
+    #[inline(always)]
+    pub(crate) fn canonical(&self, x: &[u64; N]) -> [u64; N] {
+        let mut one = [0; N];
+        one[0] = 1;
+        self.redc_product(x, &one)
+    }
+
+    /// The element of the number with the limbs `x`, below `m`: `x R mod m`, one product by
+    /// `R^2`.
+    #[inline(always)]
+    pub(crate) fn residue(&self, x: &[u64; N]) -> [u64; N] {
+        self.redc_product(x, &self.r2)
     }
 
     /// `a b / R mod m`, a row of the product and a row of the reduction for each limb.

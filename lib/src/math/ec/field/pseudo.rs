@@ -18,7 +18,8 @@ use core::mem::MaybeUninit;
 /// An element is any value of the `N` limbs, not always below `p`: a sum or a product comes back
 /// into them with a fold or two and no comparison, and only [`canonical`](Pseudo::canonical)
 /// makes it unique.
-pub(in super::super) struct Pseudo<const N: usize> {
+#[derive(Clone)]
+pub(crate) struct Pseudo<const N: usize> {
     /// `c`.
     c: u64,
     /// `f = c 2^s`, below `2^62`, so that the folds can't carry twice.
@@ -52,7 +53,7 @@ impl<const N: usize> Pseudo<N> {
 
     /// The unique element congruent to `a`, below `p`.
     #[inline(always)]
-    fn canonical(&self, a: &[u64; N]) -> [u64; N] {
+    pub(crate) fn canonical(&self, a: &[u64; N]) -> [u64; N] {
         let mut r = *a;
         if self.s != 0 {
             // `a = t 2^k + r = r + t c`, which stays below `2^k + f`.
@@ -203,7 +204,7 @@ fn product<const N: usize, const W: usize>(a: &[u64; N], b: &[u64; N]) -> [u64; 
 macro_rules! products {
     ($($n:literal => $w:literal),+) => {
         /// The product of a field of `N` limbs.
-        pub(in super::super) trait Product<const N: usize> {
+        pub(crate) trait Product<const N: usize> {
             /// `a b`, reduced.
             fn mul(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N];
 
