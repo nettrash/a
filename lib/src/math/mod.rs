@@ -3,6 +3,10 @@
 //! * [`complex`]: complex numbers with `f32` or `f64` parts, their arithmetic with `+`, `-`, `*`
 //!   and `/`, and their absolute values, arguments, exponentials, logarithms, square roots and
 //!   powers.
+//! * [`dual`]: dual and hyper-dual numbers for forward-mode automatic differentiation, which
+//!   nest, with the elementary functions; derivatives, gradients, Jacobians and Hessians, exact
+//!   up to the rounding of the arithmetic but for one rule at `0·∞`, in the shapes the methods
+//!   of [`numerics`] take.
 //! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, and
 //!   over binary fields, whose points add with `+`, subtract with `-` and multiply by a number
 //!   with `*`; the curves in common use and the 18 of SEC 2; hashing to curves (RFC 9380); not
@@ -41,6 +45,9 @@
 //!   complex numbers or residues modulo an integer, their arithmetic, division and powers modulo a
 //!   polynomial, greatest common divisors and resultants, evaluation at many points and
 //!   interpolation, roots in double precision, certified or correctly rounded, and factorisation.
+//! * [`quaternion`]: quaternions with `f32` or `f64` parts, their arithmetic, exponentials,
+//!   logarithms and powers, and rotations: axis and angle, rotation vectors and matrices, Euler
+//!   angles in SciPy's 24 conventions, rotating vectors, slerp, nlerp and shortest arcs.
 //! * [`rational`]: rational numbers in lowest terms over [`numbers`], their arithmetic with `+`,
 //!   `-`, `*` and `/`, with numbers and primitive integers too, comparisons, rounding, and their
 //!   conversions from and to integers, text and floats; continued fractions, best approximations
@@ -54,8 +61,13 @@
 //!   with the incomplete gamma and beta functions and their inverses, the error functions,
 //!   Bessel and Airy functions, the Riemann and Hurwitz zeta functions and polylogarithms, the
 //!   Lambert W function, exponential and elliptic integrals and the orthogonal polynomials.
+//! * [`uint`]: fixed-width integers of `N` 64-bit limbs on the stack, unsigned and signed, with
+//!   the operators and the checked, wrapping, overflowing and saturating arithmetic of the
+//!   primitive integers, text in any radix, and conversions to and from [`numbers`]; Montgomery
+//!   multiplication, and `pow_mod` modulo any number; not constant-time.
 
 pub mod complex;
+pub mod dual;
 pub mod ec;
 pub mod fft;
 pub mod field;
@@ -66,6 +78,8 @@ pub mod numbers;
 pub mod numerics;
 pub mod pairing;
 pub mod poly;
+pub mod quaternion;
 pub mod rational;
 pub mod sparse;
 pub mod special;
+pub mod uint;

@@ -1,5 +1,6 @@
 mod allocations;
 mod complex;
+mod dual;
 mod ec;
 mod fft;
 mod field;
@@ -10,6 +11,8 @@ mod numbers;
 mod numerics;
 mod pairing;
 mod poly;
+mod quaternion;
 mod rational;
 mod sparse;
 mod special;
+mod uint;

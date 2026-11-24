@@ -8,7 +8,7 @@
 - Quadrature: the integral of a function of one variable by QUADPACK's adaptive Gauss–Kronrod quadrature (G10–K21 and G7–K15), by Clenshaw–Curtis and by tanh-sinh quadrature, over infinite intervals too; of a function of several variables by Genz and Malik's cubature, by Monte Carlo and by quasi-Monte Carlo on the Sobol' sequence; and the nodes and weights of the Gauss–Legendre, Gauss–Hermite, Gauss–Laguerre and Gauss–Jacobi rules.
 - Differential equations: the initial value problem `y′ = f(t, y)` by the explicit methods `Rk4` (the classical Runge–Kutta method), `DormandPrince5` (Dormand and Prince's 5(4) pair) and `DormandPrince853` (their 8(5,3) method), and by the stiff methods `RadauIia` (Radau IIA of order 5) and `Bdf` (the backward differentiation formulas of orders 1 to 5), each controlling its own step size, with dense output and the location of events.
 - Optimisation: the minimum of a function of one variable by the golden section and Brent's method; of several by Nelder and Mead's simplex, the conjugate gradient method and BFGS, and within bounds by L-BFGS-B; of a sum of squares by Gauss–Newton and Levenberg–Marquardt; and linear programming by the simplex method.
-- Interpolation and approximation: the natural, clamped and not-a-knot cubic splines, Akima's spline and PCHIP, Chebyshev interpolation, barycentric interpolation, and rational approximation by the AAA algorithm; and differentiation by Richardson extrapolation. Exact derivatives by dual numbers come with `Dual<T>` in [#25](https://github.com/nettrash/a/issues/25).
+- Interpolation and approximation: the natural, clamped and not-a-knot cubic splines, Akima's spline and PCHIP, Chebyshev interpolation, barycentric interpolation, and rational approximation by the AAA algorithm; and differentiation by Richardson extrapolation. Exact derivatives, gradients, Jacobians and Hessians, by forward-mode automatic differentiation, come from the dual numbers of [`a::math::dual`](dual.md).
 
 Two rules hold throughout. A method with a tolerance never returns an answer it has not verified: where it cannot reach the tolerance it says so, by `None` (the methods for one equation, `solve`, `integrate` and `solve_at`, the derivatives), by a result with `converged` false and the best point or estimate it reached (the systems, the quadrature rules, the optimisers and the fits), by `OdeStatus::Failed` (`solve_ivp`), by `LpStatus::IterationLimit` or `None` (the simplex method), or by `converged()` false (AAA); inputs of the wrong shape panic. And a method that takes options comes with the defaults as `name` and with an options struct, built by `new()` and `with_*` calls, as `name_with`: `brent` and `brent_with`, `solve` and `solve_with`, `lbfgsb` and `lbfgsb_with`, `LinearProgram::solve` and `solve_with`. The quadrature rules other than `quad`, `monte_carlo` and `quasi_monte_carlo` take their `QuadOptions` as an argument.
 
@@ -714,6 +714,32 @@ let d = derivative(|t: f64| t.sin(), 1.0).unwrap();
 assert!((d - 1.0f64.cos()).abs() < 1e-14);
 assert!((second_derivative(|t: f64| t.ln(), 1e-100).unwrap() + 1e200).abs() < 1e192);
 assert_eq!(derivative(|t: f64| (t - 0.3).abs(), 0.3), None);
+```
+
+**Exact derivatives.** Where the function can be written over dual numbers, they come from [`a::math::dual`](dual.md): a function written once, generic over `DualNum`, gives its value for `f64` and, through `derivative`, `second_derivative`, `gradient`, `jacobian` and `hessian`, its derivatives in the shapes the methods here take — exact up to the rounding of the arithmetic (but for one rule at `0·∞`, stated in [their limits](dual.md#limits)), with no step to choose and no tolerance to meet, for one pass per variable (`n(n + 1)/2` for a Hessian). The differences of `derivative` and `second_derivative` here remain for functions given only as values.
+
+```rust
+use a::math::dual::{DualNum, derivative, gradient};
+use a::math::matrix::Matrix;
+use a::math::numerics::{bfgs, newton};
+
+fn f<D: DualNum<Float = f64>>(x: D) -> D {
+    x.exp() - x * x * 3.0
+}
+let exact = derivative(f, 1.0);
+let estimate = a::math::numerics::derivative(|x: f64| f(x), 1.0).unwrap();
+assert!((exact - estimate).abs() < 1e-12 && exact == 1.0f64.exp() - 6.0);
+let root = newton(1.0, f, |x| derivative(f, x)).unwrap();
+assert!((root - 0.910_007_572_488_709).abs() < 1e-15);
+
+fn rosen<D: DualNum<Float = f64>>(x: &[D]) -> D {
+    let a = D::constant(1.0) - x[0];
+    let b = x[1] - x[0] * x[0];
+    a * a + b * b * 100.0
+}
+let x0 = Matrix::from_column_major(2, 1, vec![-1.2, 1.0]);
+let r = bfgs(|x| rosen(x.as_slice()), |x| gradient(rosen, x), &x0).unwrap();
+assert!(r.converged && (r.x[(1, 0)] - 1.0).abs() < 1e-7);
 ```
 
 ### Measured

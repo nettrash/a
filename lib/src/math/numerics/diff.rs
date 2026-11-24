@@ -6,8 +6,8 @@
 //! Ridders, *Adv. Eng. Software* 4, 1982, whose error estimate is used here). Round-off in the
 //! values of `f` grows as the step shrinks, `ε·|f|/h` for the first derivative and `ε·|f|/h²` for
 //! the second, so the best answer is somewhere down the ladder of steps, and it is found by
-//! watching the table's own error estimate. Exact derivatives through dual numbers are a matter
-//! of issue #25 and are not offered here.
+//! watching the table's own error estimate. Exact derivatives, by dual and hyper-dual numbers,
+//! are in [`a::math::dual`](crate::math::dual).
 //!
 //! The step is chosen from the point: the ladder starts at `0.37·max(|x|, 1)` (and, for
 //! `0 < |x| < 1`, again at `0.37·|x|` when the first ladder fails or lands near a stationary
