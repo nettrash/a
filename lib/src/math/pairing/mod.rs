@@ -21,11 +21,16 @@
 //!   and gnark-crypto's two for BN254's `G1`, by the Shallue–van de Woestijne map, as RFC 9380 has
 //!   no suite for BN254. BN254's `G2` has no hashing here.
 //!
-//! The coordinates and values live in the towers of [`a::math::field`](crate::math::field):
-//! [`Fp`](crate::math::field::Fp), [`Fp2`](crate::math::field::Fp2) and
-//! [`Fp12`](crate::math::field::Fp12) of [`Tower::bn254`](crate::math::field::Tower::bn254) and
-//! [`Tower::bls12_381`](crate::math::field::Tower::bls12_381). The values of the pairing are those
-//! of arkworks on both curves, and of the `bls12_381` crate, blst and RELIC on BLS12-381, exactly.
+//! The coordinates and values are given and taken in the towers of
+//! [`a::math::field`](crate::math::field): [`Fp`](crate::math::field::Fp),
+//! [`Fp2`](crate::math::field::Fp2) and [`Fp12`](crate::math::field::Fp12) of
+//! [`Tower::bn254`](crate::math::field::Tower::bn254) and
+//! [`Tower::bls12_381`](crate::math::field::Tower::bls12_381). Inside, the pairing computes on
+//! arithmetic of its own: `F_p` in 4 or 6 limbs with the prime fixed at compile time (Montgomery's
+//! products without the extra carry word that a full-width prime needs), `F_p²` products with two
+//! reductions instead of three, and the same tower, bases and formulas above it, so that its
+//! elements are the public ones. The values of the pairing are those of arkworks on both curves,
+//! and of the `bls12_381` crate, blst and RELIC on BLS12-381, exactly.
 //!
 //! Like the rest of the library this is not constant-time: it is for mathematics and for verifying
 //! with public data, not for secret keys.
@@ -50,6 +55,7 @@ mod curve;
 mod encoding;
 mod error;
 pub mod ethereum;
+mod fast;
 mod g1;
 mod g2;
 mod gt;

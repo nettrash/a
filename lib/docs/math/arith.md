@@ -25,32 +25,53 @@ Longer divisors, from 40 of them, are made in limbs, each the product of one mad
 - A `Number` below `2^64` is factored in words, and its functions computed in words: trial division by the odd primes below 512, each tested by one multiplication by its inverse modulo `2^64`; then the strong tests to the bases 2, 7 and 61 below `2^32`, which no composite below 4,759,123,141 passes (Jaeschke 1993), their three powers to the one exponent taken side by side, and the [Baillie–PSW test](prime.md) above, exact below `2^64`; a perfect square split by its root; and the search for a factor that [`factor`](factor.md) makes in one limb, Hart's one line method up to 40 bits and the elliptic curve method in registers beyond. Longer numbers are factored by [`factor`](factor.md).
 - `mobius` and `is_squarefree` of a word do not factor it all: the trial division stops at the first square of a prime, which more than a third of all numbers have below 512; what is left has no prime below 512, so below `512²` it is a prime, a square of its root is no square-free number, and below `512³` a composite is two distinct primes; only beyond are its factors searched for, each split checked for a common factor, a square, at once.
 
-Measured on 2026-11-11 on an Apple M4 Max on the quiet machine (the load average at 3.4 to 5.2 of its 16 cores, from the system's own services; one thread, PARI's too, every process with `MallocNanoZone` unset, under the system's default allocator, the harness built with fat LTO and one codegen unit), in cycles per call by the harness's estimate of the clock: interleaved with the previous version (0.2.32) and the references, in three passes of seven rounds, each cell the median of the 21, each round on fresh inputs of each contender's own, in an order that turns with the round; against FLINT 3.6 (`fmpz_factor_euler_phi`, `fmpz_factor_moebius_mu`, `fmpz_factor_divisor_sigma`) and PARI 2.19 (`eulerphi`, `numdiv`, `sigma`, `moebius`, `divisors`, `factorback`) given the factorisations, for 2048 numbers a round of 6 random primes of 64 to 200 bits (drawn from 4096 such primes), every third one squared (144 divisors):
+## Measured
 
-| Function | a | 0.2.32 | FLINT | PARI |
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harness in the repository's `bench/nt` (its method in `bench/README.md`), on one thread: this crate as a user builds it, by rustc 1.100 stable in cargo's release profile (no LTO, 16 codegen units, no `target-cpu`), against FLINT 3.6.0 and PARI 2.19.1 as Homebrew builds them, called through shims compiled with `-O3 -mcpu=native`. Each figure is the median of 15 samples of at least a millisecond, in time per call, this crate and the references alternating sample by sample in one process, each sample on the same inputs for all, after a check that all give the same results. A ratio is this crate's time over that of the fastest reference: below 1, this crate is faster.
+
+The functions of a factorisation, given, against FLINT's `fmpz_factor_euler_phi`, `fmpz_factor_divisor_sigma` (with `k = 0` for the count) and `fmpz_factor_moebius_mu`, and PARI's `eulerphi`, `numdiv`, `sumdivk`, `moebius`, `divisors` and `factorback` of the factorisation (of its primes for the radical); a factorisation of 6 random primes of 64 to 200 bits, every third one squared (144 divisors); `value` is the number the [factorisation](factor.md) makes:
+
+| Function | a | FLINT | PARI | ratio |
 | --- | --- | --- | --- | --- |
-| `totient` | 755 | 1815 | 717 | 1713 |
-| `divisor_count` | 59 | 59 | – | 90 |
-| `divisor_sigma(1)` | 938 | 1513 | 2200 | 874 |
-| `divisor_sigma(2)` | 1876 | 3386 | 3582 | 1790 |
-| `carmichael` | 14,533 | 14,636 | – | – |
-| `mobius` | 7 | 7 | 11 | 63 |
-| `divisors` | 27,982 | 43,856 | – | 27,927 |
-| `radical` | 454 | 496 | – | 435 |
+| `totient` | 162 ns | 158 ns | 370 ns | 1.02 |
+| `divisor_count` | 15.6 ns | 11.8 ns | 19.7 ns | 1.32 |
+| `divisor_sigma(1)` | 200 ns | 481 ns | 183 ns | 1.10 |
+| `divisor_sigma(2)` | 404 ns | 764 ns | 385 ns | 1.05 |
+| `carmichael` | 3.03 µs | – | – | – |
+| `mobius` | 2.46 ns | 1.19 ns | 14.1 ns | 2.08 |
+| `divisors` | 6.35 µs | – | 5.75 µs | 1.11 |
+| `radical` | 103 ns | – | 91.7 ns | 1.13 |
+| `value` | 145 ns | – | 181 ns | 0.802 |
 
-The products in limbs take 0.42 to 0.62 of the previous time for `totient` and `divisor_sigma`, 0.92 for `radical` (whose few products of numbers were short paths in registers already), and the long divisors in limbs 0.64; FLINT's `fmpz` arithmetic in place is still 1.05 times faster for `totient`, and PARI's stack, with no allocation for each result, 1.04 to 1.07 times for `divisor_sigma` and `radical`, and as fast for `divisors` (each divisor a number of its own here: the allocations are most of the difference; these ran under the system's default allocator, and with `MallocNanoZone=0` took 1.03 to 1.15 times as long, `totient` 1.03, `divisor_sigma(1)` 1.05, `radical` 1.11 and `divisors` 1.15, and `divisor_count` 1.34). PARI has no function for λ but `znstar`, which builds the generators too.
+The divisors of highly composite numbers, in words: those of the factorisation against PARI's `divisors` of it, and those of the number, which factors it first, against FLINT's `arith_divisors`, which does too:
 
-The divisors of highly composite numbers, in words, against PARI's `divisors` of the factorisation and FLINT's `arith_divisors` (which factors the number; the factorisation is a few hundred cycles of that):
+| Number | divisors | factored | PARI | ratio | from the number | FLINT | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 720720 | 240 | 3.20 µs | 5.13 µs | 0.623 | 3.25 µs | 5.14 µs | 0.632 |
+| 2^6 3^4 5^2 7^2 11 13 17 19 23 | 10,080 | 151 µs | 435 µs | 0.347 | 165 µs | 455 µs | 0.363 |
+| 897,612,484,786,617,600 | 103,680 | 1.78 ms | 7.01 ms | 0.254 | 1.82 ms | 6.29 ms | 0.289 |
 
-| Number | Divisors | a, factored | a, from the number | PARI | FLINT |
-| --- | --- | --- | --- | --- | --- |
-| 720720 | 240 | 13,868 | 13,859 | 25,360 | 25,071 |
-| 2^6 3^4 5^2 7^2 11 13 17 19 23 | 10,080 | 661,664 | 650,816 | 2.11 M | 2.36 M |
-| 897,612,484,786,617,600 | 103,680 | 8.13 M | 7.65 M | 32.6 M | 31.4 M |
+The functions of random words, which factor them, the same words for all in each sample, against FLINT's `n_euler_phi`, `n_moebius_mu` and `n_is_squarefree` and PARI's `eulerphi`, `moebius`, `Z_issquarefree`, `sumdiv` and `numdiv`; and of random numbers of 128 bits, against FLINT's `fmpz_factor` followed by the function of the factorisation and PARI's `eulerphi` and `moebius` (which stops at a square factor):
 
-From 1.81 to 4.11 times faster: the merges in order against generating and sorting (PARI's `divisors`), and words against `fmpz`s.
+| Function | a | FLINT | PARI | ratio |
+| --- | --- | --- | --- | --- |
+| `totient` | 5.12 µs | 9.38 µs | 24.5 µs | 0.545 |
+| `mobius` | 3.30 µs | 6.50 µs | 16.8 µs | 0.508 |
+| `is_squarefree` | 3.32 µs | 6.64 µs | 16.8 µs | 0.501 |
+| `divisor_sigma(1)` | 5.30 µs | – | 24.2 µs | 0.219 |
+| `divisor_count` | 5.18 µs | – | 23.8 µs | 0.218 |
+| `carmichael` | 5.14 µs | – | – | – |
+| `radical` | 5.17 µs | – | – | – |
+| `divisors` | 5.83 µs | – | – | – |
+| `totient`, 128 bits | 403 µs | 3.70 ms | 1.68 ms | 0.240 |
+| `mobius`, 128 bits | 407 µs | 3.71 ms | 1.40 ms | 0.290 |
 
-The functions of random words, which factor them, against FLINT's `n_euler_phi`, `n_moebius_mu` and `n_is_squarefree`: `totient` 16,794 cycles against 22,298 (18,143 before), `mobius` 10,945 against 14,305 (17,596 before) and `is_squarefree` 10,692 against 14,546 (17,748), the stop at the first square factor and the shortcuts for what is left now taking two fifths off.
+- The words' functions take 0.218 to 0.545 of the fastest reference's time: the factorisation in words, and for `mobius` and `is_squarefree` the stop at the first square factor and the short cuts for what is left; those of 128 bits 0.240 and 0.290. The divisors in order by merges take 0.254 to 0.632 of the reference's time.
+- Of a factorisation given: `value` 0.802 of PARI's `factorback`, from the products in limbs on the stack; `totient` as fast as FLINT's `fmpz` arithmetic in place (1.02; 0.437 of PARI's time) and `divisor_sigma(2)` as PARI (1.05; 0.529 of FLINT's time); `divisor_sigma(1)` 0.416 of FLINT's time and `mobius` 0.174 of PARI's.
+
+Where the references are faster, this crate's time over the fastest reference's above 1.05:
+
+- **The small functions of a factorisation.** `divisor_count` 1.32 times FLINT's time (15.6 ns against 11.8), `divisor_sigma(1)` 1.10 times PARI's, `divisors` 1.11 times and `radical` 1.13 times PARI's: each result is a new number, or a vector of new numbers, where FLINT writes into an `fmpz` in place and PARI onto its stack, with no allocation for each result. `mobius`, 2.08 times FLINT's time (2.46 ns against 1.19), allocates nothing: what is left at that size is a call that the default profile may not inline across the crate and the walk over the factorisation's pairs of a number and an exponent, where FLINT's exponents are an array of their own; it was not taken apart further.
 
 ## Examples
 

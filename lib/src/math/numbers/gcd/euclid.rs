@@ -4,12 +4,12 @@
 //! ([`partial`]), which rational reconstruction and the best approximations take.
 //!
 //! Both are the greatest common divisor's own reductions. [`quotients`] reduces the numbers as
-//! [`gcd_dc`](super::hgcd::gcd_dc) and [`gcd_lehmer`](super::limbs::gcd_lehmer) do, the half gcd
-//! on the top two thirds of long numbers and then hgcd2's matrices on the top two limbs, and keeps
-//! the steps that they tell of (see [`Steps`]): a step not taken in full is followed by the rest of
-//! its quotient on the same number, so the quotients of consecutive steps on one number add up to
-//! Euclid's. The cost is that of the greatest common divisor, `O(M(n) log n)` for numbers of `n`
-//! limbs, and the terms written.
+//! [`gcd_dc`](super::hgcd::gcd_dc) and [`gcd_lehmer`](super::limbs::gcd_lehmer) do, the half gcd of
+//! the top third of long numbers, its matrix applied to the whole numbers, and then hgcd2's
+//! matrices on the top two limbs, and keeps the steps that they tell of (see [`Steps`]): a step not
+//! taken in full is followed by the rest of its quotient on the same number, so the quotients of
+//! consecutive steps on one number add up to Euclid's. The cost is that of the greatest common
+//! divisor, `O(M(n) log n)` for numbers of `n` limbs, and the terms written.
 //!
 //! [`partial`] keeps a row of the reduction matrix, the cofactors of the second number. Its bound
 //! gives a length the numbers can be reduced to without passing it: a remainder above `N` when the
@@ -18,8 +18,9 @@
 //! cannot go below that length, the row multiplied by each matrix, and the last steps are hgcd2's
 //! matrices tried against the bound, and single divisions where one would pass it.
 
+use super::super::add::write_small;
 use super::super::mul::limbs::cmp_n;
-use super::super::mul::{Operand, to_limbs};
+use super::super::mul::{Operand, Product, to_limbs};
 use super::super::scratch::{Scratch, scratch};
 use super::super::{ByteOrder, Number};
 use super::hgcd::{Matrix, adjust_itch, hgcd_itch, hgcd_with, matrix_itch, row_itch, row_times};
@@ -32,9 +33,9 @@ use super::{limbs_number, small_number};
 use core::cmp::Ordering;
 use core::ptr;
 
-/// From this many limbs, [`quotients`] reduces the numbers by the half gcd on their top two thirds
-/// before Lehmer's method, as the greatest common divisor does from
-/// [`GCD_DC_THRESHOLD`](super::hgcd::GCD_DC_THRESHOLD).
+/// From this many limbs, [`quotients`] reduces the numbers by the half gcd of their top third, its
+/// matrix applied to the whole numbers, before Lehmer's method, as the greatest common divisor does
+/// from [`GCD_DC_THRESHOLD`](super::hgcd::GCD_DC_THRESHOLD).
 const CF_DC_THRESHOLD: usize = if cfg!(miri) { 6 } else { 600 };
 
 /// From this many limbs, [`partial`] reduces the numbers by the half gcd while they are longer
@@ -68,9 +69,13 @@ fn whole(v: &mut [u64]) -> Scratch {
     scratch!(v.as_mut_ptr(), v.len())
 }
 
-/// The quotients that a reduction tells of, merged into Euclid's and written as numbers.
+/// The quotients that a reduction tells of, merged into Euclid's and written as numbers: into the
+/// vectors of the numbers of `out` from `k` on while there are some, which keeps their allocations,
+/// and pushed after them.
 struct Terms<'a> {
     out: &'a mut Vec<Number>,
+    /// Where the next term goes.
+    k: usize,
     order: ByteOrder,
     /// The column of the quotient being summed, 2 when there is none.
     col: usize,
@@ -81,9 +86,10 @@ struct Terms<'a> {
 }
 
 impl<'a> Terms<'a> {
-    fn new(out: &'a mut Vec<Number>, order: ByteOrder) -> Terms<'a> {
+    fn new(out: &'a mut Vec<Number>, order: ByteOrder, from: usize) -> Terms<'a> {
         Terms {
             out,
+            k: from,
             order,
             col: 2,
             small: 0,
@@ -96,7 +102,41 @@ impl<'a> Terms<'a> {
         if self.col == 2 {
             return;
         }
-        if self.big.is_empty() {
+        let order = self.order;
+        if let Some(t) = self.out.get_mut(self.k) {
+            // The term written over the number there, in its vector.
+            t.negative = false;
+            t.byte_order = order;
+            let v = &mut t.value;
+            v.clear();
+            if self.big.is_empty() {
+                let m = self.small;
+                let len = 16 - (m | 1).leading_zeros() as usize / 8;
+                v.reserve(len);
+                // SAFETY: the vector has room for the `len` bytes, from 1 to 16, all of which
+                // `write_small` writes before the length is set.
+                unsafe {
+                    write_small(v.as_mut_ptr(), order, m as u64, (m >> 64) as u64, len);
+                    v.set_len(len);
+                }
+            } else {
+                // SAFETY: the limbs are those of `big`, its top one not zero (a quotient of more
+                // than two limbs), and the vector has room for the product's `len` bytes, which
+                // `write` all writes before the length is set.
+                unsafe {
+                    let n = normalized(self.big.as_ptr(), self.big.len());
+                    let p = Product {
+                        r: self.big.as_ptr(),
+                        len: 8 * n - (*self.big.as_ptr().add(n - 1)).leading_zeros() as usize / 8,
+                        negative: false,
+                    };
+                    v.reserve(p.len);
+                    p.write(v.as_mut_ptr(), order);
+                    v.set_len(p.len);
+                }
+                self.big.clear();
+            }
+        } else if self.big.is_empty() {
             self.out.push(small_number(self.order, self.small, false));
         } else {
             // SAFETY: the limbs are those of the vector.
@@ -105,6 +145,7 @@ impl<'a> Terms<'a> {
             });
             self.big.clear();
         }
+        self.k += 1;
         self.small = 0;
         self.col = 2;
     }
@@ -200,7 +241,9 @@ fn step_wide<S: Steps>(record: &mut S, col: usize, q: u128) {
 }
 
 /// The larger of the numbers of `n` limbs at `a` and `b` and its length, the smaller and its
-/// length, and the column of the larger's step: 1 when it is `a`. `a` when they are equal.
+/// length, and the column of the larger's step: 1 when it is `a`. When they are equal, the one of
+/// the column `tie` (0 for `b`), `a` for any other `tie`: the number that the step before reduced,
+/// so that the step completes that step's quotient, as Euclid's algorithm takes it.
 ///
 /// # Safety
 ///
@@ -210,13 +253,17 @@ unsafe fn order_pair(
     a: *mut u64,
     b: *mut u64,
     n: usize,
+    tie: usize,
 ) -> (*mut u64, usize, *mut u64, usize, usize) {
     // SAFETY: as the caller guarantees.
     unsafe {
         let an = normalized(a, n);
         let bn = normalized(b, n);
         let a_larger = match an.cmp(&bn) {
-            Ordering::Equal => cmp_n(a, b, an) != Ordering::Less,
+            Ordering::Equal => match cmp_n(a, b, an) {
+                Ordering::Equal => tie != 0,
+                order => order == Ordering::Greater,
+            },
             order => order == Ordering::Greater,
         };
         if a_larger {
@@ -228,8 +275,9 @@ unsafe fn order_pair(
 }
 
 /// One step of Euclid's algorithm on the numbers of `n` limbs at `a` and `b`, the smaller not zero:
-/// the larger divided by the smaller, the quotient told to `record` and the remainder in place.
-/// Returns the new length, the smaller one's, or `None` when the remainder is zero.
+/// the larger divided by the smaller, the quotient told to `record` and the remainder in place;
+/// equal numbers, the one of the column `tie` ([`order_pair`]). Returns the new length, the
+/// smaller one's, or `None` when the remainder is zero.
 ///
 /// # Safety
 ///
@@ -243,10 +291,11 @@ unsafe fn divide<S: Steps>(
     record: &mut S,
     t: Scratch,
     avail: usize,
+    tie: usize,
 ) -> Option<usize> {
     // SAFETY: as the caller guarantees.
     unsafe {
-        let (l, ln, s, sn, col) = order_pair(a, b, n);
+        let (l, ln, s, sn, col) = order_pair(a, b, n, tie);
         debug_assert!(sn > 0);
         let qn = ln - sn + 1;
         let need = qn + tdiv_itch(ln, sn);
@@ -275,14 +324,43 @@ fn divide_itch(n: usize) -> usize {
 
 /// Appends to `out` the quotients of Euclid's algorithm on the magnitudes of `a` and `b`, `|a| >
 /// |b| > 0`, in the byte order `order`: the terms of the continued fraction of `|a| / |b|`, the
-/// last one at least 2 when `|b|` does not divide `|a|`.
+/// last one at least 2 when `|b|` does not divide `|a|`. They are Euclid's whatever the greatest
+/// common divisor of `a` and `b` (a step that leaves the numbers equal is followed by the step on
+/// the same number, see [`LastCol`]).
 pub(crate) fn quotients(a: &Number, b: &Number, order: ByteOrder, out: &mut Vec<Number>) {
+    let from = out.len();
+    quotients_into(a, b, order, out, from);
+}
+
+/// [`quotients`] written into `out` from index `from` (at most `out.len()`): over the numbers
+/// already there, in their vectors, which keeps their allocations, then pushed after them; `out`
+/// is then cut to `from` plus the number of terms, so it holds exactly the terms after `from`.
+/// The numbers before `from` are left as they were.
+///
+/// # Panics
+///
+/// Panics if `from > out.len()`.
+pub(crate) fn quotients_into(
+    a: &Number,
+    b: &Number,
+    order: ByteOrder,
+    out: &mut Vec<Number>,
+    from: usize,
+) {
+    assert!(from <= out.len());
+    let mut terms = Terms::new(out, order, from);
+    quotients_with(a, b, &mut terms);
+    let k = terms.k;
+    out.truncate(k);
+}
+
+/// [`quotients`] told to `terms`, flushed at the end.
+fn quotients_with(a: &Number, b: &Number, terms: &mut Terms<'_>) {
     let (mut x, na) = limbs(a, 0);
     let (_, nb) = limbs(b, 0);
     debug_assert!(nb > 0 && na >= nb);
     x.resize(na + 2, 0);
     let (mut y, _) = limbs(b, na + 2);
-    let mut terms = Terms::new(out, order);
     let mut t = work(divide_itch(na));
     let avail = t.len();
     // SAFETY: both numbers have `na` limbs and two to spare, and the scratch `avail`.
@@ -291,9 +369,10 @@ pub(crate) fn quotients(a: &Number, b: &Number, order: ByteOrder, out: &mut Vec<
             x.as_mut_ptr(),
             y.as_mut_ptr(),
             na,
-            &mut terms,
+            terms,
             whole(&mut t),
             avail,
+            1,
         ) {
             Some(n) => n,
             None => {
@@ -305,7 +384,7 @@ pub(crate) fn quotients(a: &Number, b: &Number, order: ByteOrder, out: &mut Vec<
             x.as_mut_ptr(),
             y.as_mut_ptr(),
             n,
-            &mut terms,
+            terms,
             whole(&mut t),
             avail,
         );
@@ -314,8 +393,9 @@ pub(crate) fn quotients(a: &Number, b: &Number, order: ByteOrder, out: &mut Vec<
 }
 
 /// Euclid's algorithm on the numbers of `n` limbs at `a` and `b`, not both zero at the top and
-/// neither zero, to the end, every step told to `record`: the half gcd on the top two thirds from
-/// [`CF_DC_THRESHOLD`] limbs, hgcd2's matrices down to two limbs, then divisions in registers.
+/// neither zero, to the end, every step told to `record`: the half gcd of the top third, its matrix
+/// applied to the whole numbers, from [`CF_DC_THRESHOLD`] limbs, hgcd2's matrices down to two
+/// limbs, then divisions in registers.
 ///
 /// # Safety
 ///
@@ -324,15 +404,44 @@ pub(crate) fn quotients(a: &Number, b: &Number, order: ByteOrder, out: &mut Vec<
 unsafe fn euclid<S: Steps>(
     a: *mut u64,
     b: *mut u64,
+    n: usize,
+    record: &mut S,
+    t: Scratch,
+    avail: usize,
+) -> Gcd {
+    // SAFETY: as the caller guarantees.
+    unsafe { euclid_from(a, b, n, record, t, avail, CF_DC_THRESHOLD) }
+}
+
+/// The greatest common divisor that [`euclid`] ends with: in the limbs of one of the numbers, or
+/// of at most two limbs.
+pub(super) enum Gcd {
+    /// The `n` limbs at the pointer, its top limb not zero.
+    Limbs(*const u64, usize),
+    /// Two limbs at most, not zero.
+    Small(u128),
+}
+
+/// [`euclid`] with the half gcd from `dc` limbs.
+///
+/// # Safety
+///
+/// As for [`euclid`].
+unsafe fn euclid_from<S: Steps>(
+    a: *mut u64,
+    b: *mut u64,
     mut n: usize,
     record: &mut S,
     t: Scratch,
     avail: usize,
-) {
+    dc: usize,
+) -> Gcd {
+    // The column of the last step, for the steps on equal numbers.
+    let record = &mut LastCol { record, col: 2 };
     // SAFETY: as the caller guarantees; the numbers keep at least `n` limbs, of which the top ones
     // are not both zero.
     unsafe {
-        while n >= CF_DC_THRESHOLD {
+        while n >= dc {
             let p = 2 * n / 3;
             let k = n - p;
             let mn = k.div_ceil(2) + 1;
@@ -345,9 +454,10 @@ unsafe fn euclid<S: Steps>(
             if nn > 0 {
                 n = m.adjust(p + nn, a, b, p, rest);
             } else {
-                match divide(a, b, n, record, t, avail) {
+                let tie = record.col;
+                match divide(a, b, n, record, t, avail, tie) {
                     Some(k) => n = k,
-                    None => return,
+                    None => return the_other(a, b, n),
                 }
             }
         }
@@ -358,9 +468,10 @@ unsafe fn euclid<S: Steps>(
                 reduce_pair(a, b, n, m);
                 n -= usize::from(*a.add(n - 1) | *b.add(n - 1) == 0);
             } else if n > 2 {
-                match divide(a, b, n, record, t, avail) {
+                let tie = record.col;
+                match divide(a, b, n, record, t, avail, tie) {
                     Some(k) => n = k,
-                    None => return,
+                    None => return the_other(a, b, n),
                 }
             } else {
                 break;
@@ -373,29 +484,79 @@ unsafe fn euclid<S: Steps>(
                 u128::from(*p)
             }
         };
-        euclid_u128(read(a), read(b), record);
+        let tie = record.col;
+        Gcd::Small(euclid_u128(read(a), read(b), record, tie))
+    }
+}
+
+/// A recorder that keeps the column of the last step it was told of (2 before any), and passes
+/// every step on.
+///
+/// Euclid's quotient `q` is taken as `q - 1` by hgcd2 when the remainder would fall below its
+/// bound, and when that remainder is 0 (the smaller number divides the larger) the step leaves the
+/// two numbers equal: the step after it must then reduce the same number, by 1, so that the two
+/// make `q`, as they do when the remainder is not 0.
+struct LastCol<'r, S: Steps> {
+    record: &'r mut S,
+    col: usize,
+}
+
+impl<S: Steps> Steps for LastCol<'_, S> {
+    #[inline(always)]
+    fn step(&mut self, col: usize, q: u64) {
+        self.col = col;
+        self.record.step(col, q);
+    }
+
+    #[inline(always)]
+    unsafe fn step_limbs(&mut self, col: usize, q: *const u64, qn: usize) {
+        self.col = col;
+        // SAFETY: as the caller guarantees.
+        unsafe { self.record.step_limbs(col, q, qn) };
+    }
+}
+
+/// The number of `n` limbs at `a` or `b` that is not zero, when the other is.
+///
+/// # Safety
+///
+/// The limbs must be valid for reads, and exactly one of the numbers zero.
+unsafe fn the_other(a: *const u64, b: *const u64, n: usize) -> Gcd {
+    // SAFETY: as the caller guarantees.
+    unsafe {
+        let an = normalized(a, n);
+        if an == 0 {
+            Gcd::Limbs(b, normalized(b, n))
+        } else {
+            Gcd::Limbs(a, an)
+        }
     }
 }
 
 /// Euclid's algorithm on `x` and `y`, neither zero, to the end, every step told to `record`: on two
-/// limbs while the smaller has two, then on one.
+/// limbs while the smaller has two, then on one. Equal numbers take one step on the number of the
+/// column `tie` (0 for `y`, `x` for any other), the one the step before reduced (see [`LastCol`]).
 #[inline]
-pub(super) fn euclid_u128<S: Steps>(mut x: u128, mut y: u128, record: &mut S) {
+pub(super) fn euclid_u128<S: Steps>(mut x: u128, mut y: u128, record: &mut S, tie: usize) -> u128 {
     debug_assert!(x != 0 && y != 0);
+    if x == y {
+        record.step(usize::from(tie != 0), 1);
+        return x;
+    }
     while (x | y) >> 64 != 0 {
         if x >= y {
             let q = x / y;
             x -= q * y;
             step_wide(record, 1, q);
             if x == 0 {
-                return;
+                return y;
             }
         } else {
             let q = y / x;
             y -= q * x;
             step_wide(record, 0, q);
             if y == 0 {
-                return;
+                return x;
             }
         }
     }
@@ -406,17 +567,108 @@ pub(super) fn euclid_u128<S: Steps>(mut x: u128, mut y: u128, record: &mut S) {
             x -= q * y;
             record.step(1, q);
             if x == 0 {
-                return;
+                return u128::from(y);
             }
         } else {
             let q = y / x;
             y -= q * x;
             record.step(0, q);
             if y == 0 {
-                return;
+                return u128::from(x);
             }
         }
     }
+}
+
+/// The steps of Euclid's algorithm told to a closure, `step(a_reduced, q0)`: whether the first
+/// number is the one reduced, and the low limb of the quotient.
+struct Told<F: FnMut(bool, u64)>(F);
+
+impl<F: FnMut(bool, u64)> Steps for Told<F> {
+    #[inline(always)]
+    fn step(&mut self, col: usize, q: u64) {
+        (self.0)(col == 1, q);
+    }
+
+    #[inline(always)]
+    unsafe fn step_limbs(&mut self, col: usize, q: *const u64, _: usize) {
+        // SAFETY: as the caller guarantees, at least one limb.
+        (self.0)(col == 1, unsafe { *q });
+    }
+}
+
+/// From this many limbs, [`euclid_steps`] reduces the numbers by the half gcd of their top third,
+/// its matrix applied to the whole numbers, before Lehmer's method, as the greatest common divisor
+/// does from [`GCD_DC_THRESHOLD`](super::hgcd::GCD_DC_THRESHOLD).
+// Measured on an Apple M4 Max on the Jacobi symbol of random numbers (sweep 200..=1200 limbs; GMP
+// takes its gcd's threshold, 435 limbs on an Apple M1), the half gcd at the top took 1.07 of the
+// time of Lehmer's steps alone at 200 limbs, 1.02 to 1.04 from 300 to 500, 1.01 from 600 to 700,
+// 0.99 from 750 to 850, 0.97 at 1000 and 0.94 at 1200: about as long from 600 to 850 limbs.
+pub(crate) const STEPS_DC_THRESHOLD: usize = if cfg!(miri) { 6 } else { 800 };
+
+/// Euclid's algorithm on the limbs `x` and `y`, the least significant first, of one length, not
+/// both zero: every step that reduces one number by a multiple of the other, in the order taken,
+/// told to `step(a_reduced, q0)`, `a_reduced` when `x`'s number is the one reduced and `q0` the
+/// low limb of the quotient (the steps' quotients are not zero, and consecutive steps on one
+/// number may share one of Euclid's quotients between them, a sum, so that merging them gives
+/// Euclid's quotients, for any pair, whatever its greatest common divisor: a step that leaves the
+/// numbers equal is followed by the step on the same number, see [`LastCol`]); returns whether the
+/// greatest common divisor is 1. The numbers' own limbs are not changed.
+///
+/// The reductions are the greatest common divisor's, so its cost, `O(M(n) log n)`: the half gcd of
+/// the top third, its matrix applied to the whole numbers, from [`STEPS_DC_THRESHOLD`] limbs, then
+/// hgcd2's matrices on the top two limbs, applied by the kernels, and divisions where hgcd2 cannot
+/// take a step. This is what the Jacobi symbol needs (Möller, "Efficient computation of the Jacobi
+/// symbol"; the symbol depends on each step's quotient and the numbers modulo 4 only).
+///
+/// # Panics
+///
+/// Panics if the lengths differ or both numbers are zero.
+pub(crate) fn euclid_steps<F: FnMut(bool, u64)>(x: &[u64], y: &[u64], step: F) -> bool {
+    let n = x.len();
+    assert!(y.len() == n);
+    let (xn, yn) = (len_of(x), len_of(y));
+    assert!(xn.max(yn) > 0);
+    let mut told = Told(step);
+    if xn.min(yn) == 0 {
+        // One step would divide by zero: none is taken, and the gcd is the other number.
+        let o = if xn == 0 { &y[..yn] } else { &x[..xn] };
+        return o.len() == 1 && o[0] == 1;
+    }
+    let n = xn.max(yn);
+    if n <= 2 {
+        let read = |v: &[u64]| u128::from(v[0]) | (u128::from(*v.get(1).unwrap_or(&0)) << 64);
+        return euclid_u128(read(&x[..n]), read(&y[..n]), &mut told, 1) == 1;
+    }
+    let mut a = vec![0u64; n + 2];
+    let mut b = vec![0u64; n + 2];
+    a[..n].copy_from_slice(&x[..n]);
+    b[..n].copy_from_slice(&y[..n]);
+    let mut t = work(divide_itch(n));
+    let avail = t.len();
+    // SAFETY: both numbers have `n` limbs and two to spare, neither is zero, and the scratch
+    // `avail`.
+    let g = unsafe {
+        euclid_from(
+            a.as_mut_ptr(),
+            b.as_mut_ptr(),
+            n,
+            &mut told,
+            whole(&mut t),
+            avail,
+            STEPS_DC_THRESHOLD,
+        )
+    };
+    match g {
+        // SAFETY: the limbs lie in `a` or `b`, alive.
+        Gcd::Limbs(p, k) => k == 1 && unsafe { *p } == 1,
+        Gcd::Small(v) => v == 1,
+    }
+}
+
+/// The limbs without zeros at the top.
+fn len_of(x: &[u64]) -> usize {
+    x.iter().rposition(|&l| l != 0).map_or(0, |i| i + 1)
 }
 
 /// The bound of [`partial`].
@@ -661,7 +913,7 @@ unsafe fn exact(st: &mut State<'_>, limit: &[u64], remainder: bool) {
                         st.ty[..n].copy_from_slice(&st.y[..n]);
                         reduce_pair(st.tx.as_mut_ptr(), st.ty.as_mut_ptr(), n, m);
                         let (_, _, s, sn, _) =
-                            order_pair(st.tx.as_mut_ptr(), st.ty.as_mut_ptr(), n);
+                            order_pair(st.tx.as_mut_ptr(), st.ty.as_mut_ptr(), n, 1);
                         if cmp_with(s, sn, limit) == Ordering::Greater {
                             core::mem::swap(&mut st.x, &mut st.tx);
                             core::mem::swap(&mut st.y, &mut st.ty);
@@ -794,7 +1046,7 @@ unsafe fn divide_bounded(st: &mut State<'_>, limit: &[u64], remainder: bool, ava
         // Every pointer into the numbers from one borrow of each, as a second would invalidate
         // the first's.
         let (px, py) = (st.x.as_mut_ptr(), st.y.as_mut_ptr());
-        let (l, ln, s, sn, col) = order_pair(px, py, n);
+        let (l, ln, s, sn, col) = order_pair(px, py, n, 1);
         if sn == 0 {
             return true;
         }

@@ -26,8 +26,8 @@ pub(crate) struct Ctx<'a> {
     pub(crate) word: Option<WordMod>,
     /// The products of polynomials.
     pub(crate) kr: Kron<'a>,
-    /// Montgomery's products, for an odd `n` of several limbs.
-    mc: Option<MontCtx>,
+    /// Montgomery's products, for an odd `n` of several limbs (the modulus's own).
+    mc: Option<&'a MontCtx>,
     /// The scratch of the products of residues.
     w: Work,
     /// A residue.
@@ -42,10 +42,10 @@ impl<'a> Ctx<'a> {
             m,
             k,
             word: m.word_mod().copied(),
-            kr: Kron::new(&m.d),
-            mc: MontCtx::new(m),
+            kr: Kron::new(m),
+            mc: m.mont(),
             w: Work::default(),
-            t: vec![0; k],
+            t: Vec::new(),
         }
     }
 
@@ -66,6 +66,7 @@ impl<'a> Ctx<'a> {
             Some(m) => r[0] = m.add(r[0], m.mul(a[0], b[0])),
             None => {
                 let mut t = core::mem::take(&mut self.t);
+                t.resize(self.k, 0);
                 self.mul(&mut t, a, b);
                 self.m.add(r, &t);
                 self.t = t;
@@ -80,6 +81,7 @@ impl<'a> Ctx<'a> {
             Some(m) => r[0] = m.sub(r[0], m.mul(a[0], b[0])),
             None => {
                 let mut t = core::mem::take(&mut self.t);
+                t.resize(self.k, 0);
                 self.mul(&mut t, a, b);
                 self.m.sub(r, &t);
                 self.t = t;
@@ -103,6 +105,7 @@ impl<'a> Ctx<'a> {
         match &self.mc {
             Some(mc) => {
                 let mut t = core::mem::take(&mut self.t);
+                t.resize(self.k, 0);
                 mc.mul_factor(&mut t, x, af);
                 self.m.sub(r, &t);
                 self.t = t;
@@ -187,11 +190,10 @@ impl<'a> Ctx<'a> {
         let k = self.k;
         let mut g = match &self.word {
             Some(m) => wrem::inv_series(r, prec, 1, m),
-            None => {
-                ModPolynomial::of(self.m.clone(), r.to_vec())
-                    .inv_series(prec)
-                    .c
-            }
+            None => ModPolynomial::of(self.m.clone(), r.to_vec())
+                .inv_series(prec)
+                .c
+                .into_vec(),
         };
         g.resize(prec * k, 0);
         g
@@ -318,6 +320,10 @@ pub(crate) fn from_roots(ctx: &mut Ctx<'_>, pts: &[u64]) -> Vec<u64> {
         Some(_) => LINEAR_ROOTS.1,
         None => LINEAR_ROOTS.2,
     };
+    if m <= block {
+        // One block: its linear factors one after the other.
+        return linear(ctx, pts);
+    }
     let mut level: Vec<Vec<u64>> = if m == 0 {
         vec![linear(ctx, pts)]
     } else {

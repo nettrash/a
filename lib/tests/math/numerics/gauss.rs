@@ -30,7 +30,7 @@ fn sum(xs: impl IntoIterator<Item = f64>) -> f64 {
 
 #[test]
 fn legendre_is_exact_up_to_twice_its_nodes_minus_one() {
-    for n in (1..=40usize).chain([64, 99, 100, 101, 128]) {
+    for n in (1..=40usize).chain([59, 60, 61, 64, 99, 100, 101, 128]) {
         let rule = legendre::<f64>(n);
         // Only the even moments are nonzero; the odd ones vanish by the symmetry of the nodes.
         for degree in 0..2 * n {
@@ -69,7 +69,7 @@ fn legendre_nodes_and_weights_are_what_the_smallest_rules_are() {
 
 #[test]
 fn the_nodes_are_ordered_symmetric_and_inside_the_interval() {
-    for n in [1usize, 2, 3, 9, 20, 60, 100, 101, 257, 1000] {
+    for n in [1usize, 2, 3, 9, 20, 60, 61, 100, 101, 257, 1000] {
         // Gauss–Jacobi is Golub and Welsch's at every order, O(n³): up to 257 points here.
         let rules = if n <= 257 {
             vec![legendre::<f64>(n), jacobi::<f64>(n, 0.75, 0.75)]
@@ -126,7 +126,7 @@ fn legendre_integrates_smooth_functions_to_the_last_digit() {
 
 #[test]
 fn laguerre_weights_the_exponential_decay_exactly_to_degree_two_n_minus_one() {
-    for n in [1usize, 2, 5, 12, 40, 99, 100, 101, 128] {
+    for n in [1usize, 2, 5, 12, 40, 59, 60, 61, 99, 100, 101, 128] {
         let rule = laguerre::<f64>(n);
         let total = sum(rule.weights.iter().copied());
         assert!(
@@ -162,7 +162,7 @@ fn laguerre_weights_the_exponential_decay_exactly_to_degree_two_n_minus_one() {
 
 #[test]
 fn hermite_weights_the_gaussian_exactly_to_degree_two_n_minus_one() {
-    for n in [1usize, 3, 8, 30, 99, 100, 101, 128] {
+    for n in [1usize, 3, 8, 30, 59, 60, 61, 99, 100, 101, 128] {
         let rule = hermite::<f64>(n);
         let total = sum(rule.weights.iter().copied());
         assert!(
@@ -464,7 +464,7 @@ fn the_two_methods_meet_at_the_switch() {
 fn an_f32_rule_is_the_f64_rule_rounded() {
     // Every rule is computed in f64 and rounded once to f32; the weights of f32 underflow from
     // 52 (Hermite) and 27 (Laguerre) points, to subnormal numbers and then to zero.
-    for n in [1usize, 5, 26, 27, 51, 52, 100, 101, 300] {
+    for n in [1usize, 5, 26, 27, 51, 52, 60, 61, 100, 101, 300] {
         let pairs = [
             (legendre::<f32>(n), legendre::<f64>(n)),
             (hermite::<f32>(n), hermite::<f64>(n)),

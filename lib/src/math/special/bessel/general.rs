@@ -1,22 +1,22 @@
 //! The Bessel functions of a real order `ν ≥ 0` and an argument `x > 0` (both finite), in `f64`,
 //! with `ν = n + μ`, `|μ| ≤ 1/2`:
 //!
-//! * `J_ν`, `Y_ν`: Hankel's expansion where `x ≥ 30` and `x ≥ 0.6ν²`; else the values at `μ` and
+//! * `J_ν`, `Y_ν`: Hankel's expansion where `x ≥ 20` and `x ≥ ν²/2`; else the values at `μ` and
 //!   `μ + 1` (Hankel's expansion from 30; below, `J` by its power series in double-double and `Y`
 //!   by Temme's series below 2 or Steed's CF2 summed from the tail above), then up by the
 //!   recurrences in double-double (`Y` always, `J` while `x > ν`); for `x ≤ ν`, `J_ν` by its series
 //!   or by the Wronskian with CF1. Integer orders start from `J₀, J₁, Y₀, Y₁`.
-//! * `I_ν`, `K_ν`: the power series of `I` (positive terms, double-double) below 30, else Hankel's
-//!   expansion or the Wronskian with CF1; `K_μ`, `K_(μ+1)` by Temme's series below 1/2, the
-//!   Wronskian with `I_μ`, `I_(μ+1)` and CF2 for `K_(μ+1)/K_μ` up to 30, Hankel's expansion beyond,
-//!   then up by the recurrence. Integer orders start from `I₀, I₁, K₀, K₁`.
+//! * `I_ν`, `K_ν`: Hankel's expansion in the same region; else the power series of `I` (positive
+//!   terms, double-double) below 30, or the Wronskian with CF1; `K_μ`, `K_(μ+1)` by Temme's series
+//!   below 1/2, the Wronskian with `I_μ`, `I_(μ+1)` and CF2 for `K_(μ+1)/K_μ` up to 30, Hankel's
+//!   expansion beyond, then up by the recurrence. Integer orders start from `I₀, I₁, K₀, K₁`.
 //! * The scale of the recurrences and of `e^(∓x)` is kept in exponents apart, and the orders above
 //!   `NU_MAX` are decided by Debye's exponents (see there).
 
 use super::dd::{Dd, fast_two_sum, two_prod};
 use super::ik01::{i0, i1, k0, k1};
 use super::int01::{TWO_OVER_PI, j0, j1, jy01_large, y0, y1};
-use super::kernels::{exp_parts, ldexp, ln_dd, mla, sin_cos_quadrant_dd};
+use super::kernels::{add_c, exp_parts, ldexp, ln_dd, mla, mul_c, sin_cos_quadrant_dd};
 use super::tables_ik::{RGAM, RGAM_DD};
 use core::f64::consts::PI;
 
@@ -279,28 +279,29 @@ fn series_prefactor(nu: f64, x: f64) -> (Dd, i32) {
     (m.mul(rg).div(g), k)
 }
 
-/// `Σ (∓x²/4)^k / (k!·(ν + 1)ₖ)` (minus for `J`, plus for `I`), terms and sum in
-/// double-double (in `f64` the roundings of the terms, `k` of them in the `k`-th, add up to
-/// several ulps once the terms grow).
+/// `Σ (∓x²/4)^k / (k!·(ν + 1)ₖ)` (minus for `J`, plus for `I`), terms and sum compensated: each
+/// with its error to first order, the ratio `(∓x²/4)/(k(ν + k))` of two terms a double-double
+/// formed off the chain (in plain `f64` the roundings of the terms, `k` of them in the `k`-th, add
+/// up to several ulps once the terms grow; this is the double-double run's accuracy).
 fn series_sum(nu: f64, x: f64, minus: bool) -> Dd {
     let (qh, ql) = two_prod(0.5 * x, 0.5 * x);
-    let q = if minus {
-        Dd { hi: -qh, lo: -ql }
-    } else {
-        Dd { hi: qh, lo: ql }
-    };
-    let mut term = Dd::new(1.0);
-    let mut sum = Dd::new(1.0);
+    let (qh, ql) = if minus { (-qh, -ql) } else { (qh, ql) };
+    let (mut t, mut et) = (1.0f64, 0.0f64);
+    let (mut s, mut es) = (1.0f64, 0.0f64);
     let mut k = 1.0f64;
     loop {
-        term = term.mul(q).mul(recip_dd(k, nu));
-        sum = sum.add(term);
-        if term.hi.abs() <= EPS * 0.25 * sum.hi.abs() || k > 500.0 {
+        let r = recip_dd(k, nu);
+        let (ch, ce) = two_prod(qh, r.hi);
+        let cl = ce + mla(qh, r.lo, ql * r.hi);
+        (t, et) = mul_c(t, et, ch, cl);
+        (s, es) = add_c(s, es, t, et);
+        if t.abs() <= EPS * 0.25 * s.abs() || k > 500.0 {
             break;
         }
         k += 1.0;
     }
-    sum
+    let (hi, lo) = super::dd::two_sum(s, es);
+    Dd { hi, lo }
 }
 
 /// `J_ν(x)` or `I_ν(x)` by the power series, times `scale` (`e^(−x)` for the scaled `I`).
@@ -401,28 +402,35 @@ pub(crate) fn ratio_j(nu: f64, x: f64, whole: bool) -> Dd {
         }
     }
     let (xh, xl) = two_over(x);
-    let xi2 = Dd { hi: xh, lo: xl };
-    // b_k = (2/x)·(ν + k) from k = n down, t_k = J_(ν+k)/J_(ν+k−1) = 1/(b_k − t_(k+1)). Here
-    // b_k ≥ 2 and 0 < t < 1, so neither difference cancels: one two-sum each is enough, and the
-    // reciprocal is left unnormalised (its low part below an ulp of the high).
-    let (sh, sl) = super::dd::two_sum(nu, n as f64);
-    let mut b = xi2.mul(Dd { hi: sh, lo: sl });
-    let mut t = Dd::new(0.0);
+    // The fraction from the tail, t_k = J_(ν+k)/J_(ν+k−1) = 1/(b_k − t_(k+1)) with
+    // b_k = (2/x)·(ν + k), as Miller's backward recurrence of its numerators, which needs no
+    // division: f_(k−1) = b_k f_k − f_(k+1) from f_(n+1) = 0, f_n = 1, so that t_k = f_k/f_(k−1)
+    // and t₁ = f₁/f₀. Here b_k ≥ 2 and 0 < t < 1, so a step never cancels by more than half: it
+    // runs compensated with one fused multiply-add on its chain (`rec_pos`), each value with its
+    // error to first order, the coefficient from 2/x as a double-double and the exact ν + k, as
+    // accurate as the double-double run of the quotients it replaces; the values grow down the
+    // run and are rescaled by powers of two.
+    let (mut a, mut ea, mut b, mut eb) = (0.0f64, 0.0f64, 1.0f64, 0.0f64); // f_(k+1), f_k
     let mut k = n;
     while k >= 1 {
-        let (s, e) = super::dd::two_sum(b.hi, -t.hi);
-        let (dh, dl) = fast_two_sum(s, e + (b.lo - t.lo));
-        let r = 1.0 / dh;
-        t = Dd {
-            hi: r,
-            lo: r * ((-dh).mul_add(r, 1.0) - dl * r),
-        };
-        let (s, e) = super::dd::two_sum(b.hi, -xi2.hi);
-        let (bh, bl) = fast_two_sum(s, e + (b.lo - xi2.lo));
-        b = Dd { hi: bh, lo: bl };
+        let (mh, ml) = super::dd::two_sum(nu, k as f64);
+        let (ch, ce) = two_prod(xh, mh);
+        let cl = ce + mla(xh, ml, xl * mh);
+        // Keep c·b in range: rescale first (the ratio t₁ is unchanged by a common factor).
+        while b * ch > pow2(900) {
+            let s = pow2(-BIG);
+            (a, ea, b, eb) = (a * s, ea * s, b * s, eb * s);
+        }
+        let (t, et) = super::kernels::rec_pos(ch, cl, b, eb, -a, -ea);
+        (a, ea) = (b, eb);
+        (b, eb) = (t, et);
         k -= 1;
     }
-    let (hi, lo) = fast_two_sum(t.hi, t.lo);
+    // t₁ = f₁/f₀ = (a + ea)/(b + eb), as a double-double.
+    let q = a / b;
+    let (p, pe) = two_prod(q, b);
+    let r = (((a - p) - pe) + (ea - q * eb)) / b;
+    let (hi, lo) = fast_two_sum(q, r);
     Dd { hi, lo }
 }
 
@@ -572,14 +580,16 @@ fn temme_y(mu: f64, x: f64) -> (f64, f64) {
     let mu2d = Dd { hi: m2h, lo: m2l };
     let mut i = 1.0f64;
     while i <= TEMME_DD {
-        // As below, in double-double.
+        // As below, in double-double (the two divisions by i² − μ² through one reciprocal, the
+        // division by i = 1, 2 exact).
         let den = Dd::new(i * i).sub(mu2d);
+        let rden = Dd::new(1.0).div(den);
         let h = pd
             .mul_f64(mu)
             .sub(ffd.mul_f64(i).add(qd).mul_f64(i))
-            .div(den);
-        ffd = ffd.mul_f64(i).add(pd).add(qd).div(den);
-        cd = cd.mul(dq).div(Dd::new(i));
+            .mul(rden);
+        ffd = ffd.mul_f64(i).add(pd).add(qd).mul(rden);
+        cd = cd.mul(dq).mul_f64(1.0 / i);
         let (a, b) = super::dd::two_sum(i, -mu);
         pd = pd.div(Dd { hi: a, lo: b });
         let (a, b) = super::dd::two_sum(i, mu);
@@ -654,29 +664,37 @@ fn up_dd(mu: f64, x: f64, n: u64, f_mu: f64, f_mu1: f64, plus: bool) -> (Scaled,
 }
 
 /// The recurrence of `up_dd`, its last two values `(F_ν, F_(ν+1))` as double-doubles scaled by
-/// `2^(−e)`.
+/// `2^(−e)`. It runs compensated: each value with its error to first order, the coefficient
+/// `(2/x)·(μ + i)` from `2/x` as a double-double and the exact `μ + i`, the product's and the
+/// sum's roundings exact (for `K`, whose terms are positive, the value chain is one fused
+/// multiply-add): as accurate as a double-double run at about the cost of an `f64` one.
 fn up_parts(mu: f64, x: f64, n: u64, f_mu: f64, f_mu1: f64, plus: bool) -> (Dd, Dd, i32) {
     let (xh, xl) = two_over(x);
-    let xi2 = Dd { hi: xh, lo: xl };
-    let (mut a, mut b) = (Dd::new(f_mu), Dd::new(f_mu1));
+    let (mut a, mut ea, mut b, mut eb) = (f_mu, 0.0, f_mu1, 0.0);
     let mut e = 0i32;
     let mut i = 1u64;
     while i <= n {
         let (mh, ml) = super::dd::two_sum(mu, i as f64);
-        let c = xi2.mul(Dd { hi: mh, lo: ml });
+        let (ch, ce) = two_prod(xh, mh);
+        let cl = ce + mla(xh, ml, xl * mh);
         // Keep c·b in range: rescale first (c reaches 2/x).
-        while b.hi.abs() * c.hi.abs() > pow2(900) {
-            a = a.mul_f64(pow2(-BIG));
-            b = b.mul_f64(pow2(-BIG));
+        while b.abs() * ch.abs() > pow2(900) {
+            let s = pow2(-BIG);
+            (a, ea, b, eb) = (a * s, ea * s, b * s, eb * s);
             e += BIG;
         }
-        let cb = c.mul(b);
-        let t = if plus { cb.add(a) } else { cb.sub(a) };
-        a = b;
-        b = t;
+        let (t, et) = if plus {
+            super::kernels::rec_pos(ch, cl, b, eb, a, ea)
+        } else {
+            super::kernels::rec_step(ch, cl, b, eb, -a, -ea)
+        };
+        (a, ea) = (b, eb);
+        (b, eb) = (t, et);
         i += 1;
     }
-    (a, b, e)
+    let (ah, al) = fast_two_sum(a, ea);
+    let (bh, bl) = fast_two_sum(b, eb);
+    (Dd { hi: ah, lo: al }, Dd { hi: bh, lo: bl }, e)
 }
 
 /// `Y` (or `J`) up, see `up_dd`.
@@ -726,30 +744,32 @@ fn j_pair_series(mu: f64, x: f64) -> (Dd, Dd) {
     (j0, j1)
 }
 
-/// `(Σ tₖ, Σ k·tₖ)`, `tₖ = (∓x²/4)^k/(k!·(μ + 1)ₖ)` (minus for `J`), in double-double, to a
-/// relative 2⁻⁶⁴ of the larger sum.
+/// `(Σ tₖ, Σ k·tₖ)`, `tₖ = (∓x²/4)^k/(k!·(μ + 1)ₖ)` (minus for `J`), compensated as
+/// `series_sum` (the double-double run's accuracy), to a relative 2⁻⁶⁴ of the larger sum.
 fn pair_sum(mu: f64, x: f64, minus: bool) -> (Dd, Dd) {
     let (qh, ql) = two_prod(0.5 * x, 0.5 * x);
-    let q = if minus {
-        Dd { hi: -qh, lo: -ql }
-    } else {
-        Dd { hi: qh, lo: ql }
-    };
-    let mut term = Dd::new(1.0);
-    let mut s0 = Dd::new(1.0);
-    let mut s1 = Dd::new(0.0);
+    let (qh, ql) = if minus { (-qh, -ql) } else { (qh, ql) };
+    let (mut t, mut et) = (1.0f64, 0.0f64);
+    let (mut s0, mut e0) = (1.0f64, 0.0f64);
+    let (mut s1, mut e1) = (0.0f64, 0.0f64);
     let mut kf = 1.0f64;
     loop {
-        term = term.mul(q).mul(recip_dd(kf, mu));
-        s0 = s0.add(term);
-        s1 = s1.add(term.mul_f64(kf));
-        let big = s0.hi.abs().max(s1.hi.abs());
-        if term.hi.abs() * kf <= 5.4e-20 * big || kf > 400.0 {
+        let r = recip_dd(kf, mu);
+        let (ch, ce) = two_prod(qh, r.hi);
+        let cl = ce + mla(qh, r.lo, ql * r.hi);
+        (t, et) = mul_c(t, et, ch, cl);
+        (s0, e0) = add_c(s0, e0, t, et);
+        let (u, ue) = two_prod(t, kf);
+        (s1, e1) = add_c(s1, e1, u, mla(et, kf, ue));
+        let big = s0.abs().max(s1.abs());
+        if t.abs() * kf <= 5.4e-20 * big || kf > 400.0 {
             break;
         }
         kf += 1.0;
     }
-    (s0, s1)
+    let (h0, l0) = super::dd::two_sum(s0, e0);
+    let (h1, l1) = super::dd::two_sum(s1, e1);
+    (Dd { hi: h0, lo: l0 }, Dd { hi: h1, lo: l1 })
 }
 
 /// `1/(k·(μ + k))` as a double-double (one division and a correction).
@@ -784,14 +804,12 @@ fn i_pair_series(mu: f64, x: f64, scaled: bool) -> (f64, f64) {
 fn base(mu: f64, x: f64, want_j: bool, want_y: bool) -> (f64, f64, f64, f64) {
     if mu == 0.0 {
         if x >= 24.0 {
-            let (a, b) = jy01_large(x, false);
-            let (c, d) = jy01_large(x, true);
-            return (a, c, b, d);
+            return super::int01::jy01_large_both(x);
         }
-        return if want_j {
-            (j0(x), j1(x), y0(x), y1(x))
-        } else {
-            (f64::NAN, f64::NAN, y0(x), y1(x))
+        return match (want_j, want_y) {
+            (true, true) => (j0(x), j1(x), y0(x), y1(x)),
+            (true, false) => (j0(x), j1(x), f64::NAN, f64::NAN),
+            _ => (f64::NAN, f64::NAN, y0(x), y1(x)),
         };
     }
     if x >= 30.0
@@ -867,6 +885,14 @@ fn debye_exponents(nu: f64, x: f64) -> (f64, f64) {
 
 /// From this order on `I_ν` and `K_ν` come from Debye's uniform expansions (`U₀` to `U₁₂`: the
 /// next term is below `2⁻⁵⁸` of the value).
+// Kept at 50. Measured on an Apple M4 Max (bands of ν from 20 to 100, x from 0.01 to 3000):
+// Debye's expansions, 90 ns at every order, take 0.22–0.66 of the time of the recurrences from
+// ν = 20 on, and are within 0.52 ulp from ν = 30 on (0.62 at 26, 1.9 at 22; mpmath on the
+// 2,000–15,000 results a function that changed, of 30,000–40,000), but where ν ≥ DEBYE_NU they
+// also take Hankel's region, where Hankel's expansion is faster (Debye's: 1.06–1.15× for
+// 30 ≤ ν < 50 on 0.6ν² ≤ x ≤ 1.5ν²): a value below 50 would leave that class slower. (Below
+// ν = 49 the early return of `debye_parts` for x < ν·2⁻³⁰ would also have to move, to ν·2⁻⁵⁰ at
+// 30: its bound νη < −1000 fails there, and K_30 came out ∞ at 10²⁸⁰.)
 const DEBYE_NU: f64 = 50.0;
 
 /// Below this `x`, `K_μ` and `K_(μ+1)` come from Temme's series.
@@ -1445,10 +1471,19 @@ fn hankel_ik(nu: f64, x: f64, alternate: bool) -> Option<Dd> {
     None
 }
 
-/// Whether Hankel's expansion of order `ν` serves at `x`.
+/// Whether Hankel's expansion of order `ν` serves at `x`: `x ≥ 20` (there the term `e^(−2x)` its
+/// sum for `I` leaves out is below `2⁻⁵⁷` of the value) and `x ≥ ν²/2`.
+// Measured on an Apple M4 Max (x from 15 to 35 at the orders below 7, x/ν² from 0.15 to 1.2 at
+// 7–50, J, Y, I, K and the scaled forms): Hankel's expansion takes 0.40–0.66 of the time of the
+// series and recurrences on 20 ≤ x < 30 and 0.12–0.63 on ν²/2 ≤ x < 0.6ν². Its error grows as
+// x/ν² falls, by its terms' cancellation (I: 2.7 ulps from ν²/2 on, 4.4 at 0.45ν², above 6
+// below 0.4ν²), and below x = 20 by the term left out (I: 8 ulps at 17.7); from 20 and ν²/2 on
+// J, Y, K are within 1.5, 1.4, 2.4 ulps (J, Y of M) and I within 2.7 (3.2 without FMA; 80,000
+// cases a function, mpmath on the 20,000–32,000 whose result changed and 1,000 more), against 30
+// and 0.6ν² before.
 #[inline]
 fn hankel_region(nu: f64, x: f64) -> bool {
-    x >= 30.0 && x >= 0.6 * nu * nu
+    x >= 20.0 && x >= 0.5 * nu * nu
 }
 
 /// `(J_ν(x), Y_ν(x))` from Hankel's expansion, `x` large.
@@ -1550,14 +1585,26 @@ fn cf2_k(mu: f64, x: f64) -> (f64, f64) {
 /// `bᵢ = 2(x + i)`.
 fn k_ratio(mu: f64, x: f64) -> f64 {
     let mu2 = mu * mu;
-    let mut t = 0.0f64;
+    // The fraction cf = 1/(b₁ + t₂), t_i = a_i/(b_i + t_(i+1)), a_i = μ² − (i − 1/2)²,
+    // b_i = 2(i + x), from t_(N+1) = 0, as the backward recurrence of its denominators, which needs
+    // no division: g_i = b_i g_(i+1) + a_(i+1) g_(i+2) from g_(N+1) = 1, g_(N+2) = 0, so that
+    // t_i = a_i g_(i+1)/g_i and cf = g₂/g₁ (the values grow down the run, rescaled by powers of
+    // two).
     let mut i = (60.0 / x).ceil() + 8.0;
-    while i >= 2.0 {
-        let a = mu2 - (i - 0.5) * (i - 0.5);
-        t = a / (2.0 * (i + x) + t);
+    let (mut gp, mut gpp) = (1.0f64, 0.0f64); // g_(i+1), g_(i+2)
+    let mut ap = mu2 - (i + 0.5) * (i + 0.5); // a_(i+1)
+    while i >= 1.0 {
+        let g = mla(2.0 * (i + x), gp, ap * gpp);
+        gpp = gp;
+        gp = g;
+        ap = mu2 - (i - 0.5) * (i - 0.5);
+        if gp.abs() > pow2(BIG) {
+            gp *= pow2(-BIG);
+            gpp *= pow2(-BIG);
+        }
         i -= 1.0;
     }
-    let cf = 1.0 / (2.0 * (1.0 + x) + t);
+    let cf = gpp / gp;
     (mu + x + 0.5 - (0.25 - mu2) * cf) / x
 }
 
@@ -1611,9 +1658,11 @@ fn k_scaled(nu: f64, x: f64, scaled: bool) -> (Scaled, f64) {
             // there, the recurrence kept a few bits of K_n, and the Wronskian of `i` gave I_n
             // 6·10⁴ ulps off below its overflow and 0/0 beyond (orders 35 to 49 reach x = 705
             // before Hankel's region). From the scaled K₀, K₁ instead, with e^(−x) apart.
-            return k_up_exp_neg(0.0, x, nu as u64, k0(x, true), k1(x, true));
+            let (a, b) = super::ik01::k01(x, true);
+            return k_up_exp_neg(0.0, x, nu as u64, a, b);
         }
-        return k_up(0.0, x, nu as u64, k0(x, scaled), k1(x, scaled));
+        let (a, b) = super::ik01::k01(x, scaled);
+        return k_up(0.0, x, nu as u64, a, b);
     }
     let n = (nu + 0.5).floor();
     let mu = nu - n;
@@ -1658,7 +1707,7 @@ pub(crate) fn k_parts(nu: f64, x: f64, scaled: bool) -> (Dd, i32) {
         return k_tiny(nu, x);
     }
     if nu >= DEBYE_NU {
-        // For every x: Hankel's expansion, where it serves (x ≥ 0.6ν²), sums terms that start near
+        // For every x: Hankel's expansion, where it serves (x ≥ ν²/2), sums terms that start near
         // 1 and loses up to 1.3 ulps of e^x·K.
         return debye_parts(nu, x, false, scaled);
     }

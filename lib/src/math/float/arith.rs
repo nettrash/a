@@ -15,7 +15,7 @@ use super::round::{Rounded, round_into, seal};
 use super::same::{self, Put};
 use super::small::{self, wide};
 use super::sqrt_small;
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use core::cmp::Ordering;
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -66,7 +66,7 @@ impl BigFloat {
     #[inline]
     pub(crate) fn take_mant(&mut self) -> Vec<u64> {
         match core::mem::replace(&mut self.kind, Kind::Nan) {
-            Kind::Finite { mant, .. } => mant,
+            Kind::Finite { mant, .. } => mant.into_spare(),
             _ => Vec::new(),
         }
     }
@@ -103,8 +103,8 @@ fn word_add(
         return None;
     };
     let (na, nb, ea, eb) = (*na, *nb != negate, *ea, *eb);
-    match (ma.as_slice(), mb.as_slice(), out.len()) {
-        ([x], [y], 1) => {
+    match (ma, mb, out.len()) {
+        (Mant::One(x), Mant::One(y), 1) => {
             let sh = (64 - prec) as u32;
             let r = if na == nb {
                 small::add_fit(na, ea, *x, eb, *y, sh, round)
@@ -113,9 +113,9 @@ fn word_add(
             }?;
             Some(put_fit(out, r))
         }
-        (x, y, n @ (1 | 2)) if x.len() <= 2 && y.len() <= 2 => {
+        (Mant::One(_) | Mant::Two(_), Mant::One(_) | Mant::Two(_), n @ (1 | 2)) => {
             let sh = (128 - prec) as u32;
-            let (x, y) = (wide(x), wide(y));
+            let (x, y) = (ma.top(), mb.top());
             let r = if na == nb {
                 small::add_fit(na, ea, x, eb, y, sh, round)
             } else {
@@ -157,8 +157,8 @@ fn word_mul_div(
         return None;
     };
     let (sign, ea, eb) = (*na != *nb, *ea, *eb);
-    match (ma.as_slice(), mb.as_slice(), out.len()) {
-        ([x], [y], 1) => {
+    match (ma, mb, out.len()) {
+        (Mant::One(x), Mant::One(y), 1) => {
             let sh = (64 - prec) as u32;
             let r = if div {
                 small::div_fit1(sign, ea, *x, eb, *y, sh, round)
@@ -167,9 +167,9 @@ fn word_mul_div(
             }?;
             Some(put_fit(out, r))
         }
-        (x, y, n @ (1 | 2)) if x.len() <= 2 && y.len() <= 2 => {
+        (Mant::One(_) | Mant::Two(_), Mant::One(_) | Mant::Two(_), n @ (1 | 2)) => {
             let sh = (128 - prec) as u32;
-            let (x, y) = (wide(x), wide(y));
+            let (x, y) = (ma.top(), mb.top());
             let r = if div {
                 small::div_fit2(sign, ea, x, eb, y, sh, round)
             } else {
@@ -223,11 +223,137 @@ fn long_add(
             out,
         ));
     }
+    if long_short(n, ma.len(), mb.len()) {
+        // The long operand of the larger exponent: the short one added in place, its zeros
+        // below never shifted.
+        let r = if ma.len() == n {
+            same::add_long_short(
+                na,
+                ma,
+                i128::from(ea),
+                nb,
+                mb,
+                i128::from(eb),
+                prec,
+                round,
+                out,
+            )
+        } else {
+            same::add_long_short(
+                nb,
+                mb,
+                i128::from(eb),
+                na,
+                ma,
+                i128::from(ea),
+                prec,
+                round,
+                out,
+            )
+        };
+        if r.is_some() {
+            return r;
+        }
+        // The short one of the larger exponent: the long one shifted under it.
+        let r = if ma.len() == n {
+            same::add_short_above(
+                na,
+                ma,
+                i128::from(ea),
+                nb,
+                mb,
+                i128::from(eb),
+                prec,
+                round,
+                out,
+            )
+        } else {
+            same::add_short_above(
+                nb,
+                mb,
+                i128::from(eb),
+                na,
+                ma,
+                i128::from(ea),
+                prec,
+                round,
+                out,
+            )
+        };
+        if r.is_some() {
+            return r;
+        }
+    }
+    if padded(n, ma.len(), mb.len()) {
+        return Some(add_padded(na, ma, ea, nb, mb, eb, prec, round, out));
+    }
     if ma.len() <= 4 && mb.len() <= 4 {
         let (n, e, o) = small::add_short(na, ma, ea, nb, mb, eb, prec, round, out)?;
         return Some(Put::Finite(n, e, o));
     }
     None
+}
+
+/// The most limbs of a result whose sums with a shorter operand pad it with zero limbs on the stack
+/// to take [`same::add`] (4,096 bits). Measured on an Apple M4 Max (`&x + 1`, `set_add`, shorter
+/// operands of the same and of the larger exponent; 5 to 256 limbs, bounds 32 to 256): padded on
+/// the stack these sums take 0.42 to 0.75 of the general path's time up to 256 limbs, but the
+/// buffer is made zero whole, and each 32 limbs more of it cost the padded sums of 5 to 64 limbs
+/// 3 to 23 %.
+const PAD_LIMBS: usize = 64;
+
+/// The sum of the [`padded`] case into the `n` limbs `out`: the shorter operand with zero limbs
+/// below it on the stack (the same value), and the sum of operands of one length by
+/// [`same::add`]. Out of line, so that its buffer and its copy of the kernel stay off the frame of
+/// the sums of operands of one length.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn add_padded(
+    na: bool,
+    ma: &[u64],
+    ea: i64,
+    nb: bool,
+    mb: &[u64],
+    eb: i64,
+    prec: u64,
+    round: Round,
+    out: &mut [u64],
+) -> Put {
+    let n = out.len();
+    let mut t = [0u64; PAD_LIMBS];
+    let (x, y) = if ma.len() == n {
+        t[n - mb.len()..n].copy_from_slice(mb);
+        (ma, &t[..n])
+    } else {
+        t[n - ma.len()..n].copy_from_slice(ma);
+        (&t[..n], mb)
+    };
+    same::add(
+        na,
+        x,
+        i128::from(ea),
+        nb,
+        y,
+        i128::from(eb),
+        prec,
+        round,
+        out,
+    )
+}
+
+/// Whether a sum into `n ≥ 3` limbs takes operands of `la` and `lb` limbs, one of `n` and the
+/// other shorter (and not both short enough for [`small::add_short`]): by
+/// [`same::add_long_short`] when the long one has the larger exponent, else [`padded`].
+#[inline(always)]
+fn long_short(n: usize, la: usize, lb: usize) -> bool {
+    n >= 3 && (la == n && lb < n || lb == n && la < n) && (la > 4 || lb > 4)
+}
+
+/// Whether a sum into `n ≥ 3` limbs of operands of `la` and `lb` limbs pads the shorter one: one
+/// of `n` limbs, the other shorter and not short enough for [`small::add_short`].
+#[inline(always)]
+fn padded(n: usize, la: usize, lb: usize) -> bool {
+    (3..=PAD_LIMBS).contains(&n) && (la == n && lb < n || lb == n && la < n) && (la > 4 || lb > 4)
 }
 
 /// The most limbs of a quotient by a divisor of one limb that [`long_div`] computes limb by limb:
@@ -265,7 +391,16 @@ fn long_div(a: &BigFloat, b: &BigFloat, prec: u64, round: Round, out: &mut [u64]
             round,
             out,
         )),
-        _ => None,
+        m => same::div(
+            *na != *nb,
+            ma,
+            i128::from(*ea),
+            m,
+            i128::from(*eb),
+            prec,
+            round,
+            out,
+        ),
     }
 }
 
@@ -316,10 +451,16 @@ fn long_new(
     };
     let same = lx == n && ly == n;
     let short = lx <= 4 && ly <= 4;
+    if matches!(op, Assign::Add | Assign::Sub)
+        && let Some(r) = long_short_new(op, x, y, n, prec, round)
+    {
+        return Some(r);
+    }
     let mut mant = match op {
-        Assign::Add | Assign::Sub if same || short => vec![0; n],
+        Assign::Add | Assign::Sub if same || short || padded(n, lx, ly) => vec![0; n],
         Assign::Mul if short => vec![0; n],
         Assign::Div if lx <= 2 && ly == 1 && n <= LONG_DIV1 => vec![0; n],
+        Assign::Div if same && n <= same::DIV_STACK => vec![0; n],
         _ => return None,
     };
     let (negative, exp, o) = match op {
@@ -335,10 +476,97 @@ fn long_new(
         },
         _ => long_mul(x, y, prec, round, &mut mant)?,
     };
+    // More than 128 bits: three limbs or more, on the heap.
     let kind = Kind::Finite {
         negative,
         exp,
-        mant,
+        mant: Mant::Heap(mant),
+    };
+    Some((BigFloat { prec, kind }, o))
+}
+
+/// Whether `other` is finite and short enough to be added in place into a mantissa of `n ≥ 3`
+/// limbs by [`same::add_short_in_place`].
+#[inline(always)]
+fn short_of(n: usize, other: &BigFloat) -> bool {
+    matches!(&other.kind, Kind::Finite { mant, .. } if n >= 3 && mant.len() < same::SHORT_Y && mant.len() < n)
+}
+
+/// `x ± y` of three or more limbs for one operand of the result's limbs and a shorter one of a
+/// smaller exponent: the long one's limbs copied into the new vector (no zeros first) and the
+/// short one added there in place by [`same::add_short_in_place`]; `None` for other operands.
+#[inline]
+fn long_short_new(
+    op: Assign,
+    x: &BigFloat,
+    y: &BigFloat,
+    n: usize,
+    prec: u64,
+    round: Round,
+) -> Option<(BigFloat, Ordering)> {
+    let (
+        Kind::Finite {
+            negative: na,
+            exp: ea,
+            mant: ma,
+        },
+        Kind::Finite {
+            negative: nb,
+            exp: eb,
+            mant: mb,
+        },
+    ) = (&x.kind, &y.kind)
+    else {
+        return None;
+    };
+    let nb = *nb != matches!(op, Assign::Sub);
+    // The long operand first, of the larger exponent.
+    let (nl, ml, el, ns, ms, es) = if ma.len() == n {
+        (*na, ma, *ea, nb, mb, *eb)
+    } else {
+        (nb, mb, *eb, *na, ma, *ea)
+    };
+    if n < 3 || ml.len() != n || ms.len() >= same::SHORT_Y || ms.len() >= n || el == es {
+        return None;
+    }
+    let (put, v) = if el > es {
+        let mut v = ml.to_vec();
+        let put = same::add_short_in_place(
+            nl,
+            &mut v,
+            i128::from(el),
+            ns,
+            ms,
+            i128::from(es),
+            prec,
+            round,
+        );
+        (put, v)
+    } else {
+        let mut v = vec![0; n];
+        let put = same::add_short_above(
+            nl,
+            ml,
+            i128::from(el),
+            ns,
+            ms,
+            i128::from(es),
+            prec,
+            round,
+            &mut v,
+        )?;
+        (put, v)
+    };
+    let (kind, o) = match put {
+        Put::Finite(negative, exp, o) => (
+            Kind::Finite {
+                negative,
+                exp,
+                mant: Mant::Heap(v),
+            },
+            o,
+        ),
+        Put::Other(kind, o) => (kind, o),
     };
     Some((BigFloat { prec, kind }, o))
 }
@@ -356,7 +584,7 @@ fn word_new(
     let kind = Kind::Finite {
         negative,
         exp,
-        mant: t[..n].to_vec(),
+        mant: Mant::from_slice(&t[..n]),
     };
     Some((BigFloat { prec, kind }, o))
 }
@@ -682,6 +910,30 @@ fn div_kind<'a>(a: &'a BigFloat, b: &'a BigFloat, prec: u64, round: Round) -> Pl
     }
 }
 
+/// The square root of a positive number of one or two limbs rounded to `prec ≤ 128` bits, in a
+/// word, by the kernels of [`sqrt_kind`] (whose exponent is always in the range); `None` for the
+/// other numbers.
+#[inline(always)]
+fn sqrt_word(a: &BigFloat, prec: u64, round: Round) -> Option<Rounded> {
+    let Kind::Finite {
+        negative: false,
+        exp,
+        mant,
+    } = &a.kind
+    else {
+        return None;
+    };
+    let ex = i128::from(*exp);
+    Some(match mant {
+        Mant::One(x) if prec <= 64 => sqrt_small::sqrt1(*x, ex, prec, round),
+        Mant::Two([lo, hi]) if prec <= 63 => {
+            sqrt_small::sqrt_long(*hi, *lo, false, ex, prec, round)
+        }
+        Mant::One(_) | Mant::Two(_) => sqrt_small::sqrt2(mant, ex, prec, round),
+        Mant::Heap(_) => return None,
+    })
+}
+
 #[inline]
 fn sqrt_kind(a: &BigFloat, prec: u64, round: Round) -> Plan<'_> {
     match &a.kind {
@@ -776,6 +1028,13 @@ fn result(plan: Plan<'_>, prec: u64, round: Round) -> (BigFloat, Ordering) {
     (BigFloat { prec, kind }, o)
 }
 
+/// The most limbs of a number whose `op=` copies it onto the stack (1,024 bits). Measured on an
+/// Apple M4 Max (bounds 8 to 128, mantissas of 5 to 128 limbs): past 16 limbs the copy would still
+/// make `+=` and `-=` 0.72 to 0.96 times the general path's time up to 64 limbs, but `*=` and `/=`,
+/// which it serves only to four limbs and to [`same::DIV_STACK`], would pay for the copy and its
+/// restoring, 1.02 to 1.07 times from 17 limbs.
+const ASSIGN_STACK: usize = 16;
+
 /// An operation that assigns its result to its first operand.
 #[derive(Clone, Copy)]
 enum Assign {
@@ -802,15 +1061,39 @@ impl BigFloat {
     /// Sets `self` to `self op other` at the precision `prec`: a result rounded in registers into
     /// the vector of `self`, one on limbs into the thread's spare vector, which then takes the old
     /// one.
-    #[inline]
+    ///
+    /// Inlined into each assigning form, so that its operation is a constant there and only that
+    /// operation's kernel remains on the fast path; the rest is out of line.
+    #[inline(always)]
     fn assign_op(&mut self, op: Assign, other: &BigFloat, prec: u64, round: Round) -> Ordering {
+        if prec == self.prec
+            && let Some(o) = self.assign_fast(op, other, round)
+        {
+            return o;
+        }
+        self.assign_slow(op, other, prec, round)
+    }
+
+    /// The general path of [`assign_op`](Self::assign_op).
+    #[inline(never)]
+    fn assign_slow(&mut self, op: Assign, other: &BigFloat, prec: u64, round: Round) -> Ordering {
         let small = match plan_of(op, self, other, prec, round) {
             Plan::Big(big) => {
-                let (kind, o) = run(big, prec, round, limbs::take_spare());
+                // A result of one or two limbs is kept in the number: no vector to lend it.
+                let out = if prec <= 128 {
+                    Vec::new()
+                } else {
+                    limbs::take_spare()
+                };
+                let (kind, o) = run(big, prec, round, out);
                 let old = core::mem::replace(&mut self.kind, kind);
                 self.prec = prec;
-                if let Kind::Finite { mant, .. } = old {
-                    limbs::give_spare(mant);
+                if let Kind::Finite {
+                    mant: Mant::Heap(v),
+                    ..
+                } = old
+                {
+                    limbs::give_spare(v);
                 }
                 return o;
             }
@@ -833,6 +1116,214 @@ impl BigFloat {
         }
     }
 
+    /// `self op= other` at the precision of `self` by the kernels of the `set_` forms, `self` read
+    /// from a copy: a mantissa of one or two limbs is copied with the number (no allocation),
+    /// one of three to sixteen limbs onto the stack for the same-length sums and the short
+    /// products. `None` for the general path, `self` then unchanged.
+    #[inline(always)]
+    fn assign_fast(&mut self, op: Assign, other: &BigFloat, round: Round) -> Option<Ordering> {
+        let prec = self.prec;
+        match &mut self.kind {
+            Kind::Finite {
+                negative,
+                exp,
+                mant: m @ (Mant::One(_) | Mant::Two(_)),
+            } => {
+                // The operand `self`, its fields copied (no call to clone a vector), and the
+                // kernels in words writing into its limbs.
+                let a = BigFloat {
+                    prec,
+                    kind: Kind::Finite {
+                        negative: *negative,
+                        exp: *exp,
+                        mant: match m {
+                            Mant::One(v) => Mant::One(*v),
+                            Mant::Two(v) => Mant::Two(*v),
+                            Mant::Heap(_) => unreachable!("one or two limbs"),
+                        },
+                    },
+                };
+                let r = match op {
+                    Assign::Add => word_add(&a, other, false, prec, round, m),
+                    Assign::Sub => word_add(&a, other, true, prec, round, m),
+                    Assign::Mul => word_mul_div(&a, other, false, prec, round, m),
+                    Assign::Div => word_mul_div(&a, other, true, prec, round, m),
+                    Assign::Sqrt => None,
+                };
+                if let Some((n, e, o)) = r {
+                    *negative = n;
+                    *exp = e;
+                    return Some(o);
+                }
+                Some(match op {
+                    Assign::Add => self.set_add(&a, other, round),
+                    Assign::Sub => self.set_sub(&a, other, round),
+                    Assign::Mul => self.set_mul(&a, other, round),
+                    Assign::Div => self.set_div(&a, other, round),
+                    Assign::Sqrt => self.set_sqrt(&a, round),
+                })
+            }
+            Kind::Finite {
+                mant: Mant::Heap(v),
+                ..
+            } if matches!(op, Assign::Add | Assign::Sub) && short_of(v.len(), other) => {
+                self.assign_short(op, other, round)
+            }
+            Kind::Finite {
+                mant: Mant::Heap(v),
+                ..
+            } if v.len() <= ASSIGN_STACK && !matches!(op, Assign::Sqrt) => {
+                self.assign_long(op, other, round)
+            }
+            _ => None,
+        }
+    }
+
+    /// `self ± other` for a short `other` (see [`short_of`]): added into the limbs of `self` in
+    /// place when its exponent is the smaller; `None` otherwise, `self` unchanged.
+    #[inline(never)]
+    fn assign_short(&mut self, op: Assign, other: &BigFloat, round: Round) -> Option<Ordering> {
+        let prec = self.prec;
+        let (
+            Kind::Finite {
+                negative,
+                exp,
+                mant,
+            },
+            Kind::Finite {
+                negative: nb,
+                exp: eb,
+                mant: mb,
+            },
+        ) = (&mut self.kind, &other.kind)
+        else {
+            return None;
+        };
+        if *exp <= *eb {
+            return None;
+        }
+        let nb = *nb != matches!(op, Assign::Sub);
+        let put = same::add_short_in_place(
+            *negative,
+            mant,
+            i128::from(*exp),
+            nb,
+            mb,
+            i128::from(*eb),
+            prec,
+            round,
+        );
+        match put {
+            Put::Finite(n, e, o) => {
+                *negative = n;
+                *exp = e;
+                Some(o)
+            }
+            Put::Other(kind, o) => {
+                self.kind = kind;
+                Some(o)
+            }
+        }
+    }
+
+    /// [`assign_fast`](Self::assign_fast) for a mantissa of three to [`ASSIGN_STACK`] limbs: a
+    /// copy of it on the stack is the first operand of [`same::add`], [`small::add_short`] or
+    /// [`small::mul_short`], which write into the mantissa itself.
+    #[inline(never)]
+    fn assign_long(&mut self, op: Assign, other: &BigFloat, round: Round) -> Option<Ordering> {
+        let prec = self.prec;
+        let Kind::Finite {
+            negative: nb,
+            exp: eb,
+            mant: mb,
+        } = &other.kind
+        else {
+            return None;
+        };
+        let put = {
+            let Kind::Finite {
+                negative,
+                exp,
+                mant,
+            } = &mut self.kind
+            else {
+                return None;
+            };
+            let n = mant.len();
+            let mut t = [0u64; ASSIGN_STACK];
+            t[..n].copy_from_slice(mant);
+            let (na, ea, ma) = (*negative, *exp, &t[..n]);
+            let put = match op {
+                Assign::Add | Assign::Sub => {
+                    let nb = *nb != matches!(op, Assign::Sub);
+                    if mb.len() == n {
+                        Some(same::add(
+                            na,
+                            ma,
+                            i128::from(ea),
+                            nb,
+                            mb,
+                            i128::from(*eb),
+                            prec,
+                            round,
+                            mant,
+                        ))
+                    } else if n <= 4 && mb.len() <= 4 {
+                        small::add_short(na, ma, ea, nb, mb, *eb, prec, round, mant)
+                            .map(|(n, e, o)| Put::Finite(n, e, o))
+                    } else if mb.len() < n {
+                        same::add_long_short(
+                            na,
+                            ma,
+                            i128::from(ea),
+                            nb,
+                            mb,
+                            i128::from(*eb),
+                            prec,
+                            round,
+                            mant,
+                        )
+                    } else {
+                        None
+                    }
+                }
+                Assign::Mul if n <= 4 && mb.len() <= 4 => {
+                    small::mul_short(na != *nb, ma, ea, mb, *eb, prec, round, mant)
+                        .map(|(n, e, o)| Put::Finite(n, e, o))
+                }
+                Assign::Div => same::div(
+                    na != *nb,
+                    ma,
+                    i128::from(ea),
+                    mb,
+                    i128::from(*eb),
+                    prec,
+                    round,
+                    mant,
+                ),
+                _ => None,
+            };
+            match put {
+                Some(Put::Finite(n, e, o)) => {
+                    *negative = n;
+                    *exp = e;
+                    return Some(o);
+                }
+                None => {
+                    // A kernel that gives up may have written some limbs: put `self` back.
+                    mant.copy_from_slice(&t[..n]);
+                    return None;
+                }
+                Some(put) => put,
+            }
+        };
+        let Put::Other(kind, o) = put else {
+            unreachable!("handled above")
+        };
+        self.kind = kind;
+        Some(o)
+    }
+
     /// Sets `self`, of its precision, to the result `r` rounded in registers: into its mantissa's
     /// limbs when it has as many, else as [`seal`] makes it.
     #[inline(always)]
@@ -850,11 +1341,14 @@ impl BigFloat {
         {
             *negative = r.negative;
             *exp = r.exp as i64;
-            if n == 1 {
-                mant[0] = (r.m >> 64) as u64;
-            } else {
-                mant[0] = r.m as u64;
-                mant[1] = (r.m >> 64) as u64;
+            match mant {
+                Mant::One(a) => *a = (r.m >> 64) as u64,
+                Mant::Two(a) => *a = [r.m as u64, (r.m >> 64) as u64],
+                Mant::Heap(v) if n == 1 => v[0] = (r.m >> 64) as u64,
+                Mant::Heap(v) => {
+                    v[0] = r.m as u64;
+                    v[1] = (r.m >> 64) as u64;
+                }
             }
             return if r.negative {
                 r.magnitude.reverse()
@@ -878,6 +1372,37 @@ impl BigFloat {
         round: Round,
     ) -> Option<Ordering> {
         let prec = self.prec;
+        // One limb each, the commonest shape: the kernel straight on the fields.
+        if let (
+            Kind::Finite {
+                negative,
+                exp,
+                mant: Mant::One(out),
+            },
+            Kind::Finite {
+                negative: na,
+                exp: ea,
+                mant: Mant::One(x),
+            },
+            Kind::Finite {
+                negative: nb,
+                exp: eb,
+                mant: Mant::One(y),
+            },
+        ) = (&mut self.kind, &a.kind, &b.kind)
+        {
+            let (na, nb) = (*na, *nb != negate);
+            let sh = (64 - prec) as u32;
+            let r = if na == nb {
+                small::add_fit(na, *ea, *x, *eb, *y, sh, round)
+            } else {
+                small::sub_fit(na, *ea, *x, *eb, *y, sh, round)
+            }?;
+            *out = r.m;
+            *negative = r.negative;
+            *exp = r.exp;
+            return Some(r.o);
+        }
         let Kind::Finite {
             negative,
             exp,
@@ -903,6 +1428,37 @@ impl BigFloat {
         round: Round,
     ) -> Option<Ordering> {
         let prec = self.prec;
+        // One limb each, the commonest shape: the kernel straight on the fields.
+        if let (
+            Kind::Finite {
+                negative,
+                exp,
+                mant: Mant::One(out),
+            },
+            Kind::Finite {
+                negative: na,
+                exp: ea,
+                mant: Mant::One(x),
+            },
+            Kind::Finite {
+                negative: nb,
+                exp: eb,
+                mant: Mant::One(y),
+            },
+        ) = (&mut self.kind, &a.kind, &b.kind)
+        {
+            let sign = *na != *nb;
+            let sh = (64 - prec) as u32;
+            let r = if div {
+                small::div_fit1(sign, *ea, *x, *eb, *y, sh, round)
+            } else {
+                small::mul_fit(sign, *ea, *x, *eb, *y, sh, round)
+            }?;
+            *out = r.m;
+            *negative = r.negative;
+            *exp = r.exp;
+            return Some(r.o);
+        }
         let Kind::Finite {
             negative,
             exp,
@@ -1031,7 +1587,7 @@ impl BigFloat {
     ) -> (BigFloat, Ordering) {
         let prec = BigFloat::check_prec(prec);
         if let Some((negative, x, y, z)) = fma_ops(self, a, b) {
-            let mut mant = vec![0; prec.div_ceil(64) as usize];
+            let mut mant = Mant::zeroed(prec.div_ceil(64) as usize);
             if let Some((negative, exp, o)) = fma_fit(negative, x, y, z, prec, round, &mut mant) {
                 let kind = Kind::Finite {
                     negative,
@@ -1056,6 +1612,21 @@ impl BigFloat {
     #[track_caller]
     pub fn sqrt_round(&self, prec: u64, round: Round) -> (BigFloat, Ordering) {
         let prec = BigFloat::check_prec(prec);
+        if prec <= 128
+            && let Some(r) = sqrt_word(self, prec, round)
+        {
+            let mant = if prec <= 64 {
+                Mant::One((r.m >> 64) as u64)
+            } else {
+                Mant::Two([r.m as u64, (r.m >> 64) as u64])
+            };
+            let kind = Kind::Finite {
+                negative: false,
+                exp: r.exp as i64,
+                mant,
+            };
+            return (BigFloat { prec, kind }, r.magnitude);
+        }
         result(sqrt_kind(self, prec, round), prec, round)
     }
 
@@ -1239,7 +1810,26 @@ impl BigFloat {
     /// Sets `self` to the square root of `a` rounded to the precision of `self` in the mode
     /// `round`, reusing its vector, and returns the direction of the rounding.
     pub fn set_sqrt(&mut self, a: &BigFloat, round: Round) -> Ordering {
-        let plan = sqrt_kind(a, self.prec, round);
+        let prec = self.prec;
+        if prec <= 128
+            && let Some(r) = sqrt_word(a, prec, round)
+            && let Kind::Finite {
+                negative,
+                exp,
+                mant,
+            } = &mut self.kind
+        {
+            // The root's exponent, about half the operand's, is in the range.
+            *negative = false;
+            *exp = r.exp as i64;
+            match mant {
+                Mant::One(m) => *m = (r.m >> 64) as u64,
+                Mant::Two(m) => *m = [r.m as u64, (r.m >> 64) as u64],
+                Mant::Heap(_) => unreachable!("a mantissa of at most 128 bits"),
+            }
+            return r.magnitude;
+        }
+        let plan = sqrt_kind(a, prec, round);
         self.set_plan(plan, round)
     }
 

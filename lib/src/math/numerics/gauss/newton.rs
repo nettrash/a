@@ -118,10 +118,21 @@ impl Recurrence {
     }
 
     /// Golub and Welsch's first guesses: the eigenvalues of the symmetric tridiagonal Jacobi
-    /// matrix, ascending, by the Hermitian eigensolver of `a::math::matrix`.
+    /// matrix, ascending, by the tridiagonal QL and QR algorithm of `a::math::matrix` (LAPACK's
+    /// `dsterf`) in `O(n²)`, the matrix being tridiagonal already; by its Hermitian eigensolver,
+    /// which reduces a dense copy to tridiagonal form first, should that not converge.
     pub(super) fn eigenvalues(&self) -> Vec<f64> {
         use crate::math::matrix::Matrix;
         let n = self.n;
+        let mut d: Vec<f64> = if self.a.is_empty() {
+            vec![0.0; n]
+        } else {
+            self.a.iter().map(|a| a.hi).collect()
+        };
+        let mut e: Vec<f64> = (1..n).map(|k| self.b[k].hi).collect();
+        if crate::math::matrix::tridiagonal_eigenvalues(&mut d, &mut e) {
+            return d;
+        }
         let mut j = Matrix::<f64>::zeros(n, n);
         for k in 0..n {
             if !self.a.is_empty() {

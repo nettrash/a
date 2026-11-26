@@ -387,6 +387,10 @@ impl<T: Scalar> Factor<T> {
     /// own columns lie together in `y`, so the dense kernels work on them where they are; the
     /// rows below are gathered into working memory and scattered back.
     fn solve_in_place(&self, y: &mut [T], columns: usize) {
+        if columns == 1 {
+            self.solve_one(y);
+            return;
+        }
         let s = &self.symbolic;
         let n = s.n;
         let count = s.supernodes();
@@ -482,6 +486,143 @@ impl<T: Scalar> Factor<T> {
                 &mut y[first..],
                 n,
             );
+        }
+    }
+}
+
+/// The widest supernode whose block on the diagonal [`Factor::solve_one`] solves by its own
+/// loops; a wider one goes to `trsm`, whose packed kernels divide less. 4 is `trsm`'s own limit
+/// for plain substitution.
+// Measured on an Apple M4 Max (`SparseCholesky::solve_vec` on 2-D and 3-D Laplacians, an
+// elasticity mesh, a random positive definite matrix, an arrow and a tridiagonal matrix of 10⁶,
+// `SparseLdl::solve_vec` on a Laplacian, an elasticity mesh and a saddle point; sweep 1 to 32):
+// flat from 1 to 8 (within 2 %); 16 and 32 cost the tridiagonal matrix 13 %.
+const NARROW: usize = 4;
+
+impl<T: Scalar> Factor<T> {
+    /// [`solve_in_place`](Self::solve_in_place) for one right-hand side, by loops over the blocks
+    /// instead of `gemm` calls, which cost more than their arithmetic for the narrow supernodes of
+    /// thin patterns: the rows below by one product with the panel, gathered and scattered once,
+    /// and a block on the diagonal of a narrow supernode solved column by column.
+    fn solve_one(&self, y: &mut [T]) {
+        let s = &self.symbolic;
+        let count = s.supernodes();
+        let tallest = (0..count).map(|sn| self.rows(sn).len()).max().unwrap_or(0);
+        let mut work = vec![T::zero(); tallest];
+        // `L·z = y`.
+        for sn in 0..count {
+            let (first, width) = (s.first[sn], s.first[sn + 1] - s.first[sn]);
+            let (block, panel, rows) = (self.block(sn), self.panel(sn), self.rows(sn));
+            let height = rows.len();
+            let z = &mut y[first..first + width];
+            if width > NARROW {
+                trsm(
+                    Side::Left,
+                    Uplo::Lower,
+                    Op::N,
+                    self.unit,
+                    width,
+                    1,
+                    block,
+                    width,
+                    z,
+                    width,
+                );
+            } else {
+                for c in 0..width {
+                    let column = &block[c * width..(c + 1) * width];
+                    let (head, below) = z.split_at_mut(c + 1);
+                    if !self.unit {
+                        head[c] /= column[c];
+                    }
+                    let zc = head[c];
+                    for (z, &l) in below.iter_mut().zip(&column[c + 1..]) {
+                        *z = z.mul_sub(l, zc);
+                    }
+                }
+            }
+            if height > 0 {
+                let product = &mut work[..height];
+                product.fill(T::zero());
+                for (c, column) in panel.chunks_exact(height).enumerate() {
+                    let zc = y[first + c];
+                    for (p, &l) in product.iter_mut().zip(column) {
+                        *p += l * zc;
+                    }
+                }
+                for (&i, &p) in rows.iter().zip(product.iter()) {
+                    y[i] -= p;
+                }
+            }
+        }
+        if self.unit {
+            for (y, &pivot) in y.iter_mut().zip(&self.pivots) {
+                *y = over(*y, pivot);
+            }
+        }
+        // `Lᴴ·x = z`.
+        for sn in (0..count).rev() {
+            let (first, width) = (s.first[sn], s.first[sn + 1] - s.first[sn]);
+            let (block, panel, rows) = (self.block(sn), self.panel(sn), self.rows(sn));
+            let height = rows.len();
+            if height > 0 {
+                let solved = &mut work[..height];
+                for (&i, x) in rows.iter().zip(solved.iter_mut()) {
+                    *x = y[i];
+                }
+                for (c, column) in panel.chunks_exact(height).enumerate() {
+                    let mut lanes = [T::zero(); 4];
+                    let (lc, lc_rest) = column.as_chunks::<4>();
+                    let (xc, xc_rest) = solved.as_chunks::<4>();
+                    for (l4, x4) in lc.iter().zip(xc.iter()) {
+                        for q in 0..4 {
+                            lanes[q] += l4[q].conj() * x4[q];
+                        }
+                    }
+                    for (&l, &x) in lc_rest.iter().zip(xc_rest) {
+                        lanes[0] += l.conj() * x;
+                    }
+                    y[first + c] -= (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+                }
+            }
+            let z = &mut y[first..first + width];
+            if width > NARROW {
+                trsm(
+                    Side::Left,
+                    Uplo::Lower,
+                    Op::C,
+                    self.unit,
+                    width,
+                    1,
+                    block,
+                    width,
+                    z,
+                    width,
+                );
+                continue;
+            }
+            for c in (0..width).rev() {
+                let column = &block[c * width..(c + 1) * width];
+                let (head, below) = z.split_at_mut(c + 1);
+                // The sum in four running sums, the element `r` to the sum `r mod 4`.
+                let mut lanes = [T::zero(); 4];
+                let (lc, lc_rest) = column[c + 1..].as_chunks::<4>();
+                let (zc, zc_rest) = below.as_chunks::<4>();
+                for (l4, z4) in lc.iter().zip(zc.iter()) {
+                    for q in 0..4 {
+                        lanes[q] += l4[q].conj() * z4[q];
+                    }
+                }
+                for (&l, &x) in lc_rest.iter().zip(zc_rest) {
+                    lanes[0] += l.conj() * x;
+                }
+                let sum = head[c] - ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]));
+                head[c] = if self.unit {
+                    sum
+                } else {
+                    sum / column[c].conj()
+                };
+            }
         }
     }
 }

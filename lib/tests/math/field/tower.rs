@@ -1012,3 +1012,360 @@ fn square_roots_are_exact_in_fp2_for_other_non_residues() {
         assert_eq!(root.square(), x, "{label}");
     }
 }
+
+/// An element of `F_p²` as the values of its coefficients, `c₀ + c₁u`.
+type R2 = [Number; 2];
+/// An element of `F_p⁶`, `c₀ + c₁v + c₂v²`.
+type R6 = [R2; 3];
+/// An element of `F_p¹²`, `c₀ + c₁w`.
+type R12 = [R6; 2];
+
+/// The arithmetic of a tower on the values of the coefficients, by `Number`'s products and
+/// remainders and the schoolbook formulas, independent of the field's kernels: `u² = β`,
+/// `v³ = ξ`, `w² = v`.
+struct Ref {
+    p: Number,
+    beta: Number,
+    xi: R2,
+}
+
+impl Ref {
+    fn of(t: &Tower<'_>) -> Ref {
+        Ref {
+            p: t.base().modulus().clone(),
+            beta: t.beta().value(),
+            xi: r2(&t.xi()),
+        }
+    }
+
+    fn m(&self, x: Number) -> Number {
+        x.rem_euclid(&self.p)
+    }
+
+    fn add2(&self, a: &R2, b: &R2) -> R2 {
+        [self.m(&a[0] + &b[0]), self.m(&a[1] + &b[1])]
+    }
+
+    fn sub2(&self, a: &R2, b: &R2) -> R2 {
+        [self.m(&a[0] - &b[0]), self.m(&a[1] - &b[1])]
+    }
+
+    fn mul2(&self, a: &R2, b: &R2) -> R2 {
+        [
+            self.m(&(&a[0] * &b[0]) + &(&self.beta * &(&a[1] * &b[1]))),
+            self.m(&(&a[0] * &b[1]) + &(&a[1] * &b[0])),
+        ]
+    }
+
+    fn add6(&self, a: &R6, b: &R6) -> R6 {
+        core::array::from_fn(|i| self.add2(&a[i], &b[i]))
+    }
+
+    fn sub6(&self, a: &R6, b: &R6) -> R6 {
+        core::array::from_fn(|i| self.sub2(&a[i], &b[i]))
+    }
+
+    fn mul6(&self, a: &R6, b: &R6) -> R6 {
+        let z = || [Number::default(), Number::default()];
+        let mut c: [R2; 5] = core::array::from_fn(|_| z());
+        for i in 0..3 {
+            for j in 0..3 {
+                c[i + j] = self.add2(&c[i + j], &self.mul2(&a[i], &b[j]));
+            }
+        }
+        // v³ = ξ, v⁴ = ξv.
+        [
+            self.add2(&c[0], &self.mul2(&c[3], &self.xi)),
+            self.add2(&c[1], &self.mul2(&c[4], &self.xi)),
+            c[2].clone(),
+        ]
+    }
+
+    /// `a·v`.
+    fn mul_v(&self, a: &R6) -> R6 {
+        [self.mul2(&a[2], &self.xi), a[0].clone(), a[1].clone()]
+    }
+
+    fn add12(&self, a: &R12, b: &R12) -> R12 {
+        [self.add6(&a[0], &b[0]), self.add6(&a[1], &b[1])]
+    }
+
+    fn mul12(&self, a: &R12, b: &R12) -> R12 {
+        [
+            self.add6(
+                &self.mul6(&a[0], &b[0]),
+                &self.mul_v(&self.mul6(&a[1], &b[1])),
+            ),
+            self.add6(&self.mul6(&a[0], &b[1]), &self.mul6(&a[1], &b[0])),
+        ]
+    }
+
+    fn neg2(&self, a: &R2) -> R2 {
+        self.sub2(&[Number::default(), Number::default()], a)
+    }
+
+    fn neg6(&self, a: &R6) -> R6 {
+        core::array::from_fn(|i| self.neg2(&a[i]))
+    }
+
+    fn neg12(&self, a: &R12) -> R12 {
+        [self.neg6(&a[0]), self.neg6(&a[1])]
+    }
+}
+
+fn r2(x: &Fp2<'_>) -> R2 {
+    [x.c0().value(), x.c1().value()]
+}
+
+fn r6(x: &Fp6<'_>) -> R6 {
+    [r2(x.c0()), r2(x.c1()), r2(x.c2())]
+}
+
+fn r12(x: &Fp12<'_>) -> R12 {
+    [r6(x.c0()), r6(x.c1())]
+}
+
+#[test]
+fn the_in_place_operations_of_the_towers_equal_the_others() {
+    let n = |x: u64| Number::from(x);
+    let small = PrimeField::new(&n(103));
+    let t103 = Tower::new(&small, &Number::from(-1), (&n(2), &n(1)));
+    for t in [Tower::bn254(), Tower::bls12_381(), &t103] {
+        // Each result against the operators and against the formulas on numbers.
+        let rf = Ref::of(t);
+        for s in 1..if cfg!(miri) { 2u64 } else { 20 } {
+            let e2 = |i: u64| Fp2::from_numbers(t, &n(s * 7919 + i), &n(s * 104729 + 3 * i));
+            let a2 = e2(1);
+            let mut b2 = a2.clone();
+            b2.square_in_place();
+            assert_eq!(b2, a2.square());
+            assert_eq!(r2(&b2), rf.mul2(&r2(&a2), &r2(&a2)));
+            let mut c2 = a2.clone();
+            c2.conjugate_in_place();
+            assert_eq!(c2, a2.conjugate());
+            assert_eq!(r2(&c2), [a2.c0().value(), rf.m(-a2.c1().value())]);
+            let (mut n2, mut d2) = (a2.clone(), a2.clone());
+            n2.neg_in_place();
+            d2.double_in_place();
+            assert_eq!(
+                (r2(&n2), r2(&d2)),
+                (rf.neg2(&r2(&a2)), rf.add2(&r2(&a2), &r2(&a2)))
+            );
+            assert_eq!((n2, d2), (-&a2, &a2 + &a2));
+            let a6 = Fp6::new(e2(2), e2(3), e2(4));
+            let mut b6 = a6.clone();
+            b6.square_in_place();
+            assert_eq!(b6, a6.square());
+            assert_eq!(r6(&b6), rf.mul6(&r6(&a6), &r6(&a6)));
+            let (mut n6, mut d6) = (a6.clone(), a6.clone());
+            n6.neg_in_place();
+            d6.double_in_place();
+            assert_eq!(
+                (r6(&n6), r6(&d6)),
+                (rf.neg6(&r6(&a6)), rf.add6(&r6(&a6), &r6(&a6)))
+            );
+            assert_eq!((n6, d6), (-&a6, &a6 + &a6));
+            let a12 = Fp12::new(a6.clone(), Fp6::new(e2(5), e2(6), e2(7)));
+            let ra12 = r12(&a12);
+            let mut b12 = a12.clone();
+            b12.square_in_place();
+            assert_eq!(b12, a12.square());
+            assert_eq!(r12(&b12), rf.mul12(&ra12, &ra12));
+            let mut c12 = a12.clone();
+            c12.conjugate_in_place();
+            assert_eq!(c12, a12.conjugate());
+            assert_eq!(r12(&c12), [ra12[0].clone(), rf.neg6(&ra12[1])]);
+            let (mut n12, mut d12) = (a12.clone(), a12.clone());
+            n12.neg_in_place();
+            d12.double_in_place();
+            assert_eq!(
+                (r12(&n12), r12(&d12)),
+                (rf.neg12(&ra12), rf.add12(&ra12, &ra12))
+            );
+            assert_eq!((n12, d12), (-&a12, &a12 + &a12));
+            // The assignments in place against the operators and the formulas, on each floor.
+            let b12 = Fp12::new(Fp6::new(e2(8), e2(9), e2(10)), a6.clone());
+            let rb12 = r12(&b12);
+            let mut s12 = a12.clone();
+            s12 += &b12;
+            assert_eq!(s12, &a12 + &b12);
+            assert_eq!(r12(&s12), rf.add12(&ra12, &rb12));
+            s12 -= &a12;
+            assert_eq!(s12, b12);
+            s12 *= &a12;
+            assert_eq!(s12, &b12 * &a12);
+            assert_eq!(r12(&s12), rf.mul12(&rb12, &ra12));
+            let mut s6 = a6.clone();
+            s6 *= &b12.c1().clone();
+            s6 += &a6;
+            s6 -= &b12.c0().clone();
+            assert_eq!(s6, &(&(&a6 * b12.c1()) + &a6) - b12.c0());
+            let ra6 = r6(&a6);
+            let want6 = rf.sub6(&rf.add6(&rf.mul6(&ra6, &rb12[1]), &ra6), &rb12[0]);
+            assert_eq!(r6(&s6), want6);
+            let mut s2 = a2.clone();
+            s2 *= &e2(11);
+            s2 += &a2;
+            s2 -= &e2(12);
+            assert_eq!(s2, &(&(&a2 * &e2(11)) + &a2) - &e2(12));
+            let ra2 = r2(&a2);
+            let want2 = rf.sub2(&rf.add2(&rf.mul2(&ra2, &r2(&e2(11))), &ra2), &r2(&e2(12)));
+            assert_eq!(r2(&s2), want2);
+            let g = &a12.conjugate() / &a12;
+            let g = &g.frobenius(2) * &g;
+            let mut h = g.clone();
+            h.cyclotomic_square_in_place();
+            assert_eq!(h, g.cyclotomic_square());
+            assert_eq!(h, g.square());
+            assert_eq!(r12(&h), rf.mul12(&r12(&g), &r12(&g)));
+        }
+    }
+}
+
+/// Montgomery primes on both sides of the bound of the lazy products of `F_p²`
+/// (`Mont::mul_complex` and `sqr_complex`, two spare bits: `4p < 2^(64n)`) for four and six
+/// limbs, and just below the bound of one spare bit: `(p, limbs, two spare bits, ξ₀)`. Each is
+/// `7 (mod 12)`, so that `β = −1` and a tower exists, and `2^k − p ≥ 2⁶³`, so that the field
+/// takes Montgomery's form and not `2^k − c`'s (as the primes just below `2²⁵⁴` and `2³⁸²` that
+/// come first do); `ξ = ξ₀ + u`, the first `ξ₀` that makes `ξ` neither a square nor a cube
+/// (sympy). The first two of each size reach the lazy kernels on aarch64; the others take the
+/// three Montgomery products, which a bound of the lazy kernels set one bit too loose would give
+/// to them.
+const LAZY_BOUND: [(&str, usize, bool, u64); 8] = [
+    (
+        "3fffffffffffffffffffffffffffffffffffffffffffffff7ffffffffffffa17",
+        4,
+        true,
+        2,
+    ),
+    (
+        "3fffffffffffffffffffffffffffffffffffffcffffffffffffffffffffffcf7",
+        4,
+        true,
+        8,
+    ),
+    (
+        "40000000000000000000000000000000000000000000000080000000000001db",
+        4,
+        false,
+        1,
+    ),
+    (
+        "7fffffffffffffffffffffffffffffffffffffffffffffff7ffffffffffffc5f",
+        4,
+        false,
+        5,
+    ),
+    (
+        "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7ffffffffffffdd7",
+        6,
+        true,
+        2,
+    ),
+    (
+        "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffcfffffffffffffffffffffff1f",
+        6,
+        true,
+        4,
+    ),
+    (
+        "400000000000000000000000000000000000000000000000000000000000000000000000000000008000000000000007",
+        6,
+        false,
+        10,
+    ),
+    (
+        "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7ffffffffffff893",
+        6,
+        false,
+        1,
+    ),
+];
+
+#[test]
+fn fp2_products_at_the_bounds_of_the_lazy_reduction_agree_with_numbers() {
+    let primes = if cfg!(miri) {
+        &LAZY_BOUND[..1]
+    } else {
+        &LAZY_BOUND[..]
+    };
+    for &(hex, limbs, spare2, xi0) in primes {
+        let p = Number::from_str_radix(hex, 16, ByteOrder::BigEndian).unwrap();
+        assert!(p.is_probable_prime(), "{hex}");
+        assert_eq!(
+            (&p >> (64 * limbs - 2)).is_zero(),
+            spare2,
+            "{hex}: two spare bits"
+        );
+        let f = PrimeField::new(&p);
+        assert_eq!(f.form(), format!("Montgomery, {limbs} limbs"), "{hex}");
+        let t = Tower::new(
+            &f,
+            &Number::from(-1),
+            (&Number::from(xi0), &Number::from(1u8)),
+        );
+        let rf = Ref::of(&t);
+        // The coefficients at the edges of the lazy bounds (the sums a₀ + a₁ near 2p), and random.
+        let one = Number::from(1u8);
+        let half = (&p - &one) >> 1usize;
+        let mut special = vec![
+            Number::default(),
+            one.clone(),
+            Number::from(2u8),
+            &p - &one,
+            &p - &Number::from(2u8),
+            half.clone(),
+            &half + &one,
+            &p - &(Number::from(1u8) << 64usize),
+        ];
+        if cfg!(miri) {
+            special.truncate(3);
+        }
+        let mut r = Rng(limbs as u64 * 1_000_003 + xi0);
+        let mut random = || r.number(limbs).rem_euclid(&p);
+        let mut elements: Vec<Fp2<'_>> = Vec::new();
+        let specials = special.len() * special.len();
+        for a0 in &special {
+            for a1 in &special {
+                elements.push(Fp2::from_numbers(&t, a0, a1));
+            }
+        }
+        for _ in 0..if cfg!(miri) { 2 } else { 40 } {
+            let (a0, a1) = (random(), random());
+            elements.push(Fp2::from_numbers(&t, &a0, &a1));
+            elements.push(Fp2::from_numbers(&t, &a0, &(&p - &one)));
+            elements.push(Fp2::from_numbers(&t, &(&p - &one), &a1));
+        }
+        for (i, a) in elements.iter().enumerate() {
+            let ra = r2(a);
+            let mut sq = a.clone();
+            sq.square_in_place();
+            assert_eq!(r2(&a.square()), rf.mul2(&ra, &ra), "{hex}: ({a})²");
+            assert_eq!(r2(&sq), rf.mul2(&ra, &ra), "{hex}: ({a})² in place");
+            // Each element by every special one and a third of the random ones.
+            let others = elements.iter().enumerate();
+            for (_, b) in others.filter(|(j, _)| *j < specials || j % 3 == i % 3) {
+                let rb = r2(b);
+                let want = rf.mul2(&ra, &rb);
+                assert_eq!(r2(&(a * b)), want, "{hex}: ({a})·({b})");
+                let mut c = a.clone();
+                c *= b;
+                assert_eq!(r2(&c), want, "{hex}: ({a})·({b}) in place");
+            }
+        }
+        // The products of F_p⁶ and F_p¹², made of those of F_p².
+        let n = elements.len();
+        for i in 0..if cfg!(miri) { 1 } else { 6 } {
+            let e = |j: usize| elements[(i * 37 + j * 11) % n].clone();
+            let a = Fp12::new(Fp6::new(e(0), e(1), e(2)), Fp6::new(e(3), e(4), e(5)));
+            let b = Fp12::new(Fp6::new(e(6), e(7), e(8)), Fp6::new(e(9), e(10), e(11)));
+            assert_eq!(r12(&(&a * &b)), rf.mul12(&r12(&a), &r12(&b)), "{hex}");
+            assert_eq!(r12(&a.square()), rf.mul12(&r12(&a), &r12(&a)), "{hex}");
+            assert_eq!(
+                r6(&(a.c0() * b.c1())),
+                rf.mul6(&r6(a.c0()), &r6(b.c1())),
+                "{hex}"
+            );
+        }
+    }
+}

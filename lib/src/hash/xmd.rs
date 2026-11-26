@@ -86,15 +86,8 @@ pub fn expand_message_xmd<H: Digest>(msg: &[u8], dst: &[u8], len_in_bytes: usize
     let dst_len = [dst.len() as u8];
     let lib_str = (len_in_bytes as u16).to_be_bytes();
 
-    let mut h = H::new();
-    // Z_pad, a block of zeros. Its state could be computed once per hash; that is for a later pass.
-    let zeros = [0u8; 128];
-    let mut pad = H::BLOCK_BYTES;
-    while pad > 0 {
-        let n = pad.min(zeros.len());
-        h.update(&zeros[..n]);
-        pad -= n;
-    }
+    // Z_pad, a block of zeros, whose state the hashers of this module know in advance.
+    let mut h = H::after_zero_block();
     h.update(msg);
     h.update(&lib_str);
     h.update(&[0]);
@@ -103,22 +96,22 @@ pub fn expand_message_xmd<H: Digest>(msg: &[u8], dst: &[u8], len_in_bytes: usize
     let b0 = h.finalize();
 
     let mut out = Vec::with_capacity(ell * b);
-    let mut chained = b0;
+    // Each b_i hashes one contiguous message: the chained block, i and DST'.
+    let mut input = Vec::with_capacity(b + 2 + dst.len());
+    input.extend_from_slice(b0.as_ref());
+    input.push(1);
+    input.extend_from_slice(dst);
+    input.extend_from_slice(&dst_len);
     for i in 1..=ell {
         if i > 1 {
-            // strxor(b_0, b_(i - 1)), in place of the previous block.
-            for (c, z) in chained.as_mut().iter_mut().zip(b0.as_ref()) {
-                *c ^= z;
+            // strxor(b_0, b_(i - 1)), in place of the previous block; `i` is at most 255.
+            let prev = &out[out.len() - b..];
+            for ((c, z), y) in input[..b].iter_mut().zip(b0.as_ref()).zip(prev) {
+                *c = z ^ y;
             }
+            input[b] = i as u8;
         }
-        let mut h = H::new();
-        h.update(chained.as_ref());
-        // `i` is at most 255 by the check above.
-        h.update(&[i as u8]);
-        h.update(dst);
-        h.update(&dst_len);
-        chained = h.finalize();
-        out.extend_from_slice(chained.as_ref());
+        out.extend_from_slice(H::digest(&input).as_ref());
     }
     out.truncate(len_in_bytes);
     out

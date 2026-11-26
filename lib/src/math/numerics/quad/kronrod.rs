@@ -118,7 +118,11 @@ pub(super) enum Map {
 /// The integrand in the variable of the rule: `f(x(t)) · x′(t)`. A point beyond the largest
 /// finite value of the integrand's type is not evaluated, and counts as 0 there: its share of an
 /// integral that exists is below anything the type can hold.
-fn mapped<T: Real>(f: &mut Integrand<'_, T>, map: Map, t: f64) -> f64 {
+fn mapped<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
+    map: Map,
+    t: f64,
+) -> f64 {
     let far = |x: f64| x.abs() > T::MAX.to_f64();
     match map {
         Map::Identity => f.at(t),
@@ -165,18 +169,77 @@ struct Interval {
     resabs: f64,
     /// `∫|f − mean|`, QUADPACK's `resasc`.
     resasc: f64,
-    /// The samples of the rule, ascending in `t`; the first `count` are the rule's.
-    samples: [Peak; MOST],
+    /// The values of the integrand at the rule's nodes, ascending in `t`; the first `count`.
+    /// The samples ([`Peak`]) are formed from them when the bisection needs them, which an
+    /// interval accepted at once never does.
+    values: [f64; MOST],
     count: usize,
+    centre: f64,
+    half: f64,
+    table: &'static Table,
+}
+
+/// The samples of a rule, ascending in `t`: the nodes and the values the rule saw there, and the
+/// shares of `∫|f|` they carry.
+#[derive(Clone, Copy)]
+struct Samples {
+    values: [f64; MOST],
+    count: usize,
+    centre: f64,
+    half: f64,
+    table: &'static Table,
+}
+
+impl Samples {
+    fn of(rule: &Interval) -> Self {
+        Self {
+            values: rule.values,
+            count: rule.count,
+            centre: rule.centre,
+            half: rule.half,
+            table: rule.table,
+        }
+    }
+
+    /// The point of sample `i`, as the rule formed it.
+    fn t(&self, i: usize) -> f64 {
+        let m = self.count / 2;
+        if i == m {
+            self.centre
+        } else if i < m {
+            self.centre - self.half * self.table[i].0
+        } else {
+            self.centre + self.half * self.table[self.count - 1 - i].0
+        }
+    }
+
+    /// Sample `i`: its point, `|g|` there and its share `w·|g|·h` of the rule's `∫|g|` (half of
+    /// it for the centre, which belongs to both halves of the interval).
+    fn get(&self, i: usize) -> Peak {
+        let m = self.count / 2;
+        let h = self.half.abs();
+        let v = self.values[i].abs();
+        let mass = if i == m {
+            0.5 * self.table[m].1 * v * h
+        } else {
+            let j = if i < m { i } else { self.count - 1 - i };
+            self.table[j].1 * v * h
+        };
+        Peak {
+            t: self.t(i),
+            value: v,
+            mass,
+        }
+    }
 }
 
 /// The pair `table` on `[a, b]`, with QUADPACK's error estimate.
-fn rule<T: Real>(
-    f: &mut Integrand<'_, T>,
+fn rule<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
     map: Map,
     a: f64,
     b: f64,
-    table: &Table,
+    table: &'static Table,
     s: &Settings,
 ) -> Interval {
     let (centre, half) = centre_and_half(a, b);
@@ -188,17 +251,8 @@ fn rule<T: Real>(
     let mut resg = wgc.map_or(0.0, |w| w * fc);
     let mut resabs = resk.abs();
     let h = half.abs();
-    let none = Peak {
-        t: 0.0,
-        value: 0.0,
-        mass: 0.0,
-    };
-    let mut samples = [none; MOST];
-    samples[m] = Peak {
-        t: centre,
-        value: fc.abs(),
-        mass: 0.5 * wkc * fc.abs() * h,
-    };
+    let mut ascending = [0.0f64; MOST];
+    ascending[m] = fc;
     // The values at the nodes, to measure the spread about the mean afterwards. The sums run in
     // the order of the table, which is the order in which they reproduce scipy.integrate.quad's
     // decisions (its evaluation counts) on the battery of the tests.
@@ -208,13 +262,8 @@ fn rule<T: Real>(
         let (t1, t2) = (centre - d, centre + d);
         let (f1, f2) = (mapped(f, map, t1), mapped(f, map, t2));
         values[j] = (f1, f2);
-        let sample = |t: f64, v: f64| Peak {
-            t,
-            value: v.abs(),
-            mass: wk * v.abs() * h,
-        };
-        samples[j] = sample(t1, f1);
-        samples[count - 1 - j] = sample(t2, f2);
+        ascending[j] = f1;
+        ascending[count - 1 - j] = f2;
         let sum = f1 + f2;
         resk += wk * sum;
         if let Some(wg) = wg {
@@ -249,8 +298,11 @@ fn rule<T: Real>(
         error,
         resabs,
         resasc,
-        samples,
+        values: ascending,
         count,
+        centre,
+        half,
+        table,
     }
 }
 
@@ -353,17 +405,37 @@ enum Stop {
 
 /// A sum by Neumaier's compensated summation.
 pub(super) fn neumaier(xs: impl Iterator<Item = f64>) -> f64 {
-    let (mut s, mut c) = (0.0f64, 0.0f64);
+    let mut sum = Neumaier::default();
     for x in xs {
-        let t = s + x;
-        c += if s.abs() >= x.abs() {
-            (s - t) + x
-        } else {
-            (x - t) + s
-        };
-        s = t;
+        sum.add(x);
     }
-    s + c
+    sum.total()
+}
+
+/// Neumaier's compensated sum as it runs: [`neumaier`] one term at a time, so that several sums
+/// over the same list can share one pass over it (and give the same totals to the last bit).
+#[derive(Clone, Copy, Default)]
+pub(super) struct Neumaier {
+    s: f64,
+    c: f64,
+}
+
+impl Neumaier {
+    #[inline]
+    pub(super) fn add(&mut self, x: f64) {
+        let t = self.s + x;
+        self.c += if self.s.abs() >= x.abs() {
+            (self.s - t) + x
+        } else {
+            (x - t) + self.s
+        };
+        self.s = t;
+    }
+
+    #[inline]
+    pub(super) fn total(self) -> f64 {
+        self.s + self.c
+    }
 }
 
 /// QUADPACK's `qpsrt`: after the interval `maxerr` was bisected into itself and the interval
@@ -480,9 +552,8 @@ struct Segment {
     own: f64,
     /// `∫|g|` by the rule, QUADPACK's `resabs`.
     resabs: f64,
-    /// The rule's samples, ascending; the first `count`.
-    samples: [Peak; MOST],
-    count: usize,
+    /// The rule's samples.
+    samples: Samples,
     /// Samples of the intervals this one was bisected from, inside this one, that the nodes of
     /// this one do not account for: the evidence of features between them.
     witnesses: Witnesses,
@@ -499,8 +570,7 @@ impl Segment {
             error: rule.error.max(mass(&witnesses)),
             own: rule.error,
             resabs: rule.resabs,
-            samples: rule.samples,
-            count: rule.count,
+            samples: Samples::of(rule),
             witnesses,
             large,
         }
@@ -509,13 +579,13 @@ impl Segment {
 
 /// Whether the nodes of `half` next to the sample `peak` — the last at or before it and the
 /// first after it — see the integrand at least a tenth ([`EVIDENCE`]) as large as `peak` saw it.
-fn explained(half: &Interval, peak: &Peak) -> bool {
-    let samples = &half.samples[..half.count];
-    let i = samples.partition_point(|s| s.t <= peak.t);
-    [i.checked_sub(1), (i < samples.len()).then_some(i)]
+/// `points` are the points of `half`'s samples, ascending.
+fn explained(half: &Samples, points: &[f64], peak: &Peak) -> bool {
+    let i = points.partition_point(|&t| t <= peak.t);
+    [i.checked_sub(1), (i < points.len()).then_some(i)]
         .into_iter()
         .flatten()
-        .any(|k| EVIDENCE * samples[k].value >= peak.value)
+        .any(|k| EVIDENCE * half.values[k].abs() >= peak.value)
 }
 
 /// The evidence the bisected interval `parent` leaves to its half `half` on `[lo, hi]` (the
@@ -548,34 +618,45 @@ fn witness(
     (lo, hi): (f64, f64),
 ) -> Witnesses {
     let on_side = |p: &Peak| p.t == mid || (p.t < mid) == left;
-    let own = parent.samples[..parent.count].iter().copied();
+    let ps = &parent.samples;
+    let own = (0..ps.count).map(|i| ps.get(i));
     let inherited = parent.witnesses.into_iter().flatten();
-    let samples = &half.samples[..half.count];
-    let mut found: Vec<Peak> = own
-        .chain(inherited)
-        .filter(|p| on_side(p) && !explained(half, p))
-        .map(|p| {
-            // A sample at an end of the half: the share of the gap next to it.
-            let gap = if p.t == lo {
-                Some(samples[0].t - lo)
-            } else if p.t == hi {
-                Some(hi - samples[half.count - 1].t)
-            } else {
-                None
-            };
-            match gap {
-                Some(g) => Peak {
-                    mass: p.value * g.abs(),
-                    ..p
-                },
-                None => p,
-            }
-        })
-        .collect();
-    found.sort_by(|x, y| y.mass.total_cmp(&x.mass));
-    let mut out = [None; WITNESSES];
-    for (slot, w) in out.iter_mut().zip(found) {
-        *slot = Some(w);
+    let half = Samples::of(half);
+    let mut points = [0.0f64; MOST];
+    for (i, t) in points[..half.count].iter_mut().enumerate() {
+        *t = half.t(i);
+    }
+    let points = &points[..half.count];
+    let (first, last) = (points[0], points[half.count - 1]);
+    // The heaviest `WITNESSES`, in the order a stable sort by mass, heaviest first, gives them:
+    // a candidate goes after every one at least as heavy.
+    let mut out: Witnesses = [None; WITNESSES];
+    for p in own.chain(inherited) {
+        if !on_side(&p) || explained(&half, points, &p) {
+            continue;
+        }
+        // A sample at an end of the half: the share of the gap next to it.
+        let gap = if p.t == lo {
+            Some(first - lo)
+        } else if p.t == hi {
+            Some(hi - last)
+        } else {
+            None
+        };
+        let p = match gap {
+            Some(g) => Peak {
+                mass: p.value * g.abs(),
+                ..p
+            },
+            None => p,
+        };
+        let at = out
+            .iter()
+            .position(|w| w.is_none_or(|w| w.mass.total_cmp(&p.mass).is_lt()));
+        if let Some(k) = at {
+            out[k..].rotate_right(1);
+            out[k] = Some(p);
+        }
     }
     out
 }
@@ -667,12 +748,12 @@ impl Shadows {
 ///   and share, of the smaller interval, are what stands for the feature at the next bisection:
 ///   the evidence of a narrow feature can so shrink by a tenth and more a step, and fall below a
 ///   loose tolerance before a node finds the feature.
-pub(super) fn qags<T: Real>(
-    f: &mut Integrand<'_, T>,
+pub(super) fn qags<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
     map: Map,
     a: f64,
     b: f64,
-    table: &Table,
+    table: &'static Table,
     s: &Settings,
 ) -> Outcome {
     let per_rule = (2 * table.len() - 1) * if let Map::Whole = map { 2 } else { 1 };
@@ -781,16 +862,20 @@ pub(super) fn qags<T: Real>(
             order.resize(last + 2, 0);
         }
         // The totals afresh, where QUADPACK updates running sums that cancel.
-        let current = &segs[1..];
-        errsum = neumaier(current.iter().map(|s| s.error));
-        area = neumaier(current.iter().map(|s| s.result));
-        absolute = neumaier(current.iter().map(|s| s.resabs));
-        lost = neumaier(
-            current
-                .iter()
-                .flat_map(|s| s.witnesses.into_iter().flatten())
-                .map(|w| w.mass),
-        );
+        // The four sums over the intervals in one pass over them, each in the order of the list.
+        let mut sums = [Neumaier::default(); 4];
+        for seg in &segs[1..] {
+            sums[0].add(seg.error);
+            sums[1].add(seg.result);
+            sums[2].add(seg.resabs);
+            for w in seg.witnesses.iter().flatten() {
+                sums[3].add(w.mass);
+            }
+        }
+        errsum = sums[0].total();
+        area = sums[1].total();
+        absolute = sums[2].total();
+        lost = sums[3].total();
         errbnd = bound(area);
         if iroff1 + iroff2 >= 10 || iroff3 >= 20 {
             stop = Stop::RoundOff;

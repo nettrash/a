@@ -102,9 +102,14 @@ impl Factorization {
         self.order
     }
 
-    /// The number factored: the product of the primes to their exponents, 1 for no factors, by a
-    /// balanced tree of products.
+    /// The number factored: the product of the primes to their exponents, 1 for no factors: in
+    /// limbs on the stack while each product has room for 46 limbs (the product so far and the
+    /// next factor together, checked before each product), by a balanced tree of products when one
+    /// has not.
     pub fn value(&self) -> Number {
+        if let Some(v) = super::arith::value_limbs(&self.factors, self.order) {
+            return v;
+        }
         let mut level: Vec<Number> = self.factors.iter().map(|(p, e)| p.pow(*e)).collect();
         if level.is_empty() {
             return Number::new_from_u8(1, self.order);
@@ -248,24 +253,11 @@ impl Number {
     /// ```
     pub fn perfect_power(&self) -> Option<(Number, u32)> {
         let negative = self.negative;
-        if self.value.len() <= 16 {
-            // In registers, without reading the number into limbs.
-            let mut x = 0u128;
-            match self.byte_order {
-                ByteOrder::BigEndian => self
-                    .value
-                    .iter()
-                    .for_each(|&b| x = (x << 8) | u128::from(b)),
-                ByteOrder::LittleEndian => self
-                    .value
-                    .iter()
-                    .rev()
-                    .for_each(|&b| x = (x << 8) | u128::from(b)),
-            }
+        if let Some(x) = small_magnitude(self) {
             if x < 2 {
                 return None;
             }
-            return power::perfect_power_u128(x, negative).map(|(b, k)| {
+            return power::perfect_power_u128(x, negative, false).map(|(b, k)| {
                 let mut b = Number::new_from_u128(b, self.byte_order);
                 b.negative = negative;
                 (b, k)
@@ -275,7 +267,7 @@ impl Number {
         if x.is_empty() || x == [1] {
             return None;
         }
-        power::perfect_power_limbs(x, negative).map(|(b, k)| {
+        power::perfect_power_limbs(x, negative, false).map(|(b, k)| {
             let mut b = number_of(&b, self.byte_order);
             b.negative = negative;
             (b, k)
@@ -283,10 +275,38 @@ impl Number {
     }
 
     /// Whether `self` is a perfect power, `b^k` for some `k >= 2`: [`perfect_power`](Self::perfect_power)
-    /// is `Some`.
+    /// is `Some`, so `false` for 0, 1 and -1, as PARI's `ispower` answers. The search stops at the
+    /// first exponent it finds, and forms no root beyond the one that shows it, as GMP's
+    /// `mpz_perfect_power_p` does (which, unlike this, counts 0, 1 and -1 as powers).
     pub fn is_perfect_power(&self) -> bool {
-        self.perfect_power().is_some()
+        let negative = self.negative;
+        if let Some(x) = small_magnitude(self) {
+            return x >= 2 && power::perfect_power_u128(x, negative, true).is_some();
+        }
+        let x = limbs_of(self);
+        if x.is_empty() || x == [1] {
+            return false;
+        }
+        power::perfect_power_limbs(x, negative, true).is_some()
     }
+}
+
+/// The magnitude of `x` when its vector has at most 16 bytes, read in registers without the limbs.
+#[inline]
+fn small_magnitude(x: &Number) -> Option<u128> {
+    if x.value.len() > 16 {
+        return None;
+    }
+    let mut v = 0u128;
+    match x.byte_order {
+        ByteOrder::BigEndian => x.value.iter().for_each(|&b| v = (v << 8) | u128::from(b)),
+        ByteOrder::LittleEndian => x
+            .value
+            .iter()
+            .rev()
+            .for_each(|&b| v = (v << 8) | u128::from(b)),
+    }
+    Some(v)
 }
 
 /// The primes up to `bound` that divide the absolute value of `n`, with their exponents, in

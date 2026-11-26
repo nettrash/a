@@ -9,8 +9,9 @@
 //! and their products exact by `two_prod`, a shorter path than double-double arithmetic. The
 //! values are rescaled by powers of two as they grow or shrink, so that no intermediate step
 //! overflows or underflows (on the size of the value, which lives in the low words where the plain
-//! recurrence meets an exact zero). The Chebyshev polynomials of degree above 16 are computed in
-//! `O(log n)` by binary powering of `(T₁ + i sin θ U₀)` in double-double.
+//! recurrence meets an exact zero). The Chebyshev polynomials of degree above 47 are computed in
+//! `O(log n)` by binary powering of `(T₁ + i sin θ U₀)` in double-double; for `|x| ≤ 1`, where
+//! their values stay within `n + 1`, the recurrence runs without the rescaling.
 //!
 //! Where a recurrence coefficient vanishes the recurrence decouples or divides by zero, and the
 //! values next to `±1` or `0` are small differences of large terms: those parameters go by
@@ -556,6 +557,31 @@ fn cheb_ladder(n: u32, x: f64) -> (Dd, Dd, i32) {
     (t, u, e)
 }
 
+/// `p_n` of `p_(k+1) = a·p_k − p_(k−1)` from `p₀ = 1` and `p₁` (`a = 2x` exact): the Chebyshev
+/// recurrences for `|x| ≤ 1`, compensated as `recur_ex` (the same operations without its terms
+/// of `b = 1`, so the same bits) but without its rescaling, which cannot act there: the values
+/// stay within `n + 1`, and two consecutive ones are never both small (`cos kθ` and
+/// `cos (k − 1)θ`, or the sines, vanish together only where they are ±1).
+#[inline(always)]
+fn recur_cheb(n: u32, a: f64, p1: f64) -> f64 {
+    let (mut q, mut ql, mut p, mut pl) = (1.0, 0.0, p1, 0.0);
+    for _ in 1..n {
+        let (u, e2) = two_prod(a, p);
+        let (w, e4) = two_sum(u, -q);
+        let lo = (e4 + e2) + mla(a, pl, -ql);
+        (q, ql) = (p, pl);
+        (p, pl) = (w, lo);
+    }
+    p + pl
+}
+
+/// The degree up to which the Chebyshev polynomials of `|x| ≤ 1` go by `recur_cheb` (above it by
+/// binary powering, `cheb_ladder`).
+// Measured on an Apple M4 Max (sweep 17–80, each degree): the recurrence costs 1.25 ns a degree
+// and passes the ladder (52–93 ns, by the bits of n) first at 48 (T 1.04×, U 0.93×), so it serves
+// every degree up to 47 (41–47 at random: 0.66× of the ladder for T, 0.62× for U).
+const CHEB_LEAN: u32 = 47;
+
 /// Whether `T_n(x)` and `U_n(x)` overflow for `|x| > 1`: `n log₂(|x| + √(x² − 1)) > 1100`
 /// (`log₂ 2|x|` to `2^−200` for `|x| > 2^100`, where `x²` would overflow).
 #[inline]
@@ -572,8 +598,12 @@ fn cheb_overflows(n: u32, x: f64) -> bool {
     n as f64 * l > 1100.0
 }
 
-/// The degree above which the Chebyshev polynomials go by binary powering.
-const CHEB_LADDER: u32 = 16;
+/// The degree above which the Chebyshev polynomials go by binary powering (for `|x| > 1`; it is
+/// not below `CHEB_LEAN`, so that `recur_ex`, slower than `recur_cheb`, never takes `|x| ≤ 1`).
+// Measured on an Apple M4 Max (sweep 2–128, each degree from 26 to 64, x in (1, 1.5] and
+// [1.5, 20]): the rescaled recurrence costs 1.6 ns a degree and is faster than the ladder up to
+// 47 (17–47 at random: 0.70× for T, 0.66× for U), slower at 48 (1.20×) and mixed beyond.
+const CHEB_LADDER: u32 = 47;
 
 pub(crate) fn chebyshev_t_f64(n: u32, x: f64) -> f64 {
     if x.is_nan() {
@@ -587,6 +617,10 @@ pub(crate) fn chebyshev_t_f64(n: u32, x: f64) -> f64 {
     }
     if x.abs() > HUGE_X {
         return round_e(huge_x(n, x, |i| dd(if i == 1 { 1.0 } else { 2.0 })));
+    }
+    if x.abs() <= 1.0 && n <= CHEB_LEAN {
+        // T_(k+1) = 2x T_k − T_(k−1).
+        return recur_cheb(n, 2.0 * x, x);
     }
     if cheb_overflows(n, x) {
         return at_infinity(n, 1.0, x);
@@ -612,6 +646,9 @@ pub(crate) fn chebyshev_u_f64(n: u32, x: f64) -> f64 {
     }
     if x.abs() > HUGE_X {
         return round_e(huge_x(n, x, |_| dd(2.0)));
+    }
+    if x.abs() <= 1.0 && n <= CHEB_LEAN {
+        return recur_cheb(n, 2.0 * x, 2.0 * x);
     }
     if cheb_overflows(n, x) {
         return at_infinity(n, 1.0, x);

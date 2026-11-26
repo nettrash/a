@@ -2,6 +2,8 @@
 
 use super::prime::Fp;
 use super::tower::{Tower, tower_ops};
+use super::tower_fast::fast;
+use crate::math::ec::field::limbs_of;
 use crate::math::numbers::Number;
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -141,6 +143,7 @@ impl<'t> Fp2<'t> {
     /// products of `F_p`, and two products by `β` unless `β = −1`.
     #[must_use]
     pub fn square(&self) -> Fp2<'t> {
+        fast!(self.t, k => k.st2(k.sqr2(&k.ld2(self))));
         let t = self.t;
         let (a0, a1) = (&self.c0, &self.c1);
         let ab = a0 * a1;
@@ -157,9 +160,109 @@ impl<'t> Fp2<'t> {
         }
     }
 
+    /// Negates the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let mut a = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let b = -&a;
+    /// a.neg_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn neg_in_place(&mut self) {
+        let t = self.t;
+        fast!(t, k => {
+            let r = k.neg2(&k.ld2(self));
+            k.put2(r, self)
+        });
+        *self = -&*self;
+    }
+
+    /// Doubles the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let mut a = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let b = &a + &a;
+    /// a.double_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn double_in_place(&mut self) {
+        let t = self.t;
+        fast!(t, k => {
+            let r = k.dbl2(&k.ld2(self));
+            k.put2(r, self)
+        });
+        *self = &*self + &*self;
+    }
+
+    /// `c₀ + c₁u` from the Montgomery limbs of its coefficients
+    /// ([`Fp::from_montgomery`]), for a base field in Montgomery's form of four or six limbs;
+    /// `None` otherwise.
+    #[inline]
+    pub(crate) fn from_montgomery(t: &'t Tower<'t>, c0: &[u64], c1: &[u64]) -> Option<Fp2<'t>> {
+        Some(Fp2 {
+            t,
+            c0: Fp::from_montgomery(t.base, c0)?,
+            c1: Fp::from_montgomery(t.base, c1)?,
+        })
+    }
+
+    /// Squares the element in place, writing only its coefficients' limbs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let mut a = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let b = a.square();
+    /// a.square_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn square_in_place(&mut self) {
+        let t = self.t;
+        fast!(t, k => {
+            let r = k.sqr2(&k.ld2(self));
+            k.put2(r, self)
+        });
+        *self = self.square();
+    }
+
+    /// Conjugates the element in place: `c₀ − c₁u`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bn254();
+    /// let mut a = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let b = a.conjugate();
+    /// a.conjugate_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn conjugate_in_place(&mut self) {
+        self.c1.neg_in_place();
+    }
+
     /// Twice the element.
     #[must_use]
     pub fn double(&self) -> Fp2<'t> {
+        fast!(self.t, k => k.st2(k.dbl2(&k.ld2(self))));
         Fp2 {
             t: self.t,
             c0: self.c0.double(),
@@ -170,6 +273,7 @@ impl<'t> Fp2<'t> {
     /// The conjugate `c₀ − c₁ u`, the image under the Frobenius map `x ↦ xᵖ`.
     #[must_use]
     pub fn conjugate(&self) -> Fp2<'t> {
+        fast!(self.t, k => k.st2(k.conj2(&k.ld2(self))));
         Fp2 {
             t: self.t,
             c0: self.c0.clone(),
@@ -190,6 +294,7 @@ impl<'t> Fp2<'t> {
     /// The norm to `F_p`, `x · x̄ = c₀² − β c₁²`.
     #[must_use]
     pub fn norm(&self) -> Fp<'t> {
+        fast!(self.t, k => k.st(k.norm2(&k.ld2(self))));
         self.c0.square() - self.t.mul_by_beta(&self.c1.square())
     }
 
@@ -202,6 +307,7 @@ impl<'t> Fp2<'t> {
     /// The inverse, the conjugate over the norm, or `None` for 0.
     #[must_use]
     pub fn inverse(&self) -> Option<Fp2<'t>> {
+        fast!(self.t, k => k.inv2(&k.ld2(self)).map(|r| k.st2(r)));
         let n = self.norm().inverse()?;
         Some(Fp2 {
             t: self.t,
@@ -218,6 +324,8 @@ impl<'t> Fp2<'t> {
     #[track_caller]
     #[must_use]
     pub fn mul_by_base(&self, k: &Fp<'t>) -> Fp2<'t> {
+        self.t.base.check(k);
+        fast!(self.t, q => q.st2(q.mul2_base(&q.ld2(self), &q.ld(k))));
         Fp2 {
             t: self.t,
             c0: &self.c0 * k,
@@ -229,6 +337,7 @@ impl<'t> Fp2<'t> {
     /// when `ξ₁ = 1`, four otherwise.
     #[must_use]
     pub fn mul_by_xi(&self) -> Fp2<'t> {
+        fast!(self.t, k => k.st2(k.mul_xi(&k.ld2(self))));
         let t = self.t;
         let [x0, x1] = &t.xi;
         let (a0, a1) = (&self.c0, &self.c1);
@@ -260,6 +369,7 @@ impl<'t> Fp2<'t> {
             let inv = self.inverse().expect("0 has no inverse");
             return inv.pow(&-e);
         }
+        fast!(self.t, k => k.st2(k.pow2(&k.ld2(self), &limbs_of(e))));
         let mut r = Fp2::one(self.t);
         for i in (0..e.bits()).rev() {
             r = r.square();
@@ -357,9 +467,44 @@ impl<'t> Fp2<'t> {
         s0 || (z0 && s1)
     }
 
+    /// `a += b` in place.
+    #[track_caller]
+    pub(super) fn add_assign_ref(a: &mut Fp2<'t>, b: &Fp2<'t>) {
+        a.t.check(b.t);
+        fast!(a.t, k => {
+            let r = k.add2(&k.ld2(a), &k.ld2(b));
+            k.put2(r, a)
+        });
+        *a = Self::add_ref(a, b);
+    }
+
+    /// `a -= b` in place.
+    #[track_caller]
+    pub(super) fn sub_assign_ref(a: &mut Fp2<'t>, b: &Fp2<'t>) {
+        a.t.check(b.t);
+        fast!(a.t, k => {
+            let r = k.sub2(&k.ld2(a), &k.ld2(b));
+            k.put2(r, a)
+        });
+        *a = Self::sub_ref(a, b);
+    }
+
+    /// `a *= b` in place.
+    #[track_caller]
+    pub(super) fn mul_assign_ref(a: &mut Fp2<'t>, b: &Fp2<'t>) {
+        a.t.check(b.t);
+        fast!(a.t, k => {
+            let r = k.mul2(&k.ld2(a), &k.ld2(b));
+            k.put2(r, a)
+        });
+        *a = Self::mul_ref(a, b);
+    }
+
     /// The sum.
     #[track_caller]
     pub(super) fn add_ref(a: &Fp2<'t>, b: &Fp2<'t>) -> Fp2<'t> {
+        a.t.check(b.t);
+        fast!(a.t, k => k.st2(k.add2(&k.ld2(a), &k.ld2(b))));
         a.t.check(b.t);
         Fp2 {
             t: a.t,
@@ -372,6 +517,8 @@ impl<'t> Fp2<'t> {
     #[track_caller]
     pub(super) fn sub_ref(a: &Fp2<'t>, b: &Fp2<'t>) -> Fp2<'t> {
         a.t.check(b.t);
+        fast!(a.t, k => k.st2(k.sub2(&k.ld2(a), &k.ld2(b))));
+        a.t.check(b.t);
         Fp2 {
             t: a.t,
             c0: &a.c0 - &b.c0,
@@ -382,6 +529,8 @@ impl<'t> Fp2<'t> {
     /// The product, by Karatsuba: three products of `F_p`.
     #[track_caller]
     pub(super) fn mul_ref(a: &Fp2<'t>, b: &Fp2<'t>) -> Fp2<'t> {
+        a.t.check(b.t);
+        fast!(a.t, k => k.st2(k.mul2(&k.ld2(a), &k.ld2(b))));
         a.t.check(b.t);
         let t = a.t;
         let v0 = &a.c0 * &b.c0;
@@ -403,6 +552,7 @@ impl<'t> Fp2<'t> {
 
     /// The negation.
     pub(super) fn neg_ref(&self) -> Fp2<'t> {
+        fast!(self.t, k => k.st2(k.neg2(&k.ld2(self))));
         Fp2 {
             t: self.t,
             c0: -&self.c0,

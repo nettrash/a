@@ -20,9 +20,43 @@
 //! A result is checked by squaring it, apart from Tonelli and Shanks's, which finds a non-square
 //! out by itself, and Cipolla's, which asks for the Legendre symbol first.
 
+use super::prime_chains::{BLS12_381_P, BLS12_381_SQRT};
 use super::prime_form::{Arith, Value, legendre};
 use crate::math::ec::field::limbs_of;
 use crate::math::numbers::Number;
+
+/// The plan of a fixed power `x^e` (`prime_chains`, made by `chains.py`): `x^first` from the table
+/// of the odd powers `x, x³, …, x^top`, then for each step `(s, v)`, `s` squarings and a product
+/// by `x^v` (none for `v = 0`), so that `e = (…(first·2^s₁ + v₁)·2^s₂ + v₂…)`: the sliding windows
+/// of the exponent, chosen once, with no decisions at run time.
+pub(super) struct Chain {
+    pub(super) top: u8,
+    pub(super) first: u8,
+    pub(super) steps: &'static [(u8, u8)],
+}
+
+impl Chain {
+    /// `x^e`.
+    pub(super) fn power<F: Arith>(&self, f: &F, x: &F::E) -> F::E {
+        let x2 = f.sqr(x);
+        let mut odd = Vec::with_capacity(usize::from(self.top).div_ceil(2));
+        odd.push(x.clone());
+        for i in 1..usize::from(self.top).div_ceil(2) {
+            let t = f.mul(&odd[i - 1], &x2);
+            odd.push(t);
+        }
+        let mut r = odd[usize::from(self.first) / 2].clone();
+        for &(s, v) in self.steps {
+            for _ in 0..s {
+                r = f.sqr(&r);
+            }
+            if v != 0 {
+                r = f.mul(&r, &odd[usize::from(v) / 2]);
+            }
+        }
+        r
+    }
+}
 
 /// What the square roots of a field need, computed once.
 #[derive(Clone)]
@@ -34,6 +68,8 @@ pub(super) enum Plan {
         /// `(p + 1) / 4`.
         e: Vec<u64>,
     },
+    /// `p = 3 (mod 4)` for a prime with a plan of the power by `(p + 1) / 4` (BLS12-381's).
+    ThreeMod4Chain(&'static Chain),
     /// `p = 5 (mod 8)`: the exponent `(p - 5) / 8` of Atkin's method.
     FiveMod8 {
         /// `(p - 5) / 8`.
@@ -65,6 +101,7 @@ impl Plan {
         let p1 = p - &one;
         let s = p1.trailing_zeros().unwrap_or(0);
         match s {
+            1 if limbs_of(p) == BLS12_381_P => Plan::ThreeMod4Chain(&BLS12_381_SQRT),
             1 => Plan::ThreeMod4 {
                 e: limbs_of(&((p + &one) >> 2usize)),
             },
@@ -95,7 +132,7 @@ impl Plan {
     pub(super) fn name(&self) -> &'static str {
         match self {
             Plan::Two => "GF(2)",
-            Plan::ThreeMod4 { .. } => "p = 3 mod 4",
+            Plan::ThreeMod4 { .. } | Plan::ThreeMod4Chain(_) => "p = 3 mod 4",
             Plan::FiveMod8 { .. } => "Atkin",
             Plan::Tonelli { .. } => "Tonelli-Shanks",
             Plan::Cipolla { .. } => "Cipolla",
@@ -120,6 +157,10 @@ pub(super) fn sqrt<F: Arith>(f: &F, plan: &Plan, a: &F::E) -> Option<F::E> {
         Plan::Two => Some(a.clone()),
         Plan::ThreeMod4 { e } => {
             let r = f.power(a, e);
+            f.same(&f.sqr(&r), a).then_some(r)
+        }
+        Plan::ThreeMod4Chain(c) => {
+            let r = c.power(f, a);
             f.same(&f.sqr(&r), a).then_some(r)
         }
         Plan::FiveMod8 { e } => {

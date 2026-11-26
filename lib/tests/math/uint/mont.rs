@@ -307,6 +307,25 @@ fn pow_mod_agrees_with_number_for_odd_and_even_moduli_of_every_length() {
     widths!(pow_mod_at_every_length(0x6a09_e667_f3bc_c908));
 }
 
+/// The checks of every width at `N` limbs: the ring for an odd modulus of every length, `pow_mod`
+/// for an odd and an even modulus of every length, and the moduli of special shape.
+fn every_check<const N: usize>() {
+    ring_at_every_length::<N>(0x2545_f491_4f6c_dd1d);
+    pow_mod_at_every_length::<N>(0x6a09_e667_f3bc_c908);
+    special::<N>(0xbb67_ae85_84ca_a73b);
+}
+
+#[test]
+fn the_widths_on_both_sides_of_the_crossovers_agree_with_number() {
+    // 9 and 10 limbs are the rows of CIOS and the powers' own windows just below 11, where the
+    // products and squares of the forms become Number's schoolbook kernels and its REDC and powers
+    // and inverses go to Number; 12 is just above.
+    every_check::<9>();
+    every_check::<10>();
+    every_check::<11>();
+    every_check::<12>();
+}
+
 /// Moduli of special shape for `N` limbs.
 fn special_moduli<const N: usize>(s: &mut u64) -> Vec<Uint<N>> {
     let bits = 64 * N;

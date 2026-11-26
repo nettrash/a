@@ -65,7 +65,8 @@ mod kernels;
 mod kernels;
 pub(super) mod limbs;
 
-pub(crate) use euclid::{Bound, common_prefix, partial, quotients};
+pub(crate) use euclid::euclid_steps;
+pub(crate) use euclid::{Bound, common_prefix, partial, quotients, quotients_into};
 
 use super::add::{read_small, significant_len, small, write_small};
 use super::mul::limbs::mul;

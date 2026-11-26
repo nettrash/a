@@ -15,8 +15,9 @@
 //! shortening it, an exchange undoes the one before it, or the number of iterations passes the
 //! bound that the potential gives.
 
-use super::exact::{Insertion, dot, sub_mul_row};
+use super::exact::Insertion;
 use super::l2_float::Fp;
+use super::zint::{Work, Z, dot, sub_mul_row};
 use crate::math::float::Round;
 use crate::math::numbers::Number;
 use crate::math::rational::Rational;
@@ -26,61 +27,143 @@ use crate::math::rational::Rational;
 pub(super) struct Failure;
 
 /// The exact part of a reduction: the rows, the transformation applied to them, the Gram matrix
-/// of the rows, and how many rows are the lattice's: those after `active` are zero.
+/// of the rows, and how many rows are the lattice's: those after `active` are zero. The integers
+/// are [`Z`]s, in words while they fit, updated in place.
 pub(super) struct Basis {
     /// The rows.
-    pub(super) b: Vec<Vec<Number>>,
+    pub(super) b: Vec<Vec<Z>>,
     /// The rows of `U`, `U·B₀ = B` for the rows `B₀` given.
-    pub(super) u: Vec<Vec<Number>>,
+    pub(super) u: Vec<Vec<Z>>,
     /// The lower triangle of the Gram matrix: `g[i][j] = ⟨bᵢ, bⱼ⟩` for `j ≤ i`.
-    g: Vec<Vec<Number>>,
+    g: Vec<Vec<Z>>,
     /// The rows before it are the lattice's; those from it on are zero rows found.
     pub(super) active: usize,
+    /// The working memory of the updates.
+    w: Work,
+}
+
+/// The rows of `v` as numbers.
+pub(super) fn numbers(v: &[Vec<Z>]) -> Vec<Vec<Number>> {
+    v.iter()
+        .map(|r| r.iter().map(Z::number).collect())
+        .collect()
 }
 
 impl Basis {
     /// The reduction of the rows `b`, with the transformation so far `u`.
     pub(super) fn new(b: Vec<Vec<Number>>, u: Vec<Vec<Number>>) -> Basis {
+        let ints = |v: Vec<Vec<Number>>| -> Vec<Vec<Z>> {
+            v.iter().map(|r| r.iter().map(Z::of).collect()).collect()
+        };
+        let (b, u) = (ints(b), ints(u));
+        let mut w = Work::default();
         let g = (0..b.len())
-            .map(|i| (0..=i).map(|j| dot(&b[i], &b[j])).collect())
+            .map(|i| (0..=i).map(|j| dot(&b[i], &b[j], &mut w)).collect())
             .collect();
         let active = b.len();
-        Basis { b, u, g, active }
+        Basis { b, u, g, active, w }
+    }
+
+    /// The basis of the given rows, transformation and lower triangle of the Gram matrix, the
+    /// rows from `active` on zero.
+    pub(super) fn from_parts(
+        b: Vec<Vec<Z>>,
+        u: Vec<Vec<Z>>,
+        g: Vec<Vec<Z>>,
+        active: usize,
+    ) -> Basis {
+        Basis {
+            b,
+            u,
+            g,
+            active,
+            w: Work::default(),
+        }
+    }
+
+    /// `⟨bᵢ, bⱼ⟩` as kept.
+    pub(super) fn gram_entry(&self, i: usize, j: usize) -> &Z {
+        self.gram(i, j)
+    }
+
+    /// The exact Gram matrix of the rows of the lattice, its lower triangle, as numbers.
+    pub(super) fn gram_numbers(&mut self) -> Vec<Vec<Number>> {
+        let w = &mut self.w;
+        let rows = &self.b[..self.active];
+        (0..rows.len())
+            .map(|i| {
+                (0..=i)
+                    .map(|j| dot(&rows[i], &rows[j], w).number())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The length in bits of the longest entry of the Gram matrix of the lattice's rows.
+    pub(super) fn gram_bits(&self) -> u64 {
+        self.g[..self.active]
+            .iter()
+            .flat_map(|r| r.iter())
+            .map(Z::bits)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Whether the Gram matrix kept is that of the rows: the invariant of every step.
-    fn gram_is_exact(&self) -> bool {
-        (0..self.b.len()).all(|i| (0..=i).all(|j| self.g[i][j] == dot(&self.b[i], &self.b[j])))
+    fn gram_is_exact(&mut self) -> bool {
+        let n = self.b.len();
+        (0..n).all(|i| {
+            (0..=i).all(|j| {
+                let d = dot(&self.b[i], &self.b[j], &mut self.w);
+                self.g[i][j].cmp(&d).is_eq()
+            })
+        })
     }
 
     /// `⟨bᵢ, bⱼ⟩`.
-    fn gram(&self, i: usize, j: usize) -> &Number {
+    fn gram(&self, i: usize, j: usize) -> &Z {
         if j <= i { &self.g[i][j] } else { &self.g[j][i] }
     }
 
     /// `bₖ ← bₖ − Σ xᵢ·bᵢ` for the pairs `(i, xᵢ)`, `i < k`, and the Gram matrix with it.
-    fn apply(&mut self, k: usize, xs: &[(usize, Number)]) {
+    fn apply(&mut self, k: usize, xs: &[(usize, Z)]) {
         for (i, x) in xs {
             let i = *i;
+            let w = &mut self.w;
             let (lo, hi) = self.b.split_at_mut(k);
-            sub_mul_row(&mut hi[0], x, &lo[i]);
+            sub_mul_row(&mut hi[0], x, &lo[i], w);
             let (lo, hi) = self.u.split_at_mut(k);
-            sub_mul_row(&mut hi[0], x, &lo[i]);
+            sub_mul_row(&mut hi[0], x, &lo[i], w);
             // ⟨bₖ − x·bᵢ, bₖ − x·bᵢ⟩ = Gₖₖ − x·(2·Gₖᵢ − x·Gᵢᵢ), with the old Gₖᵢ.
-            let t = &(&self.g[k][i] << 1usize) - &(x * &self.g[i][i]);
-            self.g[k][k] -= x * &t;
+            let t = self.g[k][i].twice_minus(x, &self.g[i][i], w);
+            self.g[k][k].sub_mul(x, &t, w);
             for j in 0..self.active {
                 if j == k {
                     continue;
                 }
-                let t = x * self.gram(i, j);
-                if t.is_zero() {
+                // The entry ⟨bₖ, bⱼ⟩ (row max(k, j)) loses x·⟨bᵢ, bⱼ⟩ (row max(i, j)).
+                let (tr, tc) = if j < k { (k, j) } else { (j, k) };
+                let (sr, sc) = if j <= i { (i, j) } else { (j, i) };
+                if self.g[sr][sc].is_zero() {
                     continue;
                 }
-                if j < k {
-                    self.g[k][j] -= t;
+                if tr == sr {
+                    // The same row, other columns.
+                    let row = &mut self.g[tr];
+                    let (target, source) = if tc < sc {
+                        let (a, b) = row.split_at_mut(sc);
+                        (&mut a[tc], &b[0])
+                    } else {
+                        let (a, b) = row.split_at_mut(tc);
+                        (&mut b[0], &a[sc])
+                    };
+                    target.sub_mul(x, source, w);
+                } else if tr < sr {
+                    let (a, b) = self.g.split_at_mut(sr);
+                    a[tr][tc].sub_mul(x, &b[0][sc], w);
                 } else {
-                    self.g[j][k] -= t;
+                    let (a, b) = self.g.split_at_mut(tr);
+                    b[0][tc].sub_mul(x, &a[sr][sc], w);
                 }
             }
         }
@@ -111,8 +194,7 @@ impl Basis {
         };
         // The pairs with the larger index in `lo..=hi`, old and new, are the same: the entries
         // of those rows are taken out once each and put where they now belong.
-        let mut window: Vec<Vec<Number>> =
-            (lo..=hi).map(|i| core::mem::take(&mut self.g[i])).collect();
+        let mut window: Vec<Vec<Z>> = (lo..=hi).map(|i| core::mem::take(&mut self.g[i])).collect();
         #[allow(
             clippy::needless_range_loop,
             reason = "`p` also picks the old row and the length of the new one"
@@ -152,16 +234,19 @@ struct Gso<F> {
     mu: Vec<Vec<F>>,
     s: Vec<F>,
     prec: u64,
+    /// The Gram matrix's entries are taken times `2⁻ˢ` (see [`Fp::of_z_scaled`]).
+    scale: i64,
 }
 
 impl<F: Fp> Gso<F> {
-    fn new(n: usize, prec: u64) -> Self {
+    fn new(n: usize, prec: u64, scale: i64) -> Self {
         let zero = F::of_f64(0.0, prec);
         Gso {
             r: vec![vec![zero.clone(); n]; n],
             mu: vec![vec![zero.clone(); n]; n],
             s: vec![zero; n + 1],
             prec,
+            scale,
         }
     }
 
@@ -170,7 +255,7 @@ impl<F: Fp> Gso<F> {
     fn row(&mut self, st: &Basis, k: usize) -> Result<(), Failure> {
         let p = self.prec;
         for j in 0..k {
-            let mut t = F::of_number(st.gram(k, j), p);
+            let mut t = F::of_z_scaled(st.gram(k, j), p, self.scale);
             for i in 0..j {
                 t = t.sub_mul(&self.mu[j][i], &self.r[k][i]);
             }
@@ -181,7 +266,7 @@ impl<F: Fp> Gso<F> {
             self.r[k][j] = t;
             self.mu[k][j] = m;
         }
-        self.s[0] = F::of_number(st.gram(k, k), p);
+        self.s[0] = F::of_z_scaled(st.gram(k, k), p, self.scale);
         for j in 0..k {
             self.s[j + 1] = self.s[j].sub_mul(&self.mu[k][j], &self.r[k][j]);
         }
@@ -202,13 +287,14 @@ impl<F: Fp> Gso<F> {
             if (0..k).all(|j| self.mu[k][j].abs_le(eta)) {
                 return Ok(pass > 0);
             }
-            let mut xs: Vec<(usize, Number)> = Vec::new();
+            let mut xs: Vec<(usize, Z)> = Vec::new();
             for i in (0..k).rev() {
                 let x = self.mu[k][i].rint().ok_or(Failure)?;
                 if x.is_zero() {
                     continue;
                 }
                 let xf = F::of_number(&x, p);
+                let x = Z::of(&x);
                 let (lo, hi) = self.mu.split_at_mut(k);
                 for j in 0..i {
                     hi[0][j] = hi[0][j].sub_mul(&xf, &lo[i][j]);
@@ -220,7 +306,7 @@ impl<F: Fp> Gso<F> {
             }
             let before = st.g[k][k].clone();
             st.apply(k, &xs);
-            if st.g[k][k] >= before {
+            if st.g[k][k].cmp(&before).is_ge() {
                 stalls += 1;
                 if stalls > 2 {
                     return Err(Failure);
@@ -273,8 +359,23 @@ pub(super) fn run<F: Fp>(
     eta: &Rational,
     ins: Insertion,
 ) -> Result<(), Failure> {
+    run_scaled::<F>(st, prec, delta, eta, ins, 0)
+}
+
+/// [`run`] with the Gram matrix's entries taken times `2⁻ˢ` (exactly, a power of two): the
+/// Gram–Schmidt norms and products are all scaled by it and the coefficients not, so that the
+/// steps are those of `s = 0` while every value stays in range, and a float type of a fixed range
+/// (plain doubles) can follow Gram matrices whose entries pass it.
+pub(super) fn run_scaled<F: Fp>(
+    st: &mut Basis,
+    prec: u64,
+    delta: &Rational,
+    eta: &Rational,
+    ins: Insertion,
+    scale: i64,
+) -> Result<(), Failure> {
     let n = st.b.len();
-    let mut gso = Gso::<F>::new(n, prec);
+    let mut gso = Gso::<F>::new(n, prec, scale);
     let delta_f = F::of_rational(delta, prec, Round::Down);
     let eta_f = F::of_rational(eta, prec, Round::Up);
     while st.active > 0 && st.g[0][0].is_zero() {
@@ -283,7 +384,7 @@ pub(super) fn run<F: Fp>(
     if st.active == 0 {
         return Ok(());
     }
-    gso.r[0][0] = F::of_number(&st.g[0][0], prec);
+    gso.r[0][0] = F::of_z_scaled(&st.g[0][0], prec, scale);
     let gap = (&Rational::from(1) - delta).to_f64();
     let cap = iteration_cap(st, gap, ins);
     let mut iterations = 0u64;

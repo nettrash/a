@@ -20,6 +20,7 @@
 //! with public data, not for secret keys.
 
 use super::prime::{Fp, PrimeField};
+use super::prime_form::{INLINE, Value};
 use super::tower_fp2::Fp2;
 use crate::math::numbers::Number;
 use core::fmt;
@@ -54,6 +55,11 @@ pub struct Tower<'f> {
     pub(super) xi: [Fp<'f>; 2],
     /// Whether `ξ₁ = 1`, which saves two products in each product by `ξ`.
     pub(super) xi1_is_one: bool,
+    /// `ξ₀` when it is a number from 1 to 16, whose products are sums; else 0.
+    pub(super) xi0_small: u64,
+    /// The limbs of `β`, `ξ₀` and `ξ₁` as an inline form holds them (zeros for a longer field),
+    /// for the arithmetic on limbs, which so reads them with no match on the representation.
+    pub(super) consts_raw: [[u64; INLINE]; 3],
     /// `frob[k][i] = ξ^(i (pᵏ − 1) / 6)` for `k` in `0..12` and `i` in `0..6`, the factor of `wⁱ`
     /// in its `pᵏ`-th power: `(wⁱ)^(pᵏ) = frob[k][i] · wⁱ`.
     pub(super) frob: Vec<[[Fp<'f>; 2]; 6]>,
@@ -98,11 +104,21 @@ impl<'f> Tower<'f> {
         assert!(beta.legendre() == -1, "β must not be a square modulo p");
         let xi = [base.element(xi.0), base.element(xi.1)];
         let minus_one = -base.one();
+        let consts_raw = [&beta, &xi[0], &xi[1]].map(|c| match c.raw() {
+            Value::Limbs(l) => *l,
+            _ => [0; INLINE],
+        });
         let mut t = Tower {
             base,
             beta_is_minus_one: beta == minus_one,
             beta,
             xi1_is_one: xi[1].is_one(),
+            xi0_small: {
+                let v = xi[0].value();
+                let small = if v.bits() <= 5 { v.to_f64() as u64 } else { 0 };
+                if (1..=16).contains(&small) { small } else { 0 }
+            },
+            consts_raw,
             xi,
             frob: Vec::new(),
             half: base.from_u64(2).inverse().expect("p is odd"),
@@ -272,6 +288,37 @@ fn frobenius_table<'f>(t: &Tower<'f>) -> Vec<[[Fp<'f>; 2]; 6]> {
 /// operands, and their assignments, from a function on two borrows.
 macro_rules! tower_binary {
     ($ty:ident, $tr:ident, $m:ident, $atr:ident, $am:ident, $f:path) => {
+        $crate::math::field::tower::tower_binary!(@ops $ty, $tr, $m, $f);
+        impl<'t> core::ops::$atr<&$ty<'t>> for $ty<'t> {
+            #[track_caller]
+            fn $am(&mut self, rhs: &$ty<'t>) {
+                *self = $f(self, rhs);
+            }
+        }
+        impl<'t> core::ops::$atr<$ty<'t>> for $ty<'t> {
+            #[track_caller]
+            fn $am(&mut self, rhs: $ty<'t>) {
+                *self = $f(self, &rhs);
+            }
+        }
+    };
+    // With `$fa`, the assignments in place: only the coefficients' limbs are rewritten.
+    ($ty:ident, $tr:ident, $m:ident, $atr:ident, $am:ident, $f:path, $fa:path) => {
+        $crate::math::field::tower::tower_binary!(@ops $ty, $tr, $m, $f);
+        impl<'t> core::ops::$atr<&$ty<'t>> for $ty<'t> {
+            #[track_caller]
+            fn $am(&mut self, rhs: &$ty<'t>) {
+                $fa(self, rhs);
+            }
+        }
+        impl<'t> core::ops::$atr<$ty<'t>> for $ty<'t> {
+            #[track_caller]
+            fn $am(&mut self, rhs: $ty<'t>) {
+                $fa(self, &rhs);
+            }
+        }
+    };
+    (@ops $ty:ident, $tr:ident, $m:ident, $f:path) => {
         impl<'t> core::ops::$tr<&$ty<'t>> for &$ty<'t> {
             type Output = $ty<'t>;
             #[track_caller]
@@ -300,18 +347,6 @@ macro_rules! tower_binary {
                 $f(&self, &rhs)
             }
         }
-        impl<'t> core::ops::$atr<&$ty<'t>> for $ty<'t> {
-            #[track_caller]
-            fn $am(&mut self, rhs: &$ty<'t>) {
-                *self = $f(self, rhs);
-            }
-        }
-        impl<'t> core::ops::$atr<$ty<'t>> for $ty<'t> {
-            #[track_caller]
-            fn $am(&mut self, rhs: $ty<'t>) {
-                *self = $f(self, &rhs);
-            }
-        }
     };
 }
 
@@ -325,7 +360,8 @@ macro_rules! tower_ops {
             add,
             AddAssign,
             add_assign,
-            $ty::add_ref
+            $ty::add_ref,
+            $ty::add_assign_ref
         );
         $crate::math::field::tower::tower_binary!(
             $ty,
@@ -333,7 +369,8 @@ macro_rules! tower_ops {
             sub,
             SubAssign,
             sub_assign,
-            $ty::sub_ref
+            $ty::sub_ref,
+            $ty::sub_assign_ref
         );
         $crate::math::field::tower::tower_binary!(
             $ty,
@@ -341,7 +378,8 @@ macro_rules! tower_ops {
             mul,
             MulAssign,
             mul_assign,
-            $ty::mul_ref
+            $ty::mul_ref,
+            $ty::mul_assign_ref
         );
         $crate::math::field::tower::tower_binary!(
             $ty,

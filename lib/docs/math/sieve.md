@@ -18,22 +18,22 @@ The sieve is Kim Walisch's primesieve's ("primesieve: fast prime number generato
 - Small primes, up to a fifth of 128 KiB, cross out their multiples in parts of 128 KiB, which stay in the first-level cache: a prime is held as `p/30`, its next multiple's byte and its wheel index (the class `p mod 30` and the position of the multiplier modulo 30), and a whole turn of the wheel, eight multiples, is crossed out at once at offsets fixed by the class, by a loop specialised for each of the 64 classes and positions.
 - Medium primes, up to three times the segment's bytes, cross out a few multiples each: they are kept in 64 lists by wheel index, and each list runs a loop specialised for its class and position, which takes eight steps a turn with no table; the primes are filed in the lists of the next segment as they leave.
 - Large primes, up to the square root of the range's end, have fewer multiples than there are segments: Oliveira e Silva's bucket sieve on the wheel of 210 keeps each in a bucket of the segment of its next multiple, 1024 primes a bucket, so that a segment touches only the primes that cross out one of its numbers. A prime with no multiple in the range is not kept at all, as in primesieve: the range `[2^64 − 10^7, 2^64)` keeps 33 MB, not the 1.6 GB of all the primes below `2^32`.
-- The primes are formed from each 64-bit word of the sieve from both ends at once, by the trailing zeros of the word and of its bits reversed, the lowest and the highest left two at a time into their places in a batch of up to 1024: two chains of `bits &= bits − 1` side by side, each half as long as one (from 3.3 to about 2.4 cycles a prime). The iterator's `next` reads the batch. The counts are the words' population counts.
+- The primes are formed from each 64-bit word of the sieve from both ends at once, by the trailing zeros of the word and of its bits reversed, the lowest and the highest left two at a time into their places in a batch of up to 1024: two chains of `bits &= bits − 1` side by side, each half as long as one (from 3.3 to about 2.4 cycles a prime), the first eight places from each end without a test, so that a word of up to 16 primes (about `240 / ln x` near `x`: 17.4 near `10^6`, 11.6 near `10^9`, 5.4 near `2^64`) does not pay the mispredicted end of the loop. The iterator's `next` reads the batch. The counts are the words' population counts.
 - The sieving primes come from the table of the primes below `2^16` computed at compile time when they are below it (ranges up to `2^32`), and else from a sieve of their own, whose own primes come from that table.
 
 ### Short ranges far up
 
-The sieve's start costs a division and a place for each prime up to the square root of the range: about 4 ns for each of the 203 million primes below `2^32` near `2^64`. A range narrower than about `√a / 90` is cheaper to sieve with the primes up to a quarter of its width only and to test the numbers left by Baillie–PSW, which they leave about one in `ln(width)/0.56`, the primes among them costing 0.6 µs each and the others 70 ns: the two meet there. `Primes` therefore sieves a range in stretches: the first 4096 numbers, enough for a hundred primes even near `2^64`, then four times as many each time, each stretch narrower than `√a / 90` sieved by the smaller primes and tested, and the rest of the range at once by the full sieve. Below `2^40`, where a stretch's sieving primes take a third of a millisecond at most to start, the full sieve's stretches grow the same way while they are narrower than a segment (63 million numbers): the first segment of the whole rest is sized by its end, 2 MiB for an end near `2^64`, which took 1.7 ms for the first ten primes from 0 before this rule and takes 0.6 µs with it. `count` and `fold`, which take every prime, plan the rest of the range as one stretch. primesieve sieves every range in full, from a table below 720 and in chunks of about `√a` that grow fourfold.
+The sieve's start costs a division and a place for each prime up to the square root of the range: about 4 ns for each of the 203 million primes below `2^32` near `2^64`. A range narrower than about `√a / 90` is cheaper to sieve with the primes up to a quarter of its width only and to test the numbers left by Baillie–PSW, which they leave about one in `ln(width)/0.56`, the primes among them costing 0.6 µs each and the others 70 ns: the two meet there. `Primes` therefore sieves a range in stretches: the first 4096 numbers, enough for a hundred primes even near `2^64`, then four times as many each time, each stretch narrower than `√a / 90` sieved by the smaller primes and tested, and the rest of the range at once by the full sieve. Below `2^40`, where a stretch's sieving primes take a third of a millisecond at most to start, the full sieve's stretches grow the same way while they are narrower than a segment (63 million numbers): the first segment of the whole rest is sized by its end, 2 MiB for an end near `2^64`, which took 1.7 ms for the first ten primes from 0 before this rule and takes 167 ns with it (below). `count` and `fold`, which take every prime, plan the rest of the range as one stretch. primesieve sieves every range in full, from a table below 720 and in chunks of about `√a` that grow fourfold.
 
 ## Prime counting
 
-`prime_pi(x)` reads a table below `2^16` and above uses Deléglise and Rivat's method ("Computing π(x): the Meissel, Lehmer, Lagarias, Miller, Odlyzko method", 1996), in the combinatorial form of Oliveira e Silva ("Computing π(x): the combinatorial method", 2006) and of Walisch's primecount, with its special leaves sorted as Xavier Gourdon's ("Computation of π(x): improvements to the Meissel, Lehmer, Lagarias, Miller, Odlyzko, Deléglise and Rivat method", 2001): with `y = α·x^(1/3)` and `a = π(y)`,
+`prime_pi(x)` reads a table below `2^16`, from `2^16` to `2^20` a second one, and above uses Deléglise and Rivat's method ("Computing π(x): the Meissel, Lehmer, Lagarias, Miller, Odlyzko method", 1996), in the combinatorial form of Oliveira e Silva ("Computing π(x): the combinatorial method", 2006) and of Walisch's primecount, with its special leaves sorted as Xavier Gourdon's ("Computation of π(x): improvements to the Meissel, Lehmer, Lagarias, Miller, Odlyzko, Deléglise and Rivat method", 2001): with `y = α·x^(1/3)` and `a = π(y)`,
 
 `π(x) = φ(x, a) + a − 1 − P2(x, a)`,
 
 where `φ(x, a)`, the numbers up to `x` with no prime factor up to `y`, is split by the leaves of Legendre's recursion into the ordinary leaves `S1` and the special ones `S2` (trivial, easy and hard), and `P2` counts the numbers up to `x` with exactly two prime factors above `y`. `α` is primecount's fit for the method, a polynomial in `ln x`, from 2.6 at `10^9` to 17.8 at `10^16` and 38 near `2^64`: our measurements, with the leaves sorted as below, found no better (at `10^17`, 0.85 to 1.45 times it: the hard leaves grow with `y`).
 
-- Below `2^16`, a bit for each number prime to 30 and a count for each 240, and the primes below `2^16`, are tables computed at compile time (4.4 KB and 26 KB). The method takes its primes up to `y` and its table of `π` up to `y` from them while `y` is below `2^16` (up to `x` of about `9.7·10^11`), and `P2`'s counts while `x/y` is (up to about `6.2·10^7`), so that small `x` allocate and sieve nothing but the hard leaves' segment: `π(x)` takes 0.24 µs just above `2^16`, where the sieve's count it took before took 0.76 µs and primecount's Legendre's formula takes 0.46 µs, and 3.3 µs at `10^7`, where primecount's Meissel's formula takes 6.3 µs.
+- Below `2^16`, a bit for each number prime to 30 and a count for each 240, and the primes below `2^16`, are tables computed at compile time (4.4 KB and 26 KB). From `2^16` to `2^20` (PARI's default `primelimit`, whose table of primes PARI reads for `primepi` and `prime`), the primes (82,027 of 4 bytes, 328 KB) and the same blocks from them (70 KB) are built from the sieve once 128 calls of `prime_pi` or `nth_prime` have asked there, and kept for the process: `π(x)` is then a look-up, 1.92 ns at `7·10^4` (below), and the `n`-th prime a read of the table; a program that calls them a few times never builds them. The method takes its primes up to `y` and its table of `π` up to `y` from them while `y` is below `2^16` (up to `x` of about `9.7·10^11`), and `P2`'s counts while `x/y` is (up to about `6.2·10^7`), so that small `x` allocate and sieve nothing but the hard leaves' segment: `π(x)` takes 3.50 µs at `10^7`, where primecount takes 7.70 µs.
 - `φ(x, a)` for `a ≤ 8` is `(x / P)·φ(P) + φ(x mod P, a)`, `P = 2·3·5·7·11·13·17·19` taken as `510510` and a division by 19, from tables of the numbers prime to the first primes computed at compile time.
 - The ordinary leaves `S1`: the square-free `n ≤ y` with prime factors above 19, by a recursion over the primes.
 - The trivial leaves, whose `φ` is 1, are counted, by an arithmetic progression for the primes above `x^(1/3)`.
@@ -44,91 +44,97 @@ where `φ(x, a)`, the numbers up to `x` with no prime factor up to `y`, is split
 - `P2(x, a) = Σ (π(x/p) − π(p) + 1)` over the primes `p` from `y` to `√x`: from the table when `x/y` is below `2^16`; else `π` at the first `x/p` by `prime_pi` itself, and the others from a sieve of the numbers from there to `x/y`, counted up to each `x/p` in turn, the primes `p` taken from the top down from sieves of stretches of `2^22`.
 - The sums are of 64-bit numbers that wrap: each term is below `2^64` and the result is below `2^63`, so that it is exact although the parts on the way may not fit.
 
-Lucy Hedgehog's method (2013), `O(x^(3/4))` with `O(√x)` memory, was measured too: never the fastest, 3.3 µs at `10^5`, where this method takes 0.28 µs, 380 µs at `10^8`, where it takes 16 µs, so `prime_pi` does not use it.
+Lucy Hedgehog's method (2013), `O(x^(3/4))` with `O(√x)` memory, was measured too: never the fastest, 3.3 µs at `10^5` and 380 µs at `10^8`, where `prime_pi` takes 1.91 ns (from the table) and 17.7 µs, so `prime_pi` does not use it.
 
 ## The n-th prime
 
-`nth_prime(n)` reads the table up to `π(2^16) = 6542`, and up to 18,000, about `π(2·10^5)`, sieves from `2^16` on. Above, it finds `x = R⁻¹(n)` by Newton's steps on Riemann's `R(x)`, from Cipolla's `n (ln n + ln ln n − 1 + (ln ln n − 2)/ln n)`, `R` by Gram's series `1 + Σ (ln x)^k / (k·k!·ζ(k + 1))`, whose terms are all positive (`ζ(s)` from a table to 20 and `1 + 2^−s` above): within a few times `√x / ln x` primes of the `n`-th. Then `π(x)` by `prime_pi`, and the sieve from `x` up or down to the prime, in windows of twice the expected distance (at least 4096 numbers), each read once, as primecount does (it refines `R` by the zeros of `ζ` above `10^9`, which shortens a sieve that takes a small part of the time); a window down is counted and the prime read from the bytes of its last segment, which still holds them, rather than sieved again. Within `10^7` primes of the last, it sieves down from `2^64 − 1`, whose `π` is known, instead.
+`nth_prime(n)` reads the table up to `π(2^16) = 6542`, and the table of the primes below `2^20` up to `π(2^20) = 82,025` once it is there (before, up to 18,000, about `π(2·10^5)`, it sieves from `2^16` on). Above, it finds `x = R⁻¹(n)` by Newton's steps on Riemann's `R(x)`, from Cipolla's `n (ln n + ln ln n − 1 + (ln ln n − 2)/ln n)`, `R` by Gram's series `1 + Σ (ln x)^k / (k·k!·ζ(k + 1))`, whose terms are all positive (`ζ(s)` from a table to 20 and `1 + 2^−s` above): within a few times `√x / ln x` primes of the `n`-th. Then `π(x)` by `prime_pi`, and the sieve from `x` up or down to the prime, in windows of twice the expected distance (at least 4096 numbers), each read once, as primecount does (it refines `R` by the zeros of `ζ` above `10^9`, which shortens a sieve that takes a small part of the time); a window down is counted and the prime read from the bytes of its last segment, which still holds them, rather than sieved again. Within `10^7` primes of the last, it sieves down from `2^64 − 1`, whose `π` is known, instead.
 
 ## Measured
 
-Measured on 2026-11-11 on an Apple M4 Max on a quiet machine (the load average at 1.3 to 1.9 of its 16 cores), single-threaded, every process with `MallocNanoZone` unset, the harnesses built with fat LTO and one codegen unit; interleaved in the same process with this crate before the work of 2026-11-08 (0.2.32, "before") and with the references, the median of 7 runs (5, 3 or 2 for the longest), in time per call; primesieve 12.16 and primecount 8.8 with one thread (`primesieve_set_num_threads(1)`, `primecount_set_num_threads(1)`).
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harness in the repository's `bench/nt` (its method in `bench/README.md`), on one thread: this crate as a user builds it, by rustc 1.100 stable in cargo's release profile (no LTO, 16 codegen units, no `target-cpu`); the Rust references in the same profile, primal 0.3.3 and malachite 0.15.0; the C references as Homebrew builds them, primesieve 12.18 and primecount 9.0 set to one thread, FLINT 3.6.0 and PARI 2.19.1, called through shims compiled with `-O3 -mcpu=native`. Each figure is the median of 15 samples of at least a millisecond (fewer for the longest calls, 3 at the least), in time per call, this crate and every reference alternating sample by sample in one process, after a check that all give the same counts, sums and primes. A ratio is this crate's time over that of the fastest reference that does the same work: below 1, this crate is faster.
 
-Counting and forming the primes of a range, `primes(a..=b).count()` against `primesieve_count_primes`, the primes formed in order by `next` and summed by `fold` (`sum`) against `primesieve_next_prime`:
+Counting the primes of a range, `primes(a..=b).count()`, against `primesieve_count_primes`, and forming them in order, summed by `next` and by `fold` (`sum`), against primesieve's iterator (`primesieve_next_prime`; `fold`'s ratio is against the iterator timed beside it, 70.2 ms, 811 ms and 1.28 s):
 
-| Range | count | before | primesieve | `next` | before | `fold` | primesieve iterator |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `[0, 10^9]` | 38.3 ms | 37.9 ms | 43.1 ms | 81.0 ms | 88.3 ms | 69.3 ms | 84.6 ms |
-| `[0, 10^10]` | 520 ms | 513 ms | 554 ms | 907 ms | 968 ms | 803 ms | 930 ms |
-| `[10^12, 10^12 + 10^10]` | 909 ms | 911 ms | 1.05 s | 1.28 s | 1.31 s | 1.19 s | 1.41 s |
-| `[10^15, 10^15 + 10^10]` | 1.84 s | 1.84 s | 2.59 s | | | | |
-| `[10^18, 10^18 + 10^10]` | 3.24 s | 3.20 s | 3.88 s | | | | |
-| `[10^19, 10^19 + 10^9]` | 1.36 s | 1.35 s | 1.54 s | | | | |
+| Range | `count` | primesieve | ratio | `next` | primesieve iterator | ratio | `fold` | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `[0, 10^6]` | 15.6 µs | 14.3 µs | 1.09 | | | | | |
+| `[0, 10^8]` | 2.98 ms | 2.99 ms | 0.996 | | | | | |
+| `[0, 10^9]` | 43.3 ms | 44.5 ms | 0.973 | 74.8 ms | 70.0 ms | 1.07 | 63.6 ms | 0.906 |
+| `[0, 10^10]` | 582 ms | 575 ms | 1.01 | 867 ms | 813 ms | 1.07 | 768 ms | 0.947 |
+| `[10^12, 10^12 + 10^10]` | 1.00 s | 1.09 s | 0.917 | 1.24 s | 1.28 s | 0.972 | 1.17 s | 0.915 |
+| `[10^19, 10^19 + 10^9]` | 1.36 s | 1.58 s | 0.862 | | | | | |
 
-- Counting takes 0.71 to 0.94 of primesieve's time, as before (1.00 to 1.01 times its time before): the sieve is primesieve's, its large primes' buckets and medium primes' loops specialised for each class and position by the compiler (a loop with one check of the end a turn of the wheel, as the small primes', measured 8 to 15 % slower for the medium ones), a segment of 2 MiB with parts of 128 KiB for the small primes.
-- `next` takes 0.91 to 0.97 of the time of primesieve's iterator (0.93 to 1.04 before), `fold` 0.82 to 0.86: the primes formed from both ends of each word, two chains side by side.
+- Counting takes 0.862 to 1.01 of primesieve's time from `[0, 10^8]` on: the sieve is primesieve's, its large primes' buckets and its medium primes' loops specialised for each class and position, a segment of 2 MiB with parts of 128 KiB for the small primes. `fold` takes 0.906 to 0.947 of the iterator's time, the primes formed from both ends of each word; `next` 0.972 to 1.07.
+- The other sieves are slower: this crate takes 0.209 to 0.476 of the time of primal's `StreamingSieve::prime_pi` and 0.0411 to 0.109 of malachite's `primes_less_than_or_equal_to(b).count()`; forming the primes of `[0, 10^9]`, 0.441 of primal's (`Sieve::new(b).primes_from(0)`, its whole sieve kept, 33 MB) and 0.192 of malachite's.
 
-Short ranges far up, where the start of the full sieve dominates (the code is unchanged: 0.99 to 1.01 times its time before, in the same runs):
+Short ranges far up, where the start of the full sieve dominates and the shorter stretches are sieved by the small primes and tested (see above):
 
-| Range | `primes(a..=b).count()` | primesieve |
-| --- | --- | --- |
-| `[10^15, 10^15 + 10^6]` | 7.87 ms | 7.81 ms |
-| `[10^18, 10^18 + 10^6]` | 19.0 ms | 165 ms |
-| `[10^18, 10^18 + 10^8]` | 282 ms | 316 ms |
-| `[2^64 − 10^6, 2^64)` | 20.0 ms | 714 ms |
-| `[2^64 − 10^7, 2^64)` | 182 ms | 738 ms |
-| `[2^64 − 10^8, 2^64)` | 868 ms | 909 ms |
-
-| The first primes from `a` | `primes(a..).take(k)` | before | primesieve iterator |
+| Range | `primes(a..=b).count()` | primesieve | ratio |
 | --- | --- | --- | --- |
-| 10 from `0` | 0.22 µs | 0.50 µs | 0.08 µs |
-| 10 from `10^6` | 0.91 µs | 1.41 µs | 0.70 µs |
-| 10 from `10^9` | 10.5 µs | 12.9 µs | 15.4 µs |
-| 100 from `10^12` | 86.7 µs | 87.0 µs | 608 µs |
-| 100 from `10^18` | 466 µs | 468 µs | 366 ms |
-| 100 from `2^64 − 10^9` | 487 µs | 487 µs | 1.45 s |
+| `[10^15, 10^15 + 10^6]` | 7.57 ms | 7.97 ms | 0.949 |
+| `[10^18, 10^18 + 10^6]` | 18.5 ms | 171 ms | 0.108 |
+| `[10^18, 10^18 + 10^8]` | 276 ms | 328 ms | 0.841 |
+| `[2^64 − 10^6, 2^64)` | 19.5 ms | 739 ms | 0.0263 |
+| `[2^64 − 10^7, 2^64)` | 177 ms | 760 ms | 0.233 |
+| `[2^64 − 10^8, 2^64)` | 853 ms | 935 ms | 0.912 |
 
-The first primes below `2^16` come from the table of the primes computed at compile time, with no sieve to start; what is left from 0 is mostly the allocation of the batch, 8 KiB. From `10^6` the first stretch's sieving primes are placed, a division each, and crossed out over 4096 numbers, for ten primes: primesieve's iterator, which keeps its small sieving primes, is faster there.
+The first primes from a point, against a new primesieve iterator from it (`jump_to`) and, from the first three points, primal's `Primes::all()`, which sieves from 2:
 
-`prime_pi(x)` against primecount's `primecount_pi` (Xavier Gourdon's method, its default, below `10^5` Legendre's formula and to `10^8` Meissel's), loops of calls with the argument changing up to `10^10`:
-
-| x | `prime_pi` | before | primecount | to primecount |
+| The first primes from `a` | `primes(a..).take(k)` | primesieve iterator | ratio | primal |
 | --- | --- | --- | --- | --- |
-| `3·10^4` | 3.5 ns | 3.5 ns | 11.6 ns | 0.31 |
-| `7·10^4` | 0.24 µs | 0.76 µs | 0.46 µs | 0.52 |
-| `10^5` | 0.28 µs | 1.05 µs | 0.70 µs | 0.41 |
-| `2·10^5` | 0.40 µs | 1.39 µs | 0.83 µs | 0.48 |
-| `10^6` | 1.04 µs | 2.39 µs | 1.69 µs | 0.61 |
-| `10^7` | 3.34 µs | 7.02 µs | 6.27 µs | 0.53 |
-| `10^8` | 16.0 µs | 25.8 µs | 27.4 µs | 0.58 |
-| `10^9` | 63.1 µs | 93.7 µs | 97.9 µs | 0.64 |
-| `10^10` | 248 µs | 363 µs | 392 µs | 0.63 |
-| `10^12` | 3.86 ms | 5.11 ms | 6.11 ms | 0.63 |
-| `10^14` | 60.9 ms | 78.5 ms | 88.2 ms | 0.69 |
-| `10^15` | 244 ms | 319 ms | 344 ms | 0.71 |
-| `10^16` | 988 ms | 1.30 s | 1.35 s | 0.73 |
-| `10^17` | 4.02 s | 5.42 s | 5.28 s | 0.76 |
-| `10^18` | 16.4 s | 23.0 s | 20.8 s | 0.79 |
-| `2^64 − 1` | 99.0 s, 83 MB | 161 s, 83 MB | 122 s, 104 MB | 0.81 |
+| 10 from `0` | 167 ns | 322 ns | 0.520 | 81.5 µs |
+| 10 from `10^6` | 1.07 µs | 1.09 µs | 0.982 | 219 µs |
+| 10 from `10^9` | 10.7 µs | 12.2 µs | 0.880 | 158 ms |
+| 100 from `10^12` | 72.4 µs | 258 µs | 0.280 | – |
+| 100 from `10^18` | 436 µs | 138 ms | 0.0032 | – |
+| 100 from `2^64 − 10^9` | 456 µs | 617 ms | 0.0007 | – |
 
-- Below `10^8` the tables of the primes and of `π` below `2^16` leave the method with no table to build and no sieve but the hard leaves': 1.6 to 3.7 times faster than before, 0.41 to 0.61 of primecount's Legendre's and Meissel's formulas.
-- Above, the hard leaves are fewer (Gourdon's sorting: at `10^18` 1.6 of the 2.3·10^9 that Deléglise and Rivat's method sieves, the primes above `x^(1/4)` not crossing out the sieve) and cheaper (the NEON kernels, the sums before the blocks prepared only for a prime with leaves in the segment), and the easy leaves' look-ups are two at a time: from `10^9` up, 0.63 to 0.81 of primecount's time, the share growing with `x` from `10^12`, and 0.67 to 0.78 of the time before up to `10^18`. At `10^18` (timed copies of both versions, one run each) the hard leaves took 8.40 s instead of 15.1 s, the easy ones 5.07 s instead of 5.51 s, `P2` 2.38 s (2.38 s before), the easy leaves above `y` 0.52 s; primecount's `D` (its hard leaves) took 11.6 s there, `A + C` 5.56 s and `B` 3.59 s.
-- At `2^64 − 1` (one run each, not interleaved; "before" is the earlier measurement of 2026-11-07, with other work on the machine, the load average about 25, not measured again; primecount's time is its own total): from a timed copy, a second run, `P2` 14.7 s, the easy leaves 31.9 s, those above `y` 2.71 s, the hard leaves 49.6 s (64.9 s, in an earlier run with other work on the machine, before the preparations were made only for primes with leaves), 99.1 s in all; primecount's `D` 66.3 s, `A + C` 35.0 s, `B` 20.0 s, at 122 s in all.
-- FLINT 3.6's `n_prime_pi` sieves: 4.15 ms at `10^6` and 124 ms at `10^8`, the first call (it keeps what it sieved: a call again takes 0.08 and 0.04 µs); PARI/GP's `primepi` took 14 ms at `10^8` and 18 ms at `10^9` (gp's clock counts whole milliseconds), and 88 s at `10^12` in an earlier measurement with other work on the machine.
+The first primes below `2^16` come from the table of the primes computed at compile time, with no sieve to start. From `10^6` the first stretch's sieving primes are placed, a division each, and crossed out over 4096 numbers for ten primes, about as long as primesieve's iterator takes, which keeps its small sieving primes; far up, where primesieve sieves the whole stretch of `√a` numbers, the stretches tested by Baillie–PSW take a fraction of its time.
 
-`nth_prime(n)` against primecount's `primecount_nth_prime`:
+`prime_pi(x)` against primecount's `primecount_pi` and PARI's `primepi`, each sample over 64 arguments from `x` to 6 % above it up to `10^10` (at `10^6` some of them are above `2^20`), and over `x` itself beyond:
 
-| n | `nth_prime` | before | primecount | to primecount |
-| --- | --- | --- | --- | --- |
-| `10^4` | 1.05 µs | 1.35 µs | 1.82 µs | 0.58 |
-| `3·10^4` | 1.28 µs | 4.06 µs | 2.37 µs | 0.54 |
-| `10^5` | 2.25 µs | 6.07 µs | 3.16 µs | 0.71 |
-| `10^6` | 6.45 µs | 12.4 µs | 11.7 µs | 0.55 |
-| `10^7` | 29.1 µs | 52.9 µs | 45.0 µs | 0.65 |
-| `10^9` | 557 µs | 811 µs | 785 µs | 0.71 |
-| `10^12` | 32.8 ms | 44.5 ms | 44.9 ms | 0.73 |
+| x | `prime_pi` | primecount | PARI | ratio | fastest |
+| --- | --- | --- | --- | --- | --- |
+| `3·10^4` | 1.41 ns | 199 ns | 11.3 ns | 0.125 | PARI |
+| `7·10^4` | 1.92 ns | 475 ns | 12.1 ns | 0.159 | PARI |
+| `10^5` | 1.91 ns | 669 ns | 11.6 ns | 0.165 | PARI |
+| `2·10^5` | 1.93 ns | 808 ns | 11.6 ns | 0.167 | PARI |
+| `10^6` | 258 ns | 1.64 µs | 1.31 µs | 0.197 | PARI |
+| `10^7` | 3.50 µs | 7.70 µs | 2.94 ms | 0.454 | primecount |
+| `10^8` | 17.7 µs | 30.3 µs | 16.7 ms | 0.585 | primecount |
+| `10^9` | 69.0 µs | 110 µs | 42.3 ms | 0.629 | primecount |
+| `10^10` | 276 µs | 430 µs | 333 ms | 0.642 | primecount |
+| `10^12` | 3.86 ms | 5.24 ms | – | 0.738 | primecount |
+| `10^13` | 15.4 ms | 19.5 ms | – | 0.790 | primecount |
+| `10^14` | 61.3 ms | 72.7 ms | – | 0.842 | primecount |
+| `10^15` | 248 ms | 278 ms | – | 0.892 | primecount |
+| `10^16` | 1.01 s | 1.08 s | – | 0.935 | primecount |
 
-Both are their `π` at the estimate and a short sieve; here the sieve's primes come from the table below `2^16`, its list of small primes is reserved at once (its growth took 45 % of placing the primes), `R` takes no powers, and a window down is sieved once. PARI/GP's `prime(n)` answers at once up to `n = 10^11` (it keeps checkpoints of `π` and sieves from the nearest; under a millisecond, gp's clock reading 0 ms, at `10^9` and `10^11`), and took more than four minutes for `10^12` in an earlier measurement with other work on the machine; FLINT's `n_nth_prime` sieves from 2: 2.30 s at `10^8`, 28.0 s at `10^9`.
+- Below `2^20` both this crate and PARI read tables: PARI's of the primes below its `primelimit`, made at its start, and here those of the counts above, built once 128 calls have asked there; 1.41 to 1.93 ns a call, 0.125 to 0.167 of PARI's time.
+- From `10^7` the method, 0.454 to 0.935 of primecount's time, the margin narrowing as `x` grows: primecount 9.0 chooses a larger `y` than the `α` above gives, which moves work from `P2` to the leaves, and this crate's `α` was not fitted again for it.
+- FLINT's `n_prime_pi` sieves, and keeps what it sieved: its first call (after `flint_cleanup`) took 48.4 µs at `3·10^4` and 110 ms at `10^8`; primal's `StreamingSieve::prime_pi` 1.64 µs at `3·10^4` and 1.30 s at `10^10`; PARI's `primepi` beyond its table 2.94 ms at `10^7` and 333 ms at `10^10`.
+- `prime_pi` from `10^17` to `2^64 − 1`, and the counts of `[10^15, 10^15 + 10^10]` and `[10^18, 10^18 + 10^10]`, calls of seconds to minutes, were not part of this run.
+
+`nth_prime(n)` against primecount's `primecount_nth_prime` and PARI's `prime`, each sample over arguments up to 6 % above `n`:
+
+| n | `nth_prime` | primecount | PARI | ratio | fastest |
+| --- | --- | --- | --- | --- | --- |
+| `10^4` | 3.59 ns | 1.81 µs | 6.76 ns | 0.531 | PARI |
+| `3·10^4` | 3.59 ns | 2.39 µs | 6.79 ns | 0.529 | PARI |
+| `10^5` | 3.25 µs | 3.39 µs | 97.4 µs | 0.959 | primecount |
+| `10^6` | 11.6 µs | 14.4 µs | 586 µs | 0.804 | primecount |
+| `10^7` | 44.8 µs | 52.7 µs | 6.29 ms | 0.851 | primecount |
+| `10^9` | 583 µs | 711 µs | – | 0.820 | primecount |
+| `10^12` | 33.3 ms | 38.3 ms | – | 0.869 | primecount |
+| `10^14` | 559 ms | 594 ms | – | 0.941 | primecount |
+
+Up to `π(2^20)` a read of the table, as PARI's; above, both this crate and primecount take `π` at an estimate and a short sieve, 0.804 to 0.959 of primecount's time. PARI's `prime` beyond its table sieves from the last prime it found, 97.4 µs at `10^5` and 6.29 ms at `10^7`; FLINT's `n_nth_prime` sieves from 2, 1.40 ms at `10^5` and 229 ms at `10^7`; primal's `StreamingSieve::nth_prime` 4.69 µs at `10^4` and 12.2 ms at `10^7`.
+
+Where the references are faster, this crate's time over the fastest reference's above 1.05:
+
+- **Counting `[0, 10^6]`.** 1.09 times primesieve's time, 15.6 µs against 14.3: the start of a short range, the segment and the pre-sieve's tables set up, against primesieve's.
+- **`next` over `[0, 10^9]` and `[0, 10^10]`.** 1.07 times primesieve's iterator. What `next` pays over `fold` (0.906 and 0.947), about a cycle a prime, is the iterator's own: each call loads the batch's index and length and stores the index, as the iterator's state escapes into the call that fills the batch, which is not inlined; a pair of pointers would save a load, but would put raw pointers into a public type, and was not done.
 
 ## Examples
 

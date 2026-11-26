@@ -27,7 +27,7 @@ mod portable;
 pub(super) unsafe fn submul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
     // SAFETY: forwarded; BMI2 is checked before its kernel runs.
     unsafe {
-        if std::is_x86_feature_detected!("bmi2") {
+        if !cfg!(a_baseline) && std::is_x86_feature_detected!("bmi2") {
             submul_1_bmi2(r, x, n, y)
         } else {
             portable::submul_1(r, x, n, y)

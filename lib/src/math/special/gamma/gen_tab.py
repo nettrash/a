@@ -206,7 +206,8 @@ def trit(u):
 ct, e = fit(trit, 0, mpf(1) / 100, 6, grid=800)
 print("trigamma tail", mpmath.nstr(e, 4))
 arr3("TRIG_TAIL", [float(c) for c in ct], "`(ψ′(x) − 1/x − 1/(2x²))·x³` in `u = 1/x²` on `x ≥ 10` (minimax, absolute).")
-pieces = [(2.0, 2.5), (2.5, 3.0), (3.0, 3.5), (3.5, 4.0)] + [(float(k), float(k + 1)) for k in range(4, 10)]
+# The four halves of [2, 4): minimax relative fits of ψ′(c + s) − Y.
+pieces = [(2.0, 2.5), (2.5, 3.0), (3.0, 3.5), (3.5, 4.0)]
 rows = []
 for lo, hi in pieces:
     c = (lo + hi) / 2
@@ -221,8 +222,49 @@ for lo, hi in pieces:
     n, cc, e = best
     print("trig piece", lo, hi, n, mpmath.nstr(e, 3))
     rows.append([Y] + [float(v) for v in cc] + [0.0] * (15 - n))
-extra2.append("/// `ψ′(c + s)` on ten pieces of `[2, 10)` (halves below 4, units above; `c` the centre):")
-extra2.append("/// `Y` then `R(s)`, minimax relative, padded with zeros to 16 coefficients.")
+
+
+def cheb_cut(f, h, nodes, terms):
+    """The Chebyshev interpolant of `f` on `[−h, h]` at `nodes` points of the first kind, cut to its
+    first `terms` Chebyshev terms, in powers of `s`."""
+    xs = [mpmath.cos(mpmath.pi * (j + mpf(1) / 2) / nodes) for j in range(nodes)]
+    fs = [f(h * t) for t in xs]
+    ch = [2 * mpmath.fsum(fs[j] * mpmath.cos(mpmath.pi * i * (j + mpf(1) / 2) / nodes) for j in range(nodes)) / nodes
+          for i in range(terms)]
+    ch[0] /= 2
+    T = [[mpf(1)], [mpf(0), mpf(1)]]
+    for i in range(2, terms):
+        nx = [mpf(0)] * (i + 1)
+        for m_, v in enumerate(T[-1]): nx[m_ + 1] += 2 * v
+        for m_, v in enumerate(T[-2]): nx[m_] -= v
+        T.append(nx)
+    mono = [mpf(0)] * terms
+    for i in range(terms):
+        for m_, v in enumerate(T[i]): mono[m_] += ch[i] * v
+    return [mono[i] / h ** i for i in range(terms)]
+
+
+# The twelve halves of [4, 10) (the speed pass): Y + c₀ = ψ′(c), c₁ = ψ″(c) rounded, and
+# R(s) = (ψ′(c + s) − ψ′(c) − c₁s)/s² by `cheb_cut` (30 nodes, 14 terms), mpmath at 45 digits.
+with mpmath.workdps(45):
+    for k in range(12):
+        c = mpf(4) + mpf(k) / 2 + mpf(1) / 4
+        v = mpmath.psi(1, c)
+        Y = float(v)
+        c0 = float(v - Y)
+        c1 = float(mpmath.psi(2, c))
+        R = lambda s: (mpmath.psi(1, c + s) - v - mpf(c1) * s) / s ** 2
+        cf = cheb_cut(R, mpf(1) / 4, 30, 14)
+        rows.append([Y, c0, c1] + [float(x) for x in cf])
+        g = lambda s: Y + c1 * s + (c0 + s * s * sum(float(x) * s ** i for i, x in enumerate(cf)))
+        e = max(abs(g(mpf(j) / 800) / mpmath.psi(1, c + mpf(j) / 800) - 1) for j in range(-200, 201))
+        print("trig piece", float(c), mpmath.nstr(e, 3))
+extra2.append("/// `ψ′(c + s)` on sixteen pieces of width 1/2 of `[2, 10)` (`c` the centre, the piece of `x`")
+extra2.append("/// at `⌊2(x − 2)⌋`, without a branch): `Y`, `c₀`, `c₁` then `R(s)`, padded with zeros to 14")
+extra2.append("/// coefficients, the value `Y + c₁s + (c₀ + s²R(s))`. The four on `[2, 4)` are minimax relative")
+extra2.append("/// fits (`gen_tab.py`); the twelve on `[4, 10)` Chebyshev interpolants of `R` at 30 nodes cut to")
+extra2.append("/// 14 terms (mpmath at 45 digits, `Y + c₀` the value at `c` and `c₁ = ψ″(c)` rounded, relative")
+extra2.append("/// error at most 6.2·10⁻¹⁸, nearly all of it the rounding of `c₁`).")
 extra2.append(f"pub(super) static TRIG_PIECES: [[f64; 17]; {len(rows)}] = [")
 for r in rows:
     extra2.append("    [" + ", ".join(lit(v) for v in r) + "],")
@@ -338,3 +380,21 @@ dd5("TWO_FIFTHS", mpf(2) / 5, "`2/5`.")
 dd5("LN2_DD", ln2, "`ln 2` (to `2⁻¹⁰⁶`; `LN2_HI` has 42 bits for exact multiples).")
 open(TAB, "a").write("\n".join(extra5) + "\n")
 print("argument ok")
+
+
+# ---- the release pass: C(n, k) for 0 ≤ k ≤ n/2, n ≤ 60, correctly rounded from exact integers
+import math
+extra6 = []
+bs = []
+for n in range(61):
+    for k in range(n // 2 + 1):
+        c = math.comb(n, k)
+        b = float(c)  # Python's int → float conversion rounds to nearest, ties to even
+        assert abs(mpf(c) - mpf(b)) <= mpf(2) ** (math.frexp(b)[1] - 54), (n, k)
+        bs.append(b)
+assert len(bs) == 961
+extra6.append("/// `C(n, k)` for `n = 0, 1, …, 60` and `k = 0, 1, …, ⌊n/2⌋`, row by row (row `n` from index")
+extra6.append("/// `⌊(n + 1)/2⌋·⌊(n + 2)/2⌋`), correctly rounded from the exact integers.")
+extra6.append("pub(super) static BINOM60: [f64; 961] = [" + ", ".join(lit(v) for v in bs) + "];")
+open(TAB, "a").write("\n".join(extra6) + "\n")
+print("binomial ok")

@@ -2,18 +2,20 @@
 //! 2.4.14, for a matrix of any shape and rank), and the form with its transformations by
 //! alternating Hermite forms of the rows and of the columns (Kannan and Bachem, 1979).
 //!
-//! **The diagonal.** For `A` of rank `r`, the product `d_1⋯d_r` of the nonzero elementary
-//! divisors is the greatest common divisor of the `r × r` minors, so it divides `D = |det M|` for
-//! the nonsingular minor `M` of the rank profiles, and the Smith form of `A` over `Z/DZ` is
-//! `diag(d_1, …, d_r, 0, …)`. Position `t` takes a nonzero element of the remaining block as its
-//! pivot, then clears its column and its row by unimodular steps of two rows or two columns
-//! (a subtraction when the pivot divides, the extended Euclidean step otherwise, which makes the
-//! pivot a proper divisor of itself), until both are clear; when the pivot's `g = gcd(pivot, R)`
-//! does not divide some element of the block, that element's row is added to the pivot's and the
-//! clearing goes on, with a smaller pivot. Then `d_t = g`, and the block is reduced modulo
-//! `R / d_t`, a multiple of the product of the divisors left. The elements stay below `D`;
-//! the work is `O(m·n·r)` operations on numbers as long as `D`, and each position repeats its
-//! clearing at most `log₂ D` times.
+//! **The diagonal.** For `A` of rank `r`, the divisors are those of its Hermite form `H`
+//! ([`divisors`]): each pivot 1 gives a divisor 1, and the other ones are those of the block of the
+//! rows of the pivots above 1 on their columns and on the columns outside the profile, of full row
+//! rank `t`, so that the product `P` of its pivots is a multiple of the product of its divisors
+//! and its Smith form over `Z/PZ` is `diag(d_1, …, d_t)` ([`divisors_mod`]). Position `s` takes a
+//! nonzero element of the remaining block as its pivot, then clears its column and its row by
+//! unimodular steps of two rows or two columns (a subtraction when the pivot divides, the
+//! extended Euclidean step otherwise, which makes the pivot a proper divisor of itself), until
+//! both are clear; when the pivot's `g = gcd(pivot, R)` does not divide some element of the
+//! block, that element's row is added to the pivot's and the clearing goes on, with a smaller
+//! pivot. Then `d_s = g`, and the block is reduced modulo `R / d_s`, a multiple of the product of
+//! the divisors left. The elements stay below `P`; the work is `O(t²·(t + k))` operations on
+//! numbers as long as `P`, `k` the columns outside the profile, and each position repeats its
+//! clearing at most `log₂ P` times. For a random square matrix `t = 1`.
 //!
 //! **The form with its transformations.** The Hermite form `U₁·A = H` (with the transformation
 //! of [`super::hermite`]), then that of the columns of its top `r` rows, `H[..r]·V₁ = [K | 0]`, `K`
@@ -37,9 +39,11 @@
 //! their kernel rows.
 
 use super::super::Matrix;
-use super::hermite::{Rows, form_and_transform, rows_of, square_and_transform};
+use super::hermite::{self, Rows, form_and_transform, square_and_transform};
 use super::profile::Basis;
+use super::transform::times;
 use crate::math::numbers::{Divisor, Number};
+use core::cell::OnceCell;
 
 /// `x` modulo `d`, in `[0, |d|)`.
 #[inline]
@@ -49,8 +53,8 @@ fn reduce(x: &mut Number, d: &Divisor) {
     }
 }
 
-/// The nonzero elementary divisors `d_1 | … | d_r` of `a`, of rank `r ≥ 1`, given a positive
-/// multiple `det` of their product.
+/// The nonzero elementary divisors `d_1 | … | d_r` of the rows `a`, of rank `r ≥ 1`, given a
+/// positive multiple `det` of their product.
 pub(super) fn divisors_mod(mut a: Rows, r: usize, det: &Number) -> Vec<Number> {
     let m = a.len();
     let n = a.first().map_or(0, Vec::len);
@@ -182,14 +186,35 @@ fn step(g: &mut [Number], v: &mut [Number], d: &Divisor) {
 }
 
 /// The elementary divisors of `a`, its rank profiles `b` proved: `min(m, n)` of them, the zeros
-/// last.
+/// last. Those of its Hermite form `H`, whose rows of a pivot 1 each give a divisor 1: a pivot 1
+/// is alone in its column (the elements above it are in `[0, 1)`), so the column steps that clear
+/// the rest of its row change nothing else, and the rows of the pivots above 1 are zero in its
+/// column. What is left is the block of those rows on their pivots' columns and the columns `K`
+/// outside `J`, of full rank, its divisors those of the rest; it is taken modulo the product of
+/// its pivots ([`divisors_mod`]). For a random square matrix the form is `[I h; 0 D]` and the
+/// block is `(D)`.
 pub(super) fn divisors(a: &Matrix<Number>, b: &Basis) -> Vec<Number> {
     let k = a.rows().min(a.cols());
-    let mut out = if b.rank == 0 {
-        Vec::with_capacity(k)
-    } else {
-        divisors_mod(rows_of(a), b.rank, &b.det)
-    };
+    let r = b.rank;
+    let mut out = Vec::with_capacity(k);
+    if r > 0 {
+        let h = hermite::form(a, b);
+        let above: Vec<usize> = (0..r).filter(|&i| h[(i, b.cols[i])] != 1u8).collect();
+        out.resize(r - above.len(), Number::from(1u8));
+        if !above.is_empty() {
+            let cols: Vec<usize> = above
+                .iter()
+                .map(|&i| b.cols[i])
+                .chain(b.free.iter().copied())
+                .collect();
+            let block: Rows = above
+                .iter()
+                .map(|&i| cols.iter().map(|&c| h[(i, c)].clone()).collect())
+                .collect();
+            let det: Number = above.iter().map(|&i| h[(i, b.cols[i])].clone()).product();
+            out.extend(divisors_mod(block, above.len(), &det));
+        }
+    }
     out.resize(k, Number::default());
     out
 }
@@ -197,7 +222,8 @@ pub(super) fn divisors(a: &Matrix<Number>, b: &Basis) -> Vec<Number> {
 /// The profiles of `H[..r]ᵀ` that make its transformation, for the Hermite form `H` of a matrix of
 /// the profiles `b`: its `r` columns are independent; its rows `J` are independent, the minor
 /// `H[..r, J]ᵀ` lower triangular with the pivots on its diagonal, and its other rows, `K`, are
-/// `Y = Xᵀ` times those, as `H[..r, K] = H[..r, J]·X`. `J` is in general not the row rank profile
+/// `Y = Xᵀ` times those, as `H[..r, K] = H[..r, J]·X` (kept as `N = δ'·Y`, `δ'` the product of the
+/// pivots). `J` is in general not the row rank profile
 /// from the bottom, so [`super::transform`] gives the transformation `W` of the Hermite form of
 /// `[H[..r]ᵀ | E_K]` (`E_K` the columns of the identity for the rows `K`), not that of
 /// `[H[..r]ᵀ | I]`. Proving profiles again would take the determinant of a matrix whose elements
@@ -205,7 +231,9 @@ pub(super) fn divisors(a: &Matrix<Number>, b: &Basis) -> Vec<Number> {
 fn transposed(h: &Matrix<Number>, b: &Basis) -> Basis {
     let r = b.rank;
     let minor = Matrix::from_fn(r, r, |i, j| h[(j, b.cols[i])].clone());
-    let det = (0..r).map(|k| minor[(k, k)].clone()).product();
+    let det: Number = (0..r).map(|k| minor[(k, k)].clone()).product();
+    // `N = δ'·Xᵀ`, of integers: `δ'·X = adj(H[..r, J])·H[..r, K]` up to sign.
+    let n = Matrix::from_fn(b.free.len(), r, |i, j| times(&b.x[(j, i)], &det));
     Basis {
         rank: r,
         cols: (0..r).collect(),
@@ -213,9 +241,10 @@ fn transposed(h: &Matrix<Number>, b: &Basis) -> Basis {
         rows: b.cols.clone(),
         others: b.free.clone(),
         minor,
-        det,
+        det: OnceCell::from(det),
         x: Matrix::zeros(r, 0),
-        y: Some(b.x.transpose()),
+        n: Some(n),
+        hj: OnceCell::new(),
     }
 }
 

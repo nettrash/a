@@ -355,9 +355,13 @@ fn agm_mean(a: &Fl, b: &Fl, n: usize) -> Fl {
     Fl::of(&limbs::add(&a.m, &bs), a.e - 1, n)
 }
 
-/// `sqrt(a b)` from below within a relative `2^(2 - 64 n)`: the integer square root of the exact
-/// product (one bit cut first when its exponent is odd, `2^(2 - 128 n)` at most), and one more cut
-/// when the root falls a bit short of `n` limbs.
+/// `sqrt(a b)` from below within a relative `(2n + 2)·2^(-64 n)`: the integer square root of the
+/// short product of `n` limbs (`nat::mulhigh_to`, its low `n - 1` limbs taken as zeros; the exact
+/// product where a short one does not pay, [`short_pays`](super::general::short_pays)), which is
+/// below the exact product `P ≥ 2^(128 n - 2)` by less than `(n - 1)·2^(64 n)`, a relative `4(n -
+/// 1)·2^(-64 n)` and half that on the root; one bit cut when its exponent is odd (`2^(2 - 128 n)` at
+/// most), the root's floor and one more cut when it falls a bit short of `n` limbs (`2^(2 - 64 n)`
+/// with those), [`root_err`] in units of `2^(-64 n)`.
 fn agm_root(
     a: &Fl,
     b: Option<&Fl>,
@@ -368,7 +372,19 @@ fn agm_root(
 ) -> Fl {
     let mut e = match b {
         Some(b) => {
-            if core::ptr::eq(a, b) {
+            let same = core::ptr::eq(a, b);
+            if super::general::short_pays(n) {
+                prod.clear();
+                prod.resize(2 * n, 0);
+                if same {
+                    nat::sqrhigh_to(prod, &a.m, scratch);
+                } else {
+                    nat::mulhigh_to(prod, &a.m, &b.m, scratch);
+                }
+                // The limbs below the short product's, clobbered, as zeros: from below.
+                prod[..n - 1].fill(0);
+            } else if same {
+                // The exact product, within the bound too.
                 nat::sqr_into(prod, &a.m, scratch);
             } else {
                 nat::mul_into(prod, &a.m, &b.m, scratch);
@@ -394,6 +410,12 @@ fn agm_root(
     Fl::of(root, e / 2, n)
 }
 
+/// The relative error of a step of [`agm_root`] in units of `2^(-64 n)`: `2n + 2`.
+#[inline]
+fn root_err(n: usize) -> u64 {
+    2 * n as u64 + 2
+}
+
 /// `ln x` for `x = M·2^lsb` (exact) by the arithmetic-geometric mean, as MPFR's `mpfr_log` but on
 /// numbers of `n` limbs cut from below at each step: for `s = x 2^k >= 2^(T/2 + 8)`, `ln x = π / (2
 /// AGM(1, 4/s)) - k ln 2 = π a / (2 AGM(a, 1)) - k ln 2` with `a = s/4`, the AGM being homogeneous.
@@ -407,8 +429,9 @@ fn agm_root(
 ///
 /// The steps: the AGM is homogeneous and grows with each argument, so a pair cut from below by
 /// relative errors at most `η` has an AGM within `(1 - η)` of the pair's, and the computed pairs'
-/// AGM is within `(1 - η)^K` of `AGM(a, 1)` after `K` steps (`η = 2^(2 - 64 n)`, [`agm_mean`] and
-/// [`agm_root`]). The iteration stops at `δ = (a - b)/(a + b) <= 2^-(T/4 + 3)` and takes
+/// AGM is within `(1 - η)^K` of `AGM(a, 1)` after `K` steps (`η = (2n + 2)·2^(-64 n)`, the larger
+/// of [`agm_mean`]'s `2^(2 - 64 n)` and [`agm_root`]'s, whose short products cost `log2(2n + 2) -
+/// 2` bits, which the limbs' count takes). The iteration stops at `δ = (a - b)/(a + b) <= 2^-(T/4 + 3)` and takes
 /// `AGM(a, b) = m AGM(1 + δ, 1 - δ) = m / (1 + S)`, `m = (a + b)/2`, `S = Σ_(j >= 1) c_j² δ^(2j)`
 /// (`K(δ) = (π/2)(1 + S)`, `c_j = (1/2)_j / j! <= 1/2`): `S = δ²/4 + R`, `0 <= R <= δ⁴/(4(1 -
 /// δ²))`, and `|1/(1 + S) - (1 - δ²/4)| <= R + S² <= δ⁴/3`, so `AGM(a, b) = m - (a - b)²/(16 m)`
@@ -425,8 +448,11 @@ fn ln_agm(m: &[u64], lsb: i128, w: u64, extra: u64) -> Option<(bool, Vec<u64>, i
     let t = w + extra + 4;
     let k = (t / 2 + 8) as i64 - ex + 1;
     let lb = 64 - (t / 2 + 16).leading_zeros() as u64;
-    // The limbs: `T` bits, the `lb` of `ln s` and about the `log2 4(K + 8)` of the steps.
-    let n = (t + lb + 10).div_ceil(64) as usize;
+    // The limbs: `T` bits, the `lb` of `ln s`, about the `log2 4(K + 8)` of the steps, and the
+    // `log2(2n + 2) - 2` that the short products of the roots cost.
+    let n0 = (t + lb + 10).div_ceil(64) as usize;
+    let n =
+        (t + lb + 10 + 64 - u64::from(root_err(n0 + 1).leading_zeros()) - 2).div_ceil(64) as usize;
     let nw = 64 * n as i128;
     // `a = s/4 = x 2^(k - 2)`.
     let a0 = Fl::of(&mt, (lsb + i128::from(k - 2)) as i64, n);
@@ -523,7 +549,7 @@ fn ln_agm(m: &[u64], lsb: i128, w: u64, extra: u64) -> Option<(bool, Vec<u64>, i
         (false, _) => (false, limbs::sub(&qa, &ka)),
     };
     limbs::trim(&mut v);
-    let eta = Rad::pow2(2 - nw);
+    let eta = Rad::int(root_err(n)).mul(Rad::pow2(-nw));
     let rho = eta.mul(Rad::int(steps + 8)).add(rel_pi);
     let k2 = Rad::pow2(-2 * i128::from(t / 2 + 6));
     let err = rho

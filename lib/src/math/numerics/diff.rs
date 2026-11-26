@@ -428,6 +428,10 @@ fn ladder<T: Real>(
     };
     let mut rows: Vec<Rung<T>> = Vec::new();
     let mut previous: Vec<T> = Vec::new();
+    // The row being formed and the jumps of the table, kept from one rung to the next so that a
+    // rung allocates nothing.
+    let mut current: Vec<T> = Vec::new();
+    let mut jumps: Vec<T> = Vec::new();
     let mut hopeless = 0;
     let mut kinks = 0;
     let mut last_jump: Option<T> = None;
@@ -482,7 +486,8 @@ fn ladder<T: Real>(
         all_flat = all_flat && rung.flat;
         let n = rows.len();
         // The Neville row of this step: column m cancels the powers h², …, h^(2m).
-        let mut current = vec![rung.q];
+        current.clear();
+        current.push(rung.q);
         for m in 1..=previous.len().min(columns - 1) {
             let ratio = rows[n - 1 - m].h / rung.h;
             let refined =
@@ -552,13 +557,15 @@ fn ladder<T: Real>(
                 };
             }
         }
-        previous = current;
+        core::mem::swap(&mut previous, &mut current);
         let mut good = false;
         if let Some((_, _, scale, _, _)) = candidate {
-            let jumps: Vec<T> = rows[n.saturating_sub(columns)..]
-                .iter()
-                .filter_map(|r| r.jump)
-                .collect();
+            jumps.clear();
+            jumps.extend(
+                rows[n.saturating_sub(columns)..]
+                    .iter()
+                    .filter_map(|r| r.jump),
+            );
             if jumps.len() >= 2 {
                 let limit = jump_limit(&jumps);
                 if limit.abs() <= T::from_f64(JUMP) * tol * scale {
@@ -609,7 +616,8 @@ fn ladder<T: Real>(
             // The table starts again from this rung: an answer that failed was an alias or a
             // table that settled by chance, and one that passed may still be bettered below.
             rows.drain(..n - 1);
-            previous = vec![rung.q];
+            previous.clear();
+            previous.push(rung.q);
             kinks = 0;
             last_jump = None;
         }

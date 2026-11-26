@@ -307,6 +307,13 @@ impl<'f> Ops<'f> {
 
     /// The affine coordinates of `p`, `None` for the point at infinity.
     pub(super) fn affine(&self, p: &Ld<'f>) -> Option<Affine<'f>> {
+        if p.z.is_one() {
+            // Already affine, as decoded points are: no inversion.
+            return Some(Affine {
+                x: p.x.clone(),
+                y: p.y.clone(),
+            });
+        }
         let zi = p.z.inverse()?;
         Some(Affine {
             x: &p.x * &zi,

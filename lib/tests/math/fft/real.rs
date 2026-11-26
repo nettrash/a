@@ -115,15 +115,16 @@ fn a_wrong_spectrum_length_panics() {
 }
 
 /// The lengths of every algorithm: the halves of even lengths, odd lengths summed directly, split
-/// by 3, 5, 7 and 11 (recursively), and through the complex transform (primes, and 13·13, 13·17).
+/// by each radix from 3 to 19 (9 and 15 too, recursively), and through the complex transform
+/// (primes, and the lengths without a factor up to 19: 23·23, 23·29).
 fn algorithm_lengths() -> Vec<usize> {
     if cfg!(miri) {
-        return vec![2, 4, 9, 15, 17, 21, 25, 27, 45, 49, 105];
+        return vec![2, 4, 9, 15, 17, 21, 25, 27, 45, 49, 57, 105];
     }
     vec![
-        2, 4, 6, 10, 9, 15, 17, 21, 25, 27, 33, 35, 45, 49, 55, 63, 75, 77, 81, 99, 105, 121, 125,
-        135, 143, 165, 169, 189, 221, 225, 231, 343, 375, 385, 405, 441, 525, 675, 729, 1155, 1331,
-        2048, 2187, 3000,
+        2, 4, 6, 10, 9, 15, 17, 21, 25, 27, 33, 35, 39, 45, 49, 51, 55, 57, 63, 75, 77, 81, 95, 99,
+        105, 121, 125, 135, 143, 165, 169, 189, 221, 225, 231, 247, 289, 323, 343, 361, 375, 385,
+        405, 441, 525, 529, 667, 675, 729, 1155, 1331, 2048, 2187, 3000, 3375,
     ]
 }
 
@@ -178,7 +179,7 @@ fn residue_classes_of_very_different_sizes() {
     let (lengths, classes): (&[usize], &[usize]) = if cfg!(miri) {
         (&[45], &[3])
     } else {
-        (&[45, 105, 225, 343, 1155], &[3, 5, 7])
+        (&[45, 105, 135, 225, 343, 1155, 2187], &[3, 5, 7, 9, 15])
     };
     for &n in lengths {
         for &r in classes {

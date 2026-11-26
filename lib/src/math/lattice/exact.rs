@@ -20,7 +20,10 @@
 //! `den·Tᵢ < a·dᵢ₊₁` for `δ = a/den`, and `Tᵢ = (dᵢ·Tᵢ₊₁ + λₖᵢ²)/dᵢ₊₁` exactly, downwards from
 //! `Tₖ = dₖ₊₁`.
 
+use super::l2_certify::{Verdict, certify, certify_dd, certify_f64};
+use super::zint::{Work, Z, dot as zdot, sub_mul_row as zsub_mul_row};
 use super::{LllOptions, Reduced};
+use crate::math::float::BigFloat;
 use crate::math::matrix::Matrix;
 use crate::math::numbers::Number;
 use crate::math::rational::Rational;
@@ -176,6 +179,16 @@ fn gso_row(
     lam: &mut Vec<Vec<Number>>,
     free: &mut Vec<bool>,
 ) {
+    gso_row_by(|k, j| dot(&b[k], &b[j]), d, lam, free);
+}
+
+/// [`gso_row`] with the inner products `⟨b_k, b_j⟩` from `inner(k, j)`.
+fn gso_row_by(
+    mut inner: impl FnMut(usize, usize) -> Number,
+    d: &mut Vec<Number>,
+    lam: &mut Vec<Vec<Number>>,
+    free: &mut Vec<bool>,
+) {
     let k = lam.len();
     let mut row: Vec<Number> = Vec::with_capacity(k);
     for j in 0..k {
@@ -183,14 +196,14 @@ fn gso_row(
             row.push(Number::default());
             continue;
         }
-        let mut u = dot(&b[k], &b[j]);
+        let mut u = inner(k, j);
         // A dependent row `i` has `λ = 0` and `dᵢ₊₁ = dᵢ`: its step would leave `u` as it is.
         for i in (0..j).filter(|&i| free[i]) {
             u = (&(&d[i + 1] * &u) - &(&row[i] * &lam[j][i])).div_exact(&d[i]);
         }
         row.push(u);
     }
-    let mut u = dot(&b[k], &b[k]);
+    let mut u = inner(k, k);
     for i in (0..k).filter(|&i| free[i]) {
         u = (&(&d[i + 1] * &u) - &(&row[i] * &row[i])).div_exact(&d[i]);
     }
@@ -207,10 +220,12 @@ fn gso_row(
 /// The integral reduction: the rows, the transformation applied to them, and the integral
 /// Gram–Schmidt data of the first `lam.len()` rows.
 pub(super) struct Integral {
-    /// The rows.
-    pub(super) b: Vec<Vec<Number>>,
+    /// The rows, in [`Z`]s updated in place.
+    b: Vec<Vec<Z>>,
     /// The transformation: the rows of `U` with `U·B₀ = B` for the rows `B₀` given.
-    pub(super) u: Vec<Vec<Number>>,
+    u: Vec<Vec<Z>>,
+    /// The working memory of the updates.
+    w: Work,
     /// `d[i]`: the Gram determinant of the independent rows among the first `i`; `d[0] = 1`.
     d: Vec<Number>,
     /// `lam[i][j] = d[j + 1]·μᵢⱼ` for `j < i`, zero where row `j` is dependent.
@@ -222,13 +237,38 @@ pub(super) struct Integral {
 impl Integral {
     /// The reduction of the rows `b`, with the transformation so far `u`.
     pub(super) fn new(b: Vec<Vec<Number>>, u: Vec<Vec<Number>>) -> Self {
+        let ints = |v: Vec<Vec<Number>>| -> Vec<Vec<Z>> {
+            v.iter().map(|r| r.iter().map(Z::of).collect()).collect()
+        };
         Integral {
-            b,
-            u,
+            b: ints(b),
+            u: ints(u),
+            w: Work::default(),
             d: vec![Number::from(1u8)],
             lam: Vec::new(),
             free: Vec::new(),
         }
+    }
+
+    /// The rows and the transformation, as numbers.
+    pub(super) fn into_rows(self) -> (Vec<Vec<Number>>, Vec<Vec<Number>>) {
+        let numbers = |v: Vec<Vec<Z>>| -> Vec<Vec<Number>> {
+            v.iter()
+                .map(|r| r.iter().map(Z::number).collect())
+                .collect()
+        };
+        (numbers(self.b), numbers(self.u))
+    }
+
+    /// The next row's integral Gram–Schmidt data, its inner products from the rows in place.
+    fn next_gso_row(&mut self) {
+        let (b, w) = (&self.b, &mut self.w);
+        gso_row_by(
+            |k, j| zdot(&b[k], &b[j], w).number(),
+            &mut self.d,
+            &mut self.lam,
+            &mut self.free,
+        );
     }
 
     /// The rank: the number of independent rows. Meaningful after [`run`](Self::run).
@@ -247,10 +287,11 @@ impl Integral {
         }
         // q = ⌊(2λ + d) / 2d⌋, the nearest integer to λ / d (no tie: |2λ| > d).
         let q = (&(&self.lam[k][l] << 1usize) + dl).div_floor(&(dl << 1usize));
+        let qz = Z::of(&q);
         let (lo, hi) = self.b.split_at_mut(k);
-        sub_mul_row(&mut hi[0], &q, &lo[l]);
+        zsub_mul_row(&mut hi[0], &qz, &lo[l], &mut self.w);
         let (lo, hi) = self.u.split_at_mut(k);
-        sub_mul_row(&mut hi[0], &q, &lo[l]);
+        zsub_mul_row(&mut hi[0], &qz, &lo[l], &mut self.w);
         let (lo, hi) = self.lam.split_at_mut(k);
         hi[0][l] -= &q * dl;
         sub_mul_row(&mut hi[0][..l], &q, &lo[l][..l]);
@@ -349,12 +390,12 @@ impl Integral {
             return;
         }
         if self.lam.is_empty() {
-            gso_row(&self.b, &mut self.d, &mut self.lam, &mut self.free);
+            self.next_gso_row();
         }
         let mut k = 1;
         while k < n {
             if k == self.lam.len() {
-                gso_row(&self.b, &mut self.d, &mut self.lam, &mut self.free);
+                self.next_gso_row();
             }
             if ins != Insertion::Lll && self.free[k] && self.free[k - 1] {
                 for l in (0..k).rev() {
@@ -438,12 +479,19 @@ pub(super) fn reduced_exactly(
 ///
 /// The rows may be linearly dependent: the result has a zero row for each dependency, first, and
 /// then a reduced basis of the lattice, with [`rank`](Reduced::rank) its dimension. The
-/// arithmetic is on integers alone (Cohen's integral LLL, with Pohst's handling of dependent rows),
-/// so the result is reduced exactly, for any size of the entries.
+/// reduction is Cohen's integral LLL, with Pohst's handling of dependent rows, on integers alone,
+/// so the result is reduced exactly, for any size of the entries; from 4 rows (and for `δ` above
+/// `0.2601 = 0.51²` by a margin of `1/64`) it starts from the result of the L² algorithm
+/// ([`lll_fp`](super::lll_fp)) for `min(δ, 0.99)` and `η = 0.51`, proved reduced to those, which
+/// leaves the integral reduction little more than its size reduction to `1/2` and the few
+/// exchanges that reduction asks for. The result is `(δ, 1/2)`-reduced, with `U` unimodular and
+/// `U·B = B'`; which of the lattice's reduced bases it is, is not promised beyond that (see [`Reduced`](super::Reduced)): since it starts from L², it is often another
+/// reduced basis than 0.2.45's integral reduction from the rows gave.
 ///
 /// The work is polynomial for a fixed `δ < 1`: `O(n²·log B)` exchanges for `n` rows of norm at
 /// most `B`, each followed by `O(n·(n + m))` operations on integers of `O(n·log B)` bits for `m`
-/// columns. It also ends for `δ = 1`: the potential is an integer that falls at every exchange
+/// columns, for the integral reduction from the rows given; after L² the integral data of the
+/// reduced rows, `O(n²·(n + m))` such operations, and as a rule few exchanges. It also ends for `δ = 1`: the potential is an integer that falls at every exchange
 /// but those that only move a zero Gram–Schmidt vector down a place, which leave it as it is and
 /// happen at most `n²` times in all; but no polynomial bound is known then.
 ///
@@ -478,8 +526,31 @@ pub(super) fn reduced_exactly(
 pub fn lll(basis: &Matrix<Number>, opts: &LllOptions) -> Reduced {
     check_delta(opts.delta, true);
     check_eta(opts.eta, opts.delta, true);
+    let n = basis.rows();
+    if n >= EXACT_AFTER_L2 && opts.delta > 0.2601 + 1.0 / 64.0 {
+        // L² first, to (min(δ, 0.99), 0.51), proved; then the integral reduction from its result.
+        let first = super::l2::reduce_fp(basis, opts.delta.min(0.99), 0.51, Insertion::Lll);
+        let (a, den) = fraction(opts.delta);
+        let mut e = Integral::new(rows_of(first.basis()), rows_of(first.transform()));
+        e.run(&a, &den, Insertion::Lll);
+        let rank = e.rank();
+        let (b, u) = e.into_rows();
+        return Reduced {
+            basis: matrix_of(b, basis.cols()),
+            transform: matrix_of(u, n),
+            rank,
+        };
+    }
     reduce_exactly(basis, opts.delta, Insertion::Lll)
 }
+
+/// The rows from which [`lll`] reduces by L² before the integral reduction. Measured on an Apple
+/// M4 Max, 2 to 16 rows of knapsack, uniform, q-ary, NTRU-like and small bases, L² first against
+/// the integral reduction alone: L² first takes 0.54 to 0.78 of the time of knapsacks from 3 rows
+/// (0.66 at 2 for 200 bits), but 1.17 to 1.51 of that of uniform bases of 10 and 100 bits and of
+/// small ones at 3 rows and 1.22 to 1.30 at 4 and 5 for 100 bits and small ones; neither 3 nor 5
+/// is faster everywhere, and from 6 rows L² first wins for all (0.33 to 0.95).
+pub(super) const EXACT_AFTER_L2: usize = 4;
 
 /// Reduces the rows of `basis` by the integral engine alone, with `δ` and insertions as `ins`
 /// says, the size reduction to `1/2`.
@@ -489,9 +560,10 @@ pub(super) fn reduce_exactly(basis: &Matrix<Number>, delta: f64, ins: Insertion)
     let mut e = Integral::new(rows_of(basis), identity_rows(n));
     e.run(&a, &den, ins);
     let rank = e.rank();
+    let (b, u) = e.into_rows();
     Reduced {
-        basis: matrix_of(e.b, basis.cols()),
-        transform: matrix_of(e.u, n),
+        basis: matrix_of(b, basis.cols()),
+        transform: matrix_of(u, n),
         rank,
     }
 }
@@ -500,8 +572,15 @@ pub(super) fn reduce_exactly(basis: &Matrix<Number>, delta: f64, ins: Insertion)
 /// others linearly independent, with `|μᵢⱼ| ≤ η` for `j < i` and
 /// `|b*ₖ|² ≥ (δ − μ²ₖ,ₖ₋₁)·|b*ₖ₋₁|²`, in the exact rationals the floats are.
 ///
-/// The test is on integers alone, by the integral Gram–Schmidt orthogonalisation: `O(n²·(n + m))`
-/// operations on integers of `O(n·log B)` bits, for `n` rows of `m` columns and norm at most `B`.
+/// The test is exact. The Cholesky factorisation of the exact Gram matrix in interval arithmetic
+/// decides almost every basis, a condition whose interval lies on one side of its bound holding
+/// or failing for certain: first in doubles stepped outwards after each operation (while the Gram
+/// matrix's entries are below `2^500`), then in balls of double-doubles (entries below `2^400`),
+/// then, for entries of more than 5 bits, in `BigFloat` bounds rounded outwards at `64 + n` bits
+/// and twice that.
+/// A condition the intervals leave open goes to the test on integers alone, by the integral
+/// Gram–Schmidt orthogonalisation: `O(n²·(n + m))` operations on integers of `O(n·log B)` bits,
+/// for `n` rows of `m` columns and norm at most `B`.
 ///
 /// # Panics
 ///
@@ -523,7 +602,55 @@ pub(super) fn reduce_exactly(basis: &Matrix<Number>, delta: f64, ins: Insertion)
 pub fn is_lll_reduced(basis: &Matrix<Number>, delta: f64, eta: f64) -> bool {
     assert!(delta.is_finite(), "δ is finite");
     assert!(eta.is_finite(), "η is finite");
+    let rows = rows_of(basis);
+    let zeros = rows.iter().take_while(|r| is_zero_row(r)).count();
+    let b = &rows[zeros..];
+    // Intervals first, of the exact Gram matrix's Cholesky factorisation: they decide almost
+    // every basis at a few bits a row; a condition they leave open goes to the exact test.
+    let zb: Vec<Vec<Z>> = b.iter().map(|r| r.iter().map(Z::of).collect()).collect();
+    let mut w = Work::default();
+    let g: Vec<Vec<Number>> = (0..zb.len())
+        .map(|i| {
+            (0..=i)
+                .map(|j| zdot(&zb[i], &zb[j], &mut w).number())
+                .collect()
+        })
+        .collect();
+    match certify_f64(&g, delta, eta, Insertion::Lll) {
+        Verdict::Reduced => return true,
+        Verdict::NotReduced => return false,
+        Verdict::Unsure => {}
+    }
+    // Then balls of double-doubles, about twice the bits at a few times the cost of the doubles.
+    match certify_dd(&g, delta, eta, Insertion::Lll) {
+        Verdict::Reduced => return true,
+        Verdict::NotReduced => return false,
+        Verdict::Unsure => {}
+    }
+    // A basis they leave open (the intervals widen with the depth of the factorisation,
+    // about a bit a row in doubles): of entries of a few bits, the exact test's integers stay
+    // short and it is the cheaper (a reduced knapsack basis of 100 rows of 3-bit entries: 21 ms
+    // against 32 ms for the intervals); otherwise the intervals of BigFloats first, at `64 + n`
+    // bits, then twice that. Measured on an Apple M4 Max on bases reduced by `lll_fp` of 120 to
+    // 300 rows (knapsacks, q-ary, NTRU-like and Goldstein–Mayer) that the doubles and double-doubles
+    // leave open: for entries of 6 to 8 bits the intervals first took 0.51 to 0.74 of the time of
+    // the exact test; against `64 + 2n` bits, `64 + n` took 0.75 to 0.87 of the time, `32 + n`
+    // 0.68 to 0.80, `128 + n` 0.79 to 0.96, `64 + n/2` 0.38 to 1.58 (too short for a knapsack of
+    // 200 rows, which then took a doubling) and 64 bits alone up to 3.0 times as long; one
+    // doubling more or less changed nothing, as the first precision decided every basis.
+    let short = b.iter().flatten().all(|x| x.bits() <= 5);
+    let mut p = 64 + b.len() as u64;
+    for _ in 0..if short { 0 } else { 2 } {
+        if p > BigFloat::MAX_PREC {
+            break;
+        }
+        match certify(&g, delta, eta, Insertion::Lll, p) {
+            Verdict::Reduced => return true,
+            Verdict::NotReduced => return false,
+            Verdict::Unsure => p *= 2,
+        }
+    }
     let (a, den) = fraction(delta);
     let (ea, eb) = fraction(eta);
-    reduced_exactly(&rows_of(basis), (&a, &den), (&ea, &eb), Insertion::Lll)
+    reduced_exactly(&rows, (&a, &den), (&ea, &eb), Insertion::Lll)
 }

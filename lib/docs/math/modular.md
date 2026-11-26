@@ -54,101 +54,109 @@ The methods:
 
 - `bsgs`: the baby steps `g^j`, `j < s = ceil(sqrt(order))`, at most `2^21`, go into an open-addressing table of words, each a tag of the residue's key (as the walks of `rho` key it) and the step, half full, and stop early when they come round to 1, which gives the order of `g`; the giant steps `h·g^(−s·i)` are looked up, and the first found gives the smallest `k = s·i + j`, checked by one power when the tag of a residue of more than a word matched. Both kinds of steps are formed in four progressions at once, each waiting for its own products. A `g` that is not prime to `m` has no inverse: its powers are 0 modulo the part `m_1 = gcd(m, g^b)` of `m` made of its primes from `k = t <= log2(m)`, and prime to the rest `m_2`; the `k < t` are tried one by one, and the others searched modulo `m_2`.
 - `rho`: Pollard's method for logarithms (1978) with Teske's walk (2001): steps `x → x·M_i` on elements `g^a·h^b`, the multiplier `M_i = g^(u_i)·h^(v_i)` one of 32 chosen by the low bits of the element's key (of the residue itself in Montgomery's form; of the residue mixed by a product modulo a power of two, whose low bits need not look random; and of all its limbs mixed modulo the other even numbers, whose elements of odd order all have the same low limb from `2^64` on), until a walk comes to an element met before; `g^a·h^b = g^(a')·h^(b')` then gives `k = (a' − a)/(b − b') mod q`. The elements met are recognised by keeping the distinguished ones, those whose key has `bits/4` zero bits above the multiplier's, in an open-addressing table (van Oorschot and Wiener, 1999), which lets eight walks run side by side, their elements in registers, each step written out for each walk so that the compiler keeps them there. The multipliers and the starts are products of the tables of `g^(i·16^j)` and `h^(i·16^j)`, independent products rather than chains of squares. The walk is the same for every run. A collision with `b = b'` tells nothing, and a walk that has one starts again elsewhere; every collision is such when `h` is not a power of `g`, so after four of them the answer is settled by `bsgs`.
-- `pohlig_hellman`: the reduction above, on the modulus as it is, by the baby steps and giant steps and rho (not the index calculus, which needs a prime modulus).
+- `pohlig_hellman`: the reduction above, on the modulus as it is, by the baby steps and giant steps and rho (not the index calculus, which needs a prime modulus). The table of baby steps falls out of the first-level cache from orders of about `2^24` (`2^12` steps of 8 bytes in slots half full); modulo a word, rho is the faster from orders of about `2^19.5` when each logarithm allocates a table of another size than the one before (on macOS a table of 16 to 128 KB then costs about 3.5 µs more, fresh pages) and from `2^23.3` when the same logarithm repeats, so that it is taken from `2^21` there (with `2^23` instead, `discrete_log` modulo primes of 64 bits whose `p − 1` has primes of 22 and 23 bits took 1.2 to 1.3 times as long, and repeated calls at most 6 % less); modulo longer numbers the two cross from about `2^21.5` to `2^25.5` by the length and the allocator's state, and rho is taken from `2^23`.
 
-Measured on an Apple M4 Max, single-threaded, in cycles per call by the harness's estimate of the clock, against FLINT 3.6 and PARI 2.19; the congruences, orders and primitive roots, and the logarithms, each with their conditions below. The functions that factor their modulus, or the order of the group, take [`factor`](factor.md); the long moduli below are primes `c·q + 1` with `q` prime, or have `p − 1` of known factors, so that what is timed is mostly the method itself.
+## Measured
 
-The Chinese remainder theorem, against FLINT's `fmpz_CRT` and `fmpz_multi_CRT` and PARI's `chinese` and `ZV_chinese`, all with the residues reduced; and the orders and primitive roots, against PARI's `znorder` and `znprimroot` and FLINT's `n_primitive_root_prime` (which takes `p` as prime, where `primitive_root` tests it). These were measured on 2026-11-11 on the quiet machine (the load average at 3.4 to 5.2 of its 16 cores, from the system's own services; one thread, PARI's too, every process with `MallocNanoZone` unset, under the system's default allocator, the harness built with fat LTO and one codegen unit), interleaved with the previous version (0.2.32), in three passes of seven rounds, each cell the median of the 21, each round on fresh inputs of each contender's own, in an order that turns with the round (for many congruences a pool of systems, where the earlier measurements went over one again and again; the primes of 128 to 1024 bits of the orders and the primitive roots from a few drawn once a row, six of 1024 bits, no two contenders of a round on the same one):
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harness in the repository's `bench/nt` (its method in `bench/README.md`), on one thread: this crate as a user builds it, by rustc 1.100 stable in cargo's release profile (no LTO, 16 codegen units, no `target-cpu`); malachite 0.15.0 in the same profile; FLINT 3.6.0 and PARI 2.19.1 as Homebrew builds them, called through shims compiled with `-O3 -mcpu=native`. Each figure is the median of 15 samples of at least a millisecond (12 and 13 for two rows), in time per call, this crate and every reference alternating sample by sample in one process, each sample on the same inputs for all, after a check that all give the same results. A ratio is this crate's time over that of the fastest reference that does the same work: below 1, this crate is faster. The functions that factor their modulus, or the order of the group, take [`factor`](factor.md); the long moduli below are primes `c·q + 1` with `q` prime, or have `p − 1` of known factors, so that what is timed is mostly the method itself.
 
-| Congruences | a | 0.2.32 | FLINT | PARI |
+The Chinese remainder theorem against FLINT's `fmpz_CRT` (two congruences) and `fmpz_multi_CRT`, and PARI's `chinese` of two `intmod`s and `ZV_chinese`, all with the residues reduced:
+
+| Congruences | `crt` | FLINT | PARI | ratio |
 | --- | --- | --- | --- | --- |
-| 2 primes of 64 bits | 1007 | 1262 | 1252 | 1026 |
-| 2 primes of 128 bits | 2481 | 2825 | 2850 | 2856 |
-| 2 primes of 256 bits | 4523 | 5036 | 5129 | 5306 |
-| 2 primes of 1024 bits | 16,538 | 17,694 | 20,538 | 22,530 |
-| 2 primes of 4096 bits | 88,224 | 87,910 | 108,284 | 117,522 |
-| 3 primes of 64 bits | 3020 | 3062 | 4731 | 3633 |
-| 8 primes of 64 bits | 8072 | 8381 | 22,561 | 10,711 |
-| 32 primes of 64 bits | 39,504 | 39,291 | 146,960 | 52,539 |
-| 100 primes of 64 bits | 192,664 | 191,799 | 733,271 | 220,637 |
-| 150 primes of 64 bits | 388,643 | 458,285 | 1.37 M | 373,794 |
-| 200 primes of 64 bits | 550,723 | 634,672 | 2.10 M | 548,565 |
-| 500 primes of 64 bits | 1.88 M | 2.12 M | 8.97 M | 1.96 M |
-| 1000 primes of 64 bits | 4.84 M | 5.39 M | 26.9 M | 5.36 M |
-| 10,000 primes of 64 bits | 87.3 M | 91.7 M | 1440 M | 143.2 M |
-| 8 primes of 1024 bits | 226,210 | 228,734 | 343,379 | 275,503 |
-| 100 primes of 1024 bits | 8.35 M | 8.34 M | 18.1 M | 10.5 M |
+| 2 primes of 64 bits | 117 ns | 238 ns | 142 ns | 0.820 |
+| 2 primes of 128 bits | 459 ns | 437 ns | 457 ns | 1.05 |
+| 2 primes of 256 bits | 779 ns | 811 ns | 863 ns | 0.961 |
+| 2 primes of 1024 bits | 2.72 µs | 2.96 µs | 3.42 µs | 0.919 |
+| 2 primes of 4096 bits | 15.8 µs | 17.6 µs | 20.8 µs | 0.902 |
+| 3 primes of 64 bits | 316 ns | 969 ns | 469 ns | 0.673 |
+| 8 primes of 64 bits | 1.32 µs | 4.41 µs | 1.85 µs | 0.714 |
+| 32 primes of 64 bits | 7.71 µs | 29.0 µs | 10.6 µs | 0.729 |
+| 100 primes of 64 bits | 39.8 µs | 149 µs | 45.4 µs | 0.875 |
+| 150 primes of 64 bits | 79.4 µs | 276 µs | 81.1 µs | 0.980 |
+| 200 primes of 64 bits | 112 µs | 425 µs | 116 µs | 0.964 |
+| 500 primes of 64 bits | 394 µs | 1.82 ms | 438 µs | 0.900 |
+| 1000 primes of 64 bits | 1.03 ms | 5.43 ms | 1.18 ms | 0.874 |
+| 10,000 primes of 64 bits | 18.2 ms | 301 ms | 30.1 ms | 0.606 |
+| 8 primes of 1024 bits | 43.3 µs | 68.0 µs | 53.7 µs | 0.807 |
+| 100 primes of 1024 bits | 1.72 ms | 3.73 ms | 2.20 ms | 0.779 |
 
-Faster than PARI and FLINT everywhere but for 150 primes of 64 bits, 1.04 times PARI's time, and 200, level with it: two words in registers 0.98 of PARI's time (1.23 times it before), two moduli of a few limbs on the stack 1.07 to 1.14 times faster than before (0.81 to 0.88 of FLINT's time), and from 150 to 1000 words the trees in limbs 0.90 to 1.04 of PARI's time (1.01 to 1.23 times it before), 0.61 at 10,000.
+- 0.606 to 0.980 of the fastest reference's time but for two primes of 128 bits (below): two words in registers 0.820 of PARI's time, two moduli of a few limbs on the stack 0.902 to 0.961 of FLINT's, many words 0.673 to 0.980 of PARI's, the least margin at 150 and 200 primes (0.980 and 0.964), and 0.606 at 10,000.
 
-| Modulus | `multiplicative_order`: a | 0.2.32 | PARI |
+Orders and primitive roots, against PARI's `znorder`, which factors the group's order, and `znprimroot`, which tests `p` too; FLINT's `n_primitive_root_prime` and malachite's `primitive_root_prime` take `p` as prime, where `primitive_root` tests it, so they do less, and their ratios, in parentheses, are not counted:
+
+| Modulus | `multiplicative_order` | PARI | ratio |
 | --- | --- | --- | --- |
-| primes of 32 bits | 3861 | 5516 | 6278 |
-| primes of 64 bits | 29,445 | 31,490 | 201,955 |
-| random words | 38,378 | 39,617 | 154,082 |
-| primes 2q + 1 of 128 bits | 46,922 | 52,258 | 262,414 |
-| primes 30q + 1 of 256 bits | 212,250 | 286,828 | 1.19 M |
-| primes 2q + 1 of 1024 bits | 4.34 M | 6.02 M | 13.2 M |
+| primes of 32 bits | 763 ns | 1.05 µs | 0.728 |
+| primes of 64 bits | 5.97 µs | 36.3 µs | 0.164 |
+| random words | 7.48 µs | 33.8 µs | 0.221 |
+| primes 2q + 1 of 128 bits | 7.98 µs | 53.3 µs | 0.150 |
+| primes 30q + 1 of 256 bits | 31.9 µs | 212 µs | 0.151 |
+| primes 2q + 1 of 1024 bits | 979 µs | 2.69 ms | 0.364 |
 
-| Prime | `primitive_root`: a | 0.2.32 | FLINT | PARI |
-| --- | --- | --- | --- | --- |
-| 32 bits | 3313 | 5063 | 4981 | 5118 |
-| 48 bits | 16,175 | 17,436 | 14,057 | 23,677 |
-| 64 bits | 31,131 | 32,113 | 46,820 | 122,136 |
-| 2q + 1 of 128 bits | 37,534 | 41,711 | – | 195,767 |
-| 30q + 1 of 256 bits | 220,477 | 287,749 | – | 1.00 M |
-| 2q + 1 of 1024 bits | 3.21 M | 4.34 M | – | 10.2 M |
+| Prime | `primitive_root` | PARI | ratio | FLINT, `p` taken as prime (ratio) | malachite, the same (ratio) |
+| --- | --- | --- | --- | --- | --- |
+| 32 bits | 682 ns | 1.04 µs | 0.659 | 1.01 µs (0.675) | 4.45 µs (0.153) |
+| 48 bits | 3.33 µs | 4.54 µs | 0.733 | 2.91 µs (1.14) | 19.1 µs (0.174) |
+| 64 bits | 5.94 µs | 23.8 µs | 0.250 | 10.7 µs (0.553) | 71.8 µs (0.0828) |
+| 2q + 1 of 128 bits | 5.84 µs | 41.2 µs | 0.142 | – | – |
+| 30q + 1 of 256 bits | 32.0 µs | 190 µs | 0.169 | – | – |
+| 2q + 1 of 1024 bits | 664 µs | 2.10 ms | 0.317 | – | – |
 
-- Orders 1.63 to 6.86 times faster than PARI, the 32-bit primes 1.43 times faster than before (they took 0.88 of PARI's time): the primality test and the factorisation of `p − 1` take most of the time on words, and the three strong tests' powers side by side and the powers from the low bit up took a third off them; the primes of 256 and 1024 bits 1.35 and 1.39 times faster than before, the others 1.03 to 1.11 times. Primitive roots 1.46 to 5.22 times faster than PARI (1.53 times faster than before at 32 bits, 1.31 and 1.35 at 256 and 1024, 1.03 to 1.11 for the others), and faster than FLINT but at 48 bits, where FLINT, which takes `p` as prime, is 1.15 times faster (1.07 to 1.24 from pass to pass): the Baillie–PSW test of `p` and the factorisation of `p − 1` are the time there.
+- Orders 0.150 to 0.728 of PARI's time, and primitive roots 0.142 to 0.733: the primality test and the factorisation of `p − 1` take most of the time on words. FLINT, which takes `p` as prime, is faster at 48 bits (1.14), where the test of `p` and the factorisation of `p − 1` are the time.
 
-Logarithms, against PARI's `znlog` and FLINT's `n_discrete_log_bsgs` (which searches the whole group by baby steps and giant steps). These, the safe primes and the methods below were measured on 2026-11-11 on the quiet machine (the load average at 4.1 to 5.5 of its 16 cores, from the system's own services; one thread, PARI's too, every process with `MallocNanoZone` unset, under the system's default allocator, the harness built with fat LTO and one codegen unit), interleaved with the previous version (0.2.32) where it is timed, in three passes of five rounds, each cell the median of the 15 (the safe primes of 104 and 112 bits in the first pass only, the median of its five), each round on fresh targets of each contender's own (`h` uniform below `p`, `g^e` for the methods; the moduli and the bases fixed for a row), in an order that turns with the round, where the earlier measurements went over one target a modulus again and again, so that it was learnt (the cheaper cells, `bsgs`'s most, take longer on fresh ones):
+Logarithms, against PARI's `znlog`, which factors `p − 1`, and `Fp_log` with it factored, and FLINT's `n_discrete_log_bsgs`, which searches the whole group by baby steps and giant steps:
 
-| Group | `discrete_log`: a | `pohlig_hellman`, `p − 1` factored | PARI | FLINT |
-| --- | --- | --- | --- | --- |
-| random primes of 32 bits | 26,256 | – | 635,128 | 23.9 M |
-| random primes of 48 bits | 365,772 | – | 12.3 M | – |
-| random primes of 56 bits | 1.95 M | – | 62.3 M | – |
-| random primes of 64 bits | 3.62 M | – | 99.5 M | – |
-| 64 bits, `p − 1` of 20-bit primes | 117,010 | 77,948 | 1.15 M | – |
-| 128 bits, `p − 1` of 20-bit primes | 471,189 | 276,396 | 4.88 M | – |
-| 128 bits, `p − 1` of 32-bit primes | 5.35 M | 4.58 M | 159.6 M | – |
-| 256 bits, `p − 1` of 24-bit primes | 8.36 M | 2.92 M | 44.1 M | – |
-| 256 bits, `p − 1` of 32-bit primes | 49.3 M | 30.4 M | 531.9 M | – |
-| 512 bits, `p − 1` of 28-bit primes | 132.8 M | 48.7 M | 453.8 M | – |
+| Group | `discrete_log` | PARI `znlog` | ratio | `pohlig_hellman`, `p − 1` factored | PARI `Fp_log` | ratio | FLINT |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| random primes of 32 bits | 6.11 µs | 177 µs | 0.0346 | – | – | – | 4.96 ms |
+| random primes of 48 bits | 95.7 µs | 3.87 ms | 0.0248 | – | – | – | – |
+| random primes of 56 bits | 75.4 µs | 4.83 ms | 0.0156 | – | – | – | – |
+| random primes of 64 bits | 586 µs | 20.4 ms | 0.0288 | – | – | – | – |
+| 64 bits, `p − 1` of 20-bit primes | 15.8 µs | 207 µs | 0.0765 | 10.3 µs | 195 µs | 0.0527 | – |
+| 128 bits, `p − 1` of 20-bit primes | 123 µs | 976 µs | 0.126 | 53.0 µs | 931 µs | 0.0570 | – |
+| 128 bits, `p − 1` of 32-bit primes | 906 µs | 27.3 ms | 0.0332 | 723 µs | 26.9 ms | 0.0269 | – |
+| 256 bits, `p − 1` of 24-bit primes | 3.77 ms | 9.34 ms | 0.403 | 562 µs | 8.67 ms | 0.0649 | – |
+| 256 bits, `p − 1` of 32-bit primes | 8.35 ms | 102 ms | 0.0816 | 4.38 ms | 102 ms | 0.0428 | – |
+| 512 bits, `p − 1` of 28-bit primes | 28.2 ms | 91.9 ms | 0.307 | 12.0 ms | 91.0 ms | 0.132 | – |
 
 Modulo safe primes `p = 2q + 1`, whose logarithms of order `q` the index calculus takes from 35 bits on (the factorisation of `p − 1` included, as in PARI's `znlog`, which takes its own index calculus there):
 
-| Prime | `discrete_log`: a | PARI |
-| --- | --- | --- |
-| 40 bits | 390,162 | 13.0 M |
-| 44 bits | 866,665 | 21.9 M |
-| 48 bits | 1.43 M | 33.8 M |
-| 56 bits | 2.88 M | 80.5 M |
-| 64 bits | 7.19 M | 211.2 M |
-| 68 bits | 16.5 M | 435.5 M |
-| 72 bits | 21.0 M | 533.6 M |
-| 80 bits | 60.6 M | 1183 M |
-| 88 bits | 137.1 M | 2451 M |
-| 96 bits | 316.4 M | 5124 M |
-| 104 bits | 748.6 M | 10,338 M |
-| 112 bits | 2401 M | 21,358 M |
-
-- Logarithms: modulo random primes of 32 to 64 bits 24 to 34 times faster than PARI, and modulo safe primes from 40 to 112 bits 8.9 to 33 times (24 to 33 times up to 72 bits, 16 at 96, 8.9 at 112), both by an index calculus there; modulo smooth `p − 1`, with its factorisation by `factor`, 3.4 to 30 times, and the method itself, `pohlig_hellman`, 9.3 to 35 times (the factorisation of `p − 1` takes about two thirds of the time at 256 bits with primes of 24 bits and at 512 bits, 38 % at 256 bits with primes of 32 bits). Against 0.2.32 in the same runs: modulo random primes 1.9 times faster at 32 bits, 3.6 at 48 and about 65 at 56 (0.2.32's time there varies widely with the target, its passes' medians 108 M to 205 M cycles), and modulo safe primes 19 and 33 times at 40 and 44 bits (beyond 56 and 44 bits 0.2.32 takes seconds to hours a logarithm, and was not timed); modulo smooth `p − 1` `discrete_log` 1.26 to 2.09 times and `pohlig_hellman` 1.43 to 2.24 times.
-
-The methods alone, in the group of prime order `q` modulo `p = 2q + 1` (eight groups a size, four of 40 bits, `g = 4`):
-
-| Order | `bsgs` | `rho` | `pohlig_hellman` |
+| Prime | `discrete_log` | PARI | ratio |
 | --- | --- | --- | --- |
-| 16 bits | 5356 | 5716 | 7217 |
-| 20 bits | 18,980 | 17,376 | 20,927 |
-| 22 bits | 38,823 | 24,744 | 26,649 |
-| 24 bits | 73,947 | 35,364 | 36,813 |
-| 26 bits | 173,759 | 59,941 | 64,039 |
-| 28 bits | 457,180 | 99,469 | 106,434 |
-| 30 bits | 1.10 M | 198,177 | 180,738 |
-| 40 bits | 51.2 M | 5.73 M | 5.49 M |
+| 40 bits | 71.6 µs | 2.98 ms | 0.0240 |
+| 44 bits | 173 µs | 4.56 ms | 0.0380 |
+| 48 bits | 278 µs | 6.96 ms | 0.0399 |
+| 56 bits | 613 µs | 15.4 ms | 0.0397 |
+| 64 bits | 1.47 ms | 40.4 ms | 0.0363 |
+| 68 bits | 3.59 ms | 92.4 ms | 0.0389 |
+| 72 bits | 10.1 ms | 114 ms | 0.0882 |
+| 80 bits | 12.6 ms | 239 ms | 0.0525 |
+| 88 bits | 28.2 ms | 508 ms | 0.0556 |
+| 96 bits | 63.4 ms | 1.08 s | 0.0589 |
 
-Against 0.2.32, interleaved in the same runs, each on targets of its own: `bsgs` 1.3 to 1.6 times faster (16 to 40 bits), by its four chains; `rho` 2.1 to 2.4 times (20 to 40 bits, 1.5 at 16; about 5.1 cycles a step at 40 bits, against the `sqrt(π·q/2)` steps expected, the distinguished points' tail included), by its eight walks in registers and its tables of powers; `pohlig_hellman` 1.4 to 2.4 times. The table of baby steps falls out of the first-level cache from about `2^24` (`2^12` steps of 8 bytes in slots half full); inside `pohlig_hellman`, modulo a word, rho is the faster from orders of about `2^19.5` when each logarithm allocates a table of another size than the one before (on macOS a table of 16 to 128 KB then costs about 3.5 µs more, fresh pages) and from `2^23.3` when the same logarithm repeats, so that it is taken from `2^21` there (with `2^23` instead, `discrete_log` modulo primes of 64 bits whose `p − 1` has primes of 22 and 23 bits took 1.2 to 1.3 times as long, and repeated calls at most 6 % less); modulo longer numbers the two cross from about `2^21.5` to `2^25.5` by the length and the allocator's state, and rho is taken from `2^23`.
+- Modulo random primes of 32 to 64 bits, 0.0156 to 0.0346 of PARI's time, and modulo safe primes of 40 to 96 bits 0.0240 to 0.0882, both by an index calculus there; modulo smooth `p − 1`, with its factorisation by `factor`, 0.0332 to 0.403, and the method itself, `pohlig_hellman`, 0.0269 to 0.132: the factorisation of `p − 1` takes most of the time at 256 bits with primes of 24 bits and at 512 bits (3.77 ms against 562 µs, 28.2 ms against 12.0 ms).
+- Modulo the safe primes above 96 bits, to 112, the logarithms take seconds, and were not part of this run.
+
+The methods alone, in the group of prime order `q` modulo `p = 2q + 1`, `g = 4`, against PARI's `Fp_log` with the order given, which chooses its own method (its time from the alternation with `pohlig_hellman`; each method's ratio is against PARI timed beside it), and FLINT's `n_discrete_log_bsgs`, which searches the order `p − 1 = 2q`, √2 times as many steps, so it does more and is shown apart:
+
+| Order | `bsgs` | `rho` | `pohlig_hellman` | PARI `Fp_log` | ratio `bsgs` | ratio `rho` | ratio `pohlig_hellman` | FLINT |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 16 bits | 701 ns | 710 ns | 1.08 µs | 10.1 µs | 0.0688 | 0.0697 | 0.107 | 8.51 µs |
+| 20 bits | 2.74 µs | 3.37 µs | 2.78 µs | 45.8 µs | 0.0585 | 0.0736 | 0.0607 | 50.8 µs |
+| 22 bits | 8.09 µs | 5.16 µs | 5.50 µs | 110 µs | 0.0727 | 0.0466 | 0.0498 | 130 µs |
+| 24 bits | 17.2 µs | 7.41 µs | 7.93 µs | 228 µs | 0.0752 | 0.0323 | 0.0347 | 278 µs |
+| 26 bits | 33.7 µs | 11.1 µs | 11.8 µs | 442 µs | 0.0764 | 0.0251 | 0.0266 | 542 µs |
+| 28 bits | 89.8 µs | 22.1 µs | 23.1 µs | 796 µs | 0.112 | 0.0276 | 0.0290 | 1.22 ms |
+| 30 bits | 220 µs | 39.0 µs | 40.6 µs | 993 µs | 0.226 | 0.0397 | 0.0409 | 2.83 ms |
+| 40 bits | 6.70 ms | 1.07 ms | 1.03 ms | 3.04 ms | 2.09 | 0.335 | 0.338 | 120 ms |
+
+- `rho` and `pohlig_hellman` take 0.0251 to 0.338 of PARI's time at every order; `bsgs` 0.0585 to 0.226 up to 30 bits, its table of baby steps falling out of the first-level cache from orders of about `2^24`.
+
+Where the references are faster, this crate's time over the fastest same-work reference's above 1.05:
+
+- **`dlog::bsgs` with an order of 40 bits.** 2.09 times PARI's `Fp_log`, which chooses its own method there, where `bsgs` takes the `2^20` baby steps that its name says, into a table of 16 MiB, out of the caches; on the same logarithms `rho` and `pohlig_hellman` take 0.335 and 0.338 of PARI's time.
+- **`crt` of two primes of 128 bits.** 1.05 times FLINT's `fmpz_CRT` (459 ns against 437; PARI's 457 ns): the path of two moduli of a few limbs on the stack, which takes 0.902 to 0.961 of FLINT's time from 256 bits; its cost at two limbs was not taken apart.
 
 ## Examples
 

@@ -21,6 +21,68 @@ pub(crate) fn mla(a: f64, b: f64, c: f64) -> f64 {
     if FMA { a.mul_add(b, c) } else { a * b + c }
 }
 
+/// `1/x` of a finite nonzero `x` (not beyond `2¹⁰²²`) as a double-double.
+#[inline(always)]
+pub(crate) fn recip_dd(x: f64) -> Dd {
+    let q = 1.0 / x;
+    let (p, pe) = two_prod(q, x);
+    let (hi, lo) = fast_two_sum(q, ((1.0 - p) - pe) * q);
+    Dd { hi, lo }
+}
+
+/// `k·r` of a small integer `k` and a double-double `r`, as the pair `(hi, lo)` of a coefficient
+/// of a three-term recurrence (`k/x` with `r = 1/x`).
+#[inline(always)]
+pub(crate) fn coef(k: f64, r: Dd) -> (f64, f64) {
+    let (h, e) = two_prod(k, r.hi);
+    (h, mla(k, r.lo, e))
+}
+
+/// One step `t = c·b + a` of a three-term recurrence carried as values with their errors to first
+/// order (the running values are `a + ea`, `b + eb`; `c = ch + cl`), for a sum that does not
+/// cancel by more than half (terms of one sign, or `|a| ≤ |c·b|/2`): the value by one fused
+/// multiply-add (the chain from step to step is that one operation), and its error exactly,
+/// `c·b + a − t = (q − t) + qe + pe` with `ch·b = p + pe` and `p + a = q + qe` (`q` and `t`, both
+/// roundings of a value within a few ulps of either, are within a factor of 2, so `q − t` is exact
+/// by Sterbenz's lemma), then the inputs' errors to first order. Without a fused multiply-add, as
+/// [`rec_step`].
+#[inline(always)]
+pub(crate) fn rec_pos(ch: f64, cl: f64, b: f64, eb: f64, a: f64, ea: f64) -> (f64, f64) {
+    if !FMA {
+        return rec_step(ch, cl, b, eb, a, ea);
+    }
+    let t = ch.mul_add(b, a);
+    let (p, pe) = two_prod(ch, b);
+    let (q, qe) = two_sum(p, a);
+    let r = (q - t) + (qe + pe);
+    (t, r + mla(ch, eb, mla(cl, b, ea)))
+}
+
+/// One step `t = c·b + a` (either sign of the terms, so that it may cancel) carried as values
+/// with their errors to first order: the exact product's rounding and the sum's by `two_sum`.
+#[inline(always)]
+pub(crate) fn rec_step(ch: f64, cl: f64, b: f64, eb: f64, a: f64, ea: f64) -> (f64, f64) {
+    let (p, pe) = two_prod(ch, b);
+    let (t, te) = two_sum(p, a);
+    (t, (pe + te) + mla(ch, eb, mla(cl, b, ea)))
+}
+
+/// The running product `t·c` of a compensated series (`t + et` the running term, `c = ch + cl`):
+/// the value by one product, its error to first order.
+#[inline(always)]
+pub(crate) fn mul_c(t: f64, et: f64, ch: f64, cl: f64) -> (f64, f64) {
+    let (p, pe) = two_prod(t, ch);
+    (p, pe + mla(t, cl, et * ch))
+}
+
+/// The running sum `s + t` of a compensated series (each with its error), the sum's rounding
+/// exact.
+#[inline(always)]
+pub(crate) fn add_c(s: f64, es: f64, t: f64, et: f64) -> (f64, f64) {
+    let (u, ue) = two_sum(s, t);
+    (u, ue + (es + et))
+}
+
 /// `Σ c[from + i]·x^i` by Estrin's scheme (pairs, then pairs of pairs with `x²`, `x⁴`, …), for a
 /// row of a fixed width, so that the loops unroll into straight code.
 #[inline(always)]
@@ -394,20 +456,22 @@ pub(crate) fn k_cos_dd(x: f64, y: f64) -> Dd {
     Dd { hi, lo }
 }
 
-/// `cos(n·π/2 + u)` (`sine` false) or `sin(n·π/2 + u)` as a double-double.
+/// `cos(n·π/2 + u)` (`sine` false) or `sin(n·π/2 + u)` as a double-double: both kernels, the
+/// one of the quadrant picked and signed by selections rather than branches (the quadrant of a
+/// large argument is unpredictable).
 #[inline]
 pub(crate) fn sin_or_cos_quadrant_dd(n: i64, u: Dd, sine: bool) -> Dd {
     let m = if sine { n.wrapping_sub(1) } else { n };
     // cos(mπ/2 + u): m even → ±cos u, odd → ∓sin u.
-    let v = if m & 1 == 0 {
-        k_cos_dd(u.hi, u.lo)
-    } else {
-        k_sin_dd(u.hi, u.lo)
-    };
-    if (m & 3) == 1 || (m & 3) == 2 {
-        v.neg()
-    } else {
-        v
+    let s = k_sin_dd(u.hi, u.lo);
+    let c = k_cos_dd(u.hi, u.lo);
+    let odd = m & 1 != 0;
+    let (hi, lo) = (if odd { s.hi } else { c.hi }, if odd { s.lo } else { c.lo });
+    // −1 for m mod 4 in {1, 2}.
+    let sign = f64::from_bits(1.0f64.to_bits() | (((m.wrapping_add(1) as u64) & 2) << 62));
+    Dd {
+        hi: hi * sign,
+        lo: lo * sign,
     }
 }
 

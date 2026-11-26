@@ -110,7 +110,11 @@ const QUOT2: f64 = 1.2;
 ///   falls apart into one real system with the matrix `γ/h·I − J` and one complex system with
 ///   `(α + iβ)/h·I − J`: an LU decomposition of `n × n` of each ([`Matrix::lu`], on `Matrix<T>`
 ///   and on `Matrix<Complex<T>>`) is all the iteration needs, and they are kept for as long as
-///   `h` and `J` are.
+///   `h` and `J` are, formed again in the memory of the last
+///   ([`Lu::refactor`](crate::math::matrix::Lu::refactor)) and solved into memory of their own
+///   ([`Lu::solve_into`](crate::math::matrix::Lu::solve_into)), so that for a system of at most
+///   100 equations the steps allocate nothing once the first decompositions have been formed
+///   (above that, as `Lu::refactor` says).
 /// * **Starting values.** The collocation polynomial of the previous step, extrapolated to the
 ///   stages of the new one; zero for the first step.
 /// * **Convergence.** The rate `θ` of the iteration is watched from its second iterate on: an
@@ -231,10 +235,17 @@ pub struct RadauIia<T, J = NoJacobian<T>> {
     jac: Matrix<T>,
     jac_current: bool,
     jac_wanted: bool,
-    /// The LU decompositions of `γ/h·I − J` and `(α + iβ)/h·I − J`, and the `h` they are for.
+    /// The LU decompositions of `γ/h·I − J` and `(α + iβ)/h·I − J`, whether they are current,
+    /// and the `h` they are for; the matrices they are formed from, and the solutions of their
+    /// systems, each in memory kept from one decomposition to the next.
     lu_real: Option<Lu<T>>,
     lu_complex: Option<Lu<Complex<T>>>,
+    lu_valid: bool,
     lu_h: T,
+    iteration_real: Matrix<T>,
+    iteration_complex: Matrix<Complex<T>>,
+    solution: Matrix<T>,
+    solution_complex: Matrix<Complex<T>>,
     /// The rate `θ` of the Newton iteration of the last attempt, which decides whether its
     /// Jacobian is kept (`THET` when no rate was measured: the correction was lost in rounding).
     theta: T,
@@ -303,6 +314,11 @@ impl<T: Real + Scalar, J> RadauIia<T, J> {
             jac_wanted: true,
             lu_real: None,
             lu_complex: None,
+            lu_valid: false,
+            iteration_real: Matrix::zeros(0, 0),
+            iteration_complex: Matrix::from_column_major(0, 0, Vec::new()),
+            solution: Matrix::zeros(0, 1),
+            solution_complex: Matrix::from_column_major(0, 1, Vec::new()),
             lu_h: T::ZERO,
             theta: T::from_f64(THET),
             hacc: T::ZERO,
@@ -390,8 +406,7 @@ where
         self.njev += 1;
         self.jac_current = true;
         self.jac_wanted = false;
-        self.lu_real = None;
-        self.lu_complex = None;
+        self.lu_valid = false;
         finite
     }
 
@@ -399,6 +414,7 @@ where
     /// this `h` already, to the rounding of the times of the step. Whether both are regular.
     fn factorise(&mut self, h: T, t_new: T) -> bool {
         if let (Some(real), Some(complex)) = (&self.lu_real, &self.lu_complex)
+            && self.lu_valid
             && same_step(h, self.lu_h, self.t, t_new)
         {
             return !real.is_singular() && !complex.is_singular();
@@ -406,27 +422,35 @@ where
         let n = self.y.rows();
         let g = T::from_f64(GAMMA) / h;
         let (a, b) = (T::from_f64(ALPHA) / h, T::from_f64(BETA) / h);
-        let jac = &self.jac;
-        let real = Matrix::from_fn(n, n, |i, j| {
-            if i == j {
-                g - jac[(i, j)]
-            } else {
-                -jac[(i, j)]
+        for j in 0..n {
+            for i in 0..n {
+                let x = self.jac[(i, j)];
+                self.iteration_real[(i, j)] = if i == j { g - x } else { -x };
+                self.iteration_complex[(i, j)] = if i == j {
+                    Complex::new(a - x, b)
+                } else {
+                    Complex::new(-x, T::ZERO)
+                };
             }
-        })
-        .lu();
-        let complex = Matrix::from_fn(n, n, |i, j| {
-            if i == j {
-                Complex::new(a - jac[(i, j)], b)
-            } else {
-                Complex::new(-jac[(i, j)], T::ZERO)
+        }
+        let real = match &mut self.lu_real {
+            Some(lu) => {
+                lu.refactor(&self.iteration_real);
+                lu
             }
-        })
-        .lu();
+            None => self.lu_real.insert(self.iteration_real.lu()),
+        };
+        let real_regular = !real.is_singular();
+        let complex = match &mut self.lu_complex {
+            Some(lu) => {
+                lu.refactor(&self.iteration_complex);
+                lu
+            }
+            None => self.lu_complex.insert(self.iteration_complex.lu()),
+        };
         self.nlu += 2;
-        let regular = !real.is_singular() && !complex.is_singular();
-        self.lu_real = Some(real);
-        self.lu_complex = Some(complex);
+        let regular = real_regular && !complex.is_singular();
+        self.lu_valid = true;
         self.lu_h = h;
         regular
     }
@@ -520,13 +544,17 @@ where
                 self.rhs_complex[(r, 0)] =
                     Complex::new(gr[1] - (a * w2 - b * w3), gr[2] - (b * w2 + a * w3));
             }
-            let (Some(real), Some(complex)) = (&self.lu_real, &self.lu_complex) else {
-                return Newton::Failed(T::HALF);
-            };
-            let (Some(dw1), Some(dwc)) = (real.solve(&self.rhs), complex.solve(&self.rhs_complex))
+            let (Some(real), Some(complex), true) =
+                (&self.lu_real, &self.lu_complex, self.lu_valid)
             else {
                 return Newton::Failed(T::HALF);
             };
+            if !real.solve_into(&self.rhs, &mut self.solution)
+                || !complex.solve_into(&self.rhs_complex, &mut self.solution_complex)
+            {
+                return Newton::Failed(T::HALF);
+            }
+            let (dw1, dwc) = (&self.solution, &self.solution_complex);
             let mut sum = T::ZERO;
             for r in 0..n {
                 let scale = atol + rtol * Float::abs(self.y[(r, 0)]);
@@ -606,13 +634,13 @@ where
             self.stage[(r, 0)] = dd[0] * self.z[0][r] + dd[1] * self.z[1][r] + dd[2] * self.z[2][r];
             self.rhs[(r, 0)] = self.f0[(r, 0)] + self.stage[(r, 0)];
         }
-        let Some(real) = &self.lu_real else {
+        let (Some(real), true) = (&self.lu_real, self.lu_valid) else {
             return T::INFINITY;
         };
-        let Some(e) = real.solve(&self.rhs) else {
+        if !real.solve_into(&self.rhs, &mut self.solution) {
             return T::INFINITY;
-        };
-        self.err.copy_from_slice(e.as_slice());
+        }
+        self.err.copy_from_slice(self.solution.as_slice());
         let (rtol, atol) = (self.lim.rtol, self.lim.atol);
         let floor = T::from_f64(1e-10);
         let mut err = error_norm(
@@ -635,10 +663,10 @@ where
             for r in 0..n {
                 self.rhs[(r, 0)] = self.fz[1][(r, 0)] + self.stage[(r, 0)];
             }
-            let Some(e) = real.solve(&self.rhs) else {
+            if !real.solve_into(&self.rhs, &mut self.solution) {
                 return T::INFINITY;
-            };
-            self.err.copy_from_slice(e.as_slice());
+            }
+            self.err.copy_from_slice(self.solution.as_slice());
             err = error_norm(
                 &self.err,
                 self.y.as_slice(),
@@ -766,8 +794,12 @@ where
         self.differences = Jacobian::new(n);
         self.jac_current = false;
         self.jac_wanted = true;
-        self.lu_real = None;
-        self.lu_complex = None;
+        self.lu_valid = false;
+        self.iteration_real = Matrix::zeros(n, n);
+        self.iteration_complex =
+            Matrix::from_column_major(n, n, vec![Complex::new(T::ZERO, T::ZERO); n * n]);
+        self.solution = y0.clone();
+        self.solution_complex = self.rhs_complex.clone();
         self.lu_h = T::ZERO;
         self.theta = T::from_f64(THET);
         self.hacc = T::ZERO;

@@ -18,6 +18,7 @@
 
 use super::arith::{Ld, Ops};
 use super::mul::{Expansion, Step, horner, window};
+use super::narrow::Narrow;
 use crate::math::numbers::{ByteOrder, Number};
 
 /// The number `x`.
@@ -203,10 +204,7 @@ impl Frobenius {
 
     /// The expansion of `k p` in the τ-adic non-adjacent form, `k` of any sign and length.
     pub(super) fn expansion<'f>(&self, ops: &Ops<'f>, p: &Ld<'f>, k: &Number) -> Expansion<'f> {
-        let (r0, r1) = reduce(k, &self.d0, &self.d1, &self.points, self.mu);
-        let w = window(self.points.bits());
-        let (tw, alphas) = digit_set(self.mu, w);
-        let digits = tnaf(r0, r1, self.mu, w, tw, &alphas);
+        let (digits, alphas) = self.digits(k);
         // α_u·P = β·P + γ·τ(P), with `|β|` and `|γ|` at most 11 for the widths up to 8: from the
         // multiples `j·P` and `j·τ(P)` up to the largest, by additions, with no inversion.
         let largest = alphas
@@ -237,10 +235,23 @@ impl Frobenius {
         }
     }
 
+    /// The τ-adic digits of `k`, of any sign and length, and the digit set: `α_u = β + γ·τ` as
+    /// `(β, γ)`, `u` from 1 by twos.
+    pub(super) fn digits(&self, k: &Number) -> (Vec<i8>, Vec<(i64, i64)>) {
+        let (r0, r1) = reduce(k, &self.d0, &self.d1, &self.points, self.mu);
+        let w = window(self.points.bits());
+        let (tw, alphas) = digit_set(self.mu, w);
+        (tnaf(r0, r1, self.mu, w, tw, &alphas), alphas)
+    }
+
     /// `k p` for `k` of any sign and length.
     pub(super) fn mul<'f>(&self, ops: &Ops<'f>, p: &Ld<'f>, k: &Number) -> Ld<'f> {
         if p.z.is_zero() {
             return ops.identity();
+        }
+        if let Some(narrow) = Narrow::new(ops) {
+            let (digits, alphas) = self.digits(k);
+            return narrow.mul_tnaf(ops, p, &digits, &alphas);
         }
         horner(ops, &[self.expansion(ops, p, k)], Step::Frobenius)
     }

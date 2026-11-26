@@ -1,0 +1,16 @@
+[package]
+name = "sparse-ours-ffi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Our side of the SciPy rows: a C ABI over a::math::sparse, loaded by py/scipy_ref.py through
+# ctypes so that ours and SciPy alternate in one process. Release profile as a user gets it.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../../lib" }
+
+[workspace]

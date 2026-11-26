@@ -9,7 +9,7 @@ use super::limbs;
 use super::round::{away, round_mag, signed};
 use super::scale::{Dir, decide, int_parts};
 use super::small::{self, Fit};
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::{ByteOrder, Number};
 use crate::math::rational::Rational;
 use core::cmp::Ordering;
@@ -49,7 +49,7 @@ fn word(negative: bool, m: u64, lsb: i64, prec: u64) -> BigFloat {
     debug_assert!(m != 0 && u64::from(64 - m.leading_zeros()) <= prec);
     let n = prec.div_ceil(64) as usize;
     let lz = m.leading_zeros();
-    let mut mant = vec![0u64; n];
+    let mut mant = Mant::zeroed(n);
     mant[n - 1] = m << lz;
     BigFloat {
         prec,
@@ -126,7 +126,7 @@ fn of_parts(
                 let kind = Kind::Finite {
                     negative,
                     exp: r.exp,
-                    mant: vec![r.m],
+                    mant: Mant::One(r.m),
                 };
                 return (BigFloat { prec, kind }, r.o);
             }
@@ -301,6 +301,13 @@ impl BigFloat {
     #[track_caller]
     pub fn from_rational(r: &Rational, prec: u64, round: Round) -> (BigFloat, Ordering) {
         let prec = BigFloat::check_prec(prec);
+        if let Some(w) = r.word() {
+            // Parts of a word each: no numbers made.
+            if w.num == 0 {
+                return (BigFloat::zero(prec), Ordering::Equal);
+            }
+            return div_mags(w.negative, &[w.num], 0, &[w.den], 0, prec, round);
+        }
         let a = limbs::of_number(r.numer());
         if a.is_empty() {
             return (BigFloat::zero(prec), Ordering::Equal);
@@ -316,6 +323,9 @@ impl TryFrom<&BigFloat> for Rational {
     /// The rational that a finite number is, exactly, in little-endian bytes; a zero of either
     /// sign is zero. NaN and the infinities are an error.
     fn try_from(x: &BigFloat) -> Result<Rational, TryFromBigFloatError> {
+        if let Some((negative, m, lsb)) = x.parts() {
+            return Ok(rational_of(negative, m, lsb));
+        }
         match x.mantissa_exponent() {
             Some((m, e)) => Ok(if e >= 0 {
                 Rational::from_integer(m << e as usize)
@@ -334,12 +344,100 @@ impl TryFrom<&BigFloat> for Rational {
     }
 }
 
+/// The rational `±M·2^lsb` of the limbs `m` (not zero), in lowest terms: the odd part of `M` over
+/// a power of two, or an integer; in words when the parts have at most 128 bits, with no vector.
+fn rational_of(negative: bool, m: &[u64], lsb: i128) -> Rational {
+    let low = limbs::low_zeros(m);
+    let tz = 64 * low as u64 + u64::from(m[low].trailing_zeros());
+    let e = lsb + i128::from(tz);
+    let odd = limbs::shr(m, tz);
+    let bits = limbs::bit_len(&odd);
+    let order = ByteOrder::LittleEndian;
+    if bits <= 128 {
+        let v = odd.first().map_or(0, |&l| u128::from(l))
+            | odd.get(1).map_or(0, |&l| u128::from(l) << 64);
+        if e >= 0 && i128::from(bits) + e <= 128 {
+            return Rational::from_u128(negative, v << e, 1, order);
+        }
+        if e < 0 && -e < 128 {
+            return Rational::from_u128(negative, v, 1 << -e, order);
+        }
+    }
+    if e >= 0 {
+        let num = limbs::to_number(&limbs::shl(&odd, e as u64), negative, order);
+        Rational::from_reduced(num, limbs::to_number(&[1], false, order))
+    } else {
+        let k = (-e) as u64;
+        let mut d = vec![0u64; (k / 64) as usize + 1];
+        d[(k / 64) as usize] = 1 << (k % 64);
+        Rational::from_reduced(
+            limbs::to_number(&odd, negative, order),
+            limbs::to_number(&d, false, order),
+        )
+    }
+}
+
 impl TryFrom<BigFloat> for Rational {
     type Error = TryFromBigFloatError;
 
     /// As [`TryFrom<&BigFloat>`](#impl-TryFrom%3C%26BigFloat%3E-for-Rational).
     fn try_from(x: BigFloat) -> Result<Rational, TryFromBigFloatError> {
         Rational::try_from(&x)
+    }
+}
+
+/// The integer that a finite number `0.mant·2^exp` of an exponent of at most 128 rounds to in the
+/// direction `dir` of its magnitude, in a word, and the direction of that rounding of the
+/// magnitude, with no vector: `None` for a larger exponent or an integer of 129 bits.
+#[inline]
+fn int_word(mant: &Mant, exp: i64, dir: Dir) -> Option<(u128, Ordering)> {
+    if exp > 128 {
+        return None;
+    }
+    // The magnitude `m·2^(exp - 128) + L`, the top bit of `m` set and `L` the limbs below the
+    // top two, a fraction.
+    let (m, low): (u128, &[u64]) = match mant {
+        Mant::One(a) => (u128::from(*a) << 64, &[]),
+        Mant::Two([lo, hi]) => (u128::from(*hi) << 64 | u128::from(*lo), &[]),
+        Mant::Heap(v) => {
+            let n = v.len();
+            (
+                u128::from(v[n - 1]) << 64 | u128::from(v[n - 2]),
+                &v[..n - 2],
+            )
+        }
+    };
+    let below = |l: &[u64]| l.iter().any(|&w| w != 0);
+    let (int, half, rest) = if exp < 0 {
+        (0, false, true)
+    } else if exp == 0 {
+        (0, true, m << 1 != 0 || below(low))
+    } else if exp == 128 {
+        match low.split_last() {
+            Some((&t, l)) => (m, t >> 63 == 1, t << 1 != 0 || below(l)),
+            None => (m, false, false),
+        }
+    } else {
+        let frac = m << exp;
+        (
+            m >> (128 - exp),
+            frac >> 127 == 1,
+            frac << 1 != 0 || below(low),
+        )
+    };
+    if !half && !rest {
+        return Some((int, Ordering::Equal));
+    }
+    let up = match dir {
+        Dir::Floor => false,
+        Dir::Ceil => true,
+        Dir::Nearest => half && (rest || int & 1 == 1),
+        Dir::Away => half,
+    };
+    if up {
+        Some((int.checked_add(1)?, Ordering::Greater))
+    } else {
+        Some((int, Ordering::Less))
     }
 }
 
@@ -583,7 +681,19 @@ impl BigFloat {
                 Number::new_from_u8(0, ByteOrder::LittleEndian),
                 Ordering::Equal,
             )),
-            Kind::Finite { negative, .. } => {
+            Kind::Finite {
+                negative,
+                exp,
+                ref mant,
+            } => {
+                if let Some((v, o)) = int_word(mant, exp, Dir::of(negative, round)) {
+                    let n = if v == 0 {
+                        Number::new_from_u8(0, ByteOrder::LittleEndian)
+                    } else {
+                        limbs::word_number(v, negative, ByteOrder::LittleEndian)
+                    };
+                    return Some((n, signed(negative, o)));
+                }
                 let (_, d, o) = self.integer_mag(Dir::of(negative, round));
                 Some((
                     limbs::to_number(&d, negative, ByteOrder::LittleEndian),
@@ -599,7 +709,14 @@ impl BigFloat {
     fn rounded_u128(&self, round: Round) -> (bool, Option<u128>, Ordering) {
         match &self.kind {
             Kind::Zero { negative } => (*negative, Some(0), Ordering::Equal),
-            Kind::Finite { negative, exp, .. } => {
+            Kind::Finite {
+                negative,
+                exp,
+                mant,
+            } => {
+                if let Some((v, o)) = int_word(mant, *exp, Dir::of(*negative, round)) {
+                    return (*negative, Some(v), signed(*negative, o));
+                }
                 if *exp > 129 {
                     // At least `2^128`, past any of the types.
                     let o = signed(*negative, Ordering::Less);

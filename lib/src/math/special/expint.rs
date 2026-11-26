@@ -11,7 +11,7 @@
 //! * `Ei(x)`, `0 < x ≤ 6`: `ln(x/x₀) + (x − x₀) R(x)` about the zero `x₀ = 0.3725…` of `Ei`, the
 //!   entire `R` a polynomial minimax fit on each of four pieces with its first two terms as a
 //!   double-double, `x − x₀` as a double-double, `ln(x/x₀)` as a double-double (by `ln_1p` and a
-//!   Newton step near `x₀`, by `ln_dd` up to 1.5), and the sum rounded once; `x > 6`:
+//!   Newton step near `x₀`, by the table logarithm `ln_dd_tab` up to 1.5), and the sum rounded once; `x > 6`:
 //!   `eˣ (1 + K(x))/x` with `K` a rational fit on each of four pieces to 48 (in a variable from
 //!   the left end of its piece, where the terms of both polynomials are positive) and a
 //!   polynomial in `1/x` on two past it; `x < 0`: `−E₁(−x)`.
@@ -26,7 +26,7 @@
 //! The tables but Boost's are printed by `zeta/gen_expint.py` (with `zeta/gen_fit.py`).
 
 use super::zeta::util::{
-    exp_mul, exp_parts, horner, ln_dd, mla, residual, scale, two_prod, two_sum,
+    exp_mul, exp_parts, horner, ln_dd_tab, mla, residual, scale, two_prod, two_sum,
 };
 use super::{Real, via};
 
@@ -360,7 +360,7 @@ fn e1_small(x: f64) -> f64 {
     let (k3, k3e) = two_prod(c[3], x3);
     let k3l = k3e + c[3] * (x3e + x2e * x);
     let quartic = x2 * (x2 * horner(x, &c[4..]));
-    let (lx, lxl) = ln_dd(x);
+    let (lx, lxl) = ln_dd_tab(x);
     // (−γ − ln x) + x − x²/4 + c₃x³, each step exact
     let (a, ae) = two_sum(c[0], -lx);
     let (b, be) = two_sum(a, x);
@@ -420,7 +420,7 @@ pub(crate) fn ei_f64(x: f64) -> f64 {
             let (m, ml) = (scale(m, q), scale(ml, q));
             (l, -(((m - 1.0) - t) + (ml - tl)) / (1.0 + t))
         } else if x <= 1.5 {
-            let (lx, lxl) = ln_dd(x);
+            let (lx, lxl) = ln_dd_tab(x);
             let (h, e) = two_sum(lx, -LN_EI_X0_HI);
             (h, e + (lxl - LN_EI_X0_LO))
         } else {
@@ -432,6 +432,34 @@ pub(crate) fn ei_f64(x: f64) -> f64 {
         return h + (hl + (pe + (ll + (d * rl + dl * r))));
     }
     ei_large(x)
+}
+
+/// `Ei(x)` for the `f32` form: on `0 < x ≤ 6` the form of `ei_f64` in plain `f64` (no
+/// double-double steps: `ln(x/x₀) + (x − x₀) R(x)`, whose terms have one sign, `x − x₀` from the
+/// double-double `x₀` and `ln(x/x₀)` by `ln_1p` near `x₀`), good to about `2⁻⁵⁰` relative, so
+/// that the `f32` rounding is that of the true value but within `2⁻²⁶` ulp of a halfway point;
+/// elsewhere `ei_f64`.
+pub(crate) fn ei_f32(x: f64) -> f64 {
+    if !(x > 0.0 && x <= 6.0) {
+        return ei_f64(x);
+    }
+    let d = (x - EI_X0_HI) - EI_X0_LO;
+    let (t, c) = if x <= 1.5 {
+        (x - 0.75, &EI_R1[..])
+    } else if x <= 3.0 {
+        (x - 2.25, &EI_R2[..])
+    } else if x <= 4.5 {
+        (x - 3.75, &EI_R3[..])
+    } else {
+        (x - 5.25, &EI_R4[..])
+    };
+    let r = horner(t, c);
+    let l = if d.abs() < 0.1 {
+        (d / EI_X0_HI).ln_1p()
+    } else {
+        x.ln() - LN_EI_X0_HI
+    };
+    mla(d, r, l)
 }
 
 /// `Ei(x)` for `x > 6`: `eˣ (1 + K)/x`, `K` from the left end of its piece (`x − a` exact).
@@ -472,7 +500,7 @@ fn e1_dd(x: f64) -> (f64, f64) {
             l = se + pe + l * x;
         }
         l += E1_SMALL_LO;
-        let (lx, lxl) = ln_dd(x);
+        let (lx, lxl) = ln_dd_tab(x);
         let (s, se) = two_sum(h, -lx);
         return two_sum(s, se + l - lxl);
     }
@@ -571,7 +599,7 @@ pub fn expint_e1<T: Real>(x: T) -> T {
 /// assert_eq!(expint_ei(-2.0f64), -expint_e1(2.0f64));
 /// ```
 pub fn expint_ei<T: Real>(x: T) -> T {
-    via(x, ei_f64)
+    super::via_f32(x, ei_f64, ei_f32)
 }
 
 /// The generalised exponential integral `Eₙ(x) = ∫₁^∞ e^(−xt)/tⁿ dt`, for `x ≥ 0` (`x > 0` when

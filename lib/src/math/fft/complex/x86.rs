@@ -58,6 +58,11 @@ impl Blk<f64> for P1 {
         P1(unsafe { _mm_setzero_pd() })
     }
     #[inline(always)]
+    fn conj(self) -> Self {
+        // SAFETY: SSE2 is part of x86_64; the signs (1, −1).
+        P1(unsafe { _mm_mul_pd(self.0, _mm_loadu_pd(PM64.as_ptr())) })
+    }
+    #[inline(always)]
     fn add(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         P1(unsafe { _mm_add_pd(self.0, b.0) })
@@ -114,6 +119,15 @@ impl Blk<f64> for P1 {
         unsafe { (_mm_loadu_pd(p), _mm_loadu_pd(p.add(2))) }
     }
     #[inline(always)]
+    unsafe fn tw_c(p: *const f64) -> Self::Tw {
+        // SAFETY: the caller's contract: [wr, wr] and [−wi, wi] from [wr, wi].
+        unsafe {
+            let v = _mm_loadu_pd(p);
+            let sg = _mm_set_pd(0.0, -0.0);
+            (_mm_unpacklo_pd(v, v), _mm_xor_pd(_mm_unpackhi_pd(v, v), sg))
+        }
+    }
+    #[inline(always)]
     fn mul_tw<const INV: bool>(self, (a, b): Self::Tw) -> Self {
         // SAFETY: as for `zero`.
         unsafe {
@@ -155,6 +169,11 @@ macro_rules! sse_f32 {
         fn zero() -> Self {
             // SAFETY: SSE is part of x86_64.
             $t(unsafe { _mm_setzero_ps() })
+        }
+        #[inline(always)]
+        fn conj(self) -> Self {
+            // SAFETY: SSE is part of x86_64; the signs (1, −1, 1, −1).
+            $t(unsafe { _mm_mul_ps(self.0, _mm_loadu_ps(PM32.as_ptr())) })
         }
         #[inline(always)]
         fn add(self, b: Self) -> Self {
@@ -248,6 +267,14 @@ impl Blk<f32> for S2 {
         unsafe { (_mm_loadu_ps(p), _mm_loadu_ps(p.add(4))) }
     }
     #[inline(always)]
+    unsafe fn tw_c(p: *const f32) -> Self::Tw {
+        // SAFETY: the caller's contract: [wr; 4] and [−wi, wi, −wi, wi] from [wr, wi].
+        unsafe {
+            let sg = _mm_set_ps(0.0, -0.0, 0.0, -0.0);
+            (_mm_set1_ps(*p), _mm_xor_ps(_mm_set1_ps(*p.add(1)), sg))
+        }
+    }
+    #[inline(always)]
     unsafe fn ld_rows(o: &mut [Self], p: *const Complex<f32>, stride: usize) {
         // SAFETY: the caller's contract; a lane is one f64.
         unsafe {
@@ -318,6 +345,14 @@ impl Blk<f32> for S1 {
         unsafe { Self::tw_b(p) }
     }
     #[inline(always)]
+    unsafe fn tw_c(p: *const f32) -> Self::Tw {
+        // SAFETY: the caller's contract: [wr, wr, ·, ·] and [−wi, wi, ·, ·] from [wr, wi].
+        unsafe {
+            let sg = _mm_set_ps(0.0, -0.0, 0.0, -0.0);
+            (_mm_set1_ps(*p), _mm_xor_ps(_mm_set1_ps(*p.add(1)), sg))
+        }
+    }
+    #[inline(always)]
     unsafe fn ld_rows(o: &mut [Self], p: *const Complex<f32>, _stride: usize) {
         for (j, v) in o.iter_mut().enumerate() {
             // SAFETY: the caller's contract.
@@ -355,6 +390,11 @@ impl Blk<f64> for A2 {
     fn zero() -> Self {
         // SAFETY: AVX was detected (see above).
         A2(unsafe { _mm256_setzero_pd() })
+    }
+    #[inline(always)]
+    fn conj(self) -> Self {
+        // SAFETY: AVX was detected (see above); the signs (1, −1, 1, −1).
+        A2(unsafe { _mm256_mul_pd(self.0, _mm256_loadu_pd(PM64.as_ptr())) })
     }
     #[inline(always)]
     fn add(self, b: Self) -> Self {
@@ -408,6 +448,17 @@ impl Blk<f64> for A2 {
     unsafe fn tw_l(p: *const f64) -> Self::Tw {
         // SAFETY: the caller's contract; AVX was detected.
         unsafe { (_mm256_loadu_pd(p), _mm256_loadu_pd(p.add(4))) }
+    }
+    #[inline(always)]
+    unsafe fn tw_c(p: *const f64) -> Self::Tw {
+        // SAFETY: the caller's contract; AVX was detected: [wr; 4] and [−wi, wi, −wi, wi].
+        unsafe {
+            let sg = _mm256_set_pd(0.0, -0.0, 0.0, -0.0);
+            (
+                _mm256_broadcast_sd(&*p),
+                _mm256_xor_pd(_mm256_broadcast_sd(&*p.add(1)), sg),
+            )
+        }
     }
     #[inline(always)]
     fn mul_tw<const INV: bool>(self, (a, b): Self::Tw) -> Self {
@@ -484,6 +535,11 @@ impl Blk<f32> for A4 {
         A4(unsafe { _mm256_setzero_ps() })
     }
     #[inline(always)]
+    fn conj(self) -> Self {
+        // SAFETY: AVX was detected (see above); the signs (1, −1, …).
+        A4(unsafe { _mm256_mul_ps(self.0, _mm256_loadu_ps(PM32.as_ptr())) })
+    }
+    #[inline(always)]
     fn add(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         A4(unsafe { _mm256_add_ps(self.0, b.0) })
@@ -535,6 +591,17 @@ impl Blk<f32> for A4 {
     unsafe fn tw_l(p: *const f32) -> Self::Tw {
         // SAFETY: the caller's contract; AVX was detected.
         unsafe { (_mm256_loadu_ps(p), _mm256_loadu_ps(p.add(8))) }
+    }
+    #[inline(always)]
+    unsafe fn tw_c(p: *const f32) -> Self::Tw {
+        // SAFETY: the caller's contract; AVX was detected: [wr; 8] and [−wi, wi, …].
+        unsafe {
+            let sg = _mm256_set_ps(0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0);
+            (
+                _mm256_broadcast_ss(&*p),
+                _mm256_xor_ps(_mm256_broadcast_ss(&*p.add(1)), sg),
+            )
+        }
     }
     #[inline(always)]
     fn mul_tw<const INV: bool>(self, (a, b): Self::Tw) -> Self {

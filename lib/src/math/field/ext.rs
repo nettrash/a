@@ -12,13 +12,14 @@
 //! order of its coefficients from the top down, binomials first, by Lidl and Niederreiter's
 //! Theorem 3.75 for those. See [`ExtensionField`] for the details and the costs.
 
-use super::{Fp, PrimeField, ext_arith, ext_find, ext_maps, ext_roots};
+use super::prime_form::{Arith, Value, held, inline, with_form};
+use super::{Fp, PrimeField, ext_arith, ext_find, ext_maps, ext_roots, ext_zech};
 use crate::math::numbers::{Factorization, Number};
 use crate::math::poly::ModPolynomial;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// The finite field `GF(pᵏ) = GF(p)[x] / g(x)` for a monic irreducible polynomial `g` of degree
 /// `k` over a [`PrimeField`] `GF(p)`, its elements the polynomials of degree below `k` in the
@@ -29,8 +30,9 @@ use std::sync::OnceLock;
 /// elements, [`Fpk`], borrow it, as the elements of a [`PrimeField`] borrow theirs, and their
 /// coefficients are elements of that copy, which mix with the elements of any [`PrimeField`] of
 /// the same prime. What only some uses need is computed on the first use and kept: the matrix of
-/// the Frobenius map, the traces of the powers of `x`, the data of the square roots, and the
-/// factorisation of `pᵏ − 1`.
+/// the Frobenius map, the traces of the powers of `x`, the data of the square roots, the
+/// factorisation of `pᵏ − 1`, and the tables of logarithms of a field of at most `2¹⁶` elements
+/// (`2¹⁴` for `k = 2` and `3`) over a prime of one word.
 ///
 /// It is built from a given `g` ([`new`](ExtensionField::new), which checks that `g` is
 /// irreducible) or from a degree ([`with_degree`](ExtensionField::with_degree), which takes the
@@ -77,14 +79,41 @@ pub struct ExtensionField {
     /// The matrix of the Frobenius map: column `j`, the `k` coefficients of `x^(p·j) mod g`, at
     /// `j·k..(j + 1)·k`.
     pub(super) frob: OnceLock<Vec<Number>>,
+    /// The same matrix as the base field's words, for [`Kind::Words`].
+    pub(super) frob_words: OnceLock<Vec<u64>>,
     /// The traces of `1, x, …, x^(k−1)`.
     pub(super) traces: OnceLock<Vec<Number>>,
+    /// The terms of `xᵏ mod g`, as the base field's form holds them.
+    pub(super) low_form: OnceLock<Vec<(usize, Value)>>,
+    /// The traces of the powers of `x`, in the form.
+    pub(super) traces_form: OnceLock<Vec<Value>>,
     /// For `p = 2`, the coefficients of the square root of `x`.
     pub(super) root_x: OnceLock<Vec<Number>>,
     /// For odd `p`, the data of Tonelli and Shanks's algorithm.
     pub(super) shanks: OnceLock<ext_roots::Shanks>,
     /// The factorisation of `pᵏ − 1`.
     pub(super) units: OnceLock<Factorization>,
+    /// For at most [`ext_zech::max_order`]`(k)` elements over a prime of one word, the constants of
+    /// the tables of logarithms and the tables, made on their first use and shared by the
+    /// field's copies.
+    pub(super) zech: Option<Arc<ext_zech::Zech>>,
+    /// How the elements are held ([`Repr`]).
+    pub(super) kind: Kind,
+    /// For a prime of one word below `2⁶³` in Montgomery's form (the fields of [`Kind::Words`] and
+    /// most of [`Kind::Log`]): the prime and `-1/p mod 2⁶⁴`; else `(0, 0)`.
+    pub(super) word: (u64, u64),
+}
+
+/// How the elements of a field are held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// As their coefficients, elements of the base field.
+    General,
+    /// As the words of their coefficients in Montgomery's form of one word, for a prime below
+    /// `2⁶³` (whose products sum in 128 bits before one reduction).
+    Words,
+    /// As their logarithms, for the fields of Zech's tables.
+    Log,
 }
 
 impl ExtensionField {
@@ -205,7 +234,7 @@ impl ExtensionField {
             .collect();
         let q = p.pow(u32::try_from(k).expect("a degree below 2^32"));
         let poly_min = ext_arith::poly_min(p, low.len());
-        ExtensionField {
+        let mut f = ExtensionField {
             base: base.clone(),
             k,
             g,
@@ -213,11 +242,28 @@ impl ExtensionField {
             q,
             poly_min,
             frob: OnceLock::new(),
+            frob_words: OnceLock::new(),
             traces: OnceLock::new(),
+            low_form: OnceLock::new(),
+            traces_form: OnceLock::new(),
             root_x: OnceLock::new(),
             shanks: OnceLock::new(),
             units: OnceLock::new(),
+            zech: None,
+            kind: Kind::General,
+            word: (0, 0),
+        };
+        f.zech = ext_zech::Zech::new(&f).map(Arc::new);
+        let word = with_form!(f.base.form_ref(), g => g.word_prime());
+        if let Some(w) = word {
+            f.word = w;
         }
+        if f.zech.is_some() {
+            f.kind = Kind::Log;
+        } else if word.is_some() {
+            f.kind = Kind::Words;
+        }
+        f
     }
 
     /// The base field `GF(p)`: the copy the field holds.
@@ -352,7 +398,7 @@ impl ExtensionField {
     pub fn from_base(&self, c: &Fp<'_>) -> Fpk<'_> {
         let mut v = vec![self.base.zero(); self.k];
         v[0] = self.lift(c);
-        Fpk { f: self, c: v }
+        Fpk::of(self, v)
     }
 
     /// The element of the polynomial `a`, of any degree, reduced modulo `g`.
@@ -400,9 +446,10 @@ impl ExtensionField {
     /// ```
     #[must_use]
     pub fn zero(&self) -> Fpk<'_> {
-        Fpk {
-            f: self,
-            c: vec![self.base.zero(); self.k],
+        match self.kind {
+            Kind::Log => Fpk::of_log(self, ext_zech::ZERO),
+            Kind::Words => Fpk::of_words(self, vec![0; self.k]),
+            Kind::General => Fpk::of(self, vec![self.base.zero(); self.k]),
         }
     }
 
@@ -419,7 +466,15 @@ impl ExtensionField {
     /// ```
     #[must_use]
     pub fn one(&self) -> Fpk<'_> {
-        self.from_base(&self.base.one())
+        match self.kind {
+            Kind::Log => Fpk::of_log(self, 0),
+            Kind::Words => {
+                let mut w = vec![0; self.k];
+                w[0] = inline::<1>(self.base.one().raw())[0];
+                Fpk::of_words(self, w)
+            }
+            Kind::General => self.from_base(&self.base.one()),
+        }
     }
 
     /// The class of `x`, a root of `g`, which generates the field over `GF(p)`: `x` itself for a
@@ -591,7 +646,7 @@ impl ExtensionField {
             c.push(self.base.element(&r));
             n = q;
         }
-        Fpk { f: self, c }
+        Fpk::of(self, c)
     }
 
     /// The element of the coefficients `c` of `GF(p)`, of any number, reduced modulo `g`.
@@ -601,7 +656,13 @@ impl ExtensionField {
         } else {
             c.resize(self.k, self.base.zero());
         }
-        Fpk { f: self, c }
+        Fpk::of(self, c)
+    }
+
+    /// The tables of the field, for [`Kind::Log`].
+    #[inline(always)]
+    pub(super) fn zech(&self) -> &ext_zech::Zech {
+        self.zech.as_deref().expect("a field of Zech's tables")
     }
 
     /// `c` as an element of the base field this field holds.
@@ -668,15 +729,92 @@ impl fmt::Debug for ExtensionField {
 #[derive(Clone)]
 pub struct Fpk<'f> {
     f: &'f ExtensionField,
-    /// The `k` coefficients, the constant first.
-    pub(super) c: Vec<Fp<'f>>,
+    /// The element as its field holds it ([`Kind`]).
+    pub(super) r: Repr<'f>,
+}
+
+/// An element as its field holds it; the compact forms keep the coefficients as elements of the
+/// base field too, once something has asked for them.
+#[derive(Clone, Debug)]
+pub(super) enum Repr<'f> {
+    /// Its `k` coefficients, the constant first.
+    General(Vec<Fp<'f>>),
+    /// The `k` words of its coefficients in the base field's form.
+    Words(Vec<u64>, OnceLock<Vec<Fp<'f>>>),
+    /// Its logarithm to the base of the primitive element of Zech's tables, or
+    /// [`ext_zech::ZERO`] for 0.
+    Log(u32, OnceLock<Vec<Fp<'f>>>),
+}
+
+impl PartialEq for Repr<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Repr::General(a), Repr::General(b)) => a == b,
+            (Repr::Words(a, _), Repr::Words(b, _)) => a == b,
+            (Repr::Log(a, _), Repr::Log(b, _)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Repr<'_> {}
+
+impl Hash for Repr<'_> {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        match self {
+            Repr::General(c) => c.hash(h),
+            Repr::Words(w, _) => w.hash(h),
+            Repr::Log(l, _) => l.hash(h),
+        }
+    }
 }
 
 impl<'f> Fpk<'f> {
-    /// The element of the coefficients `c`, `k` of them.
+    /// The element of the coefficients `c`, `k` of them, in its field's form.
     pub(super) fn of(f: &'f ExtensionField, c: Vec<Fp<'f>>) -> Fpk<'f> {
         debug_assert_eq!(c.len(), f.k);
-        Fpk { f, c }
+        let r = match f.kind {
+            Kind::General => Repr::General(c),
+            Kind::Words => {
+                let w = c.iter().map(|x| inline::<1>(x.raw())[0]).collect();
+                Repr::Words(w, OnceLock::from(c))
+            }
+            Kind::Log => Repr::Log(f.zech().log_of_coeffs(&c), OnceLock::from(c)),
+        };
+        Fpk { f, r }
+    }
+
+    /// The element of the words `w` of its coefficients (for a field of a word prime).
+    #[inline]
+    pub(super) fn of_words(f: &'f ExtensionField, w: Vec<u64>) -> Fpk<'f> {
+        debug_assert_eq!(w.len(), f.k);
+        let r = match f.kind {
+            Kind::Log => Repr::Log(f.zech().log_of_words(&w), OnceLock::new()),
+            _ => Repr::Words(w, OnceLock::new()),
+        };
+        Fpk { f, r }
+    }
+
+    /// The element of the logarithm `l` (for a field of Zech's tables).
+    #[inline]
+    pub(super) fn of_log(f: &'f ExtensionField, l: u32) -> Fpk<'f> {
+        Fpk {
+            f,
+            r: Repr::Log(l, OnceLock::new()),
+        }
+    }
+
+    /// The coefficients, made from the compact forms on the first use.
+    pub(super) fn c(&self) -> &[Fp<'f>] {
+        match &self.r {
+            Repr::General(c) => c,
+            Repr::Words(w, cs) => cs.get_or_init(|| {
+                w.iter()
+                    .map(|&x| Fp::from_raw(&self.f.base, held(&[x])))
+                    .collect()
+            }),
+            Repr::Log(l, cs) => cs.get_or_init(|| self.f.zech().coeffs_of_log(self.f, *l)),
+        }
     }
 
     /// The field.
@@ -709,7 +847,7 @@ impl<'f> Fpk<'f> {
     /// ```
     #[must_use]
     pub fn coeffs(&self) -> &[Fp<'f>] {
-        &self.c
+        self.c()
     }
 
     /// The polynomial of degree below `k` that the element is, modulo `p`.
@@ -729,7 +867,7 @@ impl<'f> Fpk<'f> {
     /// ```
     #[must_use]
     pub fn to_polynomial(&self) -> ModPolynomial {
-        ext_arith::to_polynomial(self.f, &self.c)
+        ext_arith::to_polynomial(self.f, self.c())
     }
 
     /// The element as an element of `GF(p)`, when it is one (a constant), else `None`.
@@ -747,10 +885,8 @@ impl<'f> Fpk<'f> {
     /// ```
     #[must_use]
     pub fn to_base(&self) -> Option<Fp<'f>> {
-        self.c[1..]
-            .iter()
-            .all(Fp::is_zero)
-            .then(|| self.c[0].clone())
+        let c = self.c();
+        c[1..].iter().all(Fp::is_zero).then(|| c[0].clone())
     }
 
     /// Whether it is 0.
@@ -767,7 +903,11 @@ impl<'f> Fpk<'f> {
     /// ```
     #[must_use]
     pub fn is_zero(&self) -> bool {
-        self.c.iter().all(Fp::is_zero)
+        match &self.r {
+            Repr::General(c) => c.iter().all(Fp::is_zero),
+            Repr::Words(w, _) => w.iter().all(|&x| x == 0),
+            Repr::Log(l, _) => *l == ext_zech::ZERO,
+        }
     }
 
     /// Whether it is 1.
@@ -784,7 +924,13 @@ impl<'f> Fpk<'f> {
     /// ```
     #[must_use]
     pub fn is_one(&self) -> bool {
-        self.c[0].is_one() && self.c[1..].iter().all(Fp::is_zero)
+        match &self.r {
+            Repr::General(c) => c[0].is_one() && c[1..].iter().all(Fp::is_zero),
+            Repr::Words(w, _) => {
+                w[0] == inline::<1>(self.f.base.one().raw())[0] && w[1..].iter().all(|&x| x == 0)
+            }
+            Repr::Log(l, _) => *l == 0,
+        }
     }
 
     /// The square.
@@ -800,7 +946,7 @@ impl<'f> Fpk<'f> {
     /// ```
     #[must_use]
     pub fn square(&self) -> Fpk<'f> {
-        self * self
+        ext_arith::square(self)
     }
 
     /// Twice the element.
@@ -1063,7 +1209,7 @@ impl<'f> Fpk<'f> {
 
 impl PartialEq for Fpk<'_> {
     fn eq(&self, other: &Self) -> bool {
-        (core::ptr::eq(self.f, other.f) || self.f == other.f) && self.c == other.c
+        (core::ptr::eq(self.f, other.f) || self.f == other.f) && self.r == other.r
     }
 }
 
@@ -1074,9 +1220,7 @@ impl Hash for Fpk<'_> {
     /// clippy's `mutable_key_type` warning for a set of elements, which sees them, is a false
     /// positive.
     fn hash<H: Hasher>(&self, h: &mut H) {
-        for c in &self.c {
-            c.hash(h);
-        }
+        self.r.hash(h);
     }
 }
 
@@ -1102,10 +1246,7 @@ impl fmt::Display for Fpk<'_> {
 impl<'f> Neg for &Fpk<'f> {
     type Output = Fpk<'f>;
     fn neg(self) -> Fpk<'f> {
-        Fpk {
-            f: self.f,
-            c: self.c.iter().map(|x| -x).collect(),
-        }
+        ext_arith::neg(self)
     }
 }
 
@@ -1165,14 +1306,8 @@ macro_rules! binary {
     };
 }
 
-binary!(Add, add, AddAssign, add_assign, |a, b| Fpk {
-    f: a.f,
-    c: a.c.iter().zip(&b.c).map(|(x, y)| x + y).collect(),
-});
-binary!(Sub, sub, SubAssign, sub_assign, |a, b| Fpk {
-    f: a.f,
-    c: a.c.iter().zip(&b.c).map(|(x, y)| x - y).collect(),
-});
+binary!(Add, add, AddAssign, add_assign, |a, b| ext_arith::add(a, b));
+binary!(Sub, sub, SubAssign, sub_assign, |a, b| ext_arith::sub(a, b));
 binary!(Mul, mul, MulAssign, mul_assign, |a, b| ext_arith::mul(a, b));
 binary!(Div, div, DivAssign, div_assign, |a, b| {
     let inv = b.inverse().expect("division by zero");

@@ -10,6 +10,7 @@
 //! to, or taken by value, take it when they have room.
 
 use super::Rational;
+use super::mixed;
 use super::small::{self, Small, Wide};
 use crate::math::numbers::fraction::{self, Fraction};
 use crate::math::numbers::{ByteOrder, Magnitude, Number};
@@ -22,6 +23,19 @@ pub(super) enum Op {
     Sub,
     Mul,
     Div,
+}
+
+impl Op {
+    /// The operation for [`mixed`].
+    #[inline(always)]
+    fn mixed(self) -> mixed::Op {
+        match self {
+            Op::Add => mixed::Op::Add,
+            Op::Sub => mixed::Op::Sub,
+            Op::Mul => mixed::Op::Mul,
+            Op::Div => mixed::Op::Div,
+        }
+    }
 }
 
 /// `x op y` on the register path.
@@ -118,6 +132,15 @@ fn apply_long(a: &Rational, b: &Rational, op: Op) -> Rational {
     if op == Op::Div && b.is_zero() {
         by_zero();
     }
+    // A short operand with a long one, on the words.
+    let mixed = match (a.word(), b.word()) {
+        (Some(x), None) => mixed::word_long(x, b, op.mixed(), true, a.byte_order()),
+        (None, Some(y)) => mixed::word_long(y, a, op.mixed(), false, a.byte_order()),
+        _ => None,
+    };
+    if let Some(r) = mixed {
+        return r;
+    }
     let (num, den) = general(parts(a), parts(b), op, a.byte_order());
     Rational::from_reduced(num, den)
 }
@@ -145,6 +168,20 @@ fn apply_left_long(a: &mut Rational, b: &Rational, op: Op) {
         by_zero();
     }
     let order = a.byte_order();
+    match (a.word(), b.word()) {
+        (None, Some(y)) => {
+            if mixed::assign_long(a, y, op.mixed(), false, order) {
+                return;
+            }
+        }
+        (Some(x), None) => {
+            if let Some(r) = mixed::word_long(x, b, op.mixed(), true, order) {
+                *a = r;
+                return;
+            }
+        }
+        _ => {}
+    }
     general_into(a, parts(b), true, op, order);
 }
 
@@ -170,7 +207,22 @@ fn apply_right_long(a: &Rational, b: &mut Rational, op: Op) {
     if op == Op::Div && b.is_zero() {
         by_zero();
     }
-    general_into(b, parts(a), false, op, a.byte_order());
+    let order = a.byte_order();
+    match (a.word(), b.word()) {
+        (Some(x), None) => {
+            if mixed::assign_long(b, x, op.mixed(), true, order) {
+                return;
+            }
+        }
+        (None, Some(y)) => {
+            if let Some(r) = mixed::word_long(y, a, op.mixed(), false, order) {
+                *b = r;
+                return;
+            }
+        }
+        _ => {}
+    }
+    general_into(b, parts(a), false, op, order);
 }
 
 /// `a op n` for an integer `n`, in a new rational in the byte order of `a`.

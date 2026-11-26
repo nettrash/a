@@ -333,11 +333,16 @@ fn modulus(state: &mut u64, len: usize, kind: usize) -> Vec<u8> {
 fn powers_modulo_long_numbers_match_the_reference() {
     let mut state = 0x452821E6_38D01377;
     // One and two limbs in registers, three to seven, the limbs from eight, and REDC by products
-    // from 100 limbs (800 bytes); exponents across the window sizes' limits.
+    // from 86 limbs (681 to 688 bytes). Its high half comes from the short product of `n + 1`
+    // limbs while `n + 1` is below the transforms' threshold, `FFT_MUL`, and from the whole
+    // product beyond: on aarch64 (`FFT_MUL` 360) the short product up to 358 limbs (2864 bytes)
+    // and the whole one from 359 (2865 to 2872 bytes); with the portable transforms (`FFT_MUL`
+    // 16,384) the short product at every length here. Exponents across the window sizes' limits.
     let lengths = [
-        1, 8, 9, 16, 17, 24, 31, 56, 57, 64, 65, 100, 200, 792, 793, 799, 800, 801, 900,
+        1, 8, 9, 16, 17, 24, 31, 56, 57, 64, 65, 100, 200, 680, 681, 688, 689, 792, 793, 799, 800,
+        801, 900, 2856, 2857, 2864, 2865, 2872, 2873, 3224, 3232,
     ];
-    for &ml in lengths.iter().filter(|&&l| l <= size(900, 24)) {
+    for &ml in lengths.iter().filter(|&&l| l <= size(3240, 24)) {
         for kind in 0..5 {
             let m = modulus(&mut state, ml, kind);
             let el = match below(&mut state, 4) {
@@ -371,6 +376,50 @@ fn powers_modulo_long_numbers_match_the_reference() {
                 )
             };
             assert_result(&result, &expected_pow_mod(&bn, &en, &mn), ob, &inputs);
+        }
+    }
+}
+
+#[test]
+fn powers_whose_montgomery_forms_are_short_match_the_reference() {
+    // A base `b = s R^-1 mod m`, `R = 2^(64 n)` for a modulus of `n` limbs, has the Montgomery
+    // form `s`: with `s` of one or two limbs the first squares reduce products whose low half is
+    // short, where REDC by products finds the carry that its short product of `q m` misses (the
+    // low limbs of `q m` below those of the short product), which random operands almost never
+    // take; at lengths on both sides of `REDC_N` (86 limbs) and of the switch to the whole product
+    // (358 and 359 limbs on aarch64).
+    let mut state = 0x9216D5D9_8979FB1B;
+    for &n in [85, 86, 87, 128, 200, 358, 359]
+        .iter()
+        .filter(|&&n| n <= size(400, 0))
+    {
+        for kind in 0..3 {
+            // Odd moduli of `n` limbs: random, or all ones.
+            let mut m = modulus(&mut state, 8 * n, if kind == 1 { 0 } else { 2 });
+            m[8 * n - 1] |= 0x80;
+            let mn = number(&m, false, ByteOrder::LittleEndian);
+            let r = &Number::new_from_u8(1, ByteOrder::LittleEndian) << (64 * n);
+            let rinv = r.mod_inverse(&mn).expect("an odd modulus");
+            let s = match kind {
+                0 => Number::new_from_u8(1 + below(&mut state, 200) as u8, ByteOrder::BigEndian),
+                1 => Number::new_from_u64(xorshift(&mut state) | 1, ByteOrder::LittleEndian),
+                _ => Number::new_from_u128(
+                    (u128::from(xorshift(&mut state)) << 64) | u128::from(xorshift(&mut state)),
+                    ByteOrder::BigEndian,
+                ),
+            };
+            let b = &(&s * &rinv) % &mn;
+            for e in [2u8, 3, 5] {
+                let en = Number::new_from_u8(e, ByteOrder::BigEndian);
+                let result = b.pow_mod(&en, &mn);
+                let inputs = || format!("{} pow_mod({e}, {} limbs)", describe(&b), n);
+                assert_result(
+                    &result,
+                    &expected_pow_mod(&b, &en, &mn),
+                    b.byte_order,
+                    &inputs,
+                );
+            }
         }
     }
 }

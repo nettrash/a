@@ -3,9 +3,12 @@
 //! Over a field, Euclid's algorithm, with the half gcd of [`hgcd`] for the coefficient types whose
 //! products are fast; over the rationals and the integers, the heuristic gcd and the multimodular
 //! algorithm of [`zz`] on the primitive parts; modulo `n`, Euclid's algorithm on the word and limb
-//! kernels of [`nmod`] and [`limbs`] below a degree and the half gcd above ([`modpoly`]).
+//! kernels of [`nmod`] and [`limbs`] below a degree and the half gcd above ([`modpoly`]); modulo 2
+//! on the packed words, Euclid's algorithm below a degree and the half gcd of the engine of
+//! [`gf2`] above.
 
 mod field;
+mod gf2;
 mod hgcd;
 mod limbs;
 mod modpoly;
@@ -19,10 +22,20 @@ use crate::math::numbers::Number;
 use crate::math::rational::Rational;
 use field::FieldEngine;
 
+/// The greatest common divisor of the packed polynomials `a` and `b` over GF(2) by the half gcd
+/// on the packed products ([`gf2`]'s engine), packed and trimmed: the method of
+/// [`arith::gf2::gcd`](super::arith::gf2::gcd) for long operands.
+pub(crate) fn gf2_gcd(a: &[u64], b: &[u64]) -> Vec<u64> {
+    gf2::gcd(a, b)
+}
+
 /// The monic greatest common divisor of the word polynomials `a` and `b` (trimmed) modulo `n ≥ 2`:
 /// the engine of [`ModPolynomial::gcd`](super::ModPolynomial::gcd) for the factor area's inner
 /// gcds; empty when both are.
 pub(crate) fn word_gcd(n: u64, a: &[u64], b: &[u64]) -> Vec<u64> {
+    if n == 2 {
+        return super::arith::gf2::gcd_words(a, b);
+    }
     let e = nmod::Word::new(n);
     let mut g = hgcd::gcd(&e, &a.to_vec(), &b.to_vec());
     if let Some(&l) = g.last()

@@ -29,7 +29,7 @@ mod tables;
 
 use super::limbs;
 use super::ziv::{Approx, guard, ziv};
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::{ByteOrder, Number};
 use core::cmp::Ordering;
 use num::{Num, quotient, sqrt_fixed};
@@ -152,6 +152,49 @@ impl Value {
             Shared::Cached(v) => &v.x,
         }
     }
+}
+
+std::thread_local! {
+    /// Each thread's reference to the kept value of each constant, as it last read it: a value
+    /// long enough is read from here without the cache's lock or a count of its references. A
+    /// shorter one is replaced on the next read of the cache, so that a thread holds at most one
+    /// value of each constant (freed when the thread ends, or the cache and every thread let go).
+    static LOCAL: core::cell::RefCell<[Option<Arc<Kept>>; 6]> =
+        const { core::cell::RefCell::new([None, None, None, None, None, None]) };
+}
+
+/// Lets go of the thread's reference to the kept value of `c`, after a value that did not decide:
+/// Ziv's loop may keep a longer one, which the next read then takes from the cache.
+#[cold]
+fn forget_local(c: Constant) {
+    LOCAL.with_borrow_mut(|l| l[c as usize] = None);
+}
+
+/// `f` of a value of `c` to at least `w` bits after the point, as [`value`] gives it (its limbs,
+/// its bits after the point and the exponent of its error): the table, or the thread's reference
+/// to the kept value when it is long enough, borrowed with no lock; [`value`] otherwise, its kept
+/// value then the thread's.
+#[inline]
+fn with_value<R>(c: Constant, w: u64, f: impl FnOnce(&[u64], u64, i128) -> R) -> R {
+    if w <= TABLE_BITS {
+        let (x, z) = c.table();
+        return f(x, TABLE_BITS + z, i128::from(z));
+    }
+    let mut f = Some(f);
+    let hit = LOCAL.with_borrow(|l| {
+        let v = l[c as usize].as_ref().filter(|v| v.w >= w)?;
+        let f = f.take().expect("called once");
+        Some(f(&v.x, v.w + v.z, 1 + i128::from(v.z)))
+    });
+    if let Some(r) = hit {
+        return r;
+    }
+    let v = value(c, w);
+    if let Shared::Cached(kept) = &v.x {
+        LOCAL.with_borrow_mut(|l| l[c as usize] = Some(kept.clone()));
+    }
+    let f = f.take().expect("called once");
+    f(v.limbs(), v.w, v.k)
 }
 
 /// A value of `c` to at least `w` bits after the point: the table up to [`TABLE_BITS`] (`k = 0`),
@@ -283,12 +326,56 @@ fn decide(x: &[u64], w: u64, k: i128, prec: u64, round: Round) -> Option<(BigFlo
 fn rounded(x: &[u64], bits: u64, w: u64, prec: u64, up: bool) -> (BigFloat, Ordering) {
     let n = prec.div_ceil(64) as usize;
     let s = bits as i128 - 64 * n as i128;
-    let mant = if s >= 0 {
+    // Past two limbs, the limbs of `X` that the mantissa starts from copied into a new vector
+    // (rather than zeros written first and the limbs over them).
+    let (mut mant, copied) = if n > 2 && s >= 0 {
+        let k = (s / 64) as usize;
+        (Mant::Heap(x[k..k + n].to_vec()), true)
+    } else {
+        (Mant::zeroed(n), false)
+    };
+    let exp = rounded_into(x, bits, w, prec, up, &mut mant, copied);
+    let r = BigFloat {
+        prec,
+        kind: Kind::Finite {
+            negative: false,
+            exp,
+            mant,
+        },
+    };
+    (
+        r,
+        if up {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        },
+    )
+}
+
+/// [`rounded`] into the `n = ceil(prec/64)` limbs `mant` (which hold the `n` limbs of `X` it starts
+/// from when `copied`): the exponent of the number.
+#[inline(always)]
+fn rounded_into(
+    x: &[u64],
+    bits: u64,
+    w: u64,
+    prec: u64,
+    up: bool,
+    mant: &mut [u64],
+    copied: bool,
+) -> i64 {
+    let n = mant.len();
+    debug_assert_eq!(n as u64, prec.div_ceil(64));
+    let s = bits as i128 - 64 * n as i128;
+    if s >= 0 {
         let (k, b) = ((s / 64) as usize, (s % 64) as u32);
         let src = &x[k..];
         // A copy, then the shift in place, from the bottom: each limb reads the next one before
         // that is shifted.
-        let mut mant = src[..n].to_vec();
+        if !copied {
+            mant.copy_from_slice(&src[..n]);
+        }
         if b != 0 {
             let last = src.get(n).copied().unwrap_or(0);
             for i in 0..n - 1 {
@@ -296,14 +383,13 @@ fn rounded(x: &[u64], bits: u64, w: u64, prec: u64, up: bool) -> (BigFloat, Orde
             }
             mant[n - 1] = mant[n - 1] >> b | last << (64 - b);
         }
-        mant
     } else {
+        debug_assert!(!copied);
         let shifted = limbs::shl(x, (-s) as u64);
-        let mut mant = vec![0; n - shifted.len()];
-        mant.extend_from_slice(&shifted);
-        mant
-    };
-    let mut mant = mant;
+        let z = n - shifted.len();
+        mant[..z].fill(0);
+        mant[z..].copy_from_slice(&shifted);
+    }
     let unused = 64 * n as u64 - prec;
     mant[0] &= !((1u64 << unused) - 1);
     let mut exp = bits as i64 - w as i64;
@@ -324,22 +410,7 @@ fn rounded(x: &[u64], bits: u64, w: u64, prec: u64, up: bool) -> (BigFloat, Orde
             exp += 1;
         }
     }
-    let r = BigFloat {
-        prec,
-        kind: Kind::Finite {
-            negative: false,
-            exp,
-            mant,
-        },
-    };
-    (
-        r,
-        if up {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        },
-    )
+    exp
 }
 
 /// The [`Approx`] of a constant to `w` bits after the point.
@@ -498,17 +569,72 @@ fn ln10_series(w: u64) -> Vec<u64> {
     limbs::shr(&limbs::add(&limbs::mul(&l2, &[3]), &l), 3)
 }
 
+/// [`decide`] into the limbs `mant` of a number of the precision `prec`: the exponent and the
+/// direction, or `None` (the limbs then untouched) when the bits do not decide.
+fn decide_into(
+    x: &[u64],
+    w: u64,
+    k: i128,
+    prec: u64,
+    round: Round,
+    mant: &mut [u64],
+) -> Option<(i64, Ordering)> {
+    let bits = limbs::bit_len(x);
+    let d = bits.checked_sub(prec)?;
+    let lo = u64::try_from(k + 1).ok()?;
+    if d < lo + 2 || !mixed(x, lo, d - 1) {
+        return None;
+    }
+    let up = match round {
+        Round::Nearest => limbs::bit(x, d - 1),
+        Round::Up => true,
+        Round::TowardZero | Round::Down => false,
+    };
+    let exp = rounded_into(x, bits, w, prec, up, mant, false);
+    Some((
+        exp,
+        if up {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        },
+    ))
+}
+
+/// Sets `x` to the constant `c` rounded to its precision in the mode `round`, into its limbs when
+/// it has them: the direction.
+fn set_const(x: &mut BigFloat, c: Constant, round: Round) -> Ordering {
+    let prec = x.prec;
+    if let Kind::Finite {
+        negative,
+        exp,
+        mant,
+    } = &mut x.kind
+        && let Some((e, o)) = with_value(c, prec + guard(prec), |x, w, k| {
+            decide_into(x, w, k, prec, round, mant)
+        })
+    {
+        *negative = false;
+        *exp = e;
+        return o;
+    }
+    let (r, o) = self::round(c, prec, round);
+    *x = r;
+    o
+}
+
 /// The correct rounding of a constant.
 #[track_caller]
 fn round(c: Constant, prec: u64, round: Round) -> (BigFloat, Ordering) {
     let prec = BigFloat::check_prec(prec);
     // The value at `prec + guard` bits, or a longer one kept, nearly always decides; otherwise
     // Ziv's loop from there.
-    let v = value(c, prec + guard(prec));
-    if let Some(r) = decide(v.limbs(), v.w, v.k, prec, round) {
+    if let Some(r) = with_value(c, prec + guard(prec), |x, w, k| {
+        decide(x, w, k, prec, round)
+    }) {
         return r;
     }
-    drop(v);
+    forget_local(c);
     match c {
         Constant::Pi => ziv(prec, round, pi_approx),
         Constant::E => ziv(prec, round, e_approx),
@@ -678,6 +804,105 @@ impl BigFloat {
     #[track_caller]
     pub fn catalan(prec: u64) -> BigFloat {
         Self::catalan_round(prec, Round::Nearest).0
+    }
+
+    /// Sets the number to π rounded to its precision in the mode `round`, in the vector of its
+    /// mantissa, and returns the direction of the rounding, as MPFR's `mpfr_const_pi (x, rnd)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    /// use core::cmp::Ordering;
+    ///
+    /// let mut x = BigFloat::zero(53);
+    /// assert_eq!(x.set_pi(Round::Up), Ordering::Greater);
+    /// assert_eq!(x, BigFloat::pi_round(53, Round::Up).0);
+    /// ```
+    pub fn set_pi(&mut self, round: Round) -> Ordering {
+        set_const(self, Constant::Pi, round)
+    }
+
+    /// Sets the number to `e` rounded to its precision in the mode `round`, in the vector of its
+    /// mantissa, and returns the direction of the rounding, as [`set_pi`](BigFloat::set_pi).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    ///
+    /// let mut x = BigFloat::zero(200);
+    /// x.set_e(Round::Nearest);
+    /// assert_eq!(x, BigFloat::e(200));
+    /// ```
+    pub fn set_e(&mut self, round: Round) -> Ordering {
+        set_const(self, Constant::E, round)
+    }
+
+    /// Sets the number to `ln 2` rounded to its precision in the mode `round`, in the vector of
+    /// its mantissa, and returns the direction of the rounding, as MPFR's `mpfr_const_log2`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    ///
+    /// let mut x = BigFloat::zero(24);
+    /// x.set_ln2(Round::Down);
+    /// assert_eq!(x, BigFloat::ln2_round(24, Round::Down).0);
+    /// ```
+    pub fn set_ln2(&mut self, round: Round) -> Ordering {
+        set_const(self, Constant::Ln2, round)
+    }
+
+    /// Sets the number to `ln 10` rounded to its precision in the mode `round`, in the vector of
+    /// its mantissa, and returns the direction of the rounding.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    ///
+    /// let mut x = BigFloat::zero(1000);
+    /// x.set_ln10(Round::TowardZero);
+    /// assert_eq!(x, BigFloat::ln10_round(1000, Round::TowardZero).0);
+    /// ```
+    pub fn set_ln10(&mut self, round: Round) -> Ordering {
+        set_const(self, Constant::Ln10, round)
+    }
+
+    /// Sets the number to Euler's `γ` rounded to its precision in the mode `round`, in the
+    /// vector of its mantissa, and returns the direction of the rounding, as MPFR's
+    /// `mpfr_const_euler`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    ///
+    /// let mut x = BigFloat::zero(64);
+    /// x.set_euler_gamma(Round::Nearest);
+    /// assert_eq!(x, BigFloat::euler_gamma(64));
+    /// ```
+    pub fn set_euler_gamma(&mut self, round: Round) -> Ordering {
+        set_const(self, Constant::Euler, round)
+    }
+
+    /// Sets the number to Catalan's `G` rounded to its precision in the mode `round`, in the
+    /// vector of its mantissa, and returns the direction of the rounding, as MPFR's
+    /// `mpfr_const_catalan`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::float::{BigFloat, Round};
+    ///
+    /// let mut x = BigFloat::zero(113);
+    /// x.set_catalan(Round::Up);
+    /// assert_eq!(x, BigFloat::catalan_round(113, Round::Up).0);
+    /// ```
+    pub fn set_catalan(&mut self, round: Round) -> Ordering {
+        set_const(self, Constant::Catalan, round)
     }
 
     /// `ln 10` rounded to `prec` bits in the mode `round`, and the direction of the rounding.

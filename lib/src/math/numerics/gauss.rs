@@ -8,9 +8,10 @@
 //! The rules are computed by two methods, as the order decides:
 //!
 //! * up to order [`GOLUB_WELSCH_LARGEST`], Golub and Welsch's (1969): the nodes are the
-//!   eigenvalues of the Jacobi matrix, from the Hermitian eigensolver of `a::math::matrix`
-//!   ([`hermitian_eigenvalues`](crate::math::matrix::Matrix::hermitian_eigenvalues)), which costs
-//!   `O(n³)` time and `O(n²)` memory;
+//!   eigenvalues of the Jacobi matrix, from the tridiagonal QL and QR algorithm of
+//!   `a::math::matrix` (LAPACK's `dsterf`, which
+//!   [`hermitian_eigenvalues`](crate::math::matrix::Matrix::hermitian_eigenvalues) ends in) on
+//!   the tridiagonal matrix itself, in `O(n²)` time and `O(n)` memory;
 //! * above it, Newton's method on the polynomial itself, from first guesses given by the
 //!   asymptotic expansions of the zeros — Olver's in terms of the zeros of `J₀` and Tricomi's for
 //!   Legendre, Langer's about the turning point for Hermite, both of them for Laguerre — in
@@ -45,13 +46,17 @@ use newton::{Recurrence, Zero, at, newton};
 
 /// The largest order computed by Golub and Welsch's method; above it the first guesses are the
 /// asymptotic ones. The two agree to the last bit around it (both end in the same Newton
-/// iterations), and the choice is one of accuracy and cost: from order 100 on the asymptotic
-/// guesses are within `1.4·10⁻³` of the spacing of the zeros (Laguerre's; Hermite's `1.4·10⁻⁴`,
-/// Legendre's `10⁻⁸`, all falling with the order), so that Newton's method converges in a few
+/// iterations), and the choice is one of accuracy and cost: from order 61 on the asymptotic
+/// guesses are within `2.8·10⁻³` of the spacing of the zeros (Laguerre's; Hermite's `2.3·10⁻⁴`,
+/// Legendre's `3·10⁻⁸`, all falling with the order), so that Newton's method converges in a few
 /// iterations and cannot slip to a neighbouring zero — which is checked all the same: the zeros
-/// found must be distinct and in order, or the rule is Golub and Welsch's after all — while the
-/// dense eigenproblem is already the larger part of the cost and grows as `n³`.
-pub const GOLUB_WELSCH_LARGEST: usize = 100;
+/// found must be distinct and in order, or the rule is Golub and Welsch's after all.
+// Measured on an Apple M4 Max, the eigenvalues now from the tridiagonal QL algorithm: from the
+// asymptotic guesses the Legendre and Hermite rules take 0.67 to 0.73 and 0.81 to 0.93 of the
+// time at every order from 10 to 200, Laguerre's 1.3 times it at 10, 1.01 to 1.06 at 40 to 58,
+// within 2 % either way from 60 to 75 and 0.97 to 0.99 from 80 on; the rules are the same to the
+// last bit (sweep 2 to 200).
+pub const GOLUB_WELSCH_LARGEST: usize = 60;
 
 /// The `n` nodes `xᵢ` and the `n` weights `wᵢ` of a Gaussian rule, ascending in `xᵢ`. The rule
 /// approximates `∫ f(x) ω(x) dx` by `Σᵢ wᵢ f(xᵢ)`.
@@ -245,7 +250,7 @@ pub fn laguerre_scaled<T: Real>(n: usize) -> NodesWeights<T> {
 /// weight `(1 − x)^α (1 + x)^β` on `[-1, 1]`; the nodes are the zeros of `Pₙ^(α,β)` and the total
 /// weight is `2^(α+β+1) B(α+1, β+1)`.
 ///
-/// The nodes are Golub and Welsch's at every order (`O(n³)` time and `O(n²)` memory), finished
+/// The nodes are Golub and Welsch's at every order (`O(n²)` time and `O(n)` memory), finished
 /// by Newton's method like the other rules. Where `2^(α+β+1)` or `B(α+1, β+1)` leaves the range
 /// of an `f64` — `α + β` above about 1000 — the total weight is formed from their logarithms,
 /// which cancel and cost about `(α + β)/4` units in the last place of every weight (measured on

@@ -74,7 +74,7 @@ use core::hint::select_unpredictable;
 /// let x = lu.solve(&Matrix::from_rows(&[[3.0], [7.0]])).unwrap();
 /// assert_eq!(x, Matrix::from_rows(&[[1.0], [1.0]]));
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Lu<T> {
     /// `L` below the diagonal and `U` on and above it.
     lu: Matrix<T>,
@@ -82,49 +82,38 @@ pub struct Lu<T> {
     perm: Vec<usize>,
     /// Whether `P` is an odd permutation.
     odd: bool,
+    /// The working memory [`Lu::refactor`] keeps from one decomposition to the next: the row
+    /// swaps, and the dense copy of `U12` of the recursion ([`work_size`]). Empty until then;
+    /// [`Matrix::lu`] takes both from the stack while they fit there.
+    pivots: Vec<usize>,
+    work: Vec<T>,
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for Lu<T> {
+    /// The decomposition, as the derived form wrote it: the working memory is not part of it.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Lu")
+            .field("lu", &self.lu)
+            .field("perm", &self.perm)
+            .field("odd", &self.odd)
+            .finish()
+    }
 }
 
 impl<T: Scalar> Matrix<T> {
     /// The LU decomposition with partial pivoting, `P·A = L·U`: see [`Lu`]. It takes about
     /// `2n³/3` operations for an `n × n` matrix, nearly all of them in products of blocks.
     pub fn lu(&self) -> Lu<T> {
-        let (m, n) = self.shape();
         let mut lu = self.clone();
-        let mut perm: Vec<usize> = (0..m).collect();
-        let mut odd = false;
-        if m == n && n <= TINY {
-            // Tiny squares unrolled, their loops of known lengths.
-            match n {
-                0 => {}
-                1 => odd = tiny::<T, 1>(&mut lu.data, &mut perm),
-                2 => odd = tiny::<T, 2>(&mut lu.data, &mut perm),
-                3 => odd = tiny::<T, 3>(&mut lu.data, &mut perm),
-                4 => odd = tiny::<T, 4>(&mut lu.data, &mut perm),
-                5 => odd = tiny::<T, 5>(&mut lu.data, &mut perm),
-                6 => odd = tiny::<T, 6>(&mut lu.data, &mut perm),
-                7 => odd = tiny::<T, 7>(&mut lu.data, &mut perm),
-                8 => odd = tiny::<T, 8>(&mut lu.data, &mut perm),
-                9 => odd = tiny::<T, 9>(&mut lu.data, &mut perm),
-                10 => odd = tiny::<T, 10>(&mut lu.data, &mut perm),
-                11 => odd = tiny::<T, 11>(&mut lu.data, &mut perm),
-                12 => odd = tiny::<T, 12>(&mut lu.data, &mut perm),
-                13 => odd = tiny::<T, 13>(&mut lu.data, &mut perm),
-                14 => odd = tiny::<T, 14>(&mut lu.data, &mut perm),
-                15 => odd = tiny::<T, 15>(&mut lu.data, &mut perm),
-                _ => odd = tiny::<T, 16>(&mut lu.data, &mut perm),
-            }
-            return Lu { lu, perm, odd };
+        let mut perm: Vec<usize> = (0..self.rows()).collect();
+        let odd = decompose(&mut lu, &mut perm, None);
+        Lu {
+            lu,
+            perm,
+            odd,
+            pivots: Vec::new(),
+            work: Vec::new(),
         }
-        with_pivots(m.min(n), |pivots| {
-            factor_all(&mut lu.data, m, n, pivots);
-            for (i, &p) in pivots.iter().enumerate() {
-                if p != i {
-                    perm.swap(i, p);
-                    odd = !odd;
-                }
-            }
-        });
-        Lu { lu, perm, odd }
     }
 
     /// The determinant `det(A)`, from the LU decomposition: the product of the pivots, with the
@@ -169,7 +158,7 @@ impl<T: Scalar> Matrix<T> {
                 with_scratch(n * n, |lu| {
                     lu.copy_from_slice(&self.data);
                     with_pivots(n, |pivots| {
-                        factor_all(lu, n, n, pivots);
+                        factor_all(lu, n, n, pivots, None);
                         if (0..n).any(|i| lu[i + i * n] == T::zero()) {
                             return None;
                         }
@@ -290,6 +279,71 @@ impl<T: Scalar> Lu<T> {
             return None;
         }
         let mut x = Matrix::from_fn(n, b.cols(), |i, j| b[(self.perm[i], j)]);
+        self.substitute(&mut x);
+        Some(x)
+    }
+
+    /// The solution `X` of `A·X = B` for the square matrix into `out`, which has the shape of
+    /// `B`: the same solution as [`solve`](Self::solve) gives, to the last bit, without allocating
+    /// when `B` has at most 16 rows, or at most 128 rows and 1,024 elements. A larger `B` takes
+    /// working memory from the heap in the blocked triangular solves (with one column, from 153
+    /// rows on). `false`, with `out` left as it was, when the matrix is singular.
+    ///
+    /// With [`refactor`](Self::refactor), it solves systems of one matrix after another in the
+    /// same memory, as an implicit integrator's Newton iterations do.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the matrix is not square, `B` has not as many rows, or `out` has not the shape
+    /// of `B`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::matrix::Matrix;
+    ///
+    /// let lu = Matrix::from_rows(&[[2.0, 1.0], [4.0, 3.0]]).lu();
+    /// let b = Matrix::from_rows(&[[3.0], [7.0]]);
+    /// let mut x = Matrix::zeros(2, 1);
+    /// assert!(lu.solve_into(&b, &mut x));
+    /// assert_eq!(x, Matrix::from_rows(&[[1.0], [1.0]]));
+    /// assert_eq!(Some(x), lu.solve(&b));
+    ///
+    /// // A singular matrix leaves `out` alone.
+    /// let singular = Matrix::from_rows(&[[1.0, 2.0], [2.0, 4.0]]).lu();
+    /// let mut y = Matrix::from_rows(&[[5.0], [6.0]]);
+    /// assert!(!singular.solve_into(&b, &mut y));
+    /// assert_eq!(y, Matrix::from_rows(&[[5.0], [6.0]]));
+    /// ```
+    #[track_caller]
+    #[must_use = "the solution is not written when the matrix is singular"]
+    pub fn solve_into(&self, b: &Matrix<T>, out: &mut Matrix<T>) -> bool {
+        assert!(self.lu.is_square(), "the matrix is not square");
+        let n = self.lu.rows();
+        assert_eq!(b.rows(), n, "the right-hand side has not as many rows");
+        assert_eq!(
+            out.shape(),
+            b.shape(),
+            "the output has not the shape of the right-hand side"
+        );
+        if self.is_singular() {
+            return false;
+        }
+        if n > 0 {
+            for (to, from) in out.data.chunks_exact_mut(n).zip(b.data.chunks_exact(n)) {
+                for (x, &p) in to.iter_mut().zip(&self.perm) {
+                    *x = from[p];
+                }
+            }
+        }
+        self.substitute(out);
+        true
+    }
+
+    /// `X ← U⁻¹·L⁻¹·X` for the square matrix, `X` the rows of `B` permuted: the two triangular
+    /// solves of [`solve`](Self::solve) and [`solve_into`](Self::solve_into).
+    fn substitute(&self, x: &mut Matrix<T>) {
+        let n = self.lu.rows();
         let cols = x.cols();
         trsm(
             Side::Left,
@@ -315,7 +369,46 @@ impl<T: Scalar> Lu<T> {
             &mut x.data,
             n,
         );
-        Some(x)
+    }
+
+    /// Factors `a` in the place of this decomposition: afterwards it is `a.lu()`, the same
+    /// pivots and the same elements to the last bit, for any shape of `a`. The memory of the
+    /// decomposition is used again — its elements, its permutation, its row swaps and the working
+    /// memory of its recursion — so that nothing is allocated when `a` is square, of at most 100
+    /// rows, and the decomposition was last formed by `refactor` from a matrix at least as large;
+    /// that is the difference from `*self = a.lu()`, which allocates a copy of `a` and a
+    /// permutation every time. [`Matrix::lu`] keeps the row swaps and the working memory on the
+    /// stack and not in the decomposition, so the first `refactor` after it allocates them, once:
+    /// the row swaps from 17 rows, the working memory from 25. From 101 rows the products of
+    /// blocks inside the factorisation take working memory of their own from the heap at every
+    /// call (4 allocations at 128 rows and 23 at 256, in `f64`), and the triangular solve of the
+    /// columns right of a wide matrix's square part may too.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::matrix::Matrix;
+    ///
+    /// let mut lu = Matrix::from_rows(&[[2.0, 1.0], [4.0, 3.0]]).lu();
+    /// let a = Matrix::from_rows(&[[1.0, 2.0], [3.0, 4.0]]);
+    /// lu.refactor(&a);
+    /// assert_eq!(lu.permutation(), [1, 0]);
+    /// assert_eq!(lu.u(), a.lu().u());
+    /// assert_eq!(lu.det(), -2.0);
+    /// ```
+    pub fn refactor(&mut self, a: &Matrix<T>) {
+        let (m, n) = a.shape();
+        self.lu.rows = m;
+        self.lu.cols = n;
+        self.lu.data.clear();
+        self.lu.data.extend_from_slice(&a.data);
+        self.perm.clear();
+        self.perm.extend(0..m);
+        self.odd = decompose(
+            &mut self.lu,
+            &mut self.perm,
+            Some((&mut self.pivots, &mut self.work)),
+        );
     }
 
     /// The inverse of the square matrix, or `None` when it is singular.
@@ -511,7 +604,69 @@ fn tiny_inverse_inline<T: Scalar, const N: usize>(a: &Matrix<T>) -> Option<Matri
     Some(Matrix::from_column_major(N, N, inverse))
 }
 
-/// Pivots up to this many are kept on the stack.
+/// Factors `lu` in place, `P·A = L·U` with `L` below its diagonal and `U` on and above it, the
+/// row swaps applied to `perm`, which holds `0, 1, …, m − 1` on entry: whether they make an odd
+/// permutation. [`Matrix::lu`] and [`Lu::refactor`] both factor by it, the first with the row
+/// swaps and the working memory on the stack while they fit there ([`with_pivots`],
+/// [`with_scratch`]), the second in the buffers `keep` it holds, grown when a larger matrix needs
+/// more and otherwise used again. Neither depends on what the buffers held: every pivot is
+/// written before it is read, and so is every element of the working memory.
+#[inline]
+fn decompose<T: Scalar>(
+    lu: &mut Matrix<T>,
+    perm: &mut [usize],
+    keep: Option<(&mut Vec<usize>, &mut Vec<T>)>,
+) -> bool {
+    let (m, n) = lu.shape();
+    let mut odd = false;
+    if m == n && n <= TINY {
+        // Tiny squares unrolled, their loops of known lengths.
+        match n {
+            0 => {}
+            1 => odd = tiny::<T, 1>(&mut lu.data, perm),
+            2 => odd = tiny::<T, 2>(&mut lu.data, perm),
+            3 => odd = tiny::<T, 3>(&mut lu.data, perm),
+            4 => odd = tiny::<T, 4>(&mut lu.data, perm),
+            5 => odd = tiny::<T, 5>(&mut lu.data, perm),
+            6 => odd = tiny::<T, 6>(&mut lu.data, perm),
+            7 => odd = tiny::<T, 7>(&mut lu.data, perm),
+            8 => odd = tiny::<T, 8>(&mut lu.data, perm),
+            9 => odd = tiny::<T, 9>(&mut lu.data, perm),
+            10 => odd = tiny::<T, 10>(&mut lu.data, perm),
+            11 => odd = tiny::<T, 11>(&mut lu.data, perm),
+            12 => odd = tiny::<T, 12>(&mut lu.data, perm),
+            13 => odd = tiny::<T, 13>(&mut lu.data, perm),
+            14 => odd = tiny::<T, 14>(&mut lu.data, perm),
+            15 => odd = tiny::<T, 15>(&mut lu.data, perm),
+            _ => odd = tiny::<T, 16>(&mut lu.data, perm),
+        }
+        return odd;
+    }
+    let mut apply = |pivots: &[usize]| {
+        for (i, &p) in pivots.iter().enumerate() {
+            if p != i {
+                perm.swap(i, p);
+                odd = !odd;
+            }
+        }
+    };
+    let k = m.min(n);
+    match keep {
+        None => with_pivots(k, |pivots| {
+            factor_all(&mut lu.data, m, n, pivots, None);
+            apply(pivots);
+        }),
+        Some((pivots, work)) => {
+            pivots.clear();
+            pivots.resize(k, 0);
+            factor_all(&mut lu.data, m, n, pivots, Some(work));
+            apply(pivots);
+        }
+    }
+    odd
+}
+
+/// Pivots up to this many are kept on the stack by [`with_pivots`].
 const STACK_PIVOTS: usize = 32;
 
 /// Runs `f` on `k` zeros, for the row swaps of a factorization.
@@ -524,8 +679,15 @@ fn with_pivots<X>(k: usize, f: impl FnOnce(&mut [usize]) -> X) -> X {
 }
 
 /// Factors the `m × n` matrix `a` in place, `P·A = L·U`: `pivots[i]` is the row swapped with
-/// row `i`, in turn, for `i < min(m, n)`.
-fn factor_all<T: Scalar>(a: &mut [T], m: usize, n: usize, pivots: &mut [usize]) {
+/// row `i`, in turn, for `i < min(m, n)`. The working memory of the recursion is `kept`, grown to
+/// [`work_size`] if it is shorter, or else taken by [`with_scratch`].
+fn factor_all<T: Scalar>(
+    a: &mut [T],
+    m: usize,
+    n: usize,
+    pivots: &mut [usize],
+    kept: Option<&mut Vec<T>>,
+) {
     let k = m.min(n);
     if k == 0 {
         return;
@@ -533,7 +695,16 @@ fn factor_all<T: Scalar>(a: &mut [T], m: usize, n: usize, pivots: &mut [usize]) 
     if k <= UNBLOCKED {
         unblocked(a, m, k, m, pivots);
     } else {
-        with_scratch(work_size(k), |work| factor(a, m, k, m, pivots, work));
+        let size = work_size(k);
+        match kept {
+            Some(work) => {
+                if work.len() < size {
+                    work.resize(size, T::zero());
+                }
+                factor(a, m, k, m, pivots, &mut work[..size]);
+            }
+            None => with_scratch(size, |work| factor(a, m, k, m, pivots, work)),
+        }
     }
     if n > k {
         // The columns right of the square part: the same row swaps, then `L⁻¹`.

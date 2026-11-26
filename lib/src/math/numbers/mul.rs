@@ -72,6 +72,7 @@ mod kernels;
 #[path = "mul/portable.rs"]
 mod kernels;
 pub(super) mod limbs;
+pub(super) mod short;
 
 /// The schoolbook kernels, for the products of fixed length of the curves' fields.
 pub(crate) mod basecase {
@@ -147,7 +148,7 @@ pub(crate) mod basecase {
 }
 mod toom;
 
-pub(super) use kernels::mul_1_bytes;
+pub(crate) use kernels::{addmul_1_bytes, mul_1_bytes};
 
 use super::add::{SMALL, read, read_small, significant_len, small, write, write_small};
 use super::div::limb_of;
@@ -852,15 +853,15 @@ fn put_widest(v: &mut Vec<u8>, order: ByteOrder, w: &Widest) {
 
 /// An operand of the general path: its vector, its byte order and its significant length.
 #[derive(Clone, Copy)]
-pub(super) struct Operand {
-    pub(super) ptr: *const u8,
-    pub(super) len: usize,
-    pub(super) big_endian: bool,
-    pub(super) significant: usize,
+pub(crate) struct Operand {
+    pub(crate) ptr: *const u8,
+    pub(crate) len: usize,
+    pub(crate) big_endian: bool,
+    pub(crate) significant: usize,
 }
 
 impl Operand {
-    pub(super) fn of(n: &Number) -> Self {
+    pub(crate) fn of(n: &Number) -> Self {
         let big_endian = n.byte_order == ByteOrder::BigEndian;
         let significant = if big_endian {
             significant_len::<true>(&n.value)

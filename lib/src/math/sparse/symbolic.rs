@@ -247,7 +247,7 @@ fn fill_reducing<T: Scalar>(a: &SparseMatrix<T>, ordering: &Ordering) -> Vec<usi
         Ordering::Natural | Ordering::Given(_) => ordering.symmetric(a),
         // The others read the pattern of `A + Aᵀ`. Only the lower triangle of `a` is the matrix,
         // so only it may steer them: whatever stands above the diagonal is taken out first.
-        _ => ordering.symmetric(&a.map(|i, j, x| if j <= i { x } else { T::zero() })),
+        _ => ordering.symmetric(&a.lower_triangle()),
     }
 }
 

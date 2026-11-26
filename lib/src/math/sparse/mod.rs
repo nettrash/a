@@ -143,7 +143,7 @@ pub use io::{
     to_matrix_market_with, write_matrix_market, write_matrix_market_with,
 };
 pub use ldl::SparseLdl;
-pub use lu::{SparseLu, SparseLuOptions};
+pub use lu::{LuStrategy, SparseLu, SparseLuOptions};
 pub use nd::nested_dissection;
 pub use operator::{FnOperator, LinearOperator};
 pub use ordering::{
@@ -269,10 +269,21 @@ pub(crate) fn sorted_order(len: usize, bound: usize, key: impl Fn(usize) -> usiz
     order
 }
 
+/// The longest row that [`sort_rows`] sorts by insertion, and that a permutation gathers rather
+/// than deals out by counting.
+// Measured on an Apple M4 Max (`permute` and `from_csr` of rows given in reverse, rows of 8 to
+// 64 random columns, a Laplacian and an elasticity mesh; sweep 8 to 96): the two uses cross at
+// different lengths. A permutation deals out by counting 21 to 35 % faster from rows of 16 on,
+// while sorting by insertion stays the faster up to rows of 40; at 16 the sort of rows of 24 to
+// 32 took 2.1 % longer, and from 48 on the permutations of rows of 40 to 64 1.5 to 2.1 times
+// as long. Kept at 32 for the sort.
+pub(crate) const SHORT_ROW: usize = 32;
+
 /// Puts the columns of every row in ascending order, the values with them, equal columns staying
 /// in the order they were given in. A read when the rows are in order already, and otherwise one
 /// stable sort of all the elements by column, dealt out to the rows: linear in the elements, where
-/// a sort row by row would be quadratic in the longest row or carry a logarithm.
+/// a sort row by row would be quadratic in the longest row or carry a logarithm — except when no row
+/// is longer than [`SHORT_ROW`], where each row is sorted by insertion in place.
 pub(crate) fn sort_rows<T: Copy>(
     row_ptrs: &[usize],
     bound: usize,
@@ -281,6 +292,26 @@ pub(crate) fn sort_rows<T: Copy>(
 ) {
     let rows = row_ptrs.len() - 1;
     if (0..rows).all(|i| col_indices[row_ptrs[i]..row_ptrs[i + 1]].is_sorted()) {
+        return;
+    }
+    // Short rows, as permutations and selections of meshes give, are sorted where they are, by
+    // insertion, which keeps equal columns in their order as the global pass below does.
+    if (0..rows).all(|i| row_ptrs[i + 1] - row_ptrs[i] <= SHORT_ROW) {
+        for i in 0..rows {
+            let (begin, end) = (row_ptrs[i], row_ptrs[i + 1]);
+            let (cols, vals) = (&mut col_indices[begin..end], &mut values[begin..end]);
+            for k in 1..cols.len() {
+                let (c, v) = (cols[k], vals[k]);
+                let mut at = k;
+                while at > 0 && cols[at - 1] > c {
+                    cols[at] = cols[at - 1];
+                    vals[at] = vals[at - 1];
+                    at -= 1;
+                }
+                cols[at] = c;
+                vals[at] = v;
+            }
+        }
         return;
     }
     let mut row_of = vec![0usize; col_indices.len()];
@@ -1190,12 +1221,22 @@ impl<T: Scalar> SparseMatrix<T> {
             row_ptrs.windows(2).all(|w| w[0] <= w[1]),
             "the offsets decrease"
         );
-        assert!(
-            col_indices.iter().all(|&j| j < cols),
-            "a column lies outside the matrix"
-        );
-        sort_rows(&row_ptrs, cols, &mut col_indices, &mut values);
-        compact(&mut row_ptrs, &mut col_indices, &mut values);
+        // One pass checks the columns and finds whether the arrays are canonical already: every
+        // row strictly ascending and no zero stored. Arrays that are need nothing more.
+        let mut canonical = true;
+        for w in row_ptrs.windows(2) {
+            let (row, vals) = (&col_indices[w[0]..w[1]], &values[w[0]..w[1]]);
+            let mut previous = None;
+            for (&j, x) in row.iter().zip(vals) {
+                assert!(j < cols, "a column lies outside the matrix");
+                canonical &= previous.is_none_or(|p| p < j) && !x.is_zero();
+                previous = Some(j);
+            }
+        }
+        if !canonical {
+            sort_rows(&row_ptrs, cols, &mut col_indices, &mut values);
+            compact(&mut row_ptrs, &mut col_indices, &mut values);
+        }
         Self {
             rows,
             cols,

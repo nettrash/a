@@ -44,10 +44,14 @@ impl<const N: usize> Uint<N> {
     #[inline]
     #[track_caller]
     fn op_mul(self, rhs: Self) -> Self {
-        debug_checked!(
-            self.overflowing_mul(rhs),
-            "attempt to multiply with overflow"
-        )
+        if cfg!(debug_assertions) {
+            debug_checked!(
+                self.overflowing_mul(rhs),
+                "attempt to multiply with overflow"
+            )
+        } else {
+            self.wrapping_mul(rhs)
+        }
     }
 
     #[inline]
@@ -118,10 +122,14 @@ impl<const N: usize> Int<N> {
     #[inline]
     #[track_caller]
     fn op_mul(self, rhs: Self) -> Self {
-        debug_checked!(
-            self.overflowing_mul(rhs),
-            "attempt to multiply with overflow"
-        )
+        if cfg!(debug_assertions) {
+            debug_checked!(
+                self.overflowing_mul(rhs),
+                "attempt to multiply with overflow"
+            )
+        } else {
+            self.wrapping_mul(rhs)
+        }
     }
 
     #[inline]

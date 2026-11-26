@@ -2640,3 +2640,769 @@ fn a_ray_whose_slope_is_within_the_tolerance_is_not_seen() {
     assert_eq!(p(1e-10).solve_with(&tight).status, LpStatus::Unbounded);
     assert_eq!(p(1e-6).solve().status, LpStatus::Unbounded);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The dual simplex method
+// ---------------------------------------------------------------------------------------------
+// `LpOptions::dual_threshold(0)` has the dual simplex method solve every programme, the primal
+// method certifying the basis it ends at and finishing from it. The answers have to be the
+// primal method's: the same statuses, the optima of HiGHS, certified as before. The pivot counts
+// show that the dual method, and not the primal method it falls back on, found them.
+
+/// The options with the dual simplex method for every programme.
+fn dual() -> LpOptions<f64> {
+    LpOptions::new().with_dual_threshold(0)
+}
+
+/// The options with the primal simplex method for every programme.
+fn primal() -> LpOptions<f64> {
+    LpOptions::new().with_dual_threshold(usize::MAX)
+}
+
+#[test]
+fn the_dual_method_agrees_with_highs_on_the_six_hundred_programmes() {
+    let (worst, objective, _) = agree_with_highs(&cases(), &dual(), 1.0, 1.0, 1e-9);
+    // Measured: the optima within 5.0e-13 of HiGHS's, as the primal method's.
+    assert!(objective <= 1e-11, "{objective:e}");
+    assert!(worst.primal <= 1e-14 && worst.gap <= 1e-14, "{worst:?}");
+    assert!(worst.dual <= 1e-11 && worst.slackness <= 1e-11, "{worst:?}");
+    let (_, objective, _) = agree_with_highs(&cases(), &dual().with_scaling(false), 1.0, 1.0, 1e-9);
+    assert!(objective <= 1e-11, "{objective:e}");
+}
+
+#[test]
+fn the_dual_method_solves_programmes_in_small_or_large_numbers_as_in_moderate_ones() {
+    let refs: Vec<Reference> = cases().into_iter().step_by(3).collect();
+    for (scale_primal, scale_dual) in [
+        (1e-9, 1.0),
+        (1e9, 1.0),
+        (1.0, 1e-8),
+        (1.0, 1e8),
+        (1e-3, 1e5),
+    ] {
+        let (_, objective, _) = agree_with_highs(&refs, &dual(), scale_primal, scale_dual, 1e-9);
+        assert!(
+            objective <= 1e-11,
+            "{scale_primal:e} {scale_dual:e}: {objective:e}"
+        );
+    }
+}
+
+#[test]
+fn the_dual_method_keeps_the_answers_beside_one_large_number() {
+    // As `random_programmes_keep_their_answers_beside_one_large_number`, the dual method first.
+    let refs: Vec<Reference> = cases().into_iter().step_by(2).collect();
+    for big in [1e9, 1e12] {
+        for large in LARGE {
+            for c in &refs {
+                let p = generate(c.seed).data().beside(big, large);
+                let r = p
+                    .program()
+                    .solve_with(&dual())
+                    .unwrap_or_else(|| panic!("seed {} {big:e} {large:?}: no answer", c.seed));
+                assert_eq!(r.status, c.status, "seed {} {big:e} {large:?}", c.seed);
+                if r.status == LpStatus::Optimal {
+                    let err = objective_error(r.objective, c.objective);
+                    assert!(err <= 1e-9, "seed {} {big:e} {large:?}: {err:e}", c.seed);
+                    assert_certified(&p, &r, 1e-9);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_dual_method_keeps_contradicted_programmes_infeasible_and_large_bounds_harmless() {
+    // Contradicted by a millionth, alone and beside a large number; and with every infinite
+    // bound written as ±10³⁰, which the dual method takes for infinite.
+    for c in cases().into_iter().filter(|c| c.m_le > 0) {
+        let p = generate(c.seed).data().contradicted(1e-6);
+        let status = |p: &Data| p.program().solve_with(&dual()).map(|r| r.status);
+        assert_eq!(status(&p), Some(LpStatus::Infeasible), "seed {}", c.seed);
+        let q = p.beside(1e12, Large::Basic);
+        assert_eq!(status(&q), Some(LpStatus::Infeasible), "seed {}", c.seed);
+    }
+    for c in cases()
+        .into_iter()
+        .filter(|c| c.status != LpStatus::Unbounded)
+    {
+        let mut p = generate(c.seed).data();
+        for v in p.lower.iter_mut().chain(&mut p.upper) {
+            if v.is_infinite() {
+                *v = 1e30f64.copysign(*v);
+            }
+        }
+        let r = p
+            .program()
+            .solve_with(&dual())
+            .unwrap_or_else(|| panic!("seed {}: no verified answer", c.seed));
+        assert_eq!(r.status, c.status, "seed {}", c.seed);
+        if r.status == LpStatus::Optimal {
+            assert!(
+                objective_error(r.objective, c.objective) <= 1e-9,
+                "seed {}",
+                c.seed
+            );
+            assert!(largest(&r.x) < 1e15, "seed {}: {:?}", c.seed, r.x);
+            assert_certified(&p, &r, 1e-9);
+        }
+    }
+}
+
+#[test]
+fn the_dual_method_in_single_precision_agrees_with_highs_on_the_small_random_programmes() {
+    let opts = LpOptions::<f32>::new().with_dual_threshold(0);
+    let mut checked = 0;
+    for c in cases().into_iter().filter(|c| c.n <= 10) {
+        let case = generate(c.seed);
+        if case.wide {
+            continue;
+        }
+        let p = case.data();
+        let r = p
+            .program_f32()
+            .solve_with(&opts)
+            .unwrap_or_else(|| panic!("seed {}: no verified answer", c.seed));
+        assert_eq!(r.status, c.status, "seed {}", c.seed);
+        if r.status == LpStatus::Optimal {
+            let err = objective_error(f64::from(r.objective), c.objective);
+            assert!(
+                err <= 1e-5,
+                "seed {}: {} against {}",
+                c.seed,
+                r.objective,
+                c.objective
+            );
+            // Measured: the duality gap with the bounds to 1.01e-4, reduced costs within the
+            // tolerance of 1e-4 priced at the far bounds they point to; the rest below 1e-7.
+            assert_single_certified(&p, &r, 2e-4);
+        }
+        checked += 1;
+    }
+    assert!(cfg!(miri) || checked >= 250, "{checked}");
+}
+
+/// A linear congruential generator of floats in `[0, 1)`: the one of the numerics scoreboard.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// The random programmes of the numerics scoreboard: `m_le` inequalities and `m_eq` equations
+/// through a random point with random slacks, of the given density of elements uniform in
+/// `[−1, 1)`, every variable in `[0, 10]` but each tenth in `[0, ∞)` with a cost in `[0, 1)`.
+fn scoreboard(m_le: usize, m_eq: usize, n: usize, density: f64, seed: u64) -> Data {
+    let mut r = Lcg(seed);
+    let entry = |r: &mut Lcg| {
+        if r.next() < density {
+            2.0 * r.next() - 1.0
+        } else {
+            0.0
+        }
+    };
+    let point: Vec<f64> = (0..n).map(|_| r.next()).collect();
+    let a_le: Vec<Vec<f64>> = (0..m_le)
+        .map(|_| (0..n).map(|_| entry(&mut r)).collect())
+        .collect();
+    let a_eq: Vec<Vec<f64>> = (0..m_eq)
+        .map(|_| (0..n).map(|_| entry(&mut r)).collect())
+        .collect();
+    let at = |row: &[f64]| row.iter().zip(&point).map(|(a, x)| a * x).sum::<f64>();
+    let b_le: Vec<f64> = a_le.iter().map(|row| at(row) + r.next()).collect();
+    let b_eq: Vec<f64> = a_eq.iter().map(|row| at(row)).collect();
+    let mut c = vec![0.0; n];
+    let mut upper = vec![10.0; n];
+    for j in 0..n {
+        if j % 10 == 9 {
+            upper[j] = f64::INFINITY;
+            c[j] = r.next();
+        } else {
+            c[j] = 2.0 * r.next() - 1.0;
+        }
+    }
+    Data {
+        maximize: false,
+        c,
+        a_le,
+        b_le,
+        a_eq,
+        b_eq,
+        lower: vec![0.0; n],
+        upper,
+    }
+}
+
+#[test]
+fn the_dual_method_solves_the_scoreboards_programmes_in_few_pivots() {
+    // The optima of HiGHS 1.12 (scipy.optimize's bindings, twelve digits). The primal method
+    // takes 1391, 869, 5340 and 3282 pivots for the first four and ends the fifth at its limit
+    // of 10 000; the dual method, about one and a half pivots a row.
+    let programmes: &[(usize, usize, usize, f64, u64, f64)] = &[
+        (100, 10, 200, 1.0, 102, -241.582_582_007),
+        (100, 10, 200, 0.1, 202, -258.963_473_468),
+        (200, 20, 400, 1.0, 103, -526.903_899_346),
+        (200, 20, 400, 0.1, 203, -533.263_798_459),
+        (300, 30, 600, 1.0, 104, -677.471_694_007),
+    ];
+    let count = if cfg!(miri) { 0 } else { programmes.len() };
+    for &(m_le, m_eq, n, density, seed, highs) in &programmes[..count] {
+        let p = scoreboard(m_le, m_eq, n, density, seed);
+        let r = p.solve();
+        assert_eq!(r.status, LpStatus::Optimal, "{m_le}×{n} {density}");
+        let err = objective_error(r.objective, highs);
+        assert!(
+            err <= 1e-11,
+            "{m_le}×{n} {density}: {} against {highs}",
+            r.objective
+        );
+        assert!(
+            r.pivots <= 3 * (m_le + m_eq),
+            "{m_le}×{n} {density}: {} pivots",
+            r.pivots
+        );
+        assert_certified(&p, &r, 1e-9);
+    }
+}
+
+/// A transportation problem of `s` sources and `d` sinks of integer supplies and demands, every
+/// supply shipped (balanced, so that one equation follows from the others) or not.
+fn transportation(s: usize, d: usize, seed: u64, balanced: bool) -> Data {
+    let mut r = Rng(seed);
+    let n = s * d;
+    let supply: Vec<f64> = (0..s).map(|_| r.between(10, 50) as f64).collect();
+    let total: f64 = supply.iter().sum();
+    let target = if balanced {
+        total
+    } else {
+        (0.8 * total).floor()
+    };
+    let weights: Vec<f64> = (0..d).map(|_| r.between(5, 40) as f64).collect();
+    let sum: f64 = weights.iter().sum();
+    let mut demand: Vec<f64> = weights.iter().map(|w| (w * target / sum).floor()).collect();
+    let short = target - demand.iter().sum::<f64>();
+    demand[d - 1] += short;
+    let c: Vec<f64> = (0..n).map(|_| r.between(1, 20) as f64).collect();
+    let source = |i: usize| (0..n).map(|k| f64::from(u8::from(k / d == i))).collect();
+    let sink = |j: usize| (0..n).map(|k| f64::from(u8::from(k % d == j))).collect();
+    let mut p = Data::minimize(&c, &[], &[]);
+    let (mut rows, mut rhs): (Vec<Vec<f64>>, Vec<f64>) =
+        (0..d).map(|j| (sink(j), demand[j])).unzip();
+    if balanced {
+        for (i, &total) in supply.iter().enumerate() {
+            rows.push(source(i));
+            rhs.push(total);
+        }
+    } else {
+        p.a_le = (0..s).map(source).collect();
+        p.b_le = supply;
+    }
+    p.a_eq = rows;
+    p.b_eq = rhs;
+    p
+}
+
+/// A plan of production over `t` periods for `k` products sharing `res` resources: production
+/// `p_ti ≤ 60` at a cost rising with time, stock `s_ti ≥ 0` at a holding cost, the balances
+/// `s_(t−1)i + p_ti − s_ti = demand_ti` and the capacities `Σ_i use_ri·p_ti ≤ cap_r`, generous or
+/// half of what the demand needs (infeasible).
+fn production(t: usize, k: usize, res: usize, seed: u64, tight: bool) -> Data {
+    let mut r = Rng(seed);
+    let n = 2 * t * k;
+    let made = |tt: usize, i: usize| tt * k + i;
+    let kept = |tt: usize, i: usize| t * k + tt * k + i;
+    let usage: Vec<Vec<f64>> = (0..res)
+        .map(|_| {
+            (0..k)
+                .map(|_| {
+                    if r.below(10) < 6 {
+                        r.between(1, 5) as f64 / 2.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let demand: Vec<Vec<f64>> = (0..t)
+        .map(|_| (0..k).map(|_| r.between(0, 30) as f64).collect())
+        .collect();
+    let mut c = vec![0.0; n];
+    let mut upper = vec![f64::INFINITY; n];
+    for tt in 0..t {
+        for i in 0..k {
+            c[made(tt, i)] = r.between(50, 100) as f64 / 10.0 + 0.3 * tt as f64;
+            c[kept(tt, i)] = r.between(5, 15) as f64 / 10.0;
+            upper[made(tt, i)] = 60.0;
+        }
+    }
+    let mut p = Data::minimize(&c, &[], &[]).with_bounds(&vec![0.0; n], &upper);
+    for tt in 0..t {
+        for i in 0..k {
+            let mut row = vec![0.0; n];
+            if tt > 0 {
+                row[kept(tt - 1, i)] = 1.0;
+            }
+            row[made(tt, i)] = 1.0;
+            row[kept(tt, i)] = -1.0;
+            p.a_eq.push(row);
+            p.b_eq.push(demand[tt][i]);
+        }
+        for usage in &usage {
+            let mut row = vec![0.0; n];
+            let mut need = 0.0;
+            for i in 0..k {
+                row[made(tt, i)] = usage[i];
+                need += usage[i] * demand[tt][i];
+            }
+            p.a_le.push(row);
+            p.b_le.push(if tight {
+                (0.5 * need).round()
+            } else {
+                (1.3 * need).round() + 10.0
+            });
+        }
+    }
+    p
+}
+
+/// A flow of least cost on a random connected network of `nodes` nodes, both directions of a
+/// spanning tree and random arcs up to `arcs`, of capacities 20 to 80: one balance equation for
+/// each node, one of them following from the others.
+fn network_flow(nodes: usize, arcs: usize, seed: u64) -> Data {
+    let mut r = Rng(seed);
+    let mut list = Vec::new();
+    for v in 1..nodes {
+        let u = r.below(v as u64) as usize;
+        list.push((u, v));
+        list.push((v, u));
+    }
+    while list.len() < arcs {
+        let (u, v) = (
+            r.below(nodes as u64) as usize,
+            r.below(nodes as u64) as usize,
+        );
+        if u != v {
+            list.push((u, v));
+        }
+    }
+    let n = list.len();
+    let c: Vec<f64> = (0..n).map(|_| r.between(1, 30) as f64).collect();
+    let upper: Vec<f64> = (0..n).map(|_| r.between(20, 80) as f64).collect();
+    let mut supply = vec![0.0; nodes];
+    for _ in 0..nodes / 3 {
+        let (s, t) = (
+            r.below(nodes as u64) as usize,
+            r.below(nodes as u64) as usize,
+        );
+        let q = r.between(1, 15) as f64;
+        supply[s] += q;
+        supply[t] -= q;
+    }
+    let mut p = Data::minimize(&c, &[], &[]).with_bounds(&vec![0.0; n], &upper);
+    for (v, b) in supply.iter().enumerate() {
+        let row = list
+            .iter()
+            .map(|&(a, z)| {
+                if a == v {
+                    1.0
+                } else if z == v {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        p.a_eq.push(row);
+        p.b_eq.push(*b);
+    }
+    p
+}
+
+/// Variables in `[−1, 1]` and `[0, u]` under random rows of the given density, slack by a random
+/// part of the size of their terms at the origin: the long-step ratio test moves many of them to
+/// their other bounds in a step.
+fn boxed(m: usize, n: usize, density: f64, seed: u64) -> Data {
+    let mut r = Lcg(seed);
+    let mut lower = vec![0.0; n];
+    let mut upper = vec![0.0; n];
+    let mut c = vec![0.0; n];
+    for j in 0..n {
+        (lower[j], upper[j]) = if j % 2 == 0 {
+            (-1.0, 1.0)
+        } else {
+            (0.0, 1.0 + 4.0 * r.next())
+        };
+        c[j] = 2.0 * r.next() - 1.0;
+    }
+    let mut a_le = Vec::new();
+    let mut b_le = Vec::new();
+    for _ in 0..m {
+        let row: Vec<f64> = (0..n)
+            .map(|_| {
+                if r.next() < density {
+                    2.0 * r.next() - 1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        b_le.push(0.2 * norm(&row) * r.next());
+        a_le.push(row);
+    }
+    Data {
+        maximize: false,
+        c,
+        a_le,
+        b_le,
+        a_eq: Vec::new(),
+        b_eq: Vec::new(),
+        lower,
+        upper,
+    }
+}
+
+/// Free variables only, held by the rows `A·x ≤ b`, `b > 0`, under costs `c = −Aᵀ·y` for some
+/// `y ≥ 0`, which bound the objective from below.
+fn free_variables(m: usize, n: usize, seed: u64) -> Data {
+    let mut r = Lcg(seed);
+    let a_le: Vec<Vec<f64>> = (0..m)
+        .map(|_| {
+            (0..n)
+                .map(|_| {
+                    if r.next() < 0.4 {
+                        2.0 * r.next() - 1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let y: Vec<f64> = (0..m)
+        .map(|_| if r.next() < 0.7 { r.next() } else { 0.0 })
+        .collect();
+    let c: Vec<f64> = (0..n)
+        .map(|j| -(0..m).map(|i| a_le[i][j] * y[i]).sum::<f64>())
+        .collect();
+    let b_le: Vec<f64> = (0..m).map(|_| 1.0 + r.next()).collect();
+    let inf = f64::INFINITY;
+    Data {
+        maximize: false,
+        c,
+        a_le,
+        b_le,
+        a_eq: Vec::new(),
+        b_eq: Vec::new(),
+        lower: vec![-inf; n],
+        upper: vec![inf; n],
+    }
+}
+
+#[test]
+fn the_dual_method_agrees_with_the_primal_method_on_structured_programmes() {
+    // Degenerate transportation and assignment problems with redundant equations, a staircase of
+    // production periods (sparse, equality-heavy; and infeasible), networks, programmes of boxed
+    // variables, of free variables, the scoreboard's with every inequality tight at the point
+    // (degenerate), and in rows of units powers of ten apart; and made infeasible and unbounded.
+    let mut cases: Vec<(String, Data, LpStatus)> = Vec::new();
+    let seeds = if cfg!(miri) { 0..0 } else { 1..3 };
+    for seed in seeds {
+        let s = seed as u64;
+        cases.push((
+            format!("transport 10×15 {s}"),
+            transportation(10, 15, s, true),
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("transport 20×20 unbalanced {s}"),
+            transportation(20, 20, s, false),
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("assignment 20 {s}"),
+            {
+                let mut p = transportation(20, 20, s, true);
+                p.b_eq.iter_mut().for_each(|b| *b = 1.0);
+                p
+            },
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("production 12×8×4 {s}"),
+            production(12, 8, 4, s, false),
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("production tight {s}"),
+            production(12, 8, 4, s, true),
+            LpStatus::Infeasible,
+        ));
+        cases.push((
+            format!("network 60 {s}"),
+            network_flow(60, 300, s),
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("boxed 60×200 {s}"),
+            boxed(60, 200, 0.3, s),
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("boxed 120×240 dense {s}"),
+            boxed(120, 240, 1.0, s),
+            LpStatus::Optimal,
+        ));
+        cases.push((
+            format!("free 80×60 {s}"),
+            free_variables(80, 60, s),
+            LpStatus::Optimal,
+        ));
+        let mut degenerate = scoreboard(80, 0, 160, 1.0, s);
+        for (row, b) in degenerate.a_le.iter().zip(&mut degenerate.b_le) {
+            *b = row.iter().sum::<f64>() * 0.5;
+        }
+        cases.push((
+            format!("degenerate 80×160 {s}"),
+            degenerate,
+            LpStatus::Optimal,
+        ));
+        let mut wide = scoreboard(60, 0, 120, 0.3, s);
+        for (i, (row, b)) in wide.a_le.iter_mut().zip(&mut wide.b_le).enumerate() {
+            let scale = 10f64.powi(i as i32 % 9 - 4);
+            row.iter_mut().for_each(|v| *v *= scale);
+            *b *= scale;
+        }
+        cases.push((
+            format!("rows in units 1e-4 to 1e4 {s}"),
+            wide,
+            LpStatus::Optimal,
+        ));
+        let mut infeasible = scoreboard(60, 10, 120, 0.2, s);
+        let mut row = vec![0.0; 120];
+        let mut rhs = 0.0;
+        for (a, b) in infeasible.a_le.iter().take(3).zip(&infeasible.b_le) {
+            row.iter_mut().zip(a).for_each(|(x, v)| *x -= v);
+            rhs -= b;
+        }
+        infeasible.a_le.push(row);
+        infeasible.b_le.push(rhs - 0.5);
+        cases.push((
+            format!("infeasible 70×120 {s}"),
+            infeasible,
+            LpStatus::Infeasible,
+        ));
+        let mut unbounded = scoreboard(60, 10, 120, 0.2, s);
+        for row in unbounded.a_le.iter_mut().chain(&mut unbounded.a_eq) {
+            row[119] = 0.0;
+        }
+        unbounded.c[119] = -1.0;
+        unbounded.lower[119] = f64::NEG_INFINITY;
+        cases.push((
+            format!("unbounded 70×120 {s}"),
+            unbounded,
+            LpStatus::Unbounded,
+        ));
+    }
+    let mut fewer = 0;
+    for (name, p, status) in &cases {
+        let d = p
+            .program()
+            .solve_with(&dual())
+            .unwrap_or_else(|| panic!("{name}: no answer"));
+        let q = p
+            .program()
+            .solve_with(&primal())
+            .unwrap_or_else(|| panic!("{name}: no answer"));
+        assert_eq!((d.status, q.status), (*status, *status), "{name}");
+        consistent(p, &d);
+        match status {
+            LpStatus::Optimal => {
+                let err = objective_error(d.objective, q.objective);
+                assert!(
+                    err <= 1e-10,
+                    "{name}: {} against {}",
+                    d.objective,
+                    q.objective
+                );
+                assert_certified(p, &d, 1e-9);
+            }
+            LpStatus::Unbounded => assert!(infeasibility(p, &d) <= 1e-9, "{name}"),
+            _ => {}
+        }
+        fewer += usize::from(d.pivots < q.pivots);
+    }
+    // The dual method takes fewer pivots on most: all but the free variables and the unbounded
+    // programmes, whose dual has no feasible point and which the primal method finishes.
+    assert!(
+        cfg!(miri) || fewer * 10 >= cases.len() * 6,
+        "{fewer} of {}",
+        cases.len()
+    );
+}
+
+#[test]
+fn an_iteration_limit_under_the_dual_method_is_reported_with_the_point_reached() {
+    let p = scoreboard(30, 5, 60, 1.0, 101);
+    let r = p.solve_with(&dual().with_max_iter(10));
+    assert_eq!(r.status, LpStatus::IterationLimit);
+    assert!(r.pivots <= 10, "{}", r.pivots);
+    consistent(&p, &r);
+    // The dual method has half the pivots allowed, the primal method the rest: a budget of
+    // twice what the dual method takes lets it finish.
+    let r = p.solve_with(&dual());
+    assert_eq!(r.status, LpStatus::Optimal);
+    let again = p.solve_with(&dual().with_max_iter(2 * r.pivots));
+    assert_eq!((again.status, again.pivots), (LpStatus::Optimal, r.pivots));
+}
+
+#[test]
+fn single_precision_reaches_the_optima_of_the_scoreboards_programmes_under_either_method() {
+    // A programme in `f32` is solved in `f64`. In `f32` arithmetic the primal method's bounds on
+    // the errors of the reduced costs grew with the rows until every reduced cost passed for
+    // rounding: it reported these optimal at −184, −420 and −240 after 754, 2015 and 1610
+    // pivots. Within a budget of 2500 pivots the primal method now ends at the optimum or says
+    // that it has not reached it (it needs 5465, 3279 and 8660); the dual method, the default,
+    // ends at the optimum, measured within 2e-7 of HiGHS's in `f64`.
+    let programmes: &[(usize, usize, usize, f64, u64, f64)] = &[
+        (200, 20, 400, 1.0, 103, -526.903_899_346),
+        (200, 20, 400, 0.1, 203, -533.263_798_459),
+        (300, 30, 600, 0.1, 204, -674.365_125_79),
+    ];
+    let count = if cfg!(miri) { 0 } else { programmes.len() };
+    for &(m_le, m_eq, n, density, seed, highs) in &programmes[..count] {
+        let p = scoreboard(m_le, m_eq, n, density, seed);
+        let primal = LpOptions::<f32>::new()
+            .with_dual_threshold(usize::MAX)
+            .with_max_iter(2500);
+        for (method, opts) in [("primal", primal), ("dual", LpOptions::<f32>::new())] {
+            let r = p
+                .program_f32()
+                .solve_with(&opts)
+                .unwrap_or_else(|| panic!("{m_le}×{n} {density} {method}: no verified answer"));
+            if method == "primal" && r.status == LpStatus::IterationLimit {
+                assert_eq!(r.pivots, 2500, "{m_le}×{n} {density}");
+                continue;
+            }
+            assert_eq!(r.status, LpStatus::Optimal, "{m_le}×{n} {density} {method}");
+            let err = objective_error(f64::from(r.objective), highs);
+            assert!(
+                err <= 1e-6,
+                "{m_le}×{n} {density} {method}: {} against {highs}",
+                r.objective
+            );
+        }
+    }
+}
+
+#[test]
+fn single_precision_agrees_with_highs_on_every_programme_it_states_exactly_under_either_method() {
+    // The programmes whose rows and columns are of one scale, whose numbers are integers below
+    // 2²⁴ and so exact in `f32` (the others' right-hand sides and costs change when they are
+    // rounded), by the primal method and by the dual method throughout. Measured: the optima
+    // within 1.2e-6 (primal) and 3.9e-6 (dual) of HiGHS's, the rounding of the point and of the
+    // objective's sum in `f32`; the residuals of the certificate below 1e-7 but for the duality
+    // gap against the dual objective with the bounds, 1.2e-4: reduced costs within the
+    // tolerance of 1e-4 priced at the far bounds they point to.
+    let methods = [
+        (
+            "primal",
+            LpOptions::<f32>::new().with_dual_threshold(usize::MAX),
+        ),
+        ("dual", LpOptions::<f32>::new().with_dual_threshold(0)),
+    ];
+    let mut checked = 0;
+    for c in cases() {
+        let case = generate(c.seed);
+        if case.wide {
+            continue;
+        }
+        let p = case.data();
+        for (method, opts) in &methods {
+            let r = p
+                .program_f32()
+                .solve_with(opts)
+                .unwrap_or_else(|| panic!("seed {} {method}: no verified answer", c.seed));
+            assert_eq!(r.status, c.status, "seed {} {method}", c.seed);
+            if r.status == LpStatus::Optimal {
+                let err = objective_error(f64::from(r.objective), c.objective);
+                assert!(err <= 1e-5, "seed {} {method}: {err:e}", c.seed);
+                assert_single_certified(&p, &r, 2e-4);
+            }
+        }
+        checked += 1;
+    }
+    assert!(cfg!(miri) || checked >= 450, "{checked}");
+}
+
+#[test]
+fn single_precision_answers_beyond_its_range_are_as_the_method_in_single_precision_gives_them() {
+    // A programme in `f32` is solved in `f64`; where its answer leaves the range of `f32`, the
+    // outcome is the one the method in `f32` arithmetic gives: a dual value or an objective
+    // beyond the range is infinite, the rest of the answer as it is; and there is no answer
+    // where the scaled working problem, or the sizes of the rows' terms at the point, are
+    // beyond the range. (Rounding the whole answer and refusing any infinite value lost the
+    // first two.)
+    let one = |c: f32, a: f32, b: f32| {
+        LinearProgram::maximize(&[c])
+            .subject_to_le(&Matrix::from_rows(&[[a]]), &[b])
+            .solve()
+    };
+    // x = 1, the objective 1e30 and the dual value 1e40.
+    let r = one(1e30, 1e-10, 1e-10).expect("an answer");
+    assert_eq!(
+        (r.status, r.x[0], r.objective),
+        (LpStatus::Optimal, 1.0, 1e30)
+    );
+    assert_eq!(r.dual_le[0], f32::INFINITY);
+    // x = 1e30, the objective 1e60 and the dual value 1e60.
+    let r = one(1e30, 1e-30, 1.0).expect("an answer");
+    assert_eq!((r.status, r.x[0]), (LpStatus::Optimal, 1e30));
+    assert_eq!((r.objective, r.dual_le[0]), (f32::INFINITY, f32::INFINITY));
+    // A dual value of 3e38 is finite.
+    let r = one(3e28, 1e-10, 1e-10).expect("an answer");
+    assert!(r.dual_le[0].is_finite() && (r.dual_le[0] / 3e38 - 1.0).abs() < 1e-5);
+    // Unbounded and infeasible programmes keep their status beside such a dual value.
+    let r = LinearProgram::maximize(&[1e30f32, 1.0])
+        .subject_to_le(&Matrix::from_rows(&[[1e-10f32, 0.0]]), &[1e-10])
+        .solve()
+        .expect("an answer");
+    assert_eq!(r.status, LpStatus::Unbounded);
+    let r = LinearProgram::maximize(&[1e30f32])
+        .subject_to_le(
+            &Matrix::from_rows(&[[1e-10f32], [-1e-10]]),
+            &[1e-10, -2e-10],
+        )
+        .solve()
+        .expect("an answer");
+    assert_eq!(r.status, LpStatus::Infeasible);
+    // The slack 3e38 − (−3e38) is infinite.
+    let r = LinearProgram::maximize(&[1.0f32])
+        .subject_to_le(&Matrix::from_rows(&[[1.0f32], [-1.0]]), &[3e38, 3e38])
+        .bounds(&[f32::NEG_INFINITY], &[f32::INFINITY])
+        .solve()
+        .expect("an answer");
+    assert_eq!(
+        (r.status, r.x[0], r.slack[1]),
+        (LpStatus::Optimal, 3e38, f32::INFINITY)
+    );
+    // No answer: the terms of the row x ≤ 3e38 at x = 3e38 add up beyond the range; and the
+    // cost 1e30 of a column whose largest element is 1e-10 is scaled beyond it.
+    let r = LinearProgram::maximize(&[2.0f32, 1.0])
+        .subject_to_le(
+            &Matrix::from_rows(&[[1.0f32, 0.0], [0.0, 1.0]]),
+            &[3e38, 1.0],
+        )
+        .solve();
+    assert!(r.is_none(), "{r:?}");
+    let r = LinearProgram::minimize(&[1e30f32, 1.0])
+        .subject_to_le(&Matrix::from_rows(&[[-1e-10f32, -1.0]]), &[-1.0])
+        .solve();
+    assert!(r.is_none(), "{r:?}");
+}

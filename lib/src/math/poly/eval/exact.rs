@@ -325,6 +325,11 @@ fn horner_limbs(c: &[Number], xs: &[Number]) -> Vec<Number> {
     if c.is_empty() {
         return vec![Number::default(); xs.len()];
     }
+    if c.len() == 1 {
+        // A constant: its value, in the form of the other values, at every point.
+        let v = Signed::of(&c[0]).number();
+        return vec![v; xs.len()];
+    }
     let cs: Vec<Signed> = c.iter().map(Signed::of).collect();
     let words = cs.iter().all(|a| a.m.len() <= 1);
     let mut s = Vec::new();
@@ -379,6 +384,12 @@ fn horner_limbs(c: &[Number], xs: &[Number]) -> Vec<Number> {
 pub(crate) fn number_from_roots(r: &[Number]) -> Vec<Number> {
     if r.is_empty() {
         return vec![Number::from(1u8)];
+    }
+    if let [x] = r {
+        // x - r, in the form of the other products.
+        let mut v = Signed::of(x);
+        v.neg = !v.neg && !v.m.is_empty();
+        return vec![v.number(), Number::from(1u8)];
     }
     let blocks: Vec<Vec<Number>> = r.chunks(Z_LINEAR_ROOTS).map(linear_limbs).collect();
     tree::product(blocks, ZMUL)

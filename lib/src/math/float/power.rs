@@ -17,7 +17,7 @@ use super::root_small;
 use super::round::{overflow, round_into, round_mag, seal, underflow};
 use super::small;
 use super::ziv::{Approx, guard, round_approx};
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::{ByteOrder, Number, nat};
 use crate::math::rational::Rational;
 use core::cmp::Ordering;
@@ -512,7 +512,7 @@ fn pow_finite(
             kind: Kind::Finite {
                 negative,
                 exp: x.exp as i64,
-                mant: x.m.to_vec(),
+                mant: Mant::from_slice(x.m),
             },
         };
         return if n_negative {
@@ -533,10 +533,28 @@ fn pow_finite(
         let ly = (n[0] as f64).log2();
         if !exactly
             && beyond(x, ly, n_negative).is_none()
-            && let Some(r) = pow_small(x, negative, n_negative, n[0], prec, round)
+            && let Some(r) = pow_small(x, negative, n_negative, u128::from(n[0]), prec, round)
         {
             let (kind, o) = seal(r, prec, round, Vec::new());
             return done(kind, o, prec);
+        }
+    }
+    if n.len() == 2 && 64 * x.m.len() as u64 - limbs::trailing_zeros(x.m) >= 2 {
+        // An exponent of two limbs (at least `2^64`) and a base that is not a power of two: the
+        // power has at least `2^64 + 1` bits, neither a number of the precision nor halfway. The
+        // register and fixed-width paths as for one limb.
+        let nv = u128::from(n[1]) << 64 | u128::from(n[0]);
+        if beyond(x, (nv as f64).log2(), n_negative).is_none() {
+            if prec <= 64
+                && x.m.len() <= 2
+                && let Some(r) = pow_small(x, negative, n_negative, nv, prec, round)
+            {
+                let (kind, o) = seal(r, prec, round, Vec::new());
+                return done(kind, o, prec);
+            }
+            if let Some((kind, o)) = power_fixed::pow(x, negative, n_negative, nv, prec, round) {
+                return done(kind, o, prec);
+            }
         }
     }
     let bits = limbs::bit_len(n);
@@ -547,7 +565,8 @@ fn pow_finite(
         // Neither a number of the precision nor halfway: on limbs of a fixed width first.
         let ly = (n[0] as f64).log2();
         if beyond(x, ly, n_negative).is_none()
-            && let Some((kind, o)) = power_fixed::pow(x, negative, n_negative, n[0], prec, round)
+            && let Some((kind, o)) =
+                power_fixed::pow(x, negative, n_negative, u128::from(n[0]), prec, round)
         {
             return done(kind, o, prec);
         }
@@ -595,7 +614,7 @@ fn pow_finite(
     if prec <= 64
         && n.len() == 1
         && x.m.len() > 2
-        && let Some(r) = pow_small(x, negative, n_negative, n[0], prec, round)
+        && let Some(r) = pow_small(x, negative, n_negative, u128::from(n[0]), prec, round)
     {
         let (kind, o) = seal(r, prec, round, Vec::new());
         return done(kind, o, prec);
@@ -660,7 +679,7 @@ fn pow_small(
     x: Op<'_>,
     negative: bool,
     n_negative: bool,
-    n: u64,
+    n: u128,
     prec: u64,
     round: Round,
 ) -> Option<super::round::Rounded> {
@@ -696,15 +715,18 @@ fn pow_small(
             (hi << 1 | lo >> 127, e - 1)
         }
     };
-    for i in (0..63 - n.leading_zeros()).rev() {
+    for i in (0..127 - n.leading_zeros()).rev() {
         (acc, e) = top(acc, acc, 2 * e);
         if n >> i & 1 == 1 {
             (acc, e) = top(acc, base, e + eb);
         }
     }
-    let k = u128::from(kb + 2) * u128::from(n);
+    let k = u128::from(kb + 2).checked_mul(n)?;
+    if k >= 1 << 120 {
+        return None;
+    }
     let (hi_end, over) = acc.overflowing_add(4 * k);
-    if over || k >= 1 << 120 {
+    if over {
         return None;
     }
     let lo = small::round_top(negative, acc, e, true, prec, round);
@@ -923,7 +945,7 @@ fn root_float(x: Op<'_>, n: u64, negative: bool, prec: u64, round: Round) -> (Bi
         kind: Kind::Finite {
             negative: false,
             exp: re as i64,
-            mant: x.m.to_vec(),
+            mant: Mant::from_slice(x.m),
         },
     };
     let top =
@@ -1040,7 +1062,7 @@ fn pow_rational(
         kind: Kind::Finite {
             negative: false,
             exp: x.exp as i64,
-            mant: x.m.to_vec(),
+            mant: Mant::from_slice(x.m),
         },
     };
     let mut w = prec + guard(prec) + bits + 8;

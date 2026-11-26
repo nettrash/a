@@ -2,6 +2,9 @@
 //! analyse it ("Analysis of PSLQ, an integer relation finding algorithm", Math. Comp. 68, 1999):
 //! with the integer matrices `A` and `B = A⁻¹` exact, the vector `y` exact, the
 //! lower-trapezoidal `H` in fixed point, and every answer checked or proved in exact arithmetic.
+//! The integers are [`Z`]s, in words while they fit, each reduction step updating them in place.
+//! From four numbers the iterations run in blocks in doubles between exact refreshes (the
+//! module `block`), which only steer: every step on `y`, `A` and `B` is exact.
 //!
 //! The numbers are first made integers: each `xᵢ = mᵢ·2^qᵢ` is `Xᵢ = mᵢ·2^(qᵢ − L)` with
 //! `L = min qᵢ`, so that `y = X·B` is held exactly and a relation is detected by an exact test on
@@ -10,7 +13,10 @@
 //! from the exact `A` by [`proved_bound`](super::pslq_bound::proved_bound), not read off the
 //! rounded `H`.
 
+mod block;
+
 use super::pslq_bound::proved_bound;
+use super::zint::{Work, Z};
 use crate::math::float::BigFloat;
 use crate::math::numbers::Number;
 
@@ -187,6 +193,11 @@ impl Pslq {
 /// [`Pslq::NoneBelow`], and with no limit in such a relation to the precision. A relation that
 /// turns up is returned whatever its norm: the shortest of the columns of `B` that pass the test
 /// when the first one does, a relation to the precision and not always the shortest relation.
+/// Which relation it is follows the rounding of `H`: the same input and options give the same
+/// answer with the same version of the crate, but a relation to the precision (one not unique up
+/// to sign) is not promised to equal another implementation's or another version's — this
+/// version's differs from 0.2.45's on some inputs whose magnitudes are spread over many bits, in
+/// the large coefficients of the tiny numbers.
 ///
 /// The search is PSLQ (Ferguson and Bailey; as Ferguson, Bailey and Arno analyse it, Math. Comp.
 /// 68, 1999) with the parameter [`gamma`](PslqOptions::gamma), on the numbers made integers
@@ -381,20 +392,30 @@ impl Input {
     }
 }
 
-/// The state of a search: the exact `y`, `A` and `B`, and `H` in fixed point.
+/// The state of a search: the exact `y`, `A` and `B`, and `H` in fixed point, all integers in
+/// words while they fit and updated in place beyond ([`Z`]).
 struct Search {
     input: Input,
     n: usize,
     /// The fraction bits of `H`: an entry `h` stands for `h / 2^frac`.
     frac: usize,
     /// `y = X·B`, exactly.
-    y: Vec<Number>,
-    /// `H`, `n × (n − 1)`, by rows, lower trapezoidal.
-    h: Vec<Number>,
+    y: Vec<Z>,
+    /// `H`, `n × (n − 1)`, by rows, lower trapezoidal when `lower` is set; after a block,
+    /// `A'·H` of the `H` before it, the same up to an orthogonal factor on the right.
+    h: Vec<Z>,
+    lower: bool,
+    /// After a block, its `Hⱼⱼ / 2^frac` in doubles, for the tests of [`Search::check_stop`].
+    diag: Vec<f64>,
     /// `A`, `n × n` by rows, exact and unimodular.
-    a: Vec<Number>,
+    a: Vec<Z>,
     /// `B = A⁻¹`, `n × n` by rows, exact.
-    b: Vec<Number>,
+    b: Vec<Z>,
+    /// The working memory of the updates.
+    w: Work,
+    /// The remainder of the quotients' check, and twice it.
+    rem: Z,
+    two: Z,
     gamma_log2: f64,
     max_norm: Option<Number>,
     max_iter: usize,
@@ -420,20 +441,25 @@ impl Search {
         let max_iter = opts
             .max_iter
             .unwrap_or_else(|| iteration_bound(n, frac as f64, opts.gamma));
-        let identity = |i: usize, j: usize| Number::from(u8::from(i == j));
+        let identity = |i: usize, j: usize| Z::S(i64::from(i == j));
         let mut s = Search {
             n,
             frac,
-            y: input.x.clone(),
+            y: input.x.iter().map(Z::of).collect(),
             h: Vec::new(),
             a: (0..n * n).map(|k| identity(k / n, k % n)).collect(),
             b: (0..n * n).map(|k| identity(k / n, k % n)).collect(),
+            w: Work::default(),
+            rem: Z::S(0),
+            two: Z::S(0),
             input,
             gamma_log2,
             max_norm: opts.max_norm.clone(),
             max_iter,
             best: BigFloat::from(1).with_prec(64),
             proved_at: f64::NEG_INFINITY,
+            lower: true,
+            diag: Vec::new(),
         };
         s.h = s.initial_h();
         s
@@ -441,7 +467,7 @@ impl Search {
 
     /// `H` of the numbers: `Hⱼⱼ = sⱼ₊₁/sⱼ` and `Hᵢⱼ = −XᵢXⱼ/(sⱼsⱼ₊₁)` below the diagonal, for
     /// `sⱼ² = Σ_{k≥j} Xₖ²`; its columns are an orthonormal basis of the plane orthogonal to `X`.
-    fn initial_h(&self) -> Vec<Number> {
+    fn initial_h(&self) -> Vec<Z> {
         let (n, f) = (self.n, self.frac);
         let x = &self.input.x;
         let mut tail = vec![Number::from(0); n + 1];
@@ -458,11 +484,16 @@ impl Search {
                 h[i * (n - 1) + j] = -round_div(&(p << f), &d);
             }
         }
-        h
+        h.iter().map(Z::of).collect()
     }
 
-    fn hh(&self, i: usize, j: usize) -> &Number {
+    fn hh(&self, i: usize, j: usize) -> &Z {
         &self.h[i * (self.n - 1) + j]
+    }
+
+    /// `log₂ |Hⱼⱼ|`, as [`log2_abs`] of the number.
+    fn log2_diag(&self, j: usize) -> f64 {
+        log2_abs(&self.hh(j, j).number())
     }
 
     /// Reduces row `i` of `H` by row `j`, the column `j` of `B` by its column `i`: subtracts
@@ -479,21 +510,26 @@ impl Search {
         if hij.bits() + 1 < hjj.bits() {
             return Some(());
         }
-        let t = round_div(hij, hjj);
+        let t = match Z::nearest_quotient(hij, hjj, &mut self.rem, &mut self.two, &mut self.w) {
+            Some(q) => Z::S(q),
+            None => Z::of(&round_div(&hij.number(), &hjj.number())),
+        };
         if t.is_zero() {
             return Some(());
         }
-        let ty = &t * &self.y[i];
-        self.y[j] += ty;
+        let wk = &mut self.w;
+        // y_j += t·y_i; H_i -= t·H_j on the columns up to j; A_i -= t·A_j; B_·j += t·B_·i.
+        let (dst, src) = pair(&mut self.y, j, i);
+        dst.add_mul(&t, src, wk);
         for k in 0..=j {
-            let d = &t * &self.h[j * w + k];
-            self.h[i * w + k] -= d;
+            let (dst, src) = pair(&mut self.h, i * w + k, j * w + k);
+            dst.sub_mul(&t, src, wk);
         }
         for k in 0..n {
-            let d = &t * &self.a[j * n + k];
-            self.a[i * n + k] -= d;
-            let e = &t * &self.b[k * n + i];
-            self.b[k * n + j] += e;
+            let (dst, src) = pair(&mut self.a, i * n + k, j * n + k);
+            dst.sub_mul(&t, src, wk);
+            let (dst, src) = pair(&mut self.b, k * n + j, k * n + i);
+            dst.add_mul(&t, src, wk);
         }
         Some(())
     }
@@ -509,6 +545,8 @@ impl Search {
             }
         }
         let mut iter = 0;
+        // Blocks in doubles, and exact iterations up to `exact_until` after a short one.
+        let mut exact_until = 0;
         loop {
             if let Some(m) = self.relation() {
                 return Pslq::Relation(m);
@@ -519,7 +557,20 @@ impl Search {
             if iter == self.max_iter {
                 return self.finish(Stop::Iterations);
             }
+            if n >= block::FROM && iter >= exact_until {
+                let Some(k) = self.block(self.max_iter - iter) else {
+                    return self.finish(Stop::Precision);
+                };
+                iter += k;
+                if k < block::SHORT {
+                    exact_until = iter + block::PAUSE;
+                }
+                if k > 0 {
+                    continue;
+                }
+            }
             iter += 1;
+            self.ensure_lower();
             if self.iterate().is_none() {
                 return self.finish(Stop::Precision);
             }
@@ -534,7 +585,7 @@ impl Search {
         let mut r = 0;
         let mut best = f64::NEG_INFINITY;
         for i in 0..w {
-            let v = log2_abs(self.hh(i, i)) + (i + 1) as f64 * self.gamma_log2;
+            let v = self.log2_diag(i) + (i + 1) as f64 * self.gamma_log2;
             if v > best {
                 best = v;
                 r = i;
@@ -563,21 +614,21 @@ impl Search {
     fn rotate(&mut self, r: usize) -> Option<()> {
         let (n, f) = (self.n, self.frac);
         let w = n - 1;
-        let (p, q) = (&self.h[r * w + r], &self.h[r * w + r + 1]);
-        let t0 = (&(p * p) + &(q * q)).isqrt();
+        let (p, q) = (self.h[r * w + r].number(), self.h[r * w + r + 1].number());
+        let t0 = (&(&p * &p) + &(&q * &q)).isqrt();
         if t0.is_zero() {
             return None;
         }
-        let t1 = round_div(&(p << f), &t0);
-        let t2 = round_div(&(q << f), &t0);
+        let t1 = round_div(&(&p << f), &t0);
+        let t2 = round_div(&(&q << f), &t0);
         for i in r..n {
-            let (t3, t4) = (&self.h[i * w + r], &self.h[i * w + r + 1]);
-            let u = round_shr(&(&(&t1 * t3) + &(&t2 * t4)), f);
-            let v = round_shr(&(&(&t1 * t4) - &(&t2 * t3)), f);
-            self.h[i * w + r] = u;
-            self.h[i * w + r + 1] = v;
+            let (t3, t4) = (self.h[i * w + r].number(), self.h[i * w + r + 1].number());
+            let u = round_shr(&(&(&t1 * &t3) + &(&t2 * &t4)), f);
+            let v = round_shr(&(&(&t1 * &t4) - &(&t2 * &t3)), f);
+            self.h[i * w + r] = Z::of(&u);
+            self.h[i * w + r + 1] = Z::of(&v);
         }
-        self.h[r * w + r + 1] = Number::from(0);
+        self.h[r * w + r + 1] = Z::S(0);
         Some(())
     }
 
@@ -598,12 +649,12 @@ impl Search {
                 if yj.bits() > top + lg + 1 {
                     continue;
                 }
-                let col = (0..n).map(|i| &self.b[i * n + j]);
-                if yj.abs() > self.input.tolerance(col) {
+                let col: Vec<Number> = (0..n).map(|i| self.b[i * n + j].number()).collect();
+                if yj.number().abs() > self.input.tolerance(col.iter()) {
                     continue;
                 }
             }
-            let m: Vec<Number> = (0..n).map(|i| self.b[i * n + j].clone()).collect();
+            let m: Vec<Number> = (0..n).map(|i| self.b[i * n + j].number()).collect();
             // y is exact, but the answer is checked again from the numbers themselves.
             if !self.input.holds(&m) {
                 continue;
@@ -620,11 +671,24 @@ impl Search {
     fn check_stop(&mut self) -> Option<Stop> {
         let n = self.n;
         let w = n - 1;
+        if !self.lower {
+            // After a block: the tests on H from its doubles while they are clear by a margin
+            // (as the block ends before they are not), otherwise on the lower form.
+            if let Some(m) = &self.max_norm
+                && (*m <= 1u32 || self.best >= *m)
+            {
+                return Some(Stop::MaxNorm);
+            }
+            if !self.near_stop() {
+                return None;
+            }
+            self.ensure_lower();
+        }
         let top = (0..w).map(|j| self.hh(j, j).bits()).max().unwrap_or(0);
         if let Some(max_norm) = self.max_norm.clone() {
             // The floating bound 1/max |Hⱼⱼ|, in log₂.
             let largest = (0..w)
-                .map(|j| log2_abs(self.hh(j, j)))
+                .map(|j| self.log2_diag(j))
                 .fold(f64::NEG_INFINITY, f64::max);
             let floating = self.frac as f64 - largest;
             if max_norm <= 1u32 || self.best >= max_norm {
@@ -638,13 +702,7 @@ impl Search {
                 }
             }
         }
-        let size = self
-            .a
-            .iter()
-            .chain(&self.b)
-            .map(Number::bits)
-            .max()
-            .unwrap_or(0);
+        let size = self.a.iter().chain(&self.b).map(Z::bits).max().unwrap_or(0);
         if size + TRUSTED_BITS >= top {
             return Some(Stop::Precision);
         }
@@ -653,7 +711,8 @@ impl Search {
 
     /// Proves a bound from the current `A`, and keeps it if it is the best so far.
     fn prove(&mut self) {
-        let bound = proved_bound(&self.input, &self.a, self.frac as u64);
+        let a: Vec<Number> = self.a.iter().map(Z::number).collect();
+        let bound = proved_bound(&self.input, &a, self.frac as u64);
         if bound > self.best {
             self.best = bound;
         }
@@ -678,6 +737,18 @@ impl Search {
                 _ => Pslq::IterationLimit(bound),
             },
         }
+    }
+}
+
+/// The entries `k` (to change) and `i ≠ k` of `v`.
+#[inline]
+fn pair(v: &mut [Z], k: usize, i: usize) -> (&mut Z, &Z) {
+    if k > i {
+        let (lo, hi) = v.split_at_mut(k);
+        (&mut hi[0], &lo[i])
+    } else {
+        let (lo, hi) = v.split_at_mut(i);
+        (&mut lo[k], &hi[0])
     }
 }
 

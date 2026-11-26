@@ -653,6 +653,73 @@ fn jacobi_at_every_length() {
 }
 
 #[test]
+fn jacobi_through_the_gcd_steps() {
+    // From 24 limbs the symbol follows the greatest common divisor's reductions, and from 800 limbs
+    // its half gcd: against Euclid's algorithm on numbers up to 70 limbs, both byte orders, with
+    // numerators of every length and both signs and a common factor; at 799 to 1000 limbs by
+    // multiplicativity in both arguments, reciprocity and squares.
+    let mut r = Rng(0x2545_f491_4f6c);
+    let (lengths, cases): (&[usize], usize) = if cfg!(miri) {
+        (&[24], 1)
+    } else {
+        (&[23, 24, 25, 31, 32, 40, 64, 70], 6)
+    };
+    for &k in lengths {
+        for c in 0..cases {
+            let order = if c % 2 == 0 {
+                ByteOrder::BigEndian
+            } else {
+                ByteOrder::LittleEndian
+            };
+            let m = &r.limbs(k, order) | &n(1);
+            let len = 1 + (r.next() % (k as u64 + 1)) as usize;
+            let mut a = r.limbs(len, ByteOrder::LittleEndian);
+            if c % 3 == 0 {
+                a = -a;
+            }
+            let want = jacobi_slow(&a, &m);
+            assert_eq!(a.jacobi(&m), want, "{k} limbs, case {c}");
+            assert_eq!(a.kronecker(&m), want, "{k} limbs, case {c}, Kronecker");
+        }
+        let f = &r.limbs(k / 2, ByteOrder::BigEndian) | &n(1);
+        let g = &r.limbs(k - k / 2, ByteOrder::LittleEndian) | &n(1);
+        let h = r.limbs(k / 2, ByteOrder::LittleEndian);
+        assert_eq!(
+            (&f * &h).jacobi(&(&f * &g)),
+            0,
+            "{k} limbs, a common factor"
+        );
+    }
+    if cfg!(miri) {
+        return;
+    }
+    let three = |x: &Number| x.rem_euclid(&n(4)) == 3u8;
+    for k in [799usize, 800, 1000] {
+        let p = &r.limbs(k, ByteOrder::BigEndian) | &n(1);
+        let q = &r.limbs(k - 3, ByteOrder::LittleEndian) | &n(1);
+        let a = r.limbs(k - 1, ByteOrder::LittleEndian);
+        let b = r.limbs(k - 2, ByteOrder::BigEndian);
+        let (ap, bp) = (a.jacobi(&p), b.jacobi(&p));
+        assert_eq!((&a * &b).jacobi(&p), ap * bp, "{k} limbs, (ab/p)");
+        assert_eq!(a.jacobi(&(&p * &q)), ap * a.jacobi(&q), "{k} limbs, (a/pq)");
+        assert_eq!((&a * &a).jacobi(&p), ap * ap, "{k} limbs, (a^2/p)");
+        let (pq, qp) = (p.jacobi(&q), q.jacobi(&p));
+        if pq == 0 {
+            assert_eq!(qp, 0, "{k} limbs, a common factor both ways");
+        } else {
+            let sign = if three(&p) && three(&q) { -1 } else { 1 };
+            assert_eq!(pq * qp, sign, "{k} limbs, reciprocity");
+        }
+        assert_eq!((&(&p * 3u8) + &p).jacobi(&p), 0, "{k} limbs, a multiple");
+        assert_eq!(
+            (-&a).jacobi(&p),
+            ap * if three(&p) { -1 } else { 1 },
+            "{k} limbs, (-1/p)"
+        );
+    }
+}
+
+#[test]
 fn jacobi_on_the_rare_paths() {
     // Numbers whose difference has low limbs of zero (the binary steps take those apart), equal
     // numbers, numerators past twice the modulus, and a common factor, at 2 to 8 limbs.

@@ -45,10 +45,14 @@ impl<T: Coefficient> Mul<&Polynomial<T>> for &Polynomial<T> {
     /// by the number-theoretic transforms on the coefficients with the Chinese remainder theorem
     /// for signed values; over the rationals the same on common
     /// denominators, each coefficient then in lowest terms; over the floats and the complex
-    /// floats by the schoolbook method, and from about 512 coefficients in the shorter operand (80
-    /// for complex floats) by a fast
-    /// Fourier transform of a length `N`, within `|ĉ_k - c_k| ≤ 11 log₂(N) ε ‖a‖₂ ‖b‖₂` (`ε =
-    /// 2⁻⁵³`) rather than the schoolbook's componentwise `γ_m Σ |a_i| |b_(k-i)|`.
+    /// floats by the schoolbook method, with the componentwise error `γ_m Σ |a_i| |b_(k-i)|`
+    /// (`γ_m = m ε / (1 − m ε)`, `ε = 2⁻⁵³`), while the shorter operand has fewer than 32
+    /// coefficients or `la·lb ≤ c·N·log₂ N` (`c` = 19 for floats, 5 for complex floats, `N` the
+    /// least power of 2 at least `la + lb − 1`: square products up to 441 coefficients, 101
+    /// complex), and beyond by the crate's linear convolution
+    /// ([`fft::convolve`](crate::math::fft::convolve)), by fast Fourier transforms within a few
+    /// units of rounding times `‖a‖₂ ‖b‖₂ log₂ N` for a transform of length `N`, in norm rather
+    /// than componentwise (an infinity or a NaN may then make every coefficient NaN).
     fn mul(self, rhs: &Polynomial<T>) -> Polynomial<T> {
         if self.c.is_empty() || rhs.c.is_empty() {
             return Polynomial::zero();
@@ -63,23 +67,33 @@ impl<T: Coefficient> Mul<&Polynomial<T>> for &Polynomial<T> {
 impl<T: Coefficient> Add<&Polynomial<T>> for &Polynomial<T> {
     type Output = Polynomial<T>;
     fn add(self, rhs: &Polynomial<T>) -> Polynomial<T> {
-        // The longer one copied, the shorter added into it.
-        let (mut r, s) = if self.c.len() >= rhs.c.len() {
-            (self.clone(), rhs)
+        // Each coefficient of the sum built once, as the sum of two references: a copy added
+        // into in place would grow (and move) about half of the integers' vectors.
+        let (long, short) = if self.c.len() >= rhs.c.len() {
+            (&self.c, &rhs.c)
         } else {
-            (rhs.clone(), self)
+            (&rhs.c, &self.c)
         };
-        r += s;
-        r
+        let mut c = Vec::with_capacity(long.len());
+        c.extend(long.iter().zip(short).map(|(x, y)| T::add(x, y)));
+        c.extend_from_slice(&long[short.len()..]);
+        trim(&mut c);
+        Polynomial { c }
     }
 }
 
 impl<T: Coefficient> Sub<&Polynomial<T>> for &Polynomial<T> {
     type Output = Polynomial<T>;
     fn sub(self, rhs: &Polynomial<T>) -> Polynomial<T> {
-        let mut r = self.clone();
-        r -= rhs;
-        r
+        let (a, b) = (&self.c, &rhs.c);
+        let n = a.len().min(b.len());
+        let mut c = Vec::with_capacity(a.len().max(b.len()));
+        c.extend(a.iter().zip(b).map(|(x, y)| T::sub(x, y)));
+        c.extend_from_slice(&a[n..]);
+        // 0 − b_i, as `-=` takes it (for the floats +0 from +0, where the negation is −0).
+        c.extend(b[n..].iter().map(T::zero_sub));
+        trim(&mut c);
+        Polynomial { c }
     }
 }
 

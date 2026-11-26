@@ -1,11 +1,12 @@
 //! The zeros of a function of one real variable.
 //!
-//! Five methods, each generic over [`Real`]:
+//! Six methods, each generic over [`Real`]:
 //!
 //! | Method | Needs | Convergence | Guaranteed |
 //! | --- | --- | --- | --- |
 //! | [`bisect`] | a bracket | linear, a bit an evaluation | yes |
 //! | [`brent`] | a bracket | superlinear (order about 1.84) where `f` is smooth | yes |
+//! | [`toms748`] | a bracket | superlinear (about 1.67 an evaluation), the bracket to zero | yes |
 //! | [`secant`] | two starting points | order `(1 + √5)/2 ≈ 1.618` | no |
 //! | [`newton`] | `f` and `f′` | order 2 | no |
 //! | [`halley`] | `f`, `f′` and `f″` | order 3 | no |
@@ -678,6 +679,336 @@ pub fn brent_with<T: Real>(
         }
         watch.push(count(b, c));
     }
+}
+
+/// The root of `f` in the bracket `[a, b]`, by Algorithm 748 of Alefeld, Potra and Shi.
+///
+/// G. E. Alefeld, F. A. Potra and Y. Shi, *Algorithm 748: Enclosing Zeros of Continuous
+/// Functions*, ACM Transactions on Mathematical Software 21 (1995), 327–344: their Algorithm 4.2,
+/// the one of Boost's `toms748_solve`. Each iteration takes two steps of interpolation — the
+/// inverse cubic through the ends of the bracket and the two points it last gave up, or, where
+/// those four values are not distinct or the cubic leaves the bracket, two or three Newton steps
+/// on the quadratic through three of them — then a secant step of double length from the better
+/// end, and a bisection when the three have not halved the bracket. Every point is first moved
+/// at least half the tolerance inside the bracket, so that an end next to the root is cut off too.
+/// Where `f` is smooth the bracket shrinks with the order `(2 + √7)^(1/3) ≈ 1.67` an evaluation,
+/// and to zero around the root, both of its ends converging, where Brent's method converges with
+/// its estimate from one side and cuts the other end off by a step of the tolerance at the end.
+///
+/// It stops when the bracket is no wider than the tolerance at its better end, the one of the
+/// smaller `|f|`, which it returns — `f` changes sign within `tol(x) = xtol + rtol·|x|` of it —
+/// or when no float is left between the ends, on the test of [`RootOptions`]. Without an absolute
+/// tolerance that halving the length reaches within 64 halvings (32 in `f32`), as with the default
+/// `xtol` of zero, an iteration on a bracket across zero or across binades is judged by the count
+/// of floats in it rather than its length, and its bisection, the midpoint, is followed by the
+/// middle float when the count is not halved yet, so that a root at zero is reached under a purely
+/// relative tolerance. Each iteration then halves the count (at most five evaluations), or the
+/// length (at most four, the count falling by a factor of 1.5 or more within a factor of two), so
+/// that with the default `xtol` the method finishes within 414 evaluations of an `f64` bracket and
+/// 203 of an `f32` one, inside the default limit of 512, which counts evaluations as for the other
+/// methods.
+///
+/// `f(a)` and `f(b)` must be of opposite signs, or one of them zero; the ends may be in either
+/// order and must be finite; an infinite value counts by its sign and is never interpolated
+/// through. The answer lies inside the bracket. A sign change through a pole is found like a root:
+/// see [`RootOptions`].
+///
+/// # Examples
+///
+/// ```
+/// use a::math::numerics::{RootOptions, toms748, toms748_with};
+///
+/// // The real root of x³ − x − 2.
+/// let x = toms748(1.0, 2.0, |x: f64| x * x * x - x - 2.0).unwrap();
+/// assert!((x - 1.521_379_706_804_567_6).abs() < 1e-15);
+///
+/// // A root at zero under the default, purely relative tolerance.
+/// assert!(toms748(-1.0, 2.0, |x: f64| x.cbrt()).unwrap().abs() < 1e-300);
+///
+/// // A pole changes sign too; a tolerance on the value refuses it.
+/// let pole = |x: f64| 1.0 / (x - 0.3);
+/// assert!((toms748(0.0, 1.0, pole).unwrap() - 0.3).abs() < 1e-15);
+/// assert!(toms748_with(0.0, 1.0, pole, &RootOptions::new().with_ftol(1e-8)).is_none());
+/// ```
+pub fn toms748<T: Real>(a: T, b: T, f: impl Fn(T) -> T) -> Option<T> {
+    toms748_with(a, b, f, &RootOptions::new())
+}
+
+/// The root of `f` in `[a, b]` by Algorithm 748 of Alefeld, Potra and Shi, with the tolerances
+/// and the limit of `opts`; see [`toms748`].
+///
+/// # Examples
+///
+/// ```
+/// use a::math::numerics::{RootOptions, toms748_with};
+///
+/// // eˣ − 2 to an absolute tolerance of 10⁻¹²: the bracket closes around ln 2.
+/// let opts = RootOptions::new().with_xtol(1e-12);
+/// let x = toms748_with(0.0, 1.0, |x: f64| x.exp() - 2.0, &opts).unwrap();
+/// assert!((x - core::f64::consts::LN_2).abs() <= 1e-12);
+/// ```
+pub fn toms748_with<T: Real>(
+    a: T,
+    b: T,
+    mut f: impl FnMut(T) -> T,
+    opts: &RootOptions<T>,
+) -> Option<T> {
+    if !opts.valid() || !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let flo = f(lo);
+    if flo.is_nan() {
+        return None;
+    }
+    if flo == T::ZERO {
+        return Some(lo);
+    }
+    if lo == hi {
+        return None;
+    }
+    let fhi = f(hi);
+    if fhi.is_nan() {
+        return None;
+    }
+    if fhi == T::ZERO {
+        return Some(hi);
+    }
+    if negative(flo) == negative(fhi) {
+        return None;
+    }
+    if opts.small(flo) || opts.small(fhi) {
+        return Some(if flo.abs() <= fhi.abs() { lo } else { hi });
+    }
+    let mut s = Enclosure {
+        f,
+        opts,
+        a: lo,
+        b: hi,
+        fa: flo,
+        fb: fhi,
+        d: lo,
+        fd: flo,
+        evaluations: 0,
+    };
+    if let Some(answer) = s.closed() {
+        return answer;
+    }
+    // The first step: the secant through the ends.
+    let c = secant_point(s.a, s.b, s.fa, s.fb);
+    if let Some(answer) = s.bracket(c) {
+        return answer;
+    }
+    // `e` is the point given up before `d`; there is none until the first iteration.
+    let (mut e, mut fe) = (T::NAN, T::NAN);
+    loop {
+        let (a0, b0) = (s.a, s.b);
+        // Two steps of interpolation: the cubic through four points where it can be formed and
+        // stays inside, else Newton's steps on the quadratic through three.
+        for newton_steps in [2, 3] {
+            let c = s.interpolate(e, fe, newton_steps);
+            if newton_steps == 2 {
+                e = s.d;
+                fe = s.fd;
+            }
+            if let Some(answer) = s.bracket(c) {
+                return answer;
+            }
+        }
+        // The secant of double length from the end of the smaller |f|, kept within half the
+        // bracket of it.
+        let (u, fu) = if s.fa.abs() < s.fb.abs() {
+            (s.a, s.fa)
+        } else {
+            (s.b, s.fb)
+        };
+        let width = s.b - s.a;
+        let mut c = u - T::TWO * (fu / (s.fb - s.fa)) * width;
+        if c.is_nan() || (c - u).abs() > width * T::HALF {
+            c = midpoint(s.a, s.b);
+        }
+        e = s.d;
+        fe = s.fd;
+        if let Some(answer) = s.bracket(c) {
+            return answer;
+        }
+        // A bisection unless the iteration has halved the bracket; across zero or binades, and
+        // without an absolute tolerance that halving the length reaches, the middle float after
+        // it if the count of floats is not halved yet.
+        if !s.halved(a0, b0) {
+            e = s.d;
+            fe = s.fd;
+            if let Some(answer) = s.bracket(midpoint(s.a, s.b)) {
+                return answer;
+            }
+            if s.by_count(a0, b0) && !s.halved(a0, b0) {
+                e = s.d;
+                fe = s.fd;
+                if let Some(answer) = s.bracket(middle_float(s.a, s.b)) {
+                    return answer;
+                }
+            }
+        }
+    }
+}
+
+/// The state of [`toms748_with`]: the bracket `[a, b]`, `a < b`, on whose ends `f` changes sign,
+/// and the end `d` the last step gave up.
+struct Enclosure<'o, T, F> {
+    f: F,
+    opts: &'o RootOptions<T>,
+    a: T,
+    b: T,
+    fa: T,
+    fb: T,
+    d: T,
+    fd: T,
+    /// The evaluations since the two at the ends.
+    evaluations: usize,
+}
+
+impl<T: Real, F: FnMut(T) -> T> Enclosure<'_, T, F> {
+    /// The answer when the bracket is closed: the end of the smaller `|f|` once the bracket is no
+    /// wider than the tolerance there, or no float is left between the ends.
+    fn closed(&self) -> Option<Option<T>> {
+        let (x, fx) = if self.fa.abs() <= self.fb.abs() {
+            (self.a, self.fa)
+        } else {
+            (self.b, self.fb)
+        };
+        let middle = midpoint(self.a, self.b);
+        if middle <= self.a || middle >= self.b || self.b - self.a <= self.opts.tol_at(x) {
+            return Some(self.opts.value_ok(fx).then_some(x));
+        }
+        None
+    }
+
+    /// Whether the iteration from `[a0, b0]` is judged by the count of floats in the bracket
+    /// rather than its length: when the bracket reaches across zero or across more than a
+    /// factor of two, and halving the length would not reach the absolute tolerance in time
+    /// (see [`spans`] and [`reachable`]).
+    fn by_count(&self, a0: T, b0: T) -> bool {
+        spans(a0, b0) && !reachable(a0, b0, self.opts)
+    }
+
+    /// Whether the bracket is at most half of `[a0, b0]`, in its count of floats or its length.
+    fn halved(&self, a0: T, b0: T) -> bool {
+        if self.by_count(a0, b0) {
+            count(self.a, self.b) <= 0.5 * count(a0, b0)
+        } else {
+            self.b - self.a <= (b0 - a0) * T::HALF
+        }
+    }
+
+    /// The point of the interpolation step: the inverse cubic through `a`, `b`, `d` and `e`
+    /// where their values are finite and distinct and it lands inside the bracket, else
+    /// `newton_steps` Newton steps on the quadratic through `a`, `b` and `d`.
+    fn interpolate(&self, e: T, fe: T, newton_steps: usize) -> T {
+        let (a, b, d) = (self.a, self.b, self.d);
+        let (fa, fb, fd) = (self.fa, self.fb, self.fd);
+        if distinct(&[fa, fb, fd, fe]) {
+            let c = inverse_cubic(a, b, d, e, fa, fb, fd, fe);
+            if a < c && c < b {
+                return c;
+            }
+        }
+        newton_quadratic(a, b, d, fa, fb, fd, newton_steps)
+    }
+
+    /// Evaluates `f` at `c`, first moved at least half the tolerance inside the bracket (to its
+    /// midpoint where the bracket is too narrow for that, or `c` is NaN), and keeps the part on
+    /// which the sign changes; the other end becomes `d`. The answer when the method is done.
+    fn bracket(&mut self, c: T) -> Option<Option<T>> {
+        let (a, b) = (self.a, self.b);
+        let near_a = (self.opts.tol_at(a) * T::HALF).max(spacing(a));
+        let near_b = (self.opts.tol_at(b) * T::HALF).max(spacing(b));
+        let mut c = if !c.is_nan() && b - a > T::TWO * (near_a + near_b) {
+            c.max(a + near_a).min(b - near_b)
+        } else {
+            midpoint(a, b)
+        };
+        if !(a < c && c < b) {
+            // Rounding of the moves, or a middle float on an end: the midpoint is inside, the
+            // bracket not being closed.
+            c = midpoint(a, b);
+        }
+        if self.evaluations == self.opts.max_iter {
+            return Some(None);
+        }
+        self.evaluations += 1;
+        let fc = (self.f)(c);
+        if fc.is_nan() {
+            return Some(None);
+        }
+        if fc == T::ZERO || self.opts.small(fc) {
+            return Some(Some(c));
+        }
+        if negative(fc) == negative(self.fa) {
+            self.d = a;
+            self.fd = self.fa;
+            self.a = c;
+            self.fa = fc;
+        } else {
+            self.d = b;
+            self.fd = self.fb;
+            self.b = c;
+            self.fb = fc;
+        }
+        self.closed()
+    }
+}
+
+/// The secant through `(a, fa)` and `(b, fb)`, in the form whose quotient of differences is
+/// formed first.
+fn secant_point<T: Real>(a: T, b: T, fa: T, fb: T) -> T {
+    a - fa / ((fb - fa) / (b - a))
+}
+
+/// Whether the values are finite and their differences far enough from zero to divide by.
+fn distinct<T: Real>(values: &[T]) -> bool {
+    let least = T::MIN_POSITIVE * T::from_f64(32.0);
+    values.iter().all(|v| v.is_finite())
+        && values
+            .iter()
+            .enumerate()
+            .all(|(i, x)| values[i + 1..].iter().all(|y| (*x - *y).abs() >= least))
+}
+
+/// The zero of the inverse cubic through four points, in the paper's form of Aitken–Neville
+/// interpolation on the inverse function.
+#[allow(clippy::too_many_arguments)]
+fn inverse_cubic<T: Real>(a: T, b: T, d: T, e: T, fa: T, fb: T, fd: T, fe: T) -> T {
+    let q11 = (d - e) * fd / (fe - fd);
+    let q21 = (b - d) * fb / (fd - fb);
+    let q31 = (a - b) * fa / (fb - fa);
+    let d21 = (b - d) * fd / (fd - fb);
+    let d31 = (a - b) * fb / (fb - fa);
+    let q22 = (d21 - q11) * fb / (fe - fb);
+    let q32 = (d31 - q21) * fa / (fd - fa);
+    let d32 = (d31 - q21) * fd / (fd - fa);
+    let q33 = (d32 - q22) * fa / (fe - fa);
+    a + q31 + q32 + q33
+}
+
+/// `steps` Newton steps on the quadratic through `(a, fa)`, `(b, fb)` and `(d, fd)`, from the end
+/// where it is convex towards the root; the secant through the ends where it is no quadratic.
+fn newton_quadratic<T: Real>(a: T, b: T, d: T, fa: T, fb: T, fd: T, steps: usize) -> T {
+    let ab = (fb - fa) / (b - a);
+    let bd = (fd - fb) / (d - b);
+    let abd = (bd - ab) / (d - a);
+    if abd == T::ZERO || !abd.is_finite() || !ab.is_finite() {
+        return secant_point(a, b, fa, fb);
+    }
+    let mut c = if negative(abd) == negative(fa) { a } else { b };
+    for _ in 0..steps {
+        let value = fa + (ab + abd * (c - b)) * (c - a);
+        let slope = ab + abd * (T::TWO * c - a - b);
+        if slope == T::ZERO {
+            return secant_point(a, b, fa, fb);
+        }
+        c -= value / slope;
+    }
+    c
 }
 
 /// Whether `f` changes sign within [`RootOptions::reach`] of the estimate `x`, where it is `fx`

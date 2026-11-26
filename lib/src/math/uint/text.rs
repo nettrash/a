@@ -76,6 +76,28 @@ const fn error(kind: IntErrorKind) -> ParseIntError {
     ParseIntError { kind }
 }
 
+/// The kind of a primitive's error, which is not `Copy`.
+const fn kind_of(e: &core::num::ParseIntError) -> IntErrorKind {
+    match e.kind() {
+        IntErrorKind::Empty => IntErrorKind::Empty,
+        IntErrorKind::PosOverflow => IntErrorKind::PosOverflow,
+        IntErrorKind::NegOverflow => IntErrorKind::NegOverflow,
+        _ => IntErrorKind::InvalidDigit,
+    }
+}
+
+impl<const N: usize> Uint<N> {
+    /// The value of a `u128` in the low limbs of one or two, for the primitives' results.
+    const fn from_low(v: u128) -> Self {
+        let mut l = [0u64; N];
+        l[0] = v as u64;
+        if N > 1 {
+            l[1 % N] = (v >> 64) as u64;
+        }
+        Uint::from_limbs(l)
+    }
+}
+
 /// Panics unless `radix` is from 2 to 36.
 #[track_caller]
 const fn check_radix(radix: u32) {
@@ -193,6 +215,14 @@ impl<const N: usize> Uint<N> {
     #[track_caller]
     pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
         check_radix(radix);
+        // One limb by the primitive, whose rules these are (`u128`'s reading, a digit at a time
+        // in 128-bit products, is slower than the chunks below).
+        if N == 1 {
+            return match u64::from_str_radix(src, radix) {
+                Ok(v) => Ok(Uint::from_low(v as u128)),
+                Err(e) => Err(error(kind_of(&e))),
+            };
+        }
         let digits = match split_sign(src, false) {
             Ok((_, d)) => d,
             Err(e) => return Err(e),
@@ -222,62 +252,254 @@ impl<const N: usize> Uint<N> {
     #[track_caller]
     pub fn to_str_radix(self, radix: u32) -> String {
         check_radix(radix);
-        // The digits are ASCII, so the conversion cannot fail.
-        String::from_utf8(self.digits(radix)).unwrap_or_default()
+        with_digits(self, radix, false, |d| d.to_string())
     }
 
-    /// The digits in `radix`, ASCII, lower-case, the most significant first; `0` for zero.
+    /// The digits in `radix`, ASCII, lower-case, the most significant first, without sign or
+    /// prefix; `0` for zero.
     fn digits(self, radix: u32) -> Vec<u8> {
-        const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-        if self.is_zero() {
-            return vec![b'0'];
-        }
-        if radix.is_power_of_two() {
-            // Read off the bits, `k` to a digit, from the top.
-            let k = radix.trailing_zeros();
-            let count = self.bits().div_ceil(k);
-            let mask = (1u64 << k) - 1;
-            let l = self.as_limbs();
-            return (0..count)
-                .rev()
-                .map(|j| {
-                    let at = j * k;
-                    let (i, s) = ((at / 64) as usize, at % 64);
-                    let mut d = l[i] >> s;
-                    if s + k > 64 && i + 1 < N {
-                        d |= l[i + 1] << (64 - s);
-                    }
-                    DIGITS[(d & mask) as usize]
-                })
-                .collect();
-        }
-        // The chunks of k digits, from the least significant up, by divisions by radix^k.
-        let (k, power) = chunk(radix);
-        let mut chunks = Vec::new();
-        let mut x = self;
-        while !x.is_zero() {
-            let (q, r) = x.div_rem_u64(power);
-            chunks.push(r);
-            x = q;
-        }
-        let mut out = Vec::with_capacity(chunks.len() * k);
-        let mut buf = [0u8; 64];
-        for (n, &c) in chunks.iter().rev().enumerate() {
-            let mut c = c;
-            let mut len = 0;
-            while c > 0 {
-                buf[len] = DIGITS[(c % radix as u64) as usize];
-                c /= radix as u64;
-                len += 1;
-            }
-            // Every chunk but the first is padded with zeros to k digits.
-            if n > 0 {
-                out.resize(out.len() + (k - len), b'0');
-            }
-            out.extend(buf[..len].iter().rev());
-        }
-        out
+        with_digits(self, radix, false, |d| d.as_bytes().to_vec())
     }
+}
+
+const LOWER: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+const UPPER: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// The pairs of decimal digits `00` to `99`, two bytes each.
+const PAIRS: [u8; 200] = {
+    let mut t = [0u8; 200];
+    let mut i = 0;
+    while i < 100 {
+        t[2 * i] = b'0' + (i / 10) as u8;
+        t[2 * i + 1] = b'0' + (i % 10) as u8;
+        i += 1;
+    }
+    t
+};
+
+/// 10¹⁹, the largest power of ten in a limb, which has its top bit set, and its reciprocal.
+const TEN19: u64 = 10_000_000_000_000_000_000;
+const TEN19_INV: u64 = limbs::reciprocal_word(TEN19);
+
+/// `x < 10⁸` as exactly eight digits ending at `end`.
+#[inline]
+fn eight(buf: &mut [u8], end: usize, x: u32) {
+    let (hi, lo) = (x / 10_000, x % 10_000);
+    for (at, v) in [
+        (end - 2, lo % 100),
+        (end - 4, lo / 100),
+        (end - 6, hi % 100),
+        (end - 8, hi / 100),
+    ] {
+        let v = v as usize;
+        buf[at] = PAIRS[2 * v];
+        buf[at + 1] = PAIRS[2 * v + 1];
+    }
+}
+
+/// `x < 10¹⁹` as exactly nineteen digits ending at `end`: three, eight and eight.
+#[inline]
+fn nineteen(buf: &mut [u8], end: usize, x: u64) {
+    let (top, rest) = (x / 10_000_000_000_000_000, x % 10_000_000_000_000_000);
+    eight(buf, end, (rest % 100_000_000) as u32);
+    eight(buf, end - 8, (rest / 100_000_000) as u32);
+    let top = top as usize;
+    buf[end - 19] = b'0' + (top / 100) as u8;
+    buf[end - 18] = PAIRS[2 * (top % 100)];
+    buf[end - 17] = PAIRS[2 * (top % 100) + 1];
+}
+
+/// The digits of `x` without leading zeros, ending at `end`; the start is returned.
+fn decimal_u64(buf: &mut [u8], mut end: usize, mut x: u64) -> usize {
+    while x >= 100_000_000 {
+        eight(buf, end, (x % 100_000_000) as u32);
+        x /= 100_000_000;
+        end -= 8;
+    }
+    let mut x = x as u32;
+    while x >= 100 {
+        let v = (x % 100) as usize;
+        buf[end - 2] = PAIRS[2 * v];
+        buf[end - 1] = PAIRS[2 * v + 1];
+        x /= 100;
+        end -= 2;
+    }
+    if x >= 10 {
+        buf[end - 2] = PAIRS[2 * x as usize];
+        buf[end - 1] = PAIRS[2 * x as usize + 1];
+        end - 2
+    } else {
+        buf[end - 1] = b'0' + x as u8;
+        end - 1
+    }
+}
+
+/// The digits of `x` in `radix` (2 to 36), without sign or prefix, at the end of `buf`, which holds
+/// `64·N + 1` digits or more; the start is returned.
+///
+/// A radix that is a power of two reads the bits off, a limb at a time where the digits do not
+/// straddle limbs (radices 2, 4 and 16). Decimal takes chunks of 19 digits from the bottom, the
+/// remainders of divisions by 10¹⁹ whose quotient limbs come from products by its reciprocal
+/// (`limbs::div_2by1`), each chunk written two digits at a time from a table. Another radix
+/// divides by the largest power of the radix in a limb and writes the chunks a digit at a time.
+fn write_digits<const N: usize>(x: Uint<N>, radix: u32, upper: bool, buf: &mut [u8]) -> usize {
+    let table = if upper { UPPER } else { LOWER };
+    let mut end = buf.len();
+    let mut l = *x.as_limbs();
+    let mut len = limbs::significant(&l);
+    if len == 0 {
+        buf[end - 1] = b'0';
+        return end - 1;
+    }
+    if radix.is_power_of_two() {
+        let k = radix.trailing_zeros();
+        let mask = (1u64 << k) - 1;
+        if 64 % k == 0 {
+            for (i, &limb) in l[..len].iter().enumerate() {
+                let mut w = limb;
+                let mut n = 64 / k;
+                while n > 0 && (w != 0 || i + 1 < len) {
+                    end -= 1;
+                    buf[end] = table[(w & mask) as usize];
+                    w >>= k;
+                    n -= 1;
+                }
+            }
+            return end;
+        }
+        let count = x.bits().div_ceil(k);
+        for j in 0..count {
+            let at = j * k;
+            let (i, s) = ((at / 64) as usize, at % 64);
+            let mut d = l[i] >> s;
+            if s + k > 64 && i + 1 < N {
+                d |= l[i + 1] << (64 - s);
+            }
+            end -= 1;
+            buf[end] = table[(d & mask) as usize];
+        }
+        return end;
+    }
+    if radix == 10 {
+        while len > 1 {
+            let mut r = 0u64;
+            let mut i = len;
+            while i > 0 {
+                i -= 1;
+                let (q, rr) = limbs::div_2by1(r, l[i], TEN19, TEN19_INV);
+                l[i] = q;
+                r = rr;
+            }
+            nineteen(buf, end, r);
+            end -= 19;
+            if l[len - 1] == 0 {
+                len -= 1;
+            }
+        }
+        return decimal_u64(buf, end, l[0]);
+    }
+    let (k, power) = chunk(radix);
+    let r = radix as u64;
+    let mut x = x;
+    loop {
+        let (q, mut c) = x.div_rem_u64(power);
+        let last = q.is_zero();
+        let mut n = 0;
+        while c > 0 || (!last && n < k) {
+            end -= 1;
+            buf[end] = table[(c % r) as usize];
+            c /= r;
+            n += 1;
+        }
+        if last {
+            return end;
+        }
+        x = q;
+    }
+}
+
+/// `f` of the digits of `x` in `radix`, from a buffer on the stack (of one of four sizes, so that
+/// a short number does not clear a long buffer) up to 16 limbs, on the heap above.
+fn with_digits<const N: usize, R>(
+    x: Uint<N>,
+    radix: u32,
+    upper: bool,
+    f: impl FnOnce(&str) -> R,
+) -> R {
+    with_sign_and_digits(x, false, radix, upper, f)
+}
+
+/// [`with_digits`] with a `-` in front where `minus` is set.
+fn with_sign_and_digits<const N: usize, R>(
+    x: Uint<N>,
+    minus: bool,
+    radix: u32,
+    upper: bool,
+    f: impl FnOnce(&str) -> R,
+) -> R {
+    // 64·N binary digits at most, the one 0 of N = 0, and the sign.
+    let size = 64 * N + 2;
+    fn run<const N: usize, R>(
+        x: Uint<N>,
+        minus: bool,
+        radix: u32,
+        upper: bool,
+        buf: &mut [u8],
+        f: impl FnOnce(&str) -> R,
+    ) -> R {
+        let mut start = write_digits(x, radix, upper, buf);
+        if minus {
+            start -= 1;
+            buf[start] = b'-';
+        }
+        // The digits and the sign are ASCII.
+        f(core::str::from_utf8(&buf[start..]).unwrap_or_default())
+    }
+    macro_rules! on_stack {
+        ($len:literal) => {{
+            let mut stack = [0u8; $len];
+            return run(x, minus, radix, upper, &mut stack[$len - size..], f);
+        }};
+    }
+    if size <= 130 {
+        on_stack!(130)
+    } else if size <= 258 {
+        on_stack!(258)
+    } else if size <= 514 {
+        on_stack!(514)
+    } else if size <= 1026 {
+        on_stack!(1026)
+    }
+    let mut heap = vec![0u8; size];
+    run(x, minus, radix, upper, &mut heap, f)
+}
+
+/// The decimal text of `x`, with a `-` where `minus` is set, written at once where the formatter
+/// asks for no width and no `+`, the only flags that change a decimal integer's text; `None`
+/// otherwise, for `pad_integral` to apply them. Up to two limbs (an `Int`'s, whose primitives
+/// format more slowly than an unsigned one's digits and a sign written here) in a short buffer.
+#[inline]
+fn plain_decimal<const N: usize>(
+    f: &mut fmt::Formatter<'_>,
+    x: Uint<N>,
+    minus: bool,
+) -> Option<fmt::Result> {
+    if f.width().is_some() || f.sign_plus() {
+        return None;
+    }
+    if N <= 2 {
+        // 39 digits and the sign.
+        let mut buf = [0u8; 40];
+        let mut start = write_digits(x, 10, false, &mut buf);
+        if minus {
+            start -= 1;
+            buf[start] = b'-';
+        }
+        return Some(f.write_str(core::str::from_utf8(&buf[start..]).unwrap_or_default()));
+    }
+    Some(with_sign_and_digits(x, minus, 10, false, |d| {
+        f.write_str(d)
+    }))
 }
 
 impl<const N: usize> Int<N> {
@@ -314,6 +536,14 @@ impl<const N: usize> Int<N> {
     #[track_caller]
     pub const fn from_str_radix(src: &str, radix: u32) -> Result<Self, ParseIntError> {
         check_radix(radix);
+        if N == 1 {
+            return match i64::from_str_radix(src, radix) {
+                Ok(v) => Ok(Int::from_limbs(
+                    *Uint::<N>::from_low(v as u64 as u128).as_limbs(),
+                )),
+                Err(e) => Err(error(kind_of(&e))),
+            };
+        }
         let (negative, digits) = match split_sign(src, true) {
             Ok(x) => x,
             Err(e) => return Err(e),
@@ -416,20 +646,42 @@ pub(super) fn debug_hex<const N: usize>(
     Ok(())
 }
 
-/// Writes `digits` through `pad_integral`, upper-cased when asked.
-fn pad(
+/// The digits of `m` in `radix` through `Formatter::pad_integral`, which applies the flags.
+fn pad<const N: usize>(
     f: &mut fmt::Formatter<'_>,
     non_negative: bool,
     prefix: &str,
-    mut digits: Vec<u8>,
+    m: Uint<N>,
+    radix: u32,
     upper: bool,
 ) -> fmt::Result {
-    if upper {
-        digits.make_ascii_uppercase();
+    with_digits(m, radix, upper, |d| f.pad_integral(non_negative, prefix, d))
+}
+
+/// The value of one or two limbs as a `u128`, for the formatting of the primitive of that width,
+/// which writes the same text with the same flags.
+#[inline]
+fn small<const N: usize>(limbs: &[u64; N]) -> Option<u128> {
+    match N {
+        1 => Some(limbs[0] as u128),
+        2 => Some(limbs[0] as u128 | (limbs[1 % N] as u128) << 64),
+        _ => None,
     }
-    // The digits are ASCII.
-    let text = core::str::from_utf8(&digits).unwrap_or_default();
-    f.pad_integral(non_negative, prefix, text)
+}
+
+/// Formats an `N`-limb integer of one or two limbs as `u64`/`u128` (`i64`/`i128` when `signed`)
+/// with the trait `$t`, or returns from the caller's fallback otherwise.
+macro_rules! as_primitive {
+    ($t:ident, $limbs:expr, $f:expr, $signed:expr) => {
+        if let Some(v) = small($limbs) {
+            return match (N, $signed) {
+                (1, false) => fmt::$t::fmt(&(v as u64), $f),
+                (1, true) => fmt::$t::fmt(&(v as u64 as i64), $f),
+                (_, false) => fmt::$t::fmt(&v, $f),
+                (_, true) => fmt::$t::fmt(&(v as i128), $f),
+            };
+        }
+    };
 }
 
 impl<const N: usize> fmt::Display for Uint<N> {
@@ -446,7 +698,11 @@ impl<const N: usize> fmt::Display for Uint<N> {
     /// assert_eq!(format!("{:+06}", Uint::<2>::from_u64(42)), "+00042");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        pad(f, true, "", self.digits(10), false)
+        as_primitive!(Display, self.as_limbs(), f, false);
+        if let Some(r) = plain_decimal(f, *self, false) {
+            return r;
+        }
+        pad(f, true, "", *self, 10, false)
     }
 }
 
@@ -463,7 +719,8 @@ impl<const N: usize> fmt::LowerHex for Uint<N> {
     /// assert_eq!(format!("{x:#066x}"), format!("0x{}beef", "0".repeat(60)));
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        pad(f, true, "0x", self.digits(16), false)
+        as_primitive!(LowerHex, self.as_limbs(), f, false);
+        pad(f, true, "0x", *self, 16, false)
     }
 }
 
@@ -478,7 +735,8 @@ impl<const N: usize> fmt::UpperHex for Uint<N> {
     /// assert_eq!(format!("{:#X}", Uint::<2>::from_u64(0xbeef)), "0xBEEF");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        pad(f, true, "0x", self.digits(16), true)
+        as_primitive!(UpperHex, self.as_limbs(), f, false);
+        pad(f, true, "0x", *self, 16, true)
     }
 }
 
@@ -493,7 +751,8 @@ impl<const N: usize> fmt::Octal for Uint<N> {
     /// assert_eq!(format!("{:#o}", Uint::<2>::from_u64(8)), "0o10");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        pad(f, true, "0o", self.digits(8), false)
+        as_primitive!(Octal, self.as_limbs(), f, false);
+        pad(f, true, "0o", *self, 8, false)
     }
 }
 
@@ -508,7 +767,8 @@ impl<const N: usize> fmt::Binary for Uint<N> {
     /// assert_eq!(format!("{:#b}", Uint::<2>::from_u64(5)), "0b101");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        pad(f, true, "0b", self.digits(2), false)
+        as_primitive!(Binary, self.as_limbs(), f, false);
+        pad(f, true, "0b", *self, 2, false)
     }
 }
 
@@ -526,13 +786,11 @@ impl<const N: usize> fmt::Display for Int<N> {
     /// assert_eq!(format!("{:06}", Int::<2>::from_i64(-42)), "-00042");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        pad(
-            f,
-            !self.is_negative(),
-            "",
-            self.unsigned_abs().digits(10),
-            false,
-        )
+        if let Some(r) = plain_decimal(f, self.unsigned_abs(), self.is_negative()) {
+            return r;
+        }
+        as_primitive!(Display, self.as_limbs(), f, true);
+        pad(f, !self.is_negative(), "", self.unsigned_abs(), 10, false)
     }
 }
 
@@ -551,7 +809,8 @@ macro_rules! twos_complement {
             /// assert_eq!(format!("{:#b}", Int::<1>::MIN), format!("{:#b}", i64::MIN));
             /// ```
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                pad(f, true, $prefix, self.cast_unsigned().digits($radix), $upper)
+                as_primitive!($trait, self.as_limbs(), f, true);
+                pad(f, true, $prefix, self.cast_unsigned(), $radix, $upper)
             }
         }
     )*};

@@ -787,3 +787,25 @@ fn expint_special_values() {
     let x0 = 0.372_507_410_781_366_6f64;
     assert!(expint_ei(x0).abs() < eps(1.0));
 }
+
+#[test]
+fn lambert_w0_without_a_fused_multiply_add() {
+    // The last step `x·c₀ + x·hl` of the pieces of `x e^(−W₀)` rounded twice without a fused
+    // multiply-add (x86_64 by default): 1.59 and 1.11 ulps at these points (mpmath at 60 digits);
+    // with the product exact, within the bound of 1 ulp on every target.
+    for (x, hi, lo) in [
+        (
+            0.7939862750941973,
+            0.4875904216912718,
+            -2.2708827691094167e-17,
+        ),
+        (
+            0.7851795518000724,
+            0.48394374643921784,
+            6.042651393545385e-18,
+        ),
+    ] {
+        let e = ulps(lambert_w0(x), (hi, lo), F64);
+        assert!(e <= 1.0, "lambert_w0({x}): {e:.3} ulps");
+    }
+}

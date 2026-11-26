@@ -81,9 +81,17 @@ pub use zeta::{dilog, hurwitz_zeta, polylog};
 pub(crate) mod sealed {
     use crate::math::complex::Complex;
 
-    pub trait Real {}
-    impl Real for f32 {}
-    impl Real for f64 {}
+    pub trait Real {
+        /// Whether the type is `f32` (whose forms may take kernels of `f32` grade, computed in
+        /// `f64` to well past an `f32`'s precision and rounded once).
+        const F32: bool;
+    }
+    impl Real for f32 {
+        const F32: bool = true;
+    }
+    impl Real for f64 {
+        const F32: bool = false;
+    }
 
     /// The functions of [`super::Scalar`], each type's own.
     pub trait Scalar: Copy {
@@ -102,7 +110,7 @@ pub(crate) mod sealed {
                 $(#[inline] fn $f(self) -> f64 { super::ep::$f::real(self) })*
             }
             impl Scalar for f32 {
-                $(#[inline] fn $f(self) -> f32 { super::ep::$f::real(self as f64) as f32 })*
+                $(#[inline] fn $f(self) -> f32 { super::ep::$f::real32(self as f64) as f32 })*
             }
             impl Scalar for Complex<f64> {
                 $(#[inline] fn $f(self) -> Complex<f64> { super::ep::$f::complex(self) })*
@@ -137,23 +145,34 @@ pub(crate) fn via<T: Real>(x: T, f: impl FnOnce(f64) -> f64) -> T {
     T::from_f64(f(x.to_f64()))
 }
 
+/// A real function of `f64` and its `f32` form through `g`, a kernel of `f32` grade (in `f64`,
+/// rounded once to the `f32`).
+#[inline]
+pub(crate) fn via_f32<T: Real>(x: T, f: impl FnOnce(f64) -> f64, g: impl FnOnce(f64) -> f64) -> T {
+    let x = x.to_f64();
+    T::from_f64(if <T as sealed::Real>::F32 { g(x) } else { f(x) })
+}
+
 // The internal entry points of the functions of `Scalar`, by area: `ep::<name>::real` of an
 // `f64` and `ep::<name>::complex` of a `Complex<f64>`.
 mod ep {
     macro_rules! entry {
-        ($($name:ident: $area:ident::$real:ident, $complex:ident;)*) => {$(
+        ($($name:ident: $area:ident::$real:ident, $real32:ident, $complex:ident;)*) => {$(
             pub(crate) mod $name {
-                pub(crate) use crate::math::special::$area::{$complex as complex, $real as real};
+                pub(crate) use crate::math::special::$area::{
+                    $complex as complex, $real as real, $real32 as real32,
+                };
             }
         )*};
     }
+    // `real32` is the kernel of the `f32` form (of `f32` grade, or the `f64` one).
     entry! {
-        gamma: gamma::gamma_f64, gamma_c64;
-        lgamma: gamma::lgamma_f64, lgamma_c64;
-        erf: erf::erf_f64, erf_c64;
-        erfc: erf::erfc_f64, erfc_c64;
-        erfcx: erf::erfcx_f64, erfcx_c64;
-        zeta: zeta::zeta_f64, zeta_c64;
+        gamma: gamma::gamma_f64, gamma_f64, gamma_c64;
+        lgamma: gamma::lgamma_f64, lgamma_f64, lgamma_c64;
+        erf: erf::erf_f64, erf_f32, erf_c64;
+        erfc: erf::erfc_f64, erfc_f64, erfc_c64;
+        erfcx: erf::erfcx_f64, erfcx_f64, erfcx_c64;
+        zeta: zeta::zeta_f64, zeta_f64, zeta_c64;
     }
 }
 

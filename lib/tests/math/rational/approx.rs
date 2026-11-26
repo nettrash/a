@@ -81,6 +81,126 @@ fn long(state: &mut u64, bytes: usize) -> Rational {
 }
 
 #[test]
+fn continued_fraction_into_one_vector() {
+    // One vector written again and again, over expansions longer and shorter than the one before,
+    // of rationals in words, of up to 128 bits and longer, in either byte order, and over
+    // numbers of any form left in it: each time what `continued_fraction` gives.
+    let mut s = 0x6366_696e_746f_0001u64;
+    let mut v = vec![
+        Number::from(7u8),
+        Number::new_signed(vec![0, 0, 5], true, ByteOrder::BigEndian),
+        Number::new_signed(vec![1; 40], false, ByteOrder::LittleEndian),
+    ];
+    for i in 0..size(3000, 60) {
+        let x = match below(&mut s, 8) {
+            0 => {
+                let bytes = 3 + below(&mut s, 200) as usize;
+                long(&mut s, bytes)
+            }
+            1 => Rational::from_integer(integer(&mut s, 30)),
+            _ => rational(&mut s, 24),
+        };
+        x.continued_fraction_into(&mut v);
+        assert_eq!(v, x.continued_fraction(), "{x}");
+        canonical(&x, &v);
+        if i % 97 == 0 {
+            v.clear();
+        }
+    }
+}
+
+#[test]
+fn continued_fraction_into_allocations() {
+    // What `continued_fraction_into` states it allocates, counted: into one vector taken again
+    // and again, one allocation for each term past those the vector held and for each number held
+    // with too little room for its term, nothing else for parts of up to 128 bits, and for longer
+    // parts below the half gcd's 600 limbs seven more a call: the first term, the remainder and
+    // Euclid's working memory; past 600 limbs more.
+    use crate::allocations::count;
+    let mut s = 0x6366_616c_6c6f_6301u64;
+    let word = |s: &mut u64| loop {
+        let n = Number::from(xorshift(s) >> below(s, 64));
+        let d = Number::from(xorshift(s) >> below(s, 64));
+        if !d.is_zero() {
+            let x = Rational::new(if below(s, 2) == 1 { -n } else { n }, d);
+            if x.numer().bits() <= 64 && x.denom().bits() <= 64 {
+                return x;
+            }
+        }
+    };
+    let wide = |s: &mut u64| loop {
+        let n = u128::from(xorshift(s)) << 64 | u128::from(xorshift(s));
+        let d = u128::from(xorshift(s)) << 64 | u128::from(xorshift(s));
+        let x = Rational::new(
+            Number::from(n >> below(s, 64)),
+            Number::from((d >> below(s, 64)).max(1)),
+        );
+        let x = if below(s, 2) == 1 { -x } else { x };
+        if x.numer().bits() > 64 || x.denom().bits() > 64 {
+            return x;
+        }
+    };
+    let longer = |s: &mut u64| loop {
+        let bytes = 20 + below(s, 480) as usize;
+        let x = long(s, bytes);
+        if x.denom().bits() > 128 {
+            return x;
+        }
+    };
+    /// A maker of random rationals of one kind.
+    type Make<'a> = &'a dyn Fn(&mut u64) -> Rational;
+    let kinds: [(&str, Make, usize); 3] = [
+        ("words", &word, 0),
+        ("parts of up to 128 bits", &wide, 0),
+        ("parts of 129 bits to 63 limbs", &longer, 7),
+    ];
+    for (what, make, extra) in kinds {
+        if cfg!(miri) && extra != 0 {
+            // Miri's half gcd starts at 6 limbs.
+            continue;
+        }
+        let values: Vec<Rational> = (0..size(60, 4)).map(|_| make(&mut s)).collect();
+        // The same value again into its own expansion.
+        for x in &values {
+            let mut v = x.continued_fraction();
+            let (_, a) = count(|| x.continued_fraction_into(&mut v));
+            assert_eq!(a, extra, "{what}: {x} into its own expansion");
+            assert_eq!(v, x.continued_fraction());
+        }
+        // One vector for all of them, from the second round on (the vector of numbers has then
+        // grown): the terms past those it held, and those held with too little room.
+        let mut v: Vec<Number> = Vec::new();
+        for x in &values {
+            x.continued_fraction_into(&mut v);
+        }
+        for round in 1..3 {
+            for x in &values {
+                let room: Vec<usize> = v.iter().map(|t| t.value.capacity()).collect();
+                let (_, a) = count(|| x.continued_fraction_into(&mut v));
+                let past = v.len().saturating_sub(room.len());
+                // The first term of longer parts is a new number, one of the seven.
+                let short = v
+                    .iter()
+                    .zip(&room)
+                    .skip(usize::from(extra != 0))
+                    .filter(|(t, c)| t.value.len() > **c)
+                    .count();
+                assert_eq!(a, past + short + extra, "{what}, round {round}: {x}");
+            }
+        }
+    }
+    if !cfg!(miri) {
+        // Past the half gcd's threshold more: parts of 640 limbs.
+        let mut st = 0x0640u64;
+        let x = long(&mut st, 640 * 8);
+        let mut v = x.continued_fraction();
+        let (_, a) = count(|| x.continued_fraction_into(&mut v));
+        assert!(a > 7, "{a}");
+        assert_eq!(v, x.continued_fraction());
+    }
+}
+
+#[test]
 fn continued_fraction_exhaustive_small() {
     let lim = size(80, 12) as i64;
     for d in 1..=lim {
@@ -525,6 +645,42 @@ fn simplest_between_random() {
         } else {
             assert_eq!(got, a);
         }
+    }
+}
+
+#[test]
+fn simplest_between_four_limbs() {
+    // Ends of parts of 9 to 32 bytes, of either sign, whose floors differ by a little or by much,
+    // or agree: the integers between in registers, against the recursive reference.
+    let mut s = 0x7369_6d70_6c65_0004u64;
+    for _ in 0..size(4000, 40) {
+        let o = order(xorshift(&mut s));
+        let part = |s: &mut u64| {
+            let b = 65 + below(s, 192) as usize;
+            of_bits(s, b, o)
+        };
+        let end = |s: &mut u64| {
+            let (n, d) = (part(s), part(s));
+            let r = Rational::new(n, d);
+            if below(s, 2) == 0 { -r } else { r }
+        };
+        let a = end(&mut s);
+        let b = match below(&mut s, 3) {
+            0 => end(&mut s),
+            1 => &a + &Rational::from(below(&mut s, 3) as i64 - 1),
+            _ => &a + &Rational::new(Number::from(1u8), part(&mut s)),
+        };
+        let got = Rational::simplest_between(&a, &b);
+        check(&got);
+        assert!(got.byte_order() == a.byte_order());
+        let (lo, hi) = if a <= b { (&a, &b) } else { (&b, &a) };
+        let expected = if lo == hi {
+            lo.clone()
+        } else {
+            simplest_recursive(lo, hi)
+        };
+        assert_eq!(got, expected, "[{a}, {b}]");
+        assert_eq!(Rational::simplest_between(&b, &a), expected);
     }
 }
 
@@ -1094,6 +1250,55 @@ fn wang(r: &Number, m: &Number, n: &Number, d: &Number) -> Option<Rational> {
         return None;
     }
     Some(Rational::new(r1, t1))
+}
+
+#[test]
+fn reconstruct_moduli_of_up_to_four_limbs() {
+    // Moduli of 129 to 256 bits, Lehmer's algorithm in registers, against Wang's on numbers: the
+    // residues of fractions near the bounds, and of any number, with bounds below `2^128` and
+    // past it.
+    let mut s = 0x6c65_686d_6572_0001u64;
+    for _ in 0..size(6000, 40) {
+        let o = order(xorshift(&mut s));
+        let mb = 129 + below(&mut s, 128) as usize;
+        let m = of_bits(&mut s, mb, o);
+        let half = mb / 2;
+        let r = if below(&mut s, 3) == 0 {
+            let b = 1 + below(&mut s, mb as u64 + 8) as usize;
+            of_bits(&mut s, b, o)
+        } else {
+            let pb = half - 3 + below(&mut s, 6) as usize;
+            let qb = half - 3 + below(&mut s, 6) as usize;
+            let p = of_bits(&mut s, pb, o);
+            let qq = of_bits(&mut s, qb, o);
+            match qq.mod_inverse(&m) {
+                Some(inv) => (&p * &inv).rem_euclid(&m),
+                None => p,
+            }
+        };
+        let r = if below(&mut s, 4) == 0 { -r } else { r };
+        let bound = |s: &mut u64| match below(s, 6) {
+            0 => Number::from(1u8) << 128usize,
+            1 => Number::from(u128::MAX),
+            2 => Number::from(1u8),
+            _ => {
+                let b = half - 4 + below(s, 8) as usize;
+                let o = order(xorshift(s));
+                of_bits(s, b, o)
+            }
+        };
+        let (n, d) = (bound(&mut s), bound(&mut s));
+        let got = Rational::reconstruct_with_bounds(&r, &m, &n, &d);
+        let expected = wang(&r, &m, &n, &d);
+        assert_eq!(got.is_some(), expected.is_some(), "{r} mod {m}, {n}, {d}");
+        if let (Some(g), Some(e)) = (&got, &expected) {
+            same(g, e);
+            assert!(g.byte_order() == r.byte_order());
+        }
+        let got = Rational::reconstruct(&r, &m);
+        let b = ((&m - 1u8).div_floor(&Number::from(2u8))).isqrt();
+        assert_eq!(got, wang(&r, &m, &b, &b), "{r} mod {m}");
+    }
 }
 
 #[test]

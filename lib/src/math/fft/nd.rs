@@ -1,9 +1,12 @@
 //! Transforms of arrays of two and three dimensions, one dimension after the other: the last
-//! (contiguous) one as a batch of rows, each other one by tiles of columns gathered into a
-//! buffer, transformed there as a batch of contiguous sequences and scattered back, so that each
-//! pass over the array reads and writes whole cache lines.
+//! (contiguous) one as a batch of rows; each other one, for an array that fits in the caches,
+//! by the passes of its transform run along the rows (the columns as interleaved sequences, the
+//! vectors across them), else by tiles of columns gathered into a buffer, transformed there as a
+//! batch of contiguous sequences and scattered back, so that each pass over the array reads and
+//! writes whole cache lines.
 
-use super::{Fft, FftFloat, check_batch};
+use super::complex::{Algo, Isa};
+use super::{Fft, FftFloat, check_batch, with_raw};
 use crate::math::complex::Complex;
 
 /// The two-dimensional discrete Fourier transform of `rows × cols` complex arrays stored row
@@ -26,13 +29,16 @@ use crate::math::complex::Complex;
 pub struct Fft2<T> {
     rows: Fft<T>,
     cols: Fft<T>,
+    down: Axis<T>,
 }
 
 impl<T: FftFloat> Fft2<T> {
     /// The plan for arrays of `rows` rows of `cols` values.
     pub fn new(rows: usize, cols: usize) -> Fft2<T> {
+        let rows_plan = Fft::new(rows);
         Fft2 {
-            rows: Fft::new(rows),
+            down: Axis::new(&rows_plan, cols, rows * cols),
+            rows: rows_plan,
             cols: Fft::new(cols),
         }
     }
@@ -62,11 +68,18 @@ impl<T: FftFloat> Fft2<T> {
         if r * c == 0 {
             return;
         }
-        let mut work = Work::new(&[&self.rows, &self.cols]);
-        rows(&self.cols, data, inverse, &mut work);
-        for array in data.chunks_exact_mut(r * c) {
-            columns(&self.rows, array, c, inverse, &mut work);
-        }
+        let need = self.cols.batch_work(data.len()).max(self.down.need());
+        with_raw(need, |scr| {
+            // SAFETY: `scr` holds `need` values, every one written before it is read; the
+            // arrays are whole.
+            unsafe {
+                self.cols
+                    .run_raw(data.as_mut_ptr(), data.len(), scr, need, inverse);
+                for array in data.chunks_exact_mut(r * c) {
+                    self.down.run(array, scr, inverse);
+                }
+            }
+        });
     }
 }
 
@@ -87,13 +100,19 @@ impl<T: FftFloat> Fft2<T> {
 /// ```
 pub struct Fft3<T> {
     n: [Fft<T>; 3],
+    /// The second axis within each plane of `n1 × n2`, and the first over the whole array.
+    mid: Axis<T>,
+    top: Axis<T>,
 }
 
 impl<T: FftFloat> Fft3<T> {
     /// The plan for arrays of the shape `n0 × n1 × n2`.
     pub fn new(n0: usize, n1: usize, n2: usize) -> Fft3<T> {
+        let n = [Fft::new(n0), Fft::new(n1), Fft::new(n2)];
         Fft3 {
-            n: [Fft::new(n0), Fft::new(n1), Fft::new(n2)],
+            mid: Axis::new(&n[1], n2, n1 * n2),
+            top: Axis::new(&n[0], n1 * n2, n0 * n1 * n2),
+            n,
         }
     }
 
@@ -123,14 +142,22 @@ impl<T: FftFloat> Fft3<T> {
         if size == 0 {
             return;
         }
-        let mut work = Work::new(&[&self.n[0], &self.n[1], &self.n[2]]);
-        rows(&self.n[2], data, inverse, &mut work);
-        for array in data.chunks_exact_mut(size) {
-            for plane in array.chunks_exact_mut(n1 * n2) {
-                columns(&self.n[1], plane, n2, inverse, &mut work);
+        let need = self.n[2]
+            .batch_work(data.len())
+            .max(self.mid.need())
+            .max(self.top.need());
+        with_raw(need, |scr| {
+            // SAFETY: as for `Fft2`.
+            unsafe {
+                self.n[2].run_raw(data.as_mut_ptr(), data.len(), scr, need, inverse);
+                for array in data.chunks_exact_mut(size) {
+                    for plane in array.chunks_exact_mut(n1 * n2) {
+                        self.mid.run(plane, scr, inverse);
+                    }
+                    self.top.run(array, scr, inverse);
+                }
             }
-            columns(&self.n[0], array, n1 * n2, inverse, &mut work);
-        }
+        });
     }
 }
 
@@ -143,22 +170,105 @@ const TILE_BYTES: usize = 1 << 20;
 /// the cache.
 const TILE_ROW_BYTES: usize = 256;
 
-/// The working memory of the passes: a tile and the scratch of the transforms.
-struct Work<T> {
-    tile: Vec<Complex<T>>,
-    scratch: Vec<Complex<T>>,
+/// The most bytes of an array whose columns are transformed by the passes along its rows
+/// (each pass reads and writes the whole array); a larger one goes by tiles. Measured on an
+/// Apple M4 Max (arrays of 1 to 256 MiB, `f64` and `f32`, 2 to 8192 rows, two and three
+/// dimensions): above this bound the passes take 0.33 to 0.9 of the tiles' time, except where a
+/// column is one composite butterfly of 12 to 25 values and the stride of the rows a power of
+/// two (16 × 65,536, 24 × 512 × 128: the values of a column fall into the same sets of the
+/// caches), 1.08 to 1.56 times the tiles' time, and already 1.15 to 1.58 times at 2 to 4 MiB; a
+/// larger bound would make those slower.
+const ALONG_BYTES: usize = 4 << 20;
+
+/// The transforms along one axis of stride `stride` (the columns of an array of `stride`
+/// columns): by the passes along the rows, or by tiles.
+enum Axis<T> {
+    /// A length of 0 or 1: nothing to do.
+    None,
+    /// The passes of the columns as interleaved sequences, over arrays of `len` values.
+    Along { algo: Algo<T>, need: usize },
+    /// Tiles of columns gathered into a buffer, transformed by `fft` and scattered back.
+    Tiles {
+        fft: Fft<T>,
+        stride: usize,
+        width: usize,
+    },
 }
 
-impl<T: FftFloat> Work<T> {
-    fn new(ffts: &[&Fft<T>]) -> Work<T> {
-        let (mut tile, mut scratch) = (0, 0);
-        for f in ffts {
-            tile = tile.max(tile_cols::<T>(f.len()) * f.len());
-            scratch = scratch.max(f.scratch_len());
+impl<T: FftFloat> Axis<T> {
+    /// The transforms by `fft` of the columns of arrays of `len` values in rows of `stride`.
+    fn new(fft: &Fft<T>, stride: usize, len: usize) -> Axis<T> {
+        let n = fft.len();
+        if n <= 1 || len == 0 {
+            return Axis::None;
         }
-        Work {
-            tile: vec![Complex::ZERO; tile],
-            scratch: vec![Complex::ZERO; scratch],
+        if len * core::mem::size_of::<Complex<T>>() <= ALONG_BYTES
+            && let Some(algo) = Algo::interleaved(n, stride, Isa::detect())
+        {
+            let need = algo.scratch();
+            return Axis::Along { algo, need };
+        }
+        Axis::Tiles {
+            fft: fft.clone(),
+            stride,
+            width: tile_cols::<T>(n),
+        }
+    }
+
+    /// The working memory of [`run`](Self::run).
+    fn need(&self) -> usize {
+        match self {
+            Axis::None => 0,
+            Axis::Along { need, .. } => *need,
+            Axis::Tiles { fft, width, .. } => {
+                let tile = width * fft.len();
+                tile + fft.batch_work(tile)
+            }
+        }
+    }
+
+    /// The transforms of the columns of `data` (one array), with the working memory at `scr`
+    /// of [`need`](Self::need) values, uninitialised.
+    ///
+    /// # Safety
+    /// `scr` must be valid for [`need`](Self::need) values and not overlap `data`.
+    unsafe fn run(&self, data: &mut [Complex<T>], scr: *mut Complex<T>, inverse: bool) {
+        match self {
+            Axis::None => {}
+            Axis::Along { algo, .. } => {
+                let p = data.as_mut_ptr();
+                // SAFETY: the array, in place; the plan's working memory at `scr`.
+                unsafe { algo.run(p, p, scr, inverse) }
+            }
+            Axis::Tiles { fft, stride, width } => {
+                let (n, stride) = (fft.len(), *stride);
+                let tile_len = width * n;
+                // SAFETY: the caller's contract: the tile and then the transforms' scratch.
+                let (tile, rest) = unsafe { (scr, scr.add(tile_len)) };
+                let rest_len = fft.batch_work(tile_len);
+                let mut o = 0;
+                while o < stride {
+                    let b = (*width).min(stride - o);
+                    // SAFETY: the gather writes the `b·n` values of the tile, which the
+                    // transform then reads and the scatter reads back; within `data`.
+                    unsafe {
+                        for j in 0..n {
+                            let row = data.as_ptr().add(j * stride + o);
+                            for c in 0..b {
+                                tile.add(c * n + j).write(*row.add(c));
+                            }
+                        }
+                        fft.run_raw(tile, b * n, rest, rest_len, inverse);
+                        for j in 0..n {
+                            let row = data.as_mut_ptr().add(j * stride + o);
+                            for c in 0..b {
+                                *row.add(c) = tile.add(c * n + j).read();
+                            }
+                        }
+                    }
+                    o += b;
+                }
+            }
         }
     }
 }
@@ -167,58 +277,6 @@ impl<T: FftFloat> Work<T> {
 fn tile_cols<T>(n: usize) -> usize {
     let size = core::mem::size_of::<Complex<T>>();
     (TILE_BYTES / (size * n.max(1))).clamp(1, TILE_ROW_BYTES / size)
-}
-
-/// The transform of each contiguous run of the plan's length in `data`, as one batch.
-fn rows<T: FftFloat>(fft: &Fft<T>, data: &mut [Complex<T>], inverse: bool, work: &mut Work<T>) {
-    if fft.len() <= 1 {
-        return;
-    }
-    if inverse {
-        fft.inverse_with_scratch(data, &mut work.scratch);
-    } else {
-        fft.forward_with_scratch(data, &mut work.scratch);
-    }
-}
-
-/// The transforms along a dimension of stride `stride`: for each offset `o` in `0..stride`, of
-/// the values `data[o], data[o + stride], …`, by tiles of adjacent columns gathered into
-/// contiguous sequences.
-fn columns<T: FftFloat>(
-    fft: &Fft<T>,
-    data: &mut [Complex<T>],
-    stride: usize,
-    inverse: bool,
-    work: &mut Work<T>,
-) {
-    let n = fft.len();
-    if n <= 1 {
-        return;
-    }
-    let width = tile_cols::<T>(n);
-    let mut o = 0;
-    while o < stride {
-        let b = width.min(stride - o);
-        let tile = &mut work.tile[..b * n];
-        for j in 0..n {
-            let row = &data[j * stride + o..j * stride + o + b];
-            for (c, &v) in row.iter().enumerate() {
-                tile[c * n + j] = v;
-            }
-        }
-        if inverse {
-            fft.inverse_with_scratch(tile, &mut work.scratch);
-        } else {
-            fft.forward_with_scratch(tile, &mut work.scratch);
-        }
-        for j in 0..n {
-            let row = &mut data[j * stride + o..j * stride + o + b];
-            for (c, v) in row.iter_mut().enumerate() {
-                *v = tile[c * n + j];
-            }
-        }
-        o += b;
-    }
 }
 
 impl<T: FftFloat> core::fmt::Debug for Fft2<T> {

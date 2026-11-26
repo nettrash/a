@@ -217,6 +217,72 @@ fn large_powers_overflow_and_underflow_by_the_mode() {
     }
 }
 
+/// Powers by exponents of two limbs (`2^64` to `2^72`) of numbers near one, against the bracket
+/// of `exp(±n·ln x)` with directed roundings at 300 bits more: the register and fixed-width paths
+/// of such exponents, in every mode, for both signs of the exponent. A case whose bracket rounds
+/// two ways is left out; the count of the others is checked.
+#[test]
+fn powers_by_two_limb_exponents_round_correctly() {
+    let mut s = 0x9017_0077u64;
+    let mut checked = 0;
+    let cases = size(240, 6);
+    for i in 0..cases {
+        let p = 1 + below(&mut s, if i % 3 == 0 { 420 } else { 130 });
+        // `x = 1 + u·2^-d`, `u` odd of up to 20 bits, exact at `d + 21` bits.
+        let d = 64 + below(&mut s, 40) as i64;
+        let u = (below(&mut s, 1 << 20) | 1) as i64;
+        let xp = d as u64 + 21;
+        let small = BigFloat::from_parts(&Number::from(u), -d, xp, Round::Nearest).0;
+        let x = BigFloat::from(1).add_round(&small, xp, Round::Nearest).0;
+        let k = below(&mut s, 1 << 40) + if i % 4 == 0 { 0 } else { 1 << 41 };
+        let n = Number::from(1u64 << 63) * Number::from(1u64 << (1 + below(&mut s, 8)))
+            + Number::from(k);
+        let negative = i % 2 == 1;
+        let nn = if negative { -&n } else { n.clone() };
+        let w = p + 300;
+        let nf = BigFloat::from_number(&n, 128, Round::Nearest).0;
+        let (l_lo, l_hi) = (x.ln_round(w, Round::Down).0, x.ln_round(w, Round::Up).0);
+        let (t_lo, t_hi) = (
+            l_lo.mul_round(&nf, w + 80, Round::Down).0,
+            l_hi.mul_round(&nf, w + 80, Round::Up).0,
+        );
+        let (t_lo, t_hi) = if negative {
+            (-t_hi, -t_lo)
+        } else {
+            (t_lo, t_hi)
+        };
+        let (y_lo, y_hi) = (
+            t_lo.exp_round(w, Round::Down).0,
+            t_hi.exp_round(w, Round::Up).0,
+        );
+        for round in MODES {
+            let (a, _) = y_lo.prec_round(p, round);
+            let (b, _) = y_hi.prec_round(p, round);
+            if a != b {
+                continue;
+            }
+            let o = if a > y_hi {
+                Ordering::Greater
+            } else if a < y_lo {
+                Ordering::Less
+            } else {
+                continue;
+            };
+            same(
+                &x.pow_number_round(&nn, p, round),
+                &(a, o),
+                &format!("{x:?}^{nn:?} at {p} {round:?}"),
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 3 * cases,
+        "only {checked} of {} cases decided",
+        4 * cases
+    );
+}
+
 #[test]
 fn power_special_values_follow_mpfr() {
     let nan = BigFloat::nan(10);
@@ -497,4 +563,136 @@ fn mpfr_vectors_agree() {
         count += 1;
     }
     assert!(count > 0);
+}
+
+/// MPFR's powers (`mpfr_pow_z`) rounded to nearest with their ternaries: `kind bits sign prec
+/// mantissa exponent ternary`, the base and the exponent of `bits` bits given by the kind (see the
+/// file's head and [`table_base`], [`table_exponent`]).
+const POW_MPFR: &str = include_str!("data/pow_mpfr.txt");
+
+/// The 256 bits the table's exponents take their low bits from.
+const POW_PATTERN: &str = "9E3779B97F4A7C15F39CC0605CEDC8341082276BF3A27251F86C6A11D0C18E95";
+
+/// `2^(bits - 1)` plus the low `bits - 1` bits of [`POW_PATTERN`].
+fn table_exponent(bits: u64) -> Number {
+    let p = Number::from_str_radix(POW_PATTERN, 16, ByteOrder::LittleEndian).unwrap();
+    let k = (bits - 1) as usize;
+    let low = &p - &(&(&p >> k) << k);
+    &(&Number::from(1) << k) + &low
+}
+
+/// The base of a line of [`POW_MPFR`]: `1 + 15·2^-(bits + 8) + 2^-(pb - 1)` of `pb = max(bits +
+/// 16, 160)` bits (three limbs or more, which the powers by negative exponents take on the general
+/// path), `1 ± 3·2^-k` of 128 bits for `k = min(bits + 2, 126)` (the register and fixed-width
+/// paths), or the auditor's `1 + 15·2^-68` of 227 bits.
+fn table_base(kind: &str, bits: u64) -> BigFloat {
+    let one = Number::from(1);
+    let (m, e, p) = match kind {
+        "sweep" => {
+            let pb = (bits + 16).max(160);
+            let m = &(&(&one << (pb - 1) as usize)
+                + &(Number::from(15) << (pb - 9 - bits) as usize))
+                + &one;
+            (m, 1 - pb as i64, pb)
+        }
+        "up" | "down" => {
+            let k = (bits + 2).min(126);
+            let m = if kind == "up" {
+                &(&one << k as usize) + &Number::from(3)
+            } else {
+                &(&one << k as usize) - &Number::from(3)
+            };
+            (m, -(k as i64), 128)
+        }
+        "repro" => (&(&one << 68usize) + &Number::from(15), -68, 227),
+        _ => panic!("no kind {kind}"),
+    };
+    let (x, o) = BigFloat::from_parts(&m, e, p, Round::Nearest);
+    assert_eq!(o, Ordering::Equal);
+    x
+}
+
+/// The four roundings of a positive value that is not a number of `prec` bits, from its rounding
+/// to nearest `m·2^e` (`m` of `prec` bits) and the ternary `t`: the other neighbour is a unit of
+/// the last place away, below (half a unit at a power of two) when `t` is `Greater`.
+fn from_nearest(m: &Number, e: i64, prec: u64, t: Ordering) -> [(Round, (BigFloat, Ordering)); 4] {
+    let at = |m: &Number, e: i64| {
+        let (x, o) = BigFloat::from_parts(m, e, prec, Round::Nearest);
+        assert_eq!(o, Ordering::Equal);
+        x
+    };
+    let one = Number::from(1);
+    let near = at(m, e);
+    let other = if t == Ordering::Greater {
+        if *m == &one << (prec - 1) as usize {
+            at(&(&(&one << prec as usize) - &one), e - 1)
+        } else {
+            at(&(m - &one), e)
+        }
+    } else {
+        at(&(m + &one), e)
+    };
+    let (below, above) = if t == Ordering::Greater {
+        (other, near.clone())
+    } else {
+        (near.clone(), other)
+    };
+    [
+        (Round::Nearest, (near, t)),
+        (Round::TowardZero, (below.clone(), Ordering::Less)),
+        (Round::Down, (below, Ordering::Less)),
+        (Round::Up, (above, Ordering::Greater)),
+    ]
+}
+
+/// Powers by exponents of every length from 1 to 200 bits, positive and negative, against MPFR in
+/// every mode, with the ternary: the general path on limbs (a base of three limbs or more), whose
+/// bound, read on the limbs left when some are dropped, once shifted a negative count for the
+/// exponents of 59, 121 to 123 and 185 to 187 bits (a panic in a debug build); the register and
+/// fixed-width paths with exponents of two limbs past `2^73`, to `2^128`; and the auditor's
+/// reproducer of that panic. `powi_round` too where the exponent fits an `i64`.
+#[test]
+fn powers_by_exponents_of_every_length_agree_with_mpfr() {
+    let lines: Vec<&str> = POW_MPFR.lines().filter(|l| !l.starts_with('#')).collect();
+    // Under Miri a sample, the reproducer among it.
+    let step = if cfg!(miri) { 29 } else { 1 };
+    let mut checked = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if i % step != 0 && !line.starts_with("repro") {
+            continue;
+        }
+        let v: Vec<&str> = line.split(' ').collect();
+        let (kind, bits, prec) = (v[0], v[1].parse::<u64>().unwrap(), v[3].parse().unwrap());
+        let negative = v[2] == "-";
+        let m = Number::from_str_radix(v[4], 16, ByteOrder::LittleEndian).unwrap();
+        let e: i64 = v[5].parse().unwrap();
+        let t = if v[6] == "-1" {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+        let x = table_base(kind, bits);
+        let n = if kind == "repro" {
+            Number::from(433_469_323_772_788_655u64)
+        } else {
+            table_exponent(bits)
+        };
+        assert_eq!(n.bits(), bits, "{line}");
+        let nn = if negative { -&n } else { n.clone() };
+        for (round, want) in from_nearest(&m, e, prec, t) {
+            let what = format!("{kind} {bits} bits {} at {prec} {round:?}", v[2]);
+            same(&x.pow_number_round(&nn, prec, round), &want, &what);
+            if bits <= 63 {
+                let k = i64::try_from(&nn).unwrap();
+                same(
+                    &x.powi_round(k, prec, round),
+                    &want,
+                    &format!("powi {what}"),
+                );
+            }
+        }
+        checked += 1;
+    }
+    // 430 lines of the sweep, 456 of the register and fixed-width paths, the reproducer.
+    assert_eq!(checked, if cfg!(miri) { 32 } else { 887 });
 }

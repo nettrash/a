@@ -397,31 +397,25 @@ impl PairingCurve {
     /// The generator of `G1`.
     #[must_use]
     pub fn g1_generator(&self) -> G1<'_> {
-        G1::from_jacobian(
-            self,
-            Jacobian::from_affine(self.g1[0].clone(), self.g1[1].clone()),
-        )
+        G1::from_affine_unchecked(self, &self.g1[0], &self.g1[1], true)
     }
 
     /// The neutral element of `G1`, the point at infinity.
     #[must_use]
     pub fn g1_identity(&self) -> G1<'_> {
-        G1::from_jacobian(self, Jacobian::identity(&self.b))
+        G1::identity(self)
     }
 
     /// The generator of `G2`.
     #[must_use]
     pub fn g2_generator(&self) -> G2<'_> {
-        G2::from_jacobian(
-            self,
-            Jacobian::from_affine(self.g2[0].clone(), self.g2[1].clone()),
-        )
+        G2::from_affine_unchecked(self, &self.g2[0], &self.g2[1], true)
     }
 
     /// The neutral element of `G2`, the point at infinity.
     #[must_use]
     pub fn g2_identity(&self) -> G2<'_> {
-        G2::from_jacobian(self, Jacobian::identity(&self.b_twist))
+        G2::identity(self)
     }
 
     /// The neutral element of `GT`, 1.

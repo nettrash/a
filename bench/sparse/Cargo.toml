@@ -1,0 +1,22 @@
+[package]
+name = "sparse-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The scoreboard probe of a::math::sparse against its references. Release profile as a user of
+# the crate gets it: opt-level 3, no LTO, default codegen units, no target-cpu.
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../lib" }
+faer = { version = "=0.24.4", default-features = false, features = ["std", "sparse-linalg"] }
+sprs = { version = "=0.11.6", default-features = false }  # no multi_thread: single-threaded like every reference
+nalgebra = "0.34"
+nalgebra-sparse = { version = "=0.11.0", features = ["io"] }
+ndarray = "0.17"
+num-complex = "0.4"
+
+[build-dependencies]
+cc = "1"
+
+[workspace]

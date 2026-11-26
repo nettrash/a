@@ -606,8 +606,9 @@ impl<const N: usize> Uint<N> {
         (Uint { limbs }, high)
     }
 
-    /// `self · rhs` modulo `2^(64·N)` and whether it wrapped, by the schoolbook method over the
-    /// limbs that land below the width.
+    /// `self · rhs` modulo `2^(64·N)` and whether it wrapped: the schoolbook products that land
+    /// below the width, and the flag from the lengths of the operands in bits (and, where they sum
+    /// to `64·N + 1`, from the high half of the full product).
     ///
     /// # Examples
     ///
@@ -620,8 +621,12 @@ impl<const N: usize> Uint<N> {
     /// ```
     #[inline]
     pub const fn overflowing_mul(self, rhs: Self) -> (Self, bool) {
-        let (limbs, overflow) = limbs::mul_low(&self.limbs, &rhs.limbs);
-        (Uint { limbs }, overflow)
+        (
+            Uint {
+                limbs: limbs::mul_low(&self.limbs, &rhs.limbs),
+            },
+            limbs::mul_overflows(&self.limbs, &rhs.limbs),
+        )
     }
 
     /// `self · rhs`, or `None` if it overflows.
@@ -653,7 +658,9 @@ impl<const N: usize> Uint<N> {
     /// ```
     #[inline]
     pub const fn wrapping_mul(self, rhs: Self) -> Self {
-        self.overflowing_mul(rhs).0
+        Uint {
+            limbs: limbs::mul_low(&self.limbs, &rhs.limbs),
+        }
     }
 
     /// `self · rhs`, or [`MAX`](Self::MAX) if it overflows.
@@ -677,7 +684,8 @@ impl<const N: usize> Uint<N> {
     // Quotients and remainders.
 
     /// The quotient and the remainder of `self` by `rhs`, `(self / rhs, self % rhs)`, computed
-    /// together: by Knuth's algorithm D, or by the plain loop for a divisor of one limb.
+    /// together: by Knuth's algorithm D, or by the loop of 2-by-1 divisions for a divisor of one
+    /// limb, each quotient limb from products by the divisor's reciprocal.
     ///
     /// # Panics
     ///
@@ -702,7 +710,8 @@ impl<const N: usize> Uint<N> {
         (Uint { limbs: q }, Uint { limbs: r })
     }
 
-    /// The quotient and the remainder of `self` by one limb `rhs`, by the plain loop.
+    /// The quotient and the remainder of `self` by one limb `rhs`, by the loop of 2-by-1 divisions
+    /// with the reciprocal of `rhs`.
     ///
     /// # Panics
     ///
@@ -1355,9 +1364,11 @@ impl<const N: usize> Uint<N> {
                 }
             }
             e >>= 1;
-            let (s, o) = base.overflowing_mul(base);
-            base = s;
-            overflow |= o;
+            // A square wraps exactly when the base has more than half the bits.
+            overflow |= base.bits() > Self::BITS / 2;
+            base = Uint {
+                limbs: limbs::sqr_low(&base.limbs),
+            };
         }
     }
 
@@ -1379,7 +1390,10 @@ impl<const N: usize> Uint<N> {
         }
     }
 
-    /// `self^exp` modulo `2^(64·N)`.
+    /// `self^exp` modulo `2^(64·N)`: from the top bit of the exponent down, a square for each bit
+    /// and a product by `self` for each one. Where `self` has one limb, the products are by that
+    /// limb, and the first steps are taken in a `u128` while the power fits; for `N = 2`, by
+    /// `u128::wrapping_pow`.
     ///
     /// # Examples
     ///
@@ -1388,10 +1402,56 @@ impl<const N: usize> Uint<N> {
     ///
     /// assert_eq!(Uint::<2>::from_u64(2).wrapping_pow(128), Uint::ZERO);
     /// assert_eq!(Uint::<2>::MAX.wrapping_pow(3), Uint::MAX);
+    /// assert_eq!(Uint::<4>::from_u64(3).wrapping_pow(100), Uint::from_u64(3).pow(50).pow(2));
     /// ```
-    #[inline]
     pub const fn wrapping_pow(self, exp: u32) -> Self {
-        self.overflowing_pow(exp).0
+        if exp == 0 {
+            return Self::ONE;
+        }
+        if N == 2 {
+            let x = self.limbs[0] as u128 | (self.limbs[1 % N] as u128) << 64;
+            let p = x.wrapping_pow(exp);
+            let mut r = [0u64; N];
+            r[0] = p as u64;
+            r[1 % N] = (p >> 64) as u64;
+            return Uint { limbs: r };
+        }
+        let one_limb = N > 0 && limbs::significant(&self.limbs) <= 1;
+        let mut acc = self;
+        let mut bit = 31 - exp.leading_zeros();
+        if one_limb && N >= 3 {
+            // The first squares and products in a u128, while the power fits in it.
+            let b = self.limbs[0] as u128;
+            let mut p = b;
+            while bit > 0 && p >> 64 == 0 {
+                let mut next = p * p;
+                if (exp >> (bit - 1)) & 1 == 1 {
+                    match next.checked_mul(b) {
+                        Some(v) => next = v,
+                        None => break,
+                    }
+                }
+                p = next;
+                bit -= 1;
+            }
+            acc = Self::from_u128(p);
+        }
+        while bit > 0 {
+            bit -= 1;
+            acc = Uint {
+                limbs: limbs::sqr_low(&acc.limbs),
+            };
+            if (exp >> bit) & 1 == 1 {
+                acc = if one_limb {
+                    Uint {
+                        limbs: limbs::mul_add_1(&acc.limbs, self.limbs[0], 0).0,
+                    }
+                } else {
+                    acc.wrapping_mul(self)
+                };
+            }
+        }
+        acc
     }
 
     /// `self^exp`, or [`MAX`](Self::MAX) if it overflows.
@@ -1428,14 +1488,22 @@ impl<const N: usize> Uint<N> {
     #[inline]
     #[track_caller]
     pub const fn pow(self, exp: u32) -> Self {
-        debug_checked!(
-            self.overflowing_pow(exp),
-            "attempt to exponentiate with overflow"
-        )
+        if cfg!(debug_assertions) {
+            debug_checked!(
+                self.overflowing_pow(exp),
+                "attempt to exponentiate with overflow"
+            )
+        } else {
+            self.wrapping_pow(exp)
+        }
     }
 
-    /// The square root rounded down, by Newton's iteration from a power of two above the root,
-    /// which decreases to it.
+    /// The square root rounded down: to 64 bits by the standard library's `u64::isqrt`; above, by
+    /// Zimmermann's Karatsuba square root (*Karatsuba Square Root*, INRIA RR-3805, 1999) on the
+    /// number shifted up by an even amount to an even number of limbs with one of its top two bits
+    /// set: the root and remainder of the top half, recursively down to two limbs (one step on
+    /// 32-bit digits there), then a division by that root for the low half of the root, about the
+    /// cost of one long division. The root is shifted back down.
     ///
     /// # Examples
     ///
@@ -1444,23 +1512,52 @@ impl<const N: usize> Uint<N> {
     ///
     /// assert_eq!(Uint::<2>::MAX.isqrt(), Uint::from_u64(u64::MAX));
     /// assert_eq!(Uint::<2>::from_u64(99).isqrt(), Uint::from_u64(9));
+    /// assert_eq!(Uint::<4>::MAX.isqrt(), Uint::from_u128(u128::MAX));
     /// ```
     pub const fn isqrt(self) -> Self {
         let bits = self.bits();
-        if bits <= 1 {
-            return self;
-        }
-        // 2^⌈bits/2⌉ is above the root; from above, x ↦ ⌊(x + ⌊n/x⌋)/2⌋ decreases strictly until
-        // it reaches ⌊√n⌋ (Brent and Zimmermann, Modern Computer Arithmetic, 1.5.1). The sum is
-        // below 2^(bits/2 + 2), which fits.
-        let mut x = Self::ONE.unbounded_shl(bits.div_ceil(2));
-        loop {
-            let y = x.wrapping_add(self.div_rem(x).0).unbounded_shr(1);
-            if !y.compare(&x).is_lt() {
-                return x;
+        let mut r = [0u64; N];
+        if bits <= 128 {
+            let low = if N > 1 {
+                self.limbs[0] as u128 | (self.limbs[1] as u128) << 64
+            } else if N == 1 {
+                self.limbs[0] as u128
+            } else {
+                0
+            };
+            if N > 0 {
+                r[0] = limbs::isqrt_u128(low);
             }
-            x = y;
+            return Uint { limbs: r };
         }
+        // len ≥ 3 limbs, into 2L limbs: a zero limb below for an odd len, and an even shift sh
+        // that leaves one of the top two bits set. 2L ≤ len + 1 ≤ 2N, and L < N.
+        let len = bits.div_ceil(64) as usize;
+        let half = len.div_ceil(2);
+        let pad = 2 * half - len;
+        let sh = (64 * len as u32 - bits) & !1;
+        let mut a = [[0u64; N]; 2];
+        let a = a.as_flattened_mut();
+        let mut i = 0;
+        while i < len {
+            a[i + pad] = limbs::shift_in(&self.limbs, i, sh);
+            i += 1;
+        }
+        let mut s = [0u64; N];
+        let mut w = [0u64; N];
+        limbs::sqrt_rem(
+            s.split_at_mut(half).0,
+            a.split_at_mut(2 * half).0,
+            w.split_at_mut(half).0,
+        );
+        // The root of x·2^(2k) is ⌊2ᵏ·√x⌋, and its floor shifted down by k is ⌊√x⌋.
+        let k = 32 * pad as u32 + sh / 2;
+        i = 0;
+        while i < half {
+            r[i] = limbs::shift_out(&s, i, k);
+            i += 1;
+        }
+        Uint { limbs: r }
     }
 
     /// The base-2 logarithm rounded down: the index of the highest set bit.
@@ -1537,9 +1634,46 @@ impl<const N: usize> Uint<N> {
     /// assert_eq!(Uint::<2>::from_u64(1000).checked_ilog10(), Some(3));
     /// assert_eq!(Uint::<2>::ZERO.checked_ilog10(), None);
     /// ```
-    #[inline]
     pub const fn checked_ilog10(self) -> Option<u32> {
-        self.checked_ilog_u64(10)
+        let bits = self.bits();
+        if bits == 0 {
+            return None;
+        }
+        if bits <= 64 {
+            return Some(self.limbs[0].ilog10());
+        }
+        if bits <= 128 {
+            return Some((self.limbs[0] as u128 | (self.limbs[1 % N] as u128) << 64).ilog10());
+        }
+        // 2^(bits − 1) ≤ x < 2^bits, so the logarithm is t or t + 1 for t = ⌊(bits − 1)·log₁₀2⌋;
+        // the product by ⌊2⁶⁴·log₁₀2⌋ is t or less. Then the powers of ten from 10^(t + 1) up,
+        // formed by products by 10¹⁹ and by the rest, are compared with x; a power that does not
+        // fit is above it.
+        const LOG10_2: u128 = 0x4d10_4d42_7de7_fbcc;
+        let mut t = ((((bits - 1) as u128) * LOG10_2) >> 64) as u32;
+        let mut e = t + 1;
+        let mut power = [0u64; N];
+        power[0] = 1;
+        while e > 0 {
+            let step = if e >= 19 { 19 } else { e };
+            let (next, carry) = limbs::mul_add_1(&power, 10u64.pow(step), 0);
+            if carry != 0 {
+                return Some(t);
+            }
+            power = next;
+            e -= step;
+        }
+        loop {
+            if limbs::compare(&self.limbs, &power).is_lt() {
+                return Some(t);
+            }
+            t += 1;
+            let (next, carry) = limbs::mul_add_1(&power, 10, 0);
+            if carry != 0 {
+                return Some(t);
+            }
+            power = next;
+        }
     }
 
     /// The logarithm to `base` rounded down: the largest `k` with `base^k ≤ self`.
@@ -1746,7 +1880,20 @@ impl<const N: usize> Uint<N> {
     /// ```
     #[inline]
     pub const fn leading_zeros(self) -> u32 {
-        Self::BITS - self.bits()
+        if N > 4 {
+            return Self::BITS - self.bits();
+        }
+        // Up to four limbs, every limb looked at, without a branch on where the top one is.
+        let mut count = 0;
+        let mut found = false;
+        let mut i = N;
+        while i > 0 {
+            i -= 1;
+            let z = self.limbs[i].leading_zeros();
+            count += if found { 0 } else { z };
+            found |= self.limbs[i] != 0;
+        }
+        count
     }
 
     /// The number of clear bits below the lowest set bit: `BITS` for zero.

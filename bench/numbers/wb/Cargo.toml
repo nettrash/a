@@ -1,0 +1,18 @@
+[package]
+name = "numbers-wb"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# White-box probe: the crate's source is compiled into this binary (src/main.rs, #[path] into
+# ../../../lib/src), so there is no dependency on the crate itself. GMP is linked by build.rs.
+[dependencies]
+
+[profile.release]
+debug = false
+
+[workspace]
+
+# The crate's own cfg (lib/Cargo.toml declares it the same way).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(a_baseline)'] }

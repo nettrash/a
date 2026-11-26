@@ -22,6 +22,8 @@ pub(crate) struct WordRem {
     finv: Vec<u64>,
     /// The low `lf - 1` coefficients of `f` as 32-bit values for a modulus up to `2^32`.
     f32: Vec<u32>,
+    /// For the modulus 2, the division by the packed `f`.
+    gf2: Option<super::gf2::Div>,
 }
 
 /// The working memory of the remainders and products.
@@ -57,12 +59,14 @@ impl WordRem {
         } else {
             Vec::new()
         };
+        let gf2 = (m.n == 2).then(|| super::gf2::Div::reused(&super::gf2::pack(f)));
         WordRem {
             m,
             f: f.to_vec(),
             inv,
             finv,
             f32,
+            gf2,
         }
     }
 
@@ -71,6 +75,13 @@ impl WordRem {
         let lf = self.f.len();
         if a.len() < lf {
             a.resize(lf - 1, 0);
+            return;
+        }
+        if let Some(d) = &self.gf2 {
+            let r = d.rem(&super::gf2::pack(a));
+            a.clear();
+            a.resize(lf - 1, 0);
+            super::gf2::unpack_into(a, &r);
             return;
         }
         if self.finv.is_empty() {
@@ -110,7 +121,7 @@ impl WordRem {
         // Modulo x^L - 1 for L >= lf: the coefficients of q f from lf - 1 on are those of a,
         // so r_j = a_j - (q f mod x^L - 1)_j + a_(j + L).
         let k = usize::BITS - (lf - 1).leading_zeros();
-        if let Some(c) = wmul::mul_cyclic(&w.u, &self.f, k, m) {
+        if let Some(c) = wmul::mul_cyclic_low(&w.u, &self.f, k, lf - 1, m) {
             let l = 1usize << k;
             for j in 0..lf - 1 {
                 let hi = if j + l < la { a[j + l] } else { 0 };
@@ -238,6 +249,14 @@ impl WordRem {
     /// shifts for `b = x`, and sliding windows of odd powers otherwise; `lf - 1` coefficients.
     pub(crate) fn pow(&self, b: &[u64], e: &crate::math::numbers::Number) -> Vec<u64> {
         let lf = self.f.len();
+        if let Some(d) = &self.gf2 {
+            // Packed from start to end: squares by spreading bits, remainders by words (by
+            // Barrett's method on polynomials for a long `f`).
+            let p = d.pow(&super::gf2::pack(b), &crate::math::numbers::limbs_of(e));
+            let mut r = vec![0u64; lf - 1];
+            super::gf2::unpack_into(&mut r, &p);
+            return r;
+        }
         let mut w = Work::default();
         let bits = e.bits();
         let mut one = vec![0u64; lf - 1];
@@ -402,12 +421,11 @@ pub(crate) fn inv_series(f: &[u64], n: usize, inv: u64, m: &WordMod) -> Vec<u64>
     let h = n.div_ceil(2);
     let mut g = inv_series(f, h, inv, m);
     g.resize(h, 0);
-    // e = f g mod x^n; its coefficients from h on are t.
+    // e = f g mod x^n; its coefficients from h on are t: the middle product, whose transform of
+    // n points wraps the coefficients past them below h, which are known.
     let fl = &f[..f.len().min(n)];
-    // Modulo x^L - 1 for L >= n the wrapped coefficients land below h, which are known.
-    let k = usize::BITS - (n - 1).leading_zeros();
-    let t: Vec<u64> = match wmul::mul_cyclic(fl, &g, k, m) {
-        Some(c) => c[h..n].to_vec(),
+    let t: Vec<u64> = match wmul::mul_middle(fl, &g, h, n - h, m) {
+        Some(t) => t,
         None => {
             let mut e = vec![0u64; fl.len() + h - 1];
             wmul::mul_into(&mut e, fl, &g, m);

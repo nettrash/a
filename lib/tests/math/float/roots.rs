@@ -127,6 +127,34 @@ fn reciprocal_square_roots_on_every_path_round_correctly() {
     }
 }
 
+/// The reciprocal square root on Newton's path at 2,500 to 12,000 bits, where its residual comes
+/// from a short product: operands as long as the result or longer (random), and operands whose
+/// root lies next to a number of the precision or a point halfway (`x ≈ 1/y^2`), every mode.
+#[test]
+fn long_reciprocal_square_roots_round_correctly() {
+    let mut s = 0x9051_000Au64;
+    for i in 0..size(48, 8) {
+        let p = 2500 + below(&mut s, 9500);
+        let x = if i % 2 == 0 {
+            let bits = p + below(&mut s, 2 * p);
+            operand(&mut s, bits, false)
+        } else {
+            let y = boundary(&mut s, p);
+            let w = 2 * p + 40 + below(&mut s, 64);
+            let yy = y.mul_round(&y, w + 8, Round::Nearest).0;
+            let inv = BigFloat::from(1).div_round(&yy, w + 8, Round::Nearest).0;
+            next_to(&inv, w, &mut s)
+        };
+        let rx = Rational::try_from(&x).unwrap();
+        for round in MODES {
+            let got = x.rec_sqrt_round(p, round);
+            bracket(&got, p, round, &format!("1/sqrt at {p} {round:?}"), |r| {
+                (&(r * r) * &rx).cmp(&Rational::from(1))
+            });
+        }
+    }
+}
+
 /// The roots of degree 3 to 16 at every precision to 130, of operands of one limb to many and of
 /// both signs for an odd degree.
 #[test]
@@ -461,6 +489,38 @@ fn square_roots_just_below_whole_limbs_round_correctly() {
             bracket(&got, p, round, &format!("sqrt {x:?} at {p}"), |r| {
                 (r * r).cmp(&rx)
             });
+        }
+    }
+}
+
+/// The reciprocal square root where the short product of Newton's last residual stops: precisions
+/// of `mf = 393` to 400 limbs, whose last step multiplies `L = mf + 3` or `mf + 4` limbs (the
+/// short product up to 399, the whole one from 400), of operands longer than the result (random)
+/// and of operands whose root lies next to a number of the precision or a point halfway (`x ≈
+/// 1/y²`), every mode, against the bracket of `r²·x` and 1.
+#[test]
+fn reciprocal_square_roots_round_correctly_at_the_short_products_edge() {
+    let mut s = 0x9051_000Bu64;
+    let limbs: Vec<u64> = (393..=400).collect();
+    for &mf in &limbs[..size(limbs.len(), 1)] {
+        let p = 64 * mf - 30;
+        for near in [false, true] {
+            let x = if near {
+                let y = boundary(&mut s, p);
+                let w = 2 * p + 40 + below(&mut s, 64);
+                let yy = y.mul_round(&y, w + 8, Round::Nearest).0;
+                let inv = BigFloat::from(1).div_round(&yy, w + 8, Round::Nearest).0;
+                next_to(&inv, w, &mut s)
+            } else {
+                operand(&mut s, p + 128, false)
+            };
+            let rx = Rational::try_from(&x).unwrap();
+            for round in MODES {
+                let got = x.rec_sqrt_round(p, round);
+                bracket(&got, p, round, &format!("1/sqrt at {p} {round:?}"), |r| {
+                    (&(r * r) * &rx).cmp(&Rational::from(1))
+                });
+            }
         }
     }
 }

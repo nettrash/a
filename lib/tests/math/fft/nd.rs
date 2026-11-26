@@ -168,6 +168,8 @@ fn tiles_of_columns_against_lines() {
             (2, 4096),
             (4096, 3),
             (300, 17),
+            // Above 4 MiB: the columns by tiles rather than by the passes along the rows.
+            (700, 400),
         ]
     };
     for &(r, c) in shapes2 {
@@ -196,6 +198,8 @@ fn tiles_of_columns_against_lines() {
             (64, 64, 64),
             (1, 37, 1),
             (40, 1, 33),
+            // The first axis above 4 MiB by tiles, the second within its planes by passes.
+            (72, 72, 72),
         ]
     };
     for &(a, b, c) in shapes3 {

@@ -56,7 +56,7 @@ assert_eq!(gradient(f2, &p).as_slice(), &[0.0, 2.0]);
 assert_eq!(hessian(f2, &p), Matrix::from_rows(&[[0.0, 2.0], [2.0, 1.0]]));
 ```
 
-The sections below give how forward mode works and what it costs, how to write a function once, the derivatives at the edges, the functions with the solvers of `a::math::numerics`, what was verified against what, and the limits. There are no timings here yet: they come with the release.
+The sections below give how forward mode works and what it costs, how to write a function once, the derivatives at the edges, the functions with the solvers of `a::math::numerics`, what was verified against what, and the limits; the times against num-dual are [last](#measured).
 
 ## Forward mode and what it costs
 
@@ -325,3 +325,97 @@ To run the tests: `cargo test --test math -- dual::`, with `-- --nocapture` on `
 - **Floats on the left in generic code.** In a function generic over `D`, `2.0 * x` does not compile (see *Writing a function once*): write `x * 2.0` or `D::constant(2.0) * x`.
 - **`==` compares values.** `assert_eq!` on two dual numbers passes when their values are equal whatever their derivatives; compare the parts.
 - **The values are the standard library's** (but `atanh` below 0), and so inherit their accuracy: `powi` of a large power multiplies its errors up (10 `f32` ulps at `x³¹`, 7 `f64` ulps at `x⁻⁴¹`, up to 40 at `|n| ≤ 60` in the auditor's sweep), and so do its derivatives.
+
+## Measured
+
+Measured on an Apple M4 Max (macOS 27.2) on 2026-11-26 between 07:55 and 07:57, with nothing else running: the areas of the release's final run were timed one after another, and every timed process ran alone on the machine. One thread; `a` as a user builds it, `cargo build --release` with the default profile (opt-level 3, no LTO, the default codegen units, no `target-cpu`), on Rust 1.100.0 stable, and the Rust references the same way, by the harness in the repository's [`bench/numtypes`](../../../bench/numtypes) (see [`bench/README.md`](../../../bench/README.md)). Each figure is the median time an operation of 21 samples of at least 1.5 ms, each a pass over a pool of fresh random inputs (64 bytes to 96 KiB), all the contenders of a row alternating sample by sample in one process; every reference's results were compared with `a`'s on the whole pool before the timing, to `10⁻¹⁰`. Each row gives the fastest reference that does the same work, its time and `a`'s time over it: below 1, `a` is faster. Times below a nanosecond are a few cycles, and their spreads are wide. The reference: num-dual 0.16.0 (`Dual64`, `HyperDual64`, `Dual2_64` and `Dual3_64`, and for the gradients, Jacobians and Hessians one pass of its vector dual numbers, `DualSVec64<n>` and `Dual2SVec64<n>` of static length, and `DualDVec64` on the heap), in `f64`.
+
+### Elementary functions
+
+Each function of `Dual<f64>` and `HyperDual<f64>` against num-dual's `Dual64` and `HyperDual64`, on arguments in the ranges given, every tangent part non-zero:
+
+| Function | Arguments | `Dual` | num-dual | `a`/num-dual | `HyperDual` | num-dual | `a`/num-dual |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `add` | `[−2, 2)` | 0.981 ns | 1.63 ns | 0.60 | 1.55 ns | 2.15 ns | 0.72 |
+| `mul` | `[−2, 2)` | 1.15 ns | 1.22 ns | 0.94 | 1.54 ns | 2.40 ns | 0.64 |
+| `div` | `[0.5, 2)` | 1.11 ns | 1.33 ns | 0.83 | 1.77 ns | 3.30 ns | 0.54 |
+| `mul_add` | `[−2, 2)` | 1.15 ns | 1.19 ns | 0.97 | 1.54 ns | 2.37 ns | 0.65 |
+| `recip` | `[0.5, 3)` | 1.06 ns | 1.20 ns | 0.88 | 1.65 ns | 2.54 ns | 0.65 |
+| `sqrt` | `[0.1, 4)` | 1.21 ns | 1.21 ns | 1.00 | 1.70 ns | 2.80 ns | 0.61 |
+| `cbrt` | `[0.1, 4)` | 1.96 ns | 2.54 ns | 0.77 | 2.45 ns | 6.50 ns | 0.38 |
+| `powi(3)` | `[−2, 2)` | 1.13 ns | 1.17 ns | 0.96 | 1.67 ns | 2.49 ns | 0.67 |
+| `powi(-5)` | `[0.5, 2)` | 1.36 ns | 1.24 ns | 1.09 | 2.85 ns | 2.87 ns | 0.99 |
+| `powf(2.5)` | `[0.1, 3)` | 10.2 ns | 6.05 ns | 1.69 | 11.2 ns | 7.90 ns | 1.42 |
+| `pow (variable exponent)` | `[0.5, 2)` | 12.8 ns | 4.68 ns | 2.74 | 22.7 ns | 7.43 ns | 3.05 |
+| `exp` | `[−3, 3)` | 2.24 ns | 2.76 ns | 0.81 | 2.52 ns | 4.47 ns | 0.56 |
+| `exp2` | `[−3, 3)` | 1.75 ns | 2.25 ns | 0.78 | 2.14 ns | 4.47 ns | 0.48 |
+| `exp_m1` | `[−3, 3)` | 4.01 ns | 5.00 ns | 0.80 | 4.21 ns | 7.19 ns | 0.58 |
+| `ln` | `[0.1, 5)` | 2.37 ns | 2.89 ns | 0.82 | 2.62 ns | 4.44 ns | 0.59 |
+| `log2` | `[0.1, 5)` | 2.32 ns | 2.98 ns | 0.78 | 2.61 ns | 4.56 ns | 0.57 |
+| `log10` | `[0.1, 5)` | 2.30 ns | 3.12 ns | 0.74 | 2.81 ns | 4.54 ns | 0.62 |
+| `ln_1p` | `[−0.5, 3)` | 2.80 ns | 3.91 ns | 0.72 | 3.06 ns | 6.70 ns | 0.46 |
+| `log(3)` | `[0.1, 5)` | 2.35 ns | 3.14 ns | 0.75 | 2.60 ns | 4.63 ns | 0.56 |
+| `sin` | `[−3, 3)` | 3.62 ns | 4.23 ns | 0.85 | 3.86 ns | 5.43 ns | 0.71 |
+| `cos` | `[−3, 3)` | 3.56 ns | 4.33 ns | 0.82 | 3.81 ns | 5.55 ns | 0.69 |
+| `tan` | `[−1.4, 1.4)` | 2.62 ns | 5.99 ns | 0.44 | 3.25 ns | 7.67 ns | 0.42 |
+| `sin_cos` | `[−3, 3)` | 3.73 ns | 4.44 ns | 0.84 | 4.02 ns | 6.04 ns | 0.67 |
+| `asin` | `[−0.9, 0.9)` | 2.97 ns | 3.44 ns | 0.86 | 3.68 ns | 6.30 ns | 0.58 |
+| `acos` | `[−0.9, 0.9)` | 2.94 ns | 3.46 ns | 0.85 | 3.33 ns | 6.04 ns | 0.55 |
+| `atan` | `[−3, 3)` | 3.74 ns | 4.08 ns | 0.92 | 4.26 ns | 5.96 ns | 0.72 |
+| `atan2` | `[−2, 2)` | 6.50 ns | 9.13 ns | 0.71 | 9.06 ns | 10.3 ns | 0.88 |
+| `sinh` | `[−3, 3)` | 5.69 ns | 6.39 ns | 0.89 | 6.02 ns | 8.69 ns | 0.69 |
+| `cosh` | `[−3, 3)` | 5.52 ns | 6.22 ns | 0.89 | 5.92 ns | 8.69 ns | 0.68 |
+| `tanh` | `[−3, 3)` | 5.33 ns | 11.9 ns | 0.45 | 6.00 ns | 14.7 ns | 0.41 |
+| `asinh` | `[−3, 3)` | 5.92 ns | 4.92 ns | 1.20 | 5.73 ns | 8.94 ns | 0.64 |
+| `acosh` | `[1.1, 5)` | 3.64 ns | 4.06 ns | 0.90 | 4.21 ns | 7.75 ns | 0.54 |
+| `atanh` | `[−0.9, 0.9)` | 3.88 ns | 4.95 ns | 0.78 | 4.41 ns | 8.20 ns | 0.54 |
+| `abs` | `[−2, 2)` | 0.924 ns | 1.23 ns | 0.75 | 1.40 ns | 2.49 ns | 0.56 |
+| `signum` | `[−2, 2)` | 1.15 ns | 1.20 ns | 0.96 | 1.57 ns | 2.23 ns | 0.71 |
+
+`hypot`, `min` and `max` have no reference.
+
+### Derivatives
+
+The free functions against num-dual's: `derivative` against `first_derivative`, `second_derivative` (one `HyperDual` pass) against `second_derivative` (`Dual2_64`, three parts), the third derivative by `Dual<HyperDual<f64>>` against `third_derivative` (`Dual3_64`), all of `sin(eˣ)/(1 + x²)`; `gradient` (`n` `Dual` passes), `jacobian` (`n` passes, all `m` rows at once) and `hessian` (`n(n + 1)/2` `HyperDual` passes) against one pass of num-dual's vector dual numbers, the faster of the static and the heap ones, of Rosenbrock's function, of `Σ sin(xᵢ)·exp(xᵢ₊₁) + ln(1 + xᵢ²)` and of Broyden's tridiagonal map, at `n` variables:
+
+| Function | n | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `derivative` |  | 6.12 ns | num-dual | 6.08 ns | 1.01 |
+| `second_derivative` |  | 10.9 ns | num-dual | 7.64 ns | 1.42 |
+| third derivative, nested |  | 19.1 ns | num-dual | 12.5 ns | 1.53 |
+| `gradient`, Rosenbrock | 2 | 15.8 ns | num-dual | 3.62 ns | 4.37 |
+|  | 4 | 25.3 ns | num-dual | 14.7 ns | 1.71 |
+|  | 8 | 75.2 ns | num-dual | 208 ns | 0.36 |
+|  | 32 | 1.20 µs | num-dual | 4.75 µs | 0.25 |
+| `gradient`, `sin·exp + ln` | 2 | 36.0 ns | num-dual | 11.6 ns | 3.12 |
+|  | 4 | 115 ns | num-dual | 31.2 ns | 3.68 |
+|  | 8 | 440 ns | num-dual | 153 ns | 2.89 |
+|  | 32 | 7.24 µs | num-dual | 3.98 µs | 1.82 |
+| `hessian`, Rosenbrock | 2 | 33.8 ns | num-dual | 16.9 ns | 2.00 |
+|  | 4 | 94.1 ns | num-dual | 366 ns | 0.26 |
+|  | 8 | 642 ns | num-dual | 2.34 µs | 0.28 |
+|  | 32 | 39.4 µs | num-dual | 259 µs | 0.15 |
+| `hessian`, `sin·exp + ln` | 2 | 64.5 ns | num-dual | 21.5 ns | 3.00 |
+|  | 4 | 353 ns | num-dual | 350 ns | 1.01 |
+|  | 8 | 2.71 µs | num-dual | 2.09 µs | 1.30 |
+|  | 32 | 172 µs | num-dual | 263 µs | 0.65 |
+| `value_gradient_and_hessian`, Rosenbrock | 2 | 35.0 ns | num-dual | 17.0 ns | 2.06 |
+|  | 4 | 97.4 ns | num-dual | 366 ns | 0.27 |
+|  | 8 | 641 ns | num-dual | 2.32 µs | 0.28 |
+|  | 32 | 39.5 µs | num-dual | 260 µs | 0.15 |
+| `jacobian`, Broyden | 2 | 50.9 ns | num-dual | 16.2 ns | 3.14 |
+|  | 4 | 93.7 ns | num-dual | 35.2 ns | 2.66 |
+|  | 8 | 210 ns | num-dual | 218 ns | 0.96 |
+|  | 32 | 1.63 µs | num-dual | 4.25 µs | 0.38 |
+
+- 64 of the 70 elementary functions are at par or faster (0.38 to 1.00), the `HyperDual` ones at 0.38 to 0.99 of num-dual's time.
+- The Hessians of Rosenbrock's function take 0.15 to 0.28 of num-dual's time from `n = 4`, its gradients 0.20 to 0.36 from 8, and the Jacobians 0.38 to 0.42 from 16: num-dual's static vectors carry `n` tangents in every operation, which grows costly past a few.
+
+### Where the references are faster
+
+Every case above 1.05 times num-dual's time, by cause: 23 of the 108 cases.
+
+- **Gradients, Jacobians and Hessians of few variables, and of transcendental functions** (at `n = 2` 2.00 to 4.37, at `n = 4` 1.71 to 3.68, the gradient of `sin·exp + ln` at every `n` to 32 1.76 to 3.68, and its Hessian at `n = 8` 1.30): `n` passes, each evaluating every elementary function again, against num-dual's one pass with `n` tangents; at small `n` also the `Matrix` results and each pass's set-up. Vector dual numbers in one pass, which would close it, are not offered (a decision of #25); the per-pass costs are what is left to reduce.
+- **`second_derivative` and the third derivative** (1.42 to 1.53 against `Dual2_64` and `Dual3_64`): `HyperDual` carries four parts where `Dual2` carries the three a second derivative needs, and the nested `Dual<HyperDual<f64>>` eight where `Dual3` carries four.
+- **Powers and `asinh`** (`powf(2.5)` 1.42 to 1.69, `pow` of a variable exponent 2.74 to 3.05, `Dual` `powi(-5)` 1.09 and `asinh` 1.20): `powf` corrects the exponent's remainder (`e − 1` rounded and its exact remainder, `ln x` and the edge tests) on every call, and `pow` takes `ln x` and both partial derivatives, for the accuracy and the edges of the table above; `asinh` keeps its digits for large and tiny arguments.
+

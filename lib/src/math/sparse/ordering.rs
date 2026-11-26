@@ -283,14 +283,41 @@ pub fn connected_components<T: Scalar>(a: &SparseMatrix<T>) -> Vec<usize> {
 #[track_caller]
 pub fn elimination_tree<T: Scalar>(a: &SparseMatrix<T>) -> Vec<Option<usize>> {
     assert!(a.rows() == a.cols(), "the matrix isn't square");
-    let graph = Graph::of_symmetric_pattern(a);
-    let n = graph.len();
+    let n = a.rows();
+    let (row_ptrs, cols) = (a.row_pointers(), a.col_indices());
+    // The elements above the diagonal, `(k, i)` with `k < i`, listed by their column `i`: the
+    // edges of `Aᵀ` that row `i` of `A` does not show. A symmetric pattern gives each edge twice,
+    // and the second join of an edge stops at once, the walk from `k` having been pointed at `i`.
+    let mut upper_ptrs = vec![0usize; n + 1];
+    for (k, w) in row_ptrs.windows(2).enumerate() {
+        for &i in &cols[w[0]..w[1]] {
+            if i > k {
+                upper_ptrs[i + 1] += 1;
+            }
+        }
+    }
+    for i in 0..n {
+        upper_ptrs[i + 1] += upper_ptrs[i];
+    }
+    let mut cursor = upper_ptrs[..n].to_vec();
+    let mut upper = vec![0usize; upper_ptrs[n]];
+    for (k, w) in row_ptrs.windows(2).enumerate() {
+        for &i in &cols[w[0]..w[1]] {
+            if i > k {
+                upper[cursor[i]] = k;
+                cursor[i] += 1;
+            }
+        }
+    }
     let mut tree = Forest::new(n);
     for i in 0..n {
-        for &k in graph.neighbours(i) {
-            if k > i {
+        for &k in &cols[row_ptrs[i]..row_ptrs[i + 1]] {
+            if k >= i {
                 break;
             }
+            tree.join(k, i);
+        }
+        for &k in &upper[upper_ptrs[i]..upper_ptrs[i + 1]] {
             tree.join(k, i);
         }
     }
@@ -428,27 +455,33 @@ pub fn postorder(parent: &[Option<usize>]) -> Vec<usize> {
             first_child[p] = v;
         }
     }
-    let mut order = Vec::with_capacity(n);
-    let mut stack = Vec::new();
+    let mut order = vec![0usize; n];
+    let mut done = 0;
+    // The path from the root to the vertex being visited; no deeper than the vertices.
+    let mut stack = vec![0usize; n];
     for (root, up) in parent.iter().enumerate() {
         if up.is_some() {
             continue;
         }
-        stack.push(root);
-        while let Some(&top) = stack.last() {
+        stack[0] = root;
+        let mut depth = 1;
+        while depth > 0 {
+            let top = stack[depth - 1];
             let child = first_child[top];
             if child == NONE {
-                order.push(top);
-                stack.pop();
+                order[done] = top;
+                done += 1;
+                depth -= 1;
             } else {
                 // The child is taken off the list as it is entered, so it is entered once.
                 first_child[top] = next_sibling[child];
-                stack.push(child);
+                stack[depth] = child;
+                depth += 1;
             }
         }
     }
     // A vertex on a cycle hangs below no root, and is never reached.
-    assert!(order.len() == n, "the parents close a cycle");
+    assert!(done == n, "the parents close a cycle");
     order
 }
 
@@ -615,8 +648,10 @@ pub(super) fn reverse_cuthill_mckee_of(graph: &Graph) -> Vec<usize> {
 /// a symmetric matrix symmetric and a Cholesky factorisation of the permuted matrix a permutation of
 /// the factorisation of the original.
 ///
-/// The elements are moved by two counting passes, so the cost is the stored elements and nothing
-/// is sorted.
+/// When no row holds more than 32 elements, each row is gathered in its new place and its elements
+/// are sorted by insertion into their new columns, a cost of the stored elements times at most the
+/// length of a row; otherwise the elements are moved by two counting passes, a cost of the stored
+/// elements and the order, and nothing is sorted.
 ///
 /// # Panics
 ///
@@ -640,39 +675,5 @@ pub fn symmetric_permutation<T: Scalar>(a: &SparseMatrix<T>, p: &[usize]) -> Spa
     let n = a.rows();
     assert_eq!(p.len(), n, "the permutation isn't of the right length");
     let inverse = inverse_permutation(p);
-    let (row_ptrs, cols, values) = (a.row_pointers(), a.col_indices(), a.values());
-    // First by new column, the new rows taken in order: every column then holds its rows
-    // ascending.
-    let mut col_ptrs = vec![0usize; n + 1];
-    for &j in cols {
-        col_ptrs[inverse[j] + 1] += 1;
-    }
-    for j in 0..n {
-        col_ptrs[j + 1] += col_ptrs[j];
-    }
-    let mut cursor = col_ptrs.clone();
-    let mut by_column: Vec<(usize, T)> = vec![(0, T::zero()); values.len()];
-    let mut new_row_ptrs = Vec::with_capacity(n + 1);
-    new_row_ptrs.push(0);
-    for (new, &old) in p.iter().enumerate() {
-        for k in row_ptrs[old]..row_ptrs[old + 1] {
-            let at = &mut cursor[inverse[cols[k]]];
-            by_column[*at] = (new, values[k]);
-            *at += 1;
-        }
-        new_row_ptrs.push(new_row_ptrs[new] + row_ptrs[old + 1] - row_ptrs[old]);
-    }
-    // Then by new row, the new columns taken in order: every row holds its columns ascending.
-    let mut cursor = new_row_ptrs.clone();
-    let mut new_cols = vec![0usize; values.len()];
-    let mut new_values = vec![T::zero(); values.len()];
-    for j in 0..n {
-        for &(i, x) in &by_column[col_ptrs[j]..col_ptrs[j + 1]] {
-            let at = &mut cursor[i];
-            new_cols[*at] = j;
-            new_values[*at] = x;
-            *at += 1;
-        }
-    }
-    SparseMatrix::from_csr(n, n, new_row_ptrs, new_cols, new_values)
+    a.permuted(p, &inverse)
 }

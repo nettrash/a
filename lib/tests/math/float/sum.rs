@@ -3,7 +3,9 @@
 //! accumulation that stops at a negligible rest), cancellations, and the special values and
 //! zeros of MPFR's `mpfr_sum`.
 
-use super::common::{MODES, below, float, mode, one, rational, reference, same, size};
+use super::common::{
+    MODES, below, float, mantissa, mode, one, rational, reference, same, size, xorshift,
+};
 use a::math::float::{BigFloat, Round};
 use a::math::rational::Rational;
 use core::cmp::Ordering;
@@ -59,6 +61,64 @@ fn sums_of_many_terms_round_once() {
             round,
             &format!("sum of {terms:?} at {prec} {round:?}"),
         );
+    }
+}
+
+/// The window of `sum_round` (see the module of sums): terms longer than the result cut below the
+/// window, of both signs; sums that are a number of the precision or a point halfway between two
+/// in the window, moved by terms below it (which must not decide); and accumulators longer than
+/// the stack's.
+#[test]
+fn sums_in_a_window_round_as_the_exact_sums() {
+    let mut s = 0x5EED_5000_0000_0077u64;
+    for i in 0..size(800, 12) {
+        let prec = match i % 5 {
+            0 => 1 + below(&mut s, 64),
+            1 => 53,
+            2 => 113,
+            3 if !cfg!(miri) => 4000 + below(&mut s, 600),
+            _ => 200,
+        };
+        let many = i % 9 == 0 && !cfg!(miri);
+        let n = 1 + below(&mut s, if many { 300 } else { 6 }) as usize;
+        let mut terms: Vec<BigFloat> = (0..n).map(|_| float(&mut s, prec + 400, 8)).collect();
+        if i % 2 == 0 {
+            // An odd mantissa of `prec` bits (a number of the precision) or `prec + 1` (halfway
+            // between two), exactly or moved by terms far below of either sign; the others
+            // cancelling in pairs.
+            let p = prec + (i / 2 % 2) as u64;
+            let mut m = mantissa(&mut s, p);
+            if !m.bit(0) {
+                m = &m + &one();
+            }
+            let e = 20 + below(&mut s, 8) as i64;
+            terms = vec![BigFloat::from_parts(&m, e - p as i64, p, Round::Nearest).0];
+            for _ in 0..below(&mut s, 3) {
+                let x = float(&mut s, prec + 300, 8);
+                terms.push(-&x);
+                terms.push(x);
+            }
+            for _ in 0..below(&mut s, 3) {
+                let k = 70 + below(&mut s, 400) as i64;
+                let (t, _) = BigFloat::from_parts(&one(), e - p as i64 - k, 1, Round::Nearest);
+                terms.push(if xorshift(&mut s) & 1 == 1 { -t } else { t });
+            }
+        }
+        let exact = terms
+            .iter()
+            .fold(Rational::from(0u8), |acc, x| acc + rational(x));
+        for round in MODES {
+            check(
+                BigFloat::sum_round(&terms, prec, round),
+                &exact,
+                prec,
+                round,
+                &format!(
+                    "sum of {} terms at {prec} {round:?}: {terms:?}",
+                    terms.len()
+                ),
+            );
+        }
     }
 }
 

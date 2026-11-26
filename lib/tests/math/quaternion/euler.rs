@@ -180,6 +180,88 @@ fn from_euler_is_the_product_of_the_elementary_rotations() {
     );
 }
 
+/// The product of the three elementary rotations `cos(θᵢ/2) + eᵢ·sin(θᵢ/2)`, formed with `*`,
+/// in the order of `frame`: what `from_euler` documents, to the bit.
+fn elementary_product<T: a::math::complex::Float>(
+    s: EulerSequence,
+    frame: EulerFrame,
+    angles: [T; 3],
+) -> Quaternion<T> {
+    let ax = s.axes();
+    let e = |i: usize| {
+        let (sin, cos) = (angles[i] * T::HALF).sin_cos();
+        let mut v = [T::ZERO; 3];
+        v[ax[i]] = sin;
+        Quaternion::from_parts(cos, v)
+    };
+    match frame {
+        EulerFrame::Intrinsic => e(0) * e(1) * e(2),
+        EulerFrame::Extrinsic => e(2) * e(1) * e(0),
+    }
+}
+
+#[test]
+fn from_euler_is_that_product_bit_for_bit_with_the_signs_of_its_zeros() {
+    // Signed zeros, subnormals and the ends of the range among the angles, where parts of the
+    // product are zeros whose signs come from the zero parts of the factors.
+    let specials = [
+        0.0,
+        -0.0,
+        5e-324,
+        -1e-310,
+        PI,
+        -PI,
+        FRAC_PI_2,
+        2.0 * PI,
+        1e300,
+        -1e-20,
+    ];
+    let mut rng = Rng::new(43);
+    let angle = |rng: &mut Rng| -> f64 {
+        let k = rng.next_u64();
+        if k.is_multiple_of(3) {
+            specials[(k >> 8) as usize % specials.len()]
+        } else {
+            4.0 * rng.signed()
+        }
+    };
+    let same = |x: f64, y: f64| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
+    let same32 = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
+    let mut zeros = 0;
+    for s in EulerSequence::ALL {
+        for frame in [EulerFrame::Intrinsic, EulerFrame::Extrinsic] {
+            for _ in 0..if cfg!(miri) { 4 } else { 2000 } {
+                let a = [0, 1, 2].map(|_| angle(&mut rng));
+                let (got, want) = (Q::from_euler(s, frame, a), elementary_product(s, frame, a));
+                assert!(
+                    same(got.w, want.w)
+                        && same(got.x, want.x)
+                        && same(got.y, want.y)
+                        && same(got.z, want.z),
+                    "{s:?} {frame:?} {a:?}: {got:?}, not {want:?}"
+                );
+                zeros += [got.w, got.x, got.y, got.z]
+                    .iter()
+                    .filter(|&&x| x == 0.0)
+                    .count();
+                let a32 = a.map(|x| x as f32);
+                let (got, want) = (
+                    Quaternion::<f32>::from_euler(s, frame, a32),
+                    elementary_product(s, frame, a32),
+                );
+                assert!(
+                    same32(got.w, want.w)
+                        && same32(got.x, want.x)
+                        && same32(got.y, want.y)
+                        && same32(got.z, want.z),
+                    "{s:?} {frame:?} {a32:?}: {got:?}, not {want:?}"
+                );
+            }
+        }
+    }
+    assert!(zeros > if cfg!(miri) { 0 } else { 1000 }, "{zeros}");
+}
+
 #[test]
 fn what_is_no_rotation_has_no_angles() {
     for x in [

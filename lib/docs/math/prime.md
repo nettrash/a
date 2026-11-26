@@ -18,11 +18,11 @@ The test is Baillie and Wagstaff's (1980) after Pomerance, Selfridge and Wagstaf
 - The strong test to base 2: `n − 1 = d·2^s` with `d` odd, `2^d mod n` from the top bit of `d` with a square for each bit and a doubling, an addition, for each one, as GMP's `mpn_2powm` does, then up to `s − 1` squares; `n` passes when `2^d = 1` or one of the squares is `−1`. Almost every composite stops here.
 - Selfridge's parameters (method A): the first `D` of `5, −7, 9, −11, 13, …` whose Jacobi symbol `(D/n)` is `−1`, `P = 1` and `Q = (1 − D)/4`. The symbols come from one remainder of `n` by `9·5·7·11·…·47`, by quadratic reciprocity and the binary method on limbs (factors of two taken out, then the larger odd number less the smaller); a `D` beyond 47 takes a pass of its own. A square's symbols are never `−1`, so squares are told apart before the search: odd squares are 1 modulo 8 and squares modulo each prime to 47, which leaves the square root, by Newton's steps, for the few numbers that pass, about 1 in 65,000 of the others.
 - The strong Lucas test: `n + 1 = d·2^s`, and `n` passes when `U_d = 0` or one of `V_(d·2^r)`, `r < s`, is 0. `U_d` and `U_(d−1)` come from the top bit of `d` with three squares a bit, as GMP's `mpz_lucas_mod` does after Hackman: `U_2k = U_(k+1)² − (U_(k+1) − U_k)²`, `U_(2k+1) = U_(k+1)² − Q·U_k²`, and for a one bit `U_(2k+2) = U_(2k+1) − Q·U_2k`, the products by `Q` by additions for `|Q| <= 4`; then `V_d = U_d − 2Q·U_(d−1)`, `Q^d = (V_d² − D·U_d²)/4`, and `V_2k = V_k² − 2Q^k`. For `D = 5`, half of all numbers, `Q = −1` and `Q^k = ±1`, so the ladder of `V_k` and `V_(k+1)` takes one square and one product a bit instead, as GMP's `mpn_strongfibo` does with the Fibonacci numbers: 9–13 % less time for primes of 256 to 1024 bits.
-- Montgomery's form throughout, the [powers](pow.md)' arithmetic: one limb in registers; two to eight limbs in registers on aarch64, by kernels in inline assembly (the coarsely integrated operand scanning, and squares that take each product of two different limbs once), which made primes of 512 bits twice as fast, and two to seven limbs on the other targets, by rows in Rust, where eight limbs stay in memory (with the kernels turned off, the rows took 1.03 to 1.04 times as long as the residues in memory for numbers of 512 bits, at a clock of 3.9 GHz, and about as long at 4.4 GHz); nine to sixteen limbs by the kernels of residues in memory on aarch64, the window of the rows in registers (1024-bit primes 1.4 times as fast); beyond, and from eight limbs on the other targets, the multiplication's kernels with the REDC kernel (two rows a pass on aarch64), and REDC by products from 100 limbs; the residues always reduced below `n`, so that equal residues are equal limbs. GMP takes Montgomery's form for the strong test only, and reduces the Lucas sequence by divisions.
+- Montgomery's form throughout, the [powers](pow.md)' arithmetic: one limb in registers; two to eight limbs in registers on aarch64, by kernels in inline assembly (the coarsely integrated operand scanning, and squares that take each product of two different limbs once), which made primes of 512 bits twice as fast, and two to seven limbs on the other targets, by rows in Rust, where eight limbs stay in memory (with the kernels turned off, the rows took 1.03 to 1.04 times as long as the residues in memory for numbers of 512 bits, at a clock of 3.9 GHz, and about as long at 4.4 GHz); nine to sixteen limbs by the kernels of residues in memory on aarch64, the window of the rows in registers (1024-bit primes 1.4 times as fast); beyond, and from eight limbs on the other targets, the multiplication's kernels with the REDC kernel (two rows a pass on aarch64), and REDC by products from 86 limbs; the residues always reduced below `n`, so that equal residues are equal limbs. GMP takes Montgomery's form for the strong test only, and reduces the Lucas sequence by divisions.
 
 ## Below 2^32
 
-A number below `2^32` with no prime factor up to 256, and at least `257²`, takes the strong test to base 2 alone instead of Baillie–PSW, and a look-up in a table of the composites that pass it: of the 2314 strong pseudoprimes to base 2 below `2^32` (from Feitsma and Galway's list of the base-2 pseudoprimes, 2009), the 1971 with no prime factor up to 256, 7.9 KB, found by a binary search among those with the same top byte. Every prime passes the test and none is in the table, so the answer is exact, as Baillie–PSW's is below `2^64`; FLINT's `n_is_prime` takes the same way from `2^20` to `2^32`. The table was computed again for this crate (the strong tests to the bases 2 to 17 of every odd number below `2^32` without such a factor) and agrees with FLINT's, and all the odd numbers below `2^32` were checked against a sieve. The power `2^d` starts from the top six bits of `d` by a shift, then takes a square for each bit, reduced by Barrett's method with `⌊(2^64 − 1)/n⌋` (a product and one correction), and a doubling, an addition, for each one. Measured on 2026-11-11 on an Apple M4 Max on a quiet machine with the trial division before (the load average at 1.7, one thread, `MallocNanoZone` unset, fat LTO; interleaved runs in rotated order, the clock read around each, the median of 11): primes of 32 bits take 415 cycles, against 1287 by Baillie–PSW (0.2.32) and 639 by the strong tests to the bases 2, 7 and 61 side by side (measured earlier, with other work on the machine), which no composite below 4,759,123,141 passes (Jaeschke, "On strong pseudoprimes to several bases", 1993); the composites that pass the trial division 386, 494 and 643; random odd numbers 126, 218 and 164; FLINT's `n_is_prime` 356, 276 and 108; `next_prime` and `prev_prime` from random numbers of 32 bits 1228 and 1262 cycles instead of 2223 and 2256 by Baillie–PSW (FLINT's `n_nextprime` 1058). The strong tests to 2, 7 and 61 were faster than Baillie–PSW at every size from 20 to 32 bits but for the composites that pass the trial division (Baillie–PSW took 0.71 to 0.78 of their time there), and the strong test to base 2 in Montgomery's form, as Baillie–PSW's, took 1.2 times as long as by Barrett's products.
+A number below `2^32` with no prime factor up to 256, and at least `257²`, takes the strong test to base 2 alone instead of Baillie–PSW, and a look-up in a table of the composites that pass it: of the 2314 strong pseudoprimes to base 2 below `2^32` (from Feitsma and Galway's list of the base-2 pseudoprimes, 2009), the 1971 with no prime factor up to 256, 7.9 KB, found by a binary search among those with the same top byte. Every prime passes the test and none is in the table, so the answer is exact, as Baillie–PSW's is below `2^64`; FLINT's `n_is_prime` takes the same way from `2^20` to `2^32`. The table was computed again for this crate (the strong tests to the bases 2 to 17 of every odd number below `2^32` without such a factor) and agrees with FLINT's, and all the odd numbers below `2^32` were checked against a sieve. The power `2^d` starts from the top six bits of `d` by a shift, then takes a square for each bit, reduced by Barrett's method with `⌊(2^64 − 1)/n⌋` (a product and one correction), and a doubling, an addition, for each one. Measured on 2026-11-11 on an Apple M4 Max on a quiet machine with the trial division before (the load average at 1.7, one thread, `MallocNanoZone` unset, fat LTO; interleaved runs in rotated order, the clock read around each, the median of 11): primes of 32 bits take 415 cycles, against 1287 by Baillie–PSW (0.2.32) and 639 by the strong tests to the bases 2, 7 and 61 side by side (measured earlier, with other work on the machine), which no composite below 4,759,123,141 passes (Jaeschke, "On strong pseudoprimes to several bases", 1993); the composites that pass the trial division 386, 494 and 643; random odd numbers 126, 218 and 164; `next_prime` and `prev_prime` from random numbers of 32 bits 1228 and 1262 cycles instead of 2223 and 2256 by Baillie–PSW (FLINT's `n_is_prime` and `n_nextprime` are measured below). The strong tests to 2, 7 and 61 were faster than Baillie–PSW at every size from 20 to 32 bits but for the composites that pass the trial division (Baillie–PSW took 0.71 to 0.78 of their time there), and the strong test to base 2 in Montgomery's form, as Baillie–PSW's, took 1.2 times as long as by Barrett's products.
 
 ## Next prime
 
@@ -34,58 +34,45 @@ The same search, downwards, as GMP 6.3's `mpz_prevprime`: the odd numbers below 
 
 ## Measured
 
-Measured on 2026-11-11 on an Apple M4 Max on a quiet machine (the load average at 1.6 to 1.8 of its 16 cores, the clock at 4.2 to 4.5 GHz; one thread, every process with `MallocNanoZone` unset, the harnesses built with fat LTO and one codegen unit; interleaved runs, the median of seven, in cycles per call, rounded), `is_probable_prime` against GMP 6.3's `mpz_probab_prime_p(n, 24)`, for random primes, random odd composites and random odd numbers of exactly the bits given:
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harness in the repository's `bench/nt` (its method in `bench/README.md`), on one thread: this crate as a user builds it, by rustc 1.100 stable in cargo's release profile (no LTO, 16 codegen units, no `target-cpu`); the Rust references in the same profile, machine-prime 1.5.7 (with `wide`), primal 0.3.3 and malachite 0.15.0; the C references as Homebrew builds them, GMP 6.3.0, FLINT 3.6.0 and PARI 2.19.1, called through shims compiled with `-O3 -mcpu=native`. Each figure is the median of 15 samples of at least a millisecond (fewer for the calls of seconds), in time per call, this crate and every reference alternating sample by sample in one process, each sample on the same numbers for all, after a check that all give the same answers. A ratio is this crate's time over that of the fastest reference that does the same work: below 1, this crate is faster.
 
-| Bits | primes: LE | BE | GMP | odd composites: LE | BE | GMP | random odd: LE | BE | GMP |
+`is_probable_prime` against the Baillie–PSW tests of GMP (`mpz_probab_prime_p(n, 24)`), FLINT (`fmpz_is_probabprime_BPSW`) and PARI (`ispseudoprime(n, 0)`), and below `2^64` also against the exact tests of words, FLINT's `n_is_prime`, machine-prime's `is_prime`, primal's `is_prime` and malachite's `u64::is_prime`; random primes, random odd composites and random odd numbers of exactly the bits given, the fastest reference of each:
+
+| Bits | primes | fastest | ratio | odd composites | fastest | ratio | random odd | fastest | ratio |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 64 | 2538 | 2544 | 12,611 | 209 | 209 | 291 | 270 | 269 | 654 |
-| 128 | 12,902 | 12,706 | 50,674 | 653 | 652 | 2270 | 827 | 829 | 3627 |
-| 256 | 49,258 | 49,340 | 170,831 | 1911 | 1897 | 6262 | 2613 | 2612 | 8954 |
-| 512 | 234,942 | 233,980 | 655,929 | 10,513 | 10,466 | 29,237 | 8334 | 8421 | 22,947 |
-| 1024 | 1.60 M | 1.61 M | 3.55 M | 54,991 | 55,138 | 96,356 | 65,286 | 67,249 | 167,046 |
-| 2048 | 16.1 M | 16.1 M | 21.6 M | 573,683 | 580,425 | 678,577 | 1.15 M | 1.15 M | 1.33 M |
+| 32 | 92.1 ns | FLINT `n_is_prime` 77.7 ns | 1.18 | 16.7 ns | FLINT `n_is_prime` 13.0 ns | 1.29 | 26.9 ns | FLINT `n_is_prime` 21.8 ns | 1.24 |
+| 64 | 590 ns | machine-prime 386 ns | 1.53 | 44.3 ns | machine-prime 30.6 ns | 1.45 | 70.8 ns | machine-prime 50.1 ns | 1.41 |
+| 128 | 2.97 µs | FLINT 6.77 µs | 0.439 | 166 ns | GMP 548 ns | 0.303 | 228 ns | GMP 784 ns | 0.291 |
+| 256 | 11.4 µs | FLINT 25.8 µs | 0.443 | 488 ns | GMP 1.61 µs | 0.302 | 555 ns | GMP 1.79 µs | 0.310 |
+| 512 | 54.6 µs | FLINT 90.0 µs | 0.606 | 2.10 µs | GMP 5.22 µs | 0.402 | 2.93 µs | GMP 7.89 µs | 0.372 |
+| 1024 | 350 µs | FLINT 536 µs | 0.653 | 10.1 µs | GMP 21.1 µs | 0.477 | 14.9 µs | GMP 32.2 µs | 0.463 |
+| 2048 | 2.94 ms | FLINT 3.50 ms | 0.839 | 104 µs | GMP 139 µs | 0.751 | 90.6 µs | GMP 144 µs | 0.629 |
+| 4096 | 27.2 ms | FLINT 23.6 ms | 1.15 | 859 µs | GMP 1.10 ms | 0.779 | 559 µs | GMP 745 µs | 0.751 |
 
-And on primes alone against FLINT 3.6's `fmpz_is_probabprime_BPSW` and PARI/GP 2.19's `ispseudoprime` (the library's, called from C), and against this crate's previous version (0.2.32, before the kernels of Montgomery's products), in another run:
+- From 128 to 2048 bits 0.291 to 0.839 of the fastest reference's time: primes, which take the whole test, 0.439 to 0.839 (FLINT), and composites and random odd numbers, which mostly stop at the trial division or the strong test to base 2, 0.291 to 0.751 (GMP). Against GMP 0.0637 to 0.876 at every size, against PARI 0.140 to 0.870, and against FLINT's Baillie–PSW from 0.0622 (odd composites of 1024 bits) to 1.15 (primes of 4096 bits).
+- Below `2^64` the other tests of words are slower: this crate takes 0.0454 to 0.331 of primal's time and 0.197 to 0.798 of malachite's.
+- At 128 bits machine-prime's `is_prime_128` is faster (this test takes 1.31 to 1.59 times its time), but it is a strong test to base 2 and a Lucas test on `V` alone, weaker than Baillie–PSW's strong Lucas test, so it is not the same test and is not counted.
 
-| Bits | LE | before | FLINT | PARI |
-| --- | --- | --- | --- | --- |
-| 64 | 2604 | 2646 | 5132 | 3903 |
-| 128 | 11,955 | 14,453 | 28,439 | 49,532 |
-| 256 | 45,776 | 69,094 | 112,503 | 183,421 |
-| 512 | 207,942 | 428,325 | 376,375 | 739,912 |
-| 1024 | 1.46 M | 2.08 M | 2.37 M | 3.90 M |
-| 2048 | 14.3 M | 14.1 M | 15.6 M | 23.0 M |
+`next_prime` and `prev_prime` from random numbers of the bits given, against FLINT's `fmpz_nextprime` and, at 32 and 64 bits, its `n_nextprime`, GMP's `mpz_prevprime`, and PARI's `nextprime` and `precprime`. GMP's `mpz_nextprime` tests the prime it finds once more, by a Miller–Rabin test to a random base: it does more, and is shown beside the ratios, not in them. Each sample takes the same starting numbers for all, and the times vary with the gaps to the primes:
 
-- Primes, which take the whole test: from 5.0 to 1.3 times faster than GMP, 1.6 to 2.5 times faster than FLINT up to 1024 bits and 1.09 times at 2048, from the residues in registers and the kernels' products and squares, where GMP's Lucas test pays a division and an `mpz` call for each step.
-- Odd composites stop at trial division or the strong test to base 2, which GMP takes in Montgomery's form too: from 1.2 to 3.5 times faster; random odd numbers, a mix, 1.16 to 4.4 times.
+| Bits | `next_prime` | fastest | ratio | GMP's `mpz_nextprime` (ratio) | `prev_prime` | fastest | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 278 ns | FLINT `n_nextprime` 232 ns | 1.20 | 1.86 µs (0.150) | 286 ns | PARI 558 ns | 0.512 |
+| 64 | 1.55 µs | FLINT `n_nextprime` 1.31 µs | 1.18 | 4.78 µs (0.324) | 1.51 µs | PARI 3.14 µs | 0.479 |
+| 128 | 9.04 µs | FLINT 31.0 µs | 0.292 | 31.2 µs (0.290) | 9.44 µs | GMP 32.7 µs | 0.289 |
+| 256 | 43.4 µs | FLINT 127 µs | 0.341 | 128 µs (0.338) | 45.3 µs | GMP 133 µs | 0.342 |
+| 512 | 300 µs | FLINT 695 µs | 0.432 | 697 µs (0.431) | 322 µs | GMP 719 µs | 0.447 |
+| 1024 | 1.65 ms | FLINT 3.08 ms | 0.537 | 3.16 ms (0.523) | 1.99 ms | GMP 3.80 ms | 0.523 |
+| 2048 | 15.5 ms | FLINT 19.7 ms | 0.788 | 19.4 ms (0.798) | 26.6 ms | GMP 32.2 ms | 0.826 |
+| 4096 | 1.53 s | FLINT 1.85 s | 0.826 | 1.86 s (0.824) | 1.21 s | GMP 1.45 s | 0.832 |
 
-`next_prime` against this crate before the work of 2026-11-08 (0.2.32, "before"), GMP 6.3's `mpz_nextprime` into a result allocated before, and FLINT 3.6's `fmpz_nextprime`, from random numbers of the bits given, little-endian, a new set each of the 7 interleaved runs, in cycles per call (measured on 2026-11-11 on a quiet machine, the load average at 1.7, one thread, every process with `MallocNanoZone` unset, fat LTO; the cycles are the times at 4.51 GHz, the clock at the end of the run and at both ends of the next, as the clock read at its start, 2.09 GHz, was taken before the processor had raised its clock); GMP's tests the prime it finds once more, by a Miller–Rabin test to a random base:
+From 128 bits `next_prime` takes 0.292 to 0.826 of FLINT's time and `prev_prime` 0.289 to 0.832 of GMP's, from the test's kernels; PARI's take longer at every size (`next_prime` 0.142 to 0.500 of its time, `prev_prime` 0.146 to 0.512).
 
-| Bits | `next_prime` | before | GMP | FLINT |
-| --- | --- | --- | --- | --- |
-| 32 | 1233 | 2243 | 8326 | 1070 |
-| 64 | 6731 | 6741 | 21,229 | 21,167 |
-| 128 | 40,741 | 46,171 | 144,499 | 144,054 |
-| 256 | 200,850 | 277,805 | 605,383 | 599,299 |
-| 512 | 1.61 M | 2.98 M | 3.57 M | 3.58 M |
-| 1024 | 15.5 M | 22.5 M | 28.2 M | 28.4 M |
-| 2048 | 241 M | 245 M | 288 M | 288 M |
+Where the references are faster, this crate's time over the fastest same-work reference's above 1.05:
 
-From 6.8 times faster than GMP at 32 bits to 1.2 times at 2048, and than FLINT from 64 bits up (3.5 to 1.2 times); from 128 to 1024 bits 0.54 to 0.88 of the time before, from the test's kernels (above), and about as long at 64 and 2048 bits. At 32 bits FLINT's word-sized search (`n_nextprime`: trial division by 32 primes with no branch, the strong test to base 2 and a table of its pseudoprimes) takes 0.87 of the time; the strong test to base 2 and the table, as FLINT's (above), took this from 2243 cycles with Baillie–PSW to 1233 (and a new vector for the result is some 150 of them). The times vary with the gaps to the next primes, which the operands share between the contenders.
-
-`prev_prime` against this crate before, GMP's `mpz_prevprime` into a result allocated before, and PARI/GP 2.19's `precprime` (in `gp`, in the same campaign, the best of three loops of calls, its interpreter's cost included), in cycles per call at 4.51 GHz, the clock at both ends of the run and around PARI/GP's, from random numbers of the bits given:
-
-| Bits | `prev_prime` | before | GMP | PARI/GP |
-| --- | --- | --- | --- | --- |
-| 32 | 1273 | 2264 | 8293 | 3000 |
-| 64 | 6823 | 6851 | 21,080 | 14,800 |
-| 128 | 41,074 | 46,819 | 145,051 | 240,000 |
-| 256 | 206,438 | 284,367 | 613,061 | 1.45 M |
-| 512 | 1.53 M | 2.90 M | 3.45 M | 10.7 M |
-| 1024 | 15.0 M | 21.7 M | 27.3 M | 117 M |
-| 2048 | 304 M | 310 M | 364 M | 1.89 G |
-
-From 6.5 times faster than GMP at 32 bits to 1.2 times at 2048, as `next_prime` is: the test's speed, the sieve's remainders four products at a time, from 64 to 250 bits only those of the products of primes below the sieve's bound (4 % at 128 bits), and from 512 bits the primes beyond 8192 from the tables of the sieve rather than a sieve of Eratosthenes each call (2 to 3 %).
+- **`is_probable_prime` of words.** At 32 bits 1.18 to 1.29 times FLINT's `n_is_prime`, which takes fewer trial divisions before the strong test to base 2 than the primes to 256 here; both then take that test and the table of its pseudoprimes (above). At 64 bits 1.41 to 1.53 times machine-prime's `is_prime` (and 1.03 to 1.49 times FLINT's `n_is_prime`), by the algorithm: from `2^32` this is Baillie–PSW, a strong test and a strong Lucas test, about three strong tests' work, where both take one or two strong tests to bases chosen by a hash of the number (after Forišek and Jančina), exact below `2^64` by a table of bases (128 to 512 KB) that this crate does not carry.
+- **`next_prime` of words.** 1.20 and 1.18 times FLINT's `n_nextprime` at 32 and 64 bits: each candidate left by the sieve takes the word test above, and the result its own vector.
+- **Primes of 4096 bits.** 1.15 times FLINT's time (GMP's 0.876, PARI's 0.870): at 64 limbs the reduction is still the quadratic one of Montgomery's form (REDC by products from 86 limbs), where FLINT's Lucas test reduces by Barrett's method on its subquadratic products.
 
 ## Examples
 
@@ -131,6 +118,6 @@ fn main() {
 
 ## Efficiency
 
-- Time complexity: trial division in `O(n·t)` for `n` limbs and `t` products of primes; the test in about `b` squares for the strong test and `2b` to `3b` for the Lucas test, for `b` bits, each `O(n²)` below 100 limbs and about 2.7 products of `n` limbs beyond; the next and the previous prime about `g / ln(P)` tests and one remainder by each product of primes per interval, for a gap `g` to it and primes up to `P`, whatever the byte order
+- Time complexity: trial division in `O(n·t)` for `n` limbs and `t` products of primes; the test in about `b` squares for the strong test and `2b` to `3b` for the Lucas test, for `b` bits, each `O(n²)` below 86 limbs and about 2.5 products of `n` limbs beyond (2.7 from the transforms' threshold); the next and the previous prime about `g / ln(P)` tests and one remainder by each product of primes per interval, for a gap `g` to it and primes up to `P`, whatever the byte order
 - Space complexity: the number's limbs and ten residues, on the stack up to 8 KiB, one temporary buffer on the heap beyond, and one more for each product of 360 limbs or more, which the [multiplication](mul.md) computes by transforms; the next and the previous prime the interval's flags and the primes beyond the table; tables of the 1027 odd primes below 8192 and of their products, computed at compile time
 - Soundness: the bytes beyond a vector's length, which may be uninitialised, are never read, and every byte of a result is written before the vector's length is set; the number is left as it was

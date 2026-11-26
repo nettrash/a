@@ -16,9 +16,11 @@ pub(super) const BATCH: usize = 1024;
 /// Each word gives its primes from both ends at once, by the trailing zeros of the word and of its
 /// bits reversed, the lowest and the highest left two at a time, into their places counted from
 /// the word's first and last: two chains of `bits &= bits - 1` side by side, each half as long as
-/// one, which took the forming of the primes from 3.3 to about 2.4 cycles a prime here. The steps
-/// past the middle write junk in places of the 64 from the word's first that are past its last,
-/// which the next word or the count leaves out.
+/// one, which took the forming of the primes from 3.3 to about 2.4 cycles a prime here; the first
+/// [`UNTESTED`] places from each end are written without a test of the word's end. The steps past
+/// the middle write junk in places of the 64 from the word's first that are past its last (a step
+/// of the top chain past the word's first wraps to the window's top places, `64 + count - 1 - k`
+/// for its step `k < 64`, past its last as well), which the next word or the count leaves out.
 #[inline(always)]
 pub(super) fn extract(bytes: &[u8], w: &mut usize, base: &mut u64, out: &mut [u64]) -> usize {
     let words = bytes.as_chunks::<8>().0;
@@ -31,7 +33,18 @@ pub(super) fn extract(bytes: &[u8], w: &mut usize, base: &mut u64, out: &mut [u6
         let (mut lo, mut hi) = (bits, bits.reverse_bits());
         // The places from the last: `count - 1 - k`, kept in the window.
         let last = count.wrapping_sub(1);
+        // The first `UNTESTED` places from each end without a test, which spares the words of up
+        // to twice as many primes the mispredicted end of the loop; their steps past the middle
+        // write junk as the loop's do.
         let mut k = 0;
+        while k < UNTESTED {
+            window[k & 63] = b.wrapping_add(BIT_VALUES[lo.trailing_zeros() as usize]);
+            lo &= lo.wrapping_sub(1);
+            window[last.wrapping_sub(k) & 63] =
+                b.wrapping_add(TOP_VALUES[hi.trailing_zeros() as usize]);
+            hi &= hi.wrapping_sub(1);
+            k += 1;
+        }
         while 2 * k < count {
             window[k & 63] = b.wrapping_add(BIT_VALUES[lo.trailing_zeros() as usize]);
             lo &= lo.wrapping_sub(1);
@@ -51,6 +64,15 @@ pub(super) fn extract(bytes: &[u8], w: &mut usize, base: &mut u64, out: &mut [u6
     }
     n
 }
+
+/// The places [`extract`] fills from each end of a word before it tests for the word's end: a word
+/// of the sieve, 240 numbers, holds about `240 / ln x` primes near `x`: 17.4 near `10^6`, 11.6 near
+/// `10^9`, 8.7 near `10^12` and 5.4 near `2^64`.
+// Measured on an Apple M4 Max (sweep 4..=16, `next` and `fold` over 2^20 numbers from 10^6, 10^9,
+// 10^12, 10^15, 10^18 and `2^64 - 2^20`, and over 2^26 from 10^15 and 10^18): 4 to 7 took 0.98 to
+// 1.03 of the time of 8 (0.98 near 10^9, 1.02 near 10^15 and 10^18), 9 and 10 0.99 to 1.04, 12 up
+// to 1.11 and 16 up to 1.31 (near 10^6); about 10^18 and above the sieving takes the time.
+const UNTESTED: usize = 8;
 
 /// The values of [`BIT_VALUES`] by the trailing zeros of a word's bits reversed: bit `63 - t`, and
 /// 0 for an empty word.

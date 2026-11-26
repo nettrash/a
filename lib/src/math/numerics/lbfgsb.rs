@@ -500,7 +500,9 @@ pub fn lbfgsb_with<T: Real + Scalar>(
         return None;
     }
 
-    let mut memory = Memory::new(opts.memory);
+    let mut memory = Memory::new(opts.memory, n);
+    // The last step and the change of the gradient along it.
+    let (mut s, mut y) = (vec![T::ZERO; n], vec![T::ZERO; n]);
     let mut work = Work::new(n);
     let mut projected = projected_norm(x.as_slice(), gradient.as_slice(), lo, hi);
     let mut iterations = 0;
@@ -607,18 +609,15 @@ pub fn lbfgsb_with<T: Real + Scalar>(
         }
 
         let (point, new_gradient) = work.found(outcome.kept);
-        let s: Vec<T> = point
-            .as_slice()
-            .iter()
-            .zip(x.as_slice())
-            .map(|(new, old)| *new - *old)
-            .collect();
-        let y: Vec<T> = new_gradient
-            .as_slice()
-            .iter()
-            .zip(gradient.as_slice())
-            .map(|(new, old)| *new - *old)
-            .collect();
+        for (s, (new, old)) in s.iter_mut().zip(point.as_slice().iter().zip(x.as_slice())) {
+            *s = *new - *old;
+        }
+        for (y, (new, old)) in y
+            .iter_mut()
+            .zip(new_gradient.as_slice().iter().zip(gradient.as_slice()))
+        {
+            *y = *new - *old;
+        }
         let descent = -dot(gradient.as_slice(), &s);
         x.as_mut_slice().copy_from_slice(point.as_slice());
         gradient
@@ -639,7 +638,7 @@ pub fn lbfgsb_with<T: Real + Scalar>(
         // The curvature test: a pair whose sᵀy is not safely positive would make B indefinite,
         // and is left out. A memory whose matrix cannot be factored is started afresh.
         let sy = dot(&s, &y);
-        if ordered(T::ZERO, sy) && sy > T::EPSILON * descent && !memory.push(s, y, sy) {
+        if ordered(T::ZERO, sy) && sy > T::EPSILON * descent && !memory.push(&s, &y, sy) {
             memory.reset();
         }
     };
@@ -771,15 +770,22 @@ fn backward<T: Real>(l: &[Vec<T>], b: &mut [T]) {
 struct Memory<T> {
     /// The most pairs kept.
     capacity: usize,
-    /// The steps.
-    s: Vec<Vec<T>>,
-    /// The changes of the gradient along them.
-    y: Vec<Vec<T>>,
+    /// The number of variables, the length of each `s` and `y`.
+    n: usize,
+    /// The pairs kept, and the slot of the oldest: pair `k` is in slot `(head + k) % capacity`.
+    len: usize,
+    head: usize,
+    /// The steps and the changes of the gradient along them, a slot of `n` elements each, in
+    /// two allocations made as the memory first fills, written over from then on.
+    s_data: Vec<T>,
+    y_data: Vec<T>,
     /// `SᵀY`: row `a` holds `sₐᵀ·y_b` for every `b`. Its diagonal is `D`, its strict lower
     /// triangle `L`.
     sy: Vec<Vec<T>>,
     /// `SᵀS`.
     ss: Vec<Vec<T>>,
+    /// `YᵀY`, for the reduced matrix while every variable is free.
+    yy: Vec<Vec<T>>,
     /// `θ`, the scale of the identity the matrix starts from: `yᵀy/sᵀy` of the last pair.
     theta: T,
     /// The lower Cholesky factor `J` of `θSᵀS + L·D⁻¹·Lᵀ`, through which `M` is applied.
@@ -787,32 +793,49 @@ struct Memory<T> {
 }
 
 impl<T: Real> Memory<T> {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, n: usize) -> Self {
         Self {
             capacity,
-            s: Vec::with_capacity(capacity),
-            y: Vec::with_capacity(capacity),
+            n,
+            len: 0,
+            head: 0,
+            s_data: Vec::new(),
+            y_data: Vec::new(),
             sy: Vec::new(),
             ss: Vec::new(),
+            yy: Vec::new(),
             theta: T::ONE,
             factor: Vec::new(),
         }
     }
 
     fn len(&self) -> usize {
-        self.s.len()
+        self.len
     }
 
     fn is_empty(&self) -> bool {
-        self.s.is_empty()
+        self.len == 0
     }
 
-    /// Forgets every pair: the matrix is the identity again.
+    /// The step of pair `k`, oldest first.
+    fn s(&self, k: usize) -> &[T] {
+        let slot = (self.head + k) % self.capacity;
+        &self.s_data[slot * self.n..(slot + 1) * self.n]
+    }
+
+    /// The change of the gradient of pair `k`, oldest first.
+    fn y(&self, k: usize) -> &[T] {
+        let slot = (self.head + k) % self.capacity;
+        &self.y_data[slot * self.n..(slot + 1) * self.n]
+    }
+
+    /// Forgets every pair: the matrix is the identity again. The slots are kept.
     fn reset(&mut self) {
-        self.s.clear();
-        self.y.clear();
+        self.len = 0;
+        self.head = 0;
         self.sy.clear();
         self.ss.clear();
+        self.yy.clear();
         self.factor.clear();
         self.theta = T::ONE;
     }
@@ -820,36 +843,67 @@ impl<T: Real> Memory<T> {
     /// Takes the pair `(s, y)` with `sᵀy = sy > 0`, in place of the oldest if the memory is
     /// full. Returns false when the matrix the pairs make can no longer be factored, which the
     /// caller answers by starting afresh.
-    fn push(&mut self, s: Vec<T>, y: Vec<T>, sy: T) -> bool {
-        let theta = dot(&y, &y) / sy;
+    fn push(&mut self, s: &[T], y: &[T], sy: T) -> bool {
+        let y_y = dot(y, y);
+        let theta = y_y / sy;
         if !ordered(T::ZERO, theta) || !finite(theta) {
             // A pair whose curvature the arithmetic cannot express teaches nothing.
             return true;
         }
-        if self.len() == self.capacity {
-            self.s.remove(0);
-            self.y.remove(0);
+        if self.len == self.capacity {
+            self.head = (self.head + 1) % self.capacity;
+            self.len -= 1;
             self.sy.remove(0);
             self.ss.remove(0);
-            for row in self.sy.iter_mut().chain(self.ss.iter_mut()) {
+            self.yy.remove(0);
+            for row in self
+                .sy
+                .iter_mut()
+                .chain(self.ss.iter_mut())
+                .chain(self.yy.iter_mut())
+            {
                 row.remove(0);
             }
         }
-        // The new row and column of SᵀY and of SᵀS, O(m·n).
-        for (row, old_s) in self.sy.iter_mut().zip(&self.s) {
-            row.push(dot(old_s, &y));
+        // The new row and column of SᵀY, SᵀS and YᵀY, O(m·n): for each pair kept, its four
+        // products with the new pair in one pass, each summed as `dot` sums it (from −0, over
+        // the variables in their order); `sₖᵀs` and `yₖᵀy` stand in both the row and the column.
+        let mut new_sy = Vec::with_capacity(self.len + 1);
+        let mut new_ss = Vec::with_capacity(self.len + 1);
+        let mut new_yy = Vec::with_capacity(self.len + 1);
+        for k in 0..self.len {
+            let (sk, yk) = (self.s(k), self.y(k));
+            let (mut sk_y, mut s_yk, mut sk_s, mut yk_y) = (-T::ZERO, -T::ZERO, -T::ZERO, -T::ZERO);
+            for (((&a, &b), &c), &d) in sk.iter().zip(yk).zip(s).zip(y) {
+                sk_y += a * d;
+                s_yk += c * b;
+                sk_s += a * c;
+                yk_y += b * d;
+            }
+            self.sy[k].push(sk_y);
+            new_sy.push(s_yk);
+            self.ss[k].push(sk_s);
+            new_ss.push(sk_s);
+            self.yy[k].push(yk_y);
+            new_yy.push(yk_y);
         }
-        let mut new_sy: Vec<T> = self.y.iter().map(|old_y| dot(&s, old_y)).collect();
         new_sy.push(sy);
         self.sy.push(new_sy);
-        for (row, old_s) in self.ss.iter_mut().zip(&self.s) {
-            row.push(dot(old_s, &s));
-        }
-        let mut new_ss: Vec<T> = self.s.iter().map(|old_s| dot(&s, old_s)).collect();
-        new_ss.push(dot(&s, &s));
+        new_ss.push(dot(s, s));
         self.ss.push(new_ss);
-        self.s.push(s);
-        self.y.push(y);
+        new_yy.push(y_y);
+        self.yy.push(new_yy);
+        // The new pair into the next slot, the oldest one's when the memory was full.
+        let slot = (self.head + self.len) % self.capacity;
+        let n = self.n;
+        if self.s_data.len() < (slot + 1) * n {
+            self.s_data.extend_from_slice(s);
+            self.y_data.extend_from_slice(y);
+        } else {
+            self.s_data[slot * n..(slot + 1) * n].copy_from_slice(s);
+            self.y_data[slot * n..(slot + 1) * n].copy_from_slice(y);
+        }
+        self.len += 1;
         self.theta = theta;
         self.refactor()
     }
@@ -915,32 +969,59 @@ impl<T: Real> Memory<T> {
     /// The row `i` of `W = [Y, θS]`.
     fn w_row(&self, i: usize) -> Vec<T> {
         let theta = self.theta;
-        self.y
-            .iter()
-            .map(|y| y[i])
-            .chain(self.s.iter().map(|s| theta * s[i]))
+        (0..self.len)
+            .map(|k| self.y(k)[i])
+            .chain((0..self.len).map(|k| theta * self.s(k)[i]))
             .collect()
     }
 
-    /// `Wᵀ·v` over the variables `indices`, `v` holding one element for each of them.
+    /// `Wᵀ·v` over the variables `indices`, ascending, `v` holding one element for each of
+    /// them: element `k` is `Σ wₖ[i]·v` summed as `dot` sums it, from −0 over `indices` in
+    /// their order, times 1 for a column of `Y` and `θ` for one of `θS`. The columns are taken
+    /// four at a time, in one pass over `v` each, their sums side by side.
     fn w_transpose_times(&self, indices: &[usize], v: &[T]) -> Vec<T> {
-        let along = |columns: &[Vec<T>], scale: T| -> Vec<T> {
-            columns
-                .iter()
-                .map(|c| scale * indices.iter().zip(v).map(|(i, v)| c[*i] * *v).sum::<T>())
-                .collect()
-        };
-        let mut out = along(&self.y, T::ONE);
-        out.extend(along(&self.s, self.theta));
+        let col = self.len;
+        let column = |c: usize| if c < col { self.y(c) } else { self.s(c - col) };
+        let scale = |c: usize| if c < col { T::ONE } else { self.theta };
+        // Every variable, in order: the columns read straight through.
+        let all = indices.len() == self.n;
+        let mut out = Vec::with_capacity(2 * col);
+        let mut c = 0;
+        while c + 4 <= 2 * col {
+            let w = [column(c), column(c + 1), column(c + 2), column(c + 3)];
+            let mut sums = [-T::ZERO; 4];
+            if all {
+                for (j, &vj) in v.iter().enumerate() {
+                    for (sum, w) in sums.iter_mut().zip(&w) {
+                        *sum += w[j] * vj;
+                    }
+                }
+            } else {
+                for (&i, &vj) in indices.iter().zip(v) {
+                    for (sum, w) in sums.iter_mut().zip(&w) {
+                        *sum += w[i] * vj;
+                    }
+                }
+            }
+            for (k, sum) in sums.into_iter().enumerate() {
+                out.push(scale(c + k) * sum);
+            }
+            c += 4;
+        }
+        for c in c..2 * col {
+            let w = column(c);
+            let sum: T = indices.iter().zip(v).map(|(i, v)| w[*i] * *v).sum();
+            out.push(scale(c) * sum);
+        }
         out
     }
 
     /// The element `i` of `W·v` for a vector `v` of `2m` elements.
     fn w_times_at(&self, i: usize, v: &[T]) -> T {
-        let col = self.len();
+        let col = self.len;
         let mut sum = T::ZERO;
-        for (k, (s, y)) in self.s.iter().zip(&self.y).enumerate() {
-            sum += y[i] * v[k] + self.theta * s[i] * v[col + k];
+        for k in 0..col {
+            sum += self.y(k)[i] * v[k] + self.theta * self.s(k)[i] * v[col + k];
         }
         sum
     }
@@ -1139,29 +1220,50 @@ impl<T: Real> Reduced<T> {
         let col = memory.len();
         let theta = memory.theta;
         // YᵀZZᵀY and SᵀZZᵀY over the free variables, SᵀAAᵀY and SᵀAAᵀS over the others:
-        // O(m²·n) in all.
+        // O(m²·n) in all. Of SᵀZZᵀY only the upper triangle (diagonal included) is read below,
+        // of SᵀAAᵀY only the strict lower one, and the other two are symmetric: each sum is
+        // formed once, over the variables in their order. With every variable free (no bound active, as
+        // throughout an unbounded problem) they are `YᵀY` and `SᵀY`, which the memory keeps,
+        // summed in the same order, and the others vanish.
         let mut yy = vec![vec![T::ZERO; col]; col];
         let mut sy_free = vec![vec![T::ZERO; col]; col];
         let mut sy_held = vec![vec![T::ZERO; col]; col];
         let mut ss_held = vec![vec![T::ZERO; col]; col];
-        for a in 0..col {
-            for b in 0..col {
-                let (sa, yb) = (&memory.s[a], &memory.y[b]);
-                let (mut f_yy, mut f_sy, mut h_sy, mut h_ss) = (T::ZERO, T::ZERO, T::ZERO, T::ZERO);
-                let (ya, sb) = (&memory.y[a], &memory.s[b]);
-                for (i, is_free) in free.iter().enumerate() {
-                    if *is_free {
-                        f_yy += ya[i] * yb[i];
-                        f_sy += sa[i] * yb[i];
-                    } else {
-                        h_sy += sa[i] * yb[i];
-                        h_ss += sa[i] * sb[i];
+        if free.iter().all(|f| *f) {
+            for a in 0..col {
+                yy[a].copy_from_slice(&memory.yy[a]);
+                sy_free[a].copy_from_slice(&memory.sy[a]);
+            }
+        } else {
+            for a in 0..col {
+                let (sa, ya) = (memory.s(a), memory.y(a));
+                for b in a..col {
+                    let (yb, sb) = (memory.y(b), memory.s(b));
+                    let (mut f_yy, mut f_sy, mut h_ss) = (T::ZERO, T::ZERO, T::ZERO);
+                    for (i, is_free) in free.iter().enumerate() {
+                        if *is_free {
+                            f_yy += ya[i] * yb[i];
+                            f_sy += sa[i] * yb[i];
+                        } else {
+                            h_ss += sa[i] * sb[i];
+                        }
                     }
+                    yy[a][b] = f_yy;
+                    yy[b][a] = f_yy;
+                    sy_free[a][b] = f_sy;
+                    ss_held[a][b] = h_ss;
+                    ss_held[b][a] = h_ss;
                 }
-                yy[a][b] = f_yy;
-                sy_free[a][b] = f_sy;
-                sy_held[a][b] = h_sy;
-                ss_held[a][b] = h_ss;
+                for (b, held) in sy_held[a].iter_mut().enumerate().take(a) {
+                    let yb = memory.y(b);
+                    let mut h_sy = T::ZERO;
+                    for (i, is_free) in free.iter().enumerate() {
+                        if !*is_free {
+                            h_sy += sa[i] * yb[i];
+                        }
+                    }
+                    *held = h_sy;
+                }
             }
         }
         let p: Vec<Vec<T>> = (0..col)
@@ -1263,7 +1365,11 @@ fn trial_point<T: Real>(
     let theta = memory.theta;
     // The reduced gradient of the model at the Cauchy point, negated:
     // r = −Zᵀ·(g + θ·(xᶜ − x) − W·M·c).
-    let mc = if col > 0 {
+    // With `c` zero, as when the Cauchy point is x itself, `M·c` is zero and so is every
+    // `(W·M·c)ᵢ`: a sum from +0 of products of finite numbers with zeros, which is +0 (the
+    // memory holds only finite pairs, and a factor whose elements are finite). It is not formed.
+    let wmc_needed = col > 0 && cauchy.c.iter().any(|c| *c != T::ZERO);
+    let mc = if wmc_needed {
         memory.times_m(&cauchy.c)
     } else {
         Vec::new()
@@ -1271,7 +1377,7 @@ fn trial_point<T: Real>(
     let r: Vec<T> = free
         .iter()
         .map(|&i| {
-            let wmc = if col > 0 {
+            let wmc = if wmc_needed {
                 memory.w_times_at(i, &mc)
             } else {
                 T::ZERO
@@ -1289,8 +1395,8 @@ fn trial_point<T: Real>(
             .zip(&r)
             .map(|(&i, r)| {
                 let mut sum = *r;
-                for (k, (s, y)) in memory.s.iter().zip(&memory.y).enumerate() {
-                    sum += y[i] * v[k] / theta + s[i] * v[col + k];
+                for k in 0..col {
+                    sum += memory.y(k)[i] * v[k] / theta + memory.s(k)[i] * v[col + k];
                 }
                 sum / theta
             })

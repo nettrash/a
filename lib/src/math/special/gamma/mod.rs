@@ -40,7 +40,7 @@ pub fn lgamma_sign<T: Real>(x: T) -> (T, T) {
 /// The digamma function `ψ(x) = Γ′(x)/Γ(x)` (`∓∞` at `±0`, NaN at the negative integers and
 /// `−∞`).
 pub fn digamma<T: Real>(x: T) -> T {
-    via(x, psi::digamma_f64)
+    super::via_f32(x, psi::digamma_f64, psi::digamma_f32)
 }
 
 /// The polygamma function `ψ⁽ⁿ⁾(x)`, the `n`-th derivative of [`digamma`] (`n = 0` is

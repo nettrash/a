@@ -12,11 +12,13 @@
 //! (28 and 36 tours in all against 42 and 38 on two knapsack lattices of rank 60 with
 //! `β = 20`); the second makes the end exact.
 //!
-//! The tours run in two stages. The first, in [`bkz_fast`](super::bkz_fast), is fplll's design:
+//! The basis is LLL-reduced first by the certified L² ([`reduce`]). The tours then run in two
+//! stages. The first, in [`bkz_fast`](super::bkz_fast), is fplll's design:
 //! the Gram–Schmidt orthogonalisation kept in floating point across insertions and tours, a
 //! float enumeration per block, and after an insertion an uncertified local L² on the block's
 //! rows alone; it does nearly all the work. Then, once, the certified LLL reduction of the whole
-//! basis, and tours on the exact Gram–Schmidt data with the exact enumeration, inserting any
+//! basis, and tours on the exact Gram–Schmidt data (from residues modulo primes,
+//! [`Gso::of_residues`]) with the exact enumeration, inserting any
 //! vector strictly shorter than `b*ₖ`, until a tour inserts nothing; usually the first does.
 //! Last, a size reduction to `|μᵢⱼ| ≤ 1/2`, exact, which changes no Gram–Schmidt vector.
 //!
@@ -101,61 +103,6 @@ pub(super) fn reduce(b: &Matrix<Number>, delta: f64, eta: f64) -> Reduced {
     } else {
         super::lll(b, &opts)
     }
-}
-
-/// Whether the rows of `b` are independent modulo the prime `2⁶¹ − 1`, which proves them
-/// independent over the integers (a rank modulo a prime is at most the rank); `false` says
-/// nothing. A word-size elimination, far cheaper than the exact rank of large numbers.
-fn full_rank_modulo(b: &Matrix<Number>) -> bool {
-    const P: u64 = (1 << 61) - 1;
-    let (n, m) = b.shape();
-    if n > m {
-        return false;
-    }
-    let mulmod = |x: u64, y: u64| (u128::from(x) * u128::from(y) % u128::from(P)) as u64;
-    let inverse = |x: u64| {
-        // x^(P−2) by squaring.
-        let (mut r, mut base, mut e) = (1u64, x, P - 2);
-        while e > 0 {
-            if e & 1 == 1 {
-                r = mulmod(r, base);
-            }
-            base = mulmod(base, base);
-            e >>= 1;
-        }
-        r
-    };
-    let mut a: Vec<Vec<u64>> = (0..n)
-        .map(|i| {
-            (0..m)
-                .map(|j| u64::try_from(&b[(i, j)].rem_euclid(&Number::from(P))).expect("below P"))
-                .collect()
-        })
-        .collect();
-    let mut row = 0;
-    for col in 0..m {
-        if row == n {
-            break;
-        }
-        let Some(p) = (row..n).find(|&i| a[i][col] != 0) else {
-            continue;
-        };
-        a.swap(row, p);
-        let inv = inverse(a[row][col]);
-        let (top, below) = a.split_at_mut(row + 1);
-        let pivot = &top[row];
-        for r in below.iter_mut() {
-            let f = mulmod(r[col], inv);
-            if f == 0 {
-                continue;
-            }
-            for (x, &y) in r[col..].iter_mut().zip(&pivot[col..]) {
-                *x = (*x + P - mulmod(f, y)) % P;
-            }
-        }
-        row += 1;
-    }
-    row == n
 }
 
 /// The rows of `m`.
@@ -292,7 +239,8 @@ impl State {
 ///
 /// The result is `(δ, η)`-LLL-reduced (as [`is_lll_reduced`](super::is_lll_reduced) checks
 /// it), with `U·B = B'` for the unimodular [`transform`](Reduced::transform), and for dependent
-/// rows the zero rows first. Tours insert first only vectors with `|πₖ(v)|² < δ·|b*ₖ|²`, as
+/// rows the zero rows first; which of the bases with the properties below it is, is not promised
+/// beyond them (see [`Reduced`]). Tours insert first only vectors with `|πₖ(v)|² < δ·|b*ₖ|²`, as
 /// Schnorr and Euchner and fplll do, and then any vector shorter than `b*ₖ`; the last tours
 /// compare in exact arithmetic, on the exact Gram–Schmidt data, and run until one inserts
 /// nothing. So when the reduction ends that way — always, with `max_tours` `None` — every
@@ -305,13 +253,16 @@ impl State {
 /// [`max_tours`](BkzOptions::max_tours) (counting every tour) the basis is still
 /// `(δ, η)`-LLL-reduced, but the blocks are promised nothing.
 ///
-/// Most tours run in floating point, in fplll's way: the Gram–Schmidt orthogonalisation kept
-/// from one insertion to the next, and after an insertion a local L² on the block's rows only.
-/// Then the basis is LLL-reduced once by the certified [`lll_fp`](super::lll_fp) (the exact
-/// [`lll`](super::lll) for `η = 1/2`) and the exact tours finish the work. The reduction
-/// always ends: the floating-point tours are at most `4n + 64` for each of at most three starts
-/// (a start that fails is followed by the certified LLL and a fresh start), `3·(4n + 64)` in
-/// all, and in the exact ones each
+/// The basis is LLL-reduced first by the certified [`lll_fp`](super::lll_fp) (the exact
+/// [`lll`](super::lll) for `η = 1/2`). Most tours then run in floating point, in fplll's way:
+/// the Gram–Schmidt orthogonalisation kept from one insertion to the next, and after an insertion
+/// a local L² on the block's rows only. Then the basis is LLL-reduced once more by the certified
+/// reduction and the exact tours finish the work, on the exact Gram–Schmidt data, computed from
+/// their residues modulo primes. The reduction
+/// always ends: the floating-point tours are at most `4n + 64` for each start, in plain scaled
+/// doubles and then, should they fail, in floats with an exponent of their own, of each of at
+/// most three runs (a run that fails is followed by the certified LLL and a fresh run),
+/// `6·(4n + 64)` in all, and in the exact ones each
 /// insertion and each exchange of LLL makes the Gram determinants `(d₁, d₂, …)`, positive
 /// integers, smaller in lexicographic order. The work of a block is that of an enumeration in
 /// dimension `β`, `2^O(β²)`: block sizes up to about 30 are practical.
@@ -364,16 +315,9 @@ pub fn bkz(basis: &Matrix<Number>, opts: &BkzOptions) -> Reduced {
         eta >= 0.5 && eta * eta < delta,
         "η must be in [1/2, √δ), not {eta} for δ = {delta}"
     );
-    // Rows proved independent go to the floating-point tours as they are, which reduce them
-    // first; others are LLL-reduced by the certified reduction, their zero rows set apart.
-    let independent = basis.rows() >= 2 && full_rank_modulo(basis);
-    let (head_rows, head_trans, rows, trans) = if independent {
-        let n = basis.rows();
-        let identity = (0..n)
-            .map(|i| (0..n).map(|j| Number::from(u8::from(i == j))).collect())
-            .collect();
-        (Vec::new(), Vec::new(), rows_of(basis, 0), identity)
-    } else {
+    // The rows are LLL-reduced first by the certified reduction (L², fast on large entries),
+    // their zero rows set apart; the floating-point tours start from that basis.
+    let (head_rows, head_trans, rows, trans) = {
         let r0 = reduce(basis, delta, eta);
         if r0.rank() < 2 {
             return r0;
@@ -416,6 +360,14 @@ pub fn bkz(basis: &Matrix<Number>, opts: &BkzOptions) -> Reduced {
     let (da, dc) = (dl.numer().clone(), dl.denom().clone());
     let mut strict = outcome == Outcome::Converged;
     let mut clean = false;
+    // The exact Gram–Schmidt data of the whole basis from residues when most of it is missing
+    // (the certified reduction above changed it), the same integers as row after row. Measured
+    // on an Apple M4 Max, BKZ-10 and BKZ-20 on knapsack, q-ary, uniform, Goldstein–Mayer and
+    // NTRU-like bases of 30 to 60 rows: never from residues took 1.01 to 1.19 of the time, and
+    // every share from a quarter of the rows missing to always within 0.5 % of a half.
+    if st.gso.len() < n / 2 {
+        st.gso = Gso::of_residues(&st.rows, n).expect("the rows of a BKZ basis are independent");
+    }
     while outcome != Outcome::Stopped && max_tours.is_none_or(|t| tours < t) {
         tours += 1;
         let mut inserted = false;

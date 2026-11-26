@@ -23,7 +23,8 @@ mod x86;
 
 use super::twiddle;
 use crate::math::complex::{Complex, Float};
-use pass::{CODELETS, Form, Kset, MAX_GENERIC, Pass};
+use pass::{CODELETS, Form, Kern, Kset, MAX_GENERIC, Pass};
+pub(crate) use pass::{HKern, RKern, SFwd, SInv};
 
 /// The instruction set the kernels of a plan were chosen for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,7 +48,10 @@ impl Isa {
         }
         #[cfg(all(target_arch = "x86_64", not(miri)))]
         {
-            if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            if !cfg!(a_baseline)
+                && std::is_x86_feature_detected!("avx2")
+                && std::is_x86_feature_detected!("fma")
+            {
                 Isa::Avx2
             } else {
                 Isa::Sse2
@@ -76,7 +80,7 @@ macro_rules! kset {
     ($name:ident, $t:ty, $w:ty, $h:ty, $n:ty, $p:ty $(, $feat:literal)?) => {
         mod $name {
             use super::blk::Blk;
-            use super::pass::{self, Form, Kern, Kset, Pass};
+            use super::pass::{self, Form, HKern, Kern, Kset, Pass, RKern, SKerns};
             use crate::math::complex::Complex;
 
             $(#[target_feature(enable = $feat)])?
@@ -166,8 +170,27 @@ macro_rules! kset {
                 }
             }
 
+            /// The kernels of a composite butterfly: a whole transform, L or B form only.
+            fn sel_short<const R: usize>(form: Form, inv: bool) -> Kern<$t> {
+                match (form, inv) {
+                    (Form::B, false) => b::<R, false>,
+                    (Form::B, true) => b::<R, true>,
+                    (_, false) => l::<R, false>,
+                    (_, true) => l::<R, true>,
+                }
+            }
+
             fn kern(r: usize, form: Form, inv: bool) -> Kern<$t> {
                 match r {
+                    6 => sel_short::<6>(form, inv),
+                    9 => sel_short::<9>(form, inv),
+                    10 => sel_short::<10>(form, inv),
+                    12 => sel_short::<12>(form, inv),
+                    15 => sel_short::<15>(form, inv),
+                    16 => sel_short::<16>(form, inv),
+                    20 => sel_short::<20>(form, inv),
+                    24 => sel_short::<24>(form, inv),
+                    25 => sel_short::<25>(form, inv),
                     2 => sel::<2>(form, inv),
                     3 => sel::<3>(form, inv),
                     4 => sel::<4>(form, inv),
@@ -183,7 +206,159 @@ macro_rules! kset {
                 }
             }
 
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn rf<const M: usize>(
+                g: &[$t],
+                tw: *const $t,
+                x: *const Complex<$t>,
+                y: *mut Complex<$t>,
+            ) {
+                // SAFETY: the contract of the fused kernels; the features were detected.
+                unsafe { pass::real_fwd::<$t, $n, M>(g, tw, x, y) }
+            }
+
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn ri<const M: usize>(
+                g: &[$t],
+                tw: *const $t,
+                x: *const Complex<$t>,
+                y: *mut Complex<$t>,
+            ) {
+                // SAFETY: as for `rf`.
+                unsafe { pass::real_inv::<$t, $n, M>(g, tw, x, y) }
+            }
+
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn rof<const M: usize>(
+                g: &[$t],
+                tw: *const $t,
+                x: *const Complex<$t>,
+                y: *mut Complex<$t>,
+            ) {
+                // SAFETY: as for `rf`.
+                unsafe { pass::real_odd_fwd::<$t, $n, M>(g, tw, x, y) }
+            }
+
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn roi<const M: usize>(
+                g: &[$t],
+                tw: *const $t,
+                x: *const Complex<$t>,
+                y: *mut Complex<$t>,
+            ) {
+                // SAFETY: as for `rf`.
+                unsafe { pass::real_odd_inv::<$t, $n, M>(g, tw, x, y) }
+            }
+
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn sf<const R: usize>(
+                g: &[$t],
+                tw: *const $t,
+                zb: *const Complex<$t>,
+                yl: *const Complex<$t>,
+                m: usize,
+                y: *mut Complex<$t>,
+            ) {
+                // SAFETY: as for `rf`.
+                unsafe { pass::split_fwd::<$t, $n, R>(g, tw, zb, yl, m, y) }
+            }
+
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn si<const R: usize>(
+                g: &[$t],
+                tw: *const $t,
+                x: *const Complex<$t>,
+                m: usize,
+                zb: *mut Complex<$t>,
+                ul: *mut Complex<$t>,
+            ) {
+                // SAFETY: as for `rf`.
+                unsafe { pass::split_inv::<$t, $n, R>(g, tw, x, m, zb, ul) }
+            }
+
+            $(#[target_feature(enable = $feat)])?
+            unsafe fn hl<const R: usize>(
+                d: &Pass<$t>,
+                x: *const Complex<$t>,
+                y: *mut Complex<$t>,
+                tw: *const $t,
+            ) {
+                // SAFETY: as for `rf`.
+                unsafe { pass::half_last::<$t, $n, R>(d, x, y, tw) }
+            }
+
+            fn half_last(r: usize) -> Option<HKern<$t>> {
+                Some(match r {
+                    2 => hl::<2>,
+                    3 => hl::<3>,
+                    4 => hl::<4>,
+                    5 => hl::<5>,
+                    8 => hl::<8>,
+                    _ => return None,
+                })
+            }
+
+            fn split(r: usize) -> Option<SKerns<$t>> {
+                Some(match r {
+                    3 => (sf::<3>, si::<3>),
+                    5 => (sf::<5>, si::<5>),
+                    7 => (sf::<7>, si::<7>),
+                    9 => (sf::<9>, si::<9>),
+                    11 => (sf::<11>, si::<11>),
+                    13 => (sf::<13>, si::<13>),
+                    15 => (sf::<15>, si::<15>),
+                    17 => (sf::<17>, si::<17>),
+                    19 => (sf::<19>, si::<19>),
+                    _ => return None,
+                })
+            }
+
+            fn real_odd(m: usize) -> Option<[RKern<$t>; 2]> {
+                Some(match m {
+                    3 => [rof::<3>, roi::<3>],
+                    5 => [rof::<5>, roi::<5>],
+                    7 => [rof::<7>, roi::<7>],
+                    9 => [rof::<9>, roi::<9>],
+                    11 => [rof::<11>, roi::<11>],
+                    13 => [rof::<13>, roi::<13>],
+                    15 => [rof::<15>, roi::<15>],
+                    _ => return None,
+                })
+            }
+
+            fn real(m: usize) -> Option<[RKern<$t>; 2]> {
+                Some(match m {
+                    2 => [rf::<2>, ri::<2>],
+                    3 => [rf::<3>, ri::<3>],
+                    4 => [rf::<4>, ri::<4>],
+                    5 => [rf::<5>, ri::<5>],
+                    6 => [rf::<6>, ri::<6>],
+                    7 => [rf::<7>, ri::<7>],
+                    8 => [rf::<8>, ri::<8>],
+                    9 => [rf::<9>, ri::<9>],
+                    10 => [rf::<10>, ri::<10>],
+                    11 => [rf::<11>, ri::<11>],
+                    12 => [rf::<12>, ri::<12>],
+                    13 => [rf::<13>, ri::<13>],
+                    15 => [rf::<15>, ri::<15>],
+                    16 => [rf::<16>, ri::<16>],
+                    17 => [rf::<17>, ri::<17>],
+                    19 => [rf::<19>, ri::<19>],
+                    20 => [rf::<20>, ri::<20>],
+                    24 => [rf::<24>, ri::<24>],
+                    25 => [rf::<25>, ri::<25>],
+                    // None for 32 (64 reals, 32 = 8·4 in one butterfly): measured on an Apple
+                    // M4 Max, the transform of 32 and the pair pass take 0.87 (forward) and 0.97
+                    // (inverse) of the fused kernel's time in `f64`, 0.69 to 0.97 in `f32`.
+                    _ => return None,
+                })
+            }
+
             pub(crate) static KSET: Kset<$t> = Kset {
+                real,
+                real_odd,
+                split,
+                half_last,
                 pass: kern,
                 pmul: [pm::<false>, pm::<true>],
                 wide: <$w as Blk<$t>>::K,
@@ -708,6 +883,9 @@ impl<T: Kernels> Algo<T> {
                 Algo::Blue(Box::new(Blue::new(n, ks)))
             };
         }
+        if pass::composite(n) {
+            return Algo::Stock(Stock::new(n, 1, &[n], ks));
+        }
         if big > MAX_GENERIC {
             if bluestein_cost(n).1 < cost(n) {
                 return Algo::Blue(Box::new(Blue::new(n, ks)));
@@ -800,6 +978,85 @@ impl<T: Kernels> Algo<T> {
     }
 }
 
+/// The kernel of a length transformed by one hard-coded butterfly, for a plan to call it
+/// directly on one run: no dispatch through the algorithm, its passes and the batch.
+#[derive(Clone, Copy)]
+pub(crate) struct Short<T> {
+    /// The batch kernels of the butterfly (`Form::B`), called for one run.
+    kern: [Kern<T>; 2],
+    len: usize,
+    pass: *const Pass<T>,
+}
+
+impl<T> Short<T> {
+    /// The transform of the one run at `x` into `y` (the same or not overlapping).
+    ///
+    /// # Safety
+    /// `x` and `y` must be valid for the run's values, and the plan `algo` this was made from
+    /// must be alive.
+    #[inline(always)]
+    pub(crate) unsafe fn run(&self, x: *const Complex<T>, y: *mut Complex<T>, inv: bool) {
+        // SAFETY: the caller's contract; the pass lives in the plan, which never changes.
+        unsafe { (self.kern[inv as usize])(&*self.pass, x, y, 1, self.len) }
+    }
+}
+
+impl<T: Kernels> Algo<T> {
+    /// The direct kernel of a length of one hard-coded butterfly, if it is one; the pass is
+    /// inside `self`, which must stay where it is (it is in an `Arc`) and unchanged.
+    pub(crate) fn short(&self) -> Option<Short<T>> {
+        match self {
+            Algo::Stock(s) if s.passes.len() == 1 && s.len == s.passes[0].r => {
+                let p = &s.passes[0];
+                if p.sub.is_some() || p.bkern.is_none() {
+                    return None;
+                }
+                Some(Short {
+                    kern: p.bkern.expect("checked"),
+                    len: p.r,
+                    pass: p,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The kernels of the real transform of an odd `n` of one butterfly by that butterfly on the
+/// reals (forward, inverse), and its table.
+pub(crate) fn real_odd_kernels<T: Kernels>(n: usize, isa: Isa) -> Option<([RKern<T>; 2], Vec<T>)> {
+    (T::kset(isa).real_odd)(n).map(|k| (k, pass::bfly_table::<T>(n)))
+}
+
+/// The combine passes of the odd split of a real transform by the radix `r` (forward, inverse)
+/// and the table of the butterfly of `r`, if `r` has them.
+pub(crate) fn split_kernels<T: Kernels>(r: usize, isa: Isa) -> Option<(SFwd<T>, SInv<T>, Vec<T>)> {
+    (T::kset(isa).split)(r).map(|(f, i)| (f, i, pass::bfly_table::<T>(r)))
+}
+
+/// The fused real kernels of `n = 2m` (forward, inverse) and the table of the butterfly of
+/// `m`, for a length `m` of one butterfly.
+pub(crate) fn real_kernels<T: Kernels>(m: usize, isa: Isa) -> Option<([RKern<T>; 2], Vec<T>)> {
+    (T::kset(isa).real)(m).map(|k| (k, pass::bfly_table::<T>(m)))
+}
+
+impl<T: Kernels> Algo<T> {
+    /// The transforms of the length `n` of `s0` interleaved sequences, `x[q + s0·j]` for the
+    /// sequence `q` (the columns of an array of `s0` columns stored row by row), in place by
+    /// passes along the contiguous index: if `n` has no prime factor above [`MAX_GENERIC`].
+    pub(crate) fn interleaved(n: usize, s0: usize, isa: Isa) -> Option<Algo<T>> {
+        if n <= 1 || s0 == 0 || *factors(n).last()? > MAX_GENERIC {
+            return None;
+        }
+        let rs = if pass::composite(n) {
+            vec![n]
+        } else {
+            radices(n)
+        };
+        Some(Algo::Stock(Stock::new(n, s0, &rs, T::kset(isa))))
+    }
+}
+
 impl<T> Algo<T> {
     /// The algorithm, for `Debug`: e.g. `8·8·4·4`, `Rader(4·4·3·3·7)`, `2·[Bluestein(…)]`.
     pub(crate) fn describe(&self) -> String {
@@ -832,12 +1089,13 @@ impl<T: Kernels> Stock<T> {
     fn new(n: usize, s0: usize, rs: &[usize], ks: &'static Kset<T>) -> Stock<T> {
         let mut passes = Vec::with_capacity(rs.len());
         // Every pass's twiddles W_L^e = W_n^(e·n/L) from one table of the roots of n.
-        let roots = twiddle::Roots::new(n);
+        let roots = twiddle::Gen::new::<T>(n);
         let (mut s, mut l) = (s0, n);
         let mut extra = 0;
         for &r in rs {
             let m = l / r;
-            let codelet = CODELETS.contains(&r);
+            let comp = pass::composite(r);
+            let codelet = comp || CODELETS.contains(&r);
             let form = if codelet && s == 1 && ks.plane > 1 && m >= ks.plane {
                 Form::P
             } else if m == 1 {
@@ -847,52 +1105,55 @@ impl<T: Kernels> Stock<T> {
             };
             let step = n / l;
             // W_L^(j·p) in the place the pass reads it: compact [wr, wr, −wi, wi] by p then j,
-            // or for the P form by blocks of `plane` values of p, in lane form.
-            let mut tw = vec![
-                T::ZERO;
-                if form == Form::P || m > 1 {
-                    4 * (r - 1) * m
-                } else {
-                    0
-                }
-            ];
+            // or for the P form by blocks of `plane` values of p, in lane form; written once in
+            // order (no zeroing first: at 2²⁰ the tables are tens of megabytes).
+            let len = if form == Form::P || m > 1 {
+                4 * (r - 1) * m
+            } else {
+                0
+            };
+            let mut tw: Vec<T> = Vec::with_capacity(len);
+            let out = &mut tw.spare_capacity_mut()[..len];
+            let mut whole = 0;
             if form == Form::P {
                 let k = ks.plane;
-                let whole = m / k * k;
+                whole = m / k * k;
                 // Blocks of k values of p, for each j the lanes [wr, wr, …] then [−wi, wi, …].
-                let (blocks, rest) = tw.split_at_mut(4 * (r - 1) * whole);
-                for (pb, blk) in blocks.chunks_exact_mut(4 * k * (r - 1)).enumerate() {
-                    for (j, o) in blk.chunks_exact_mut(4 * k).enumerate() {
-                        let (re, im) = o.split_at_mut(2 * k);
-                        for l in 0..k {
-                            let w = roots.get_t::<T>((j + 1) * (pb * k + l) * step);
-                            re[2 * l] = w.re;
-                            re[2 * l + 1] = w.re;
-                            im[2 * l] = -w.im;
-                            im[2 * l + 1] = w.im;
+                let blocks = &mut out[..4 * (r - 1) * whole];
+                for (pb, blk) in blocks.chunks_exact_mut(4 * (r - 1) * k).enumerate() {
+                    for (j, c) in blk.chunks_exact_mut(4 * k).enumerate() {
+                        let (re, im) = c.split_at_mut(2 * k);
+                        let e0 = (j + 1) * pb * k * step;
+                        let (re, im) = (re.as_chunks_mut::<2>().0, im.as_chunks_mut::<2>().0);
+                        for (l, (re, im)) in re.iter_mut().zip(im).enumerate() {
+                            let w = roots.get_t::<T>(e0 + (j + 1) * l * step);
+                            re[0].write(w.re);
+                            re[1].write(w.re);
+                            im[0].write(-w.im);
+                            im[1].write(w.im);
                         }
                     }
                 }
-                for (i, row) in rest.chunks_exact_mut(4 * (r - 1)).enumerate() {
-                    let p = whole + i;
+            }
+            if m > 1 || form == Form::P {
+                // The rest by p, then j: W^(j·p) with the exponent by additions.
+                let rows = out[4 * (r - 1) * whole..].chunks_exact_mut(4 * (r - 1));
+                for (p, row) in (whole..m).zip(rows) {
                     let mut e = 0;
-                    for o in row.as_chunks_mut::<4>().0 {
+                    for c in row.as_chunks_mut::<4>().0 {
                         e += p * step;
                         let w = roots.get_t::<T>(e);
-                        *o = [w.re, w.re, -w.im, w.im];
-                    }
-                }
-            } else if m > 1 {
-                // By p, then j: W^(j·p) with the exponent by additions.
-                for (p, row) in tw.chunks_exact_mut(4 * (r - 1)).enumerate() {
-                    let mut e = 0;
-                    for o in row.as_chunks_mut::<4>().0 {
-                        e += p * step;
-                        let w = roots.get_t::<T>(e);
-                        *o = [w.re, w.re, -w.im, w.im];
+                        c[0].write(w.re);
+                        c[1].write(w.re);
+                        c[2].write(-w.im);
+                        c[3].write(w.im);
                     }
                 }
             }
+            // SAFETY: the loops above wrote each of the `len` values: `4(r − 1)` a value of p,
+            // for the blocks of the P form and for the rest.
+            unsafe { tw.set_len(len) };
+            debug_assert_eq!(tw.len(), len);
             let big = !codelet;
             let mut batched = None;
             let (g, sub) = if big {
@@ -903,12 +1164,8 @@ impl<T: Kernels> Stock<T> {
                     batched = Some(Box::new(sb));
                 }
                 (Vec::new(), Some(Box::new(sub)))
-            } else if r > 8 {
-                let mut g: Vec<T> = (0..r).map(|i| T::from_f64(twiddle::root(i, r).0)).collect();
-                g.extend((0..r).map(|i| T::from_f64(-twiddle::root(i, r).1)));
-                (g, None)
             } else {
-                (Vec::new(), None)
+                (pass::bfly_table::<T>(r), None)
             };
             let kern = if big {
                 // Unused: the pass runs by its sub-plan.
@@ -1024,6 +1281,82 @@ impl<T: Kernels> Stock<T> {
             }
             Self::exec(&self.passes[np - 1], cur, dst, extra, count, len, inv);
         }
+    }
+}
+
+impl<T: Kernels> Stock<T> {
+    /// [`run`](Self::run) of one transform of `s0 = 1` sequence with the last pass by `k` (the
+    /// fused real pass, `tw` its factors) into `dst`, which holds one value more.
+    ///
+    /// # Safety
+    /// As for [`run`](Self::run) with `count = 1`; `dst` valid for `len + 1` values; the last
+    /// pass is one `k` was made for.
+    unsafe fn run_last(
+        &self,
+        src: *const Complex<T>,
+        dst: *mut Complex<T>,
+        tmp: *mut Complex<T>,
+        k: HKern<T>,
+        tw: *const T,
+    ) {
+        let np = self.passes.len();
+        let len = self.len;
+        // SAFETY: as in `run`; the last pass reads `cur` and writes `dst`, the same or apart.
+        unsafe {
+            let extra = tmp.add(len);
+            let in_place = core::ptr::eq(src, dst);
+            let mut cur = src;
+            for (i, p) in self.passes[..np - 1].iter().enumerate() {
+                let out = if in_place {
+                    if i.is_multiple_of(2) { tmp } else { dst }
+                } else if (np - 2 - i).is_multiple_of(2) {
+                    dst
+                } else {
+                    tmp
+                };
+                Self::exec(p, cur, out, extra, 1, len, false);
+                cur = out;
+            }
+            k(&self.passes[np - 1], cur, dst, tw);
+        }
+    }
+}
+
+impl<T: Kernels> Algo<T> {
+    /// For the even real transform whose half this plan transforms: the kernel of its last pass
+    /// fused with the real pass, when the plan is Stockham passes of one sequence (two at least)
+    /// whose last is a hard-coded butterfly with such a kernel.
+    pub(crate) fn half_last(&self, isa: Isa) -> Option<HKern<T>> {
+        match self {
+            Algo::Stock(s) if s.passes.len() >= 2 && s.passes[0].s == 1 => {
+                let p = s.passes.last()?;
+                if p.m != 1 || p.sub.is_some() || pass::composite(p.r) {
+                    return None;
+                }
+                (T::kset(isa).half_last)(p.r)
+            }
+            _ => None,
+        }
+    }
+
+    /// The transform of `x` with the last pass by `k` (from [`half_last`](Self::half_last)) into
+    /// `y`, `scr` the plan's working memory.
+    ///
+    /// # Safety
+    /// As for [`Algo::run`]; `y` valid for `n + 1` values; `tw` holds the real pass's factors.
+    pub(crate) unsafe fn run_half_last(
+        &self,
+        x: *const Complex<T>,
+        y: *mut Complex<T>,
+        scr: *mut Complex<T>,
+        k: HKern<T>,
+        tw: *const T,
+    ) {
+        let Algo::Stock(s) = self else {
+            unreachable!("a plan of passes")
+        };
+        // SAFETY: the caller's contract.
+        unsafe { s.run_last(x, y, scr, k, tw) }
     }
 }
 

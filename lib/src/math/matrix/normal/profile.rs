@@ -8,23 +8,30 @@
 //! rows outside it, `S`, are then each a combination of rows of `R` below them, which makes the
 //! transformation of [`super::hermite`] the one of the Hermite normal form of `[A | I]`.
 //!
-//! Both are found together by one elimination modulo a prime `p` below `2^62`: the rows from the
-//! bottom, each reduced by the echelon basis of the rows kept so far, kept when something is left,
-//! whose first element is then a new pivot column. That costs `O(m·n·r)` operations on words, and
-//! gives the true profiles unless `p` divides one of a few minors. They are then proved exactly:
+//! Both are found modulo a prime `p` below `2^62` by the PLE decomposition of
+//! [`ModMatrix`](super::super::ModMatrix): its pivots are the column rank profile, and those of
+//! the decomposition of `Aᵀ` with its columns reversed are the rows from the bottom (when only
+//! some independent rows are wanted, the first `r` rows of the first decomposition's permutation
+//! are). That costs `O(m·n·r^(ω−2))` operations on words, and gives the true profiles unless `p`
+//! divides one of a few minors. They are then proved exactly:
 //! with `M = A[R, J]` nonsingular (its determinant is not zero modulo `p`), the solution
 //! `X = M⁻¹·A[R, K]` for the columns `K` outside `J` must satisfy `A[S, J]·X = A[S, K]`, which
 //! makes every column a combination of the columns `J` and the rank `r`, and must be zero where a
 //! column of `J` comes after the column of `K` it expresses, which makes `J` the column profile;
 //! when `R` is wanted too, `Y = A[S, J]·M⁻¹` must be zero where a row of `R` comes before the row
-//! of `S` it expresses. When a check fails, the next prime is tried. Each prime that fails divides
+//! of `S` it expresses (`Y` is computed as the integers `N = |det M|·Y`, from their residues modulo
+//! primes, which are zero where `Y` is). When a check fails, the next prime is tried. Each prime that fails divides
 //! one of the `m + n` minors the profiles depend on, so a matrix fails at most a number of primes
 //! that is the length of those minors in bits over 61, and as a rule none.
 
-use super::super::Matrix;
-use crate::math::numbers::nat::inverse_word;
-use crate::math::numbers::{Divisor, Number, is_prime_u64};
+use super::super::modp::{Field, TopPrimes, decompose};
+use super::super::{Matrix, ModMatrix};
+use super::hermite::matrix_of;
+use super::inverse::times_inverse;
+use super::pernet;
+use crate::math::numbers::Number;
 use crate::math::rational::Rational;
+use core::cell::OnceCell;
 
 /// The rank profiles of a matrix, proved, and what the proof computed.
 pub(crate) struct Basis {
@@ -41,38 +48,31 @@ pub(crate) struct Basis {
     pub(crate) others: Vec<usize>,
     /// `M = A[R, J]`, nonsingular.
     pub(crate) minor: Matrix<Number>,
-    /// `|det M|`, positive: 1 for rank 0.
-    pub(crate) det: Number,
+    /// `|det M|`, positive: 1 for rank 0; found when first asked for ([`Basis::det`]), or set
+    /// by whoever finds it on the way.
+    pub(crate) det: OnceCell<Number>,
     /// `X = M⁻¹·A[R, K]`, `r × (n − r)`: `A[:, K] = A[:, J]·X`.
     pub(crate) x: Matrix<Rational>,
-    /// `Y = A[S, J]·M⁻¹`, `(m − r) × r`: `A[S, :] = Y·A[R, :]`; when asked for.
-    pub(crate) y: Option<Matrix<Rational>>,
+    /// `N = |det M|·Y` for `Y = A[S, J]·M⁻¹`, `(m − r) × r`, of integers: `A[S, :] = Y·A[R, :]`;
+    /// when asked for.
+    pub(crate) n: Option<Matrix<Number>>,
+    /// The Hermite form of the rows of `A[:, J]`, when it is known already.
+    pub(crate) hj: OnceCell<Matrix<Number>>,
 }
 
-/// The primes the profiles are computed modulo: the largest below `2^62`, then each the largest
-/// below the one before.
-struct Primes(u64);
-
-impl Iterator for Primes {
-    type Item = u64;
-
-    fn next(&mut self) -> Option<u64> {
-        while self.0 > 3 {
-            self.0 -= 2;
-            if is_prime_u64(self.0) {
-                return Some(self.0);
-            }
-        }
-        None
+impl Basis {
+    /// `|det M|`: the determinant of the minor, computed the first time.
+    pub(crate) fn det(&self) -> &Number {
+        self.det.get_or_init(|| self.minor.det().abs())
     }
 }
 
 /// The rank profiles of `a`, proved; with the row rank profile from the bottom when `rows_too` is
 /// set, and some `r` independent rows otherwise.
 pub(crate) fn basis(a: &Matrix<Number>, rows_too: bool) -> Basis {
-    // From `2^62 + 1`, so that the first prime tried is the largest below `2^62`.
-    for p in Primes((1 << 62) + 1) {
-        if let Some(b) = prove(a, &candidate(a, p), rows_too) {
+    // The primes from the largest below `2^62` down.
+    for p in TopPrimes::default() {
+        if let Some(b) = prove(a, &candidate(a, p, rows_too), rows_too) {
             return b;
         }
     }
@@ -85,54 +85,42 @@ struct Candidate {
     rows: Vec<usize>,
 }
 
-/// `a·b mod p`.
-#[inline]
-fn mul_mod(a: u64, b: u64, p: u64) -> u64 {
-    (u128::from(a) * u128::from(b) % u128::from(p)) as u64
-}
-
-/// The rank profiles of `a` modulo the prime `p`: the rows from the bottom, each reduced by the
-/// echelon basis of the rows kept so far, its basis vectors in the order of their first columns,
-/// each scaled to a 1 there; a row with something left is kept, and its first nonzero column is a
-/// pivot.
-fn candidate(a: &Matrix<Number>, p: u64) -> Candidate {
+/// The rank profiles of `a` modulo the prime `p`: the pivot columns of the PLE decomposition of
+/// `A`, the column rank profile; and, when `rows_too` is set, the pivot columns of the
+/// decomposition of `Aᵀ` with its columns reversed, the rows from the bottom that are
+/// independent, otherwise the rows the first decomposition took its pivots from, independent.
+fn candidate(a: &Matrix<Number>, p: u64, rows_too: bool) -> Candidate {
     let (m, n) = a.shape();
-    let divisor = Divisor::new(&Number::from(p));
-    let mut basis: Vec<(usize, Vec<u64>)> = Vec::new();
-    let mut rows = Vec::new();
-    let mut v = vec![0u64; n];
-    for i in (0..m).rev() {
-        if basis.len() == n {
-            // The rows kept span everything: the others depend on them.
-            break;
-        }
-        for (j, x) in v.iter_mut().enumerate() {
-            let r = divisor.rem_euclid(&a[(i, j)]);
-            *x = u64::try_from(&r).expect("a residue below the prime");
-        }
-        for (lead, b) in &basis {
-            let c = v[*lead];
-            if c == 0 {
-                continue;
-            }
-            for (x, &y) in v[*lead..].iter_mut().zip(&b[*lead..]) {
-                let t = mul_mod(c, y, p);
-                *x = if *x >= t { *x - t } else { *x + (p - t) };
-            }
-        }
-        if let Some(lead) = v.iter().position(|&x| x != 0) {
-            let inv = inverse_word(v[lead], p).expect("a unit modulo a prime");
-            for x in &mut v[lead..] {
-                *x = mul_mod(*x, inv, p);
-            }
-            let at = basis.partition_point(|(l, _)| *l < lead);
-            basis.insert(at, (lead, v.clone()));
-            rows.push(i);
-        }
+    if m == 0 || n == 0 {
+        return Candidate {
+            cols: Vec::new(),
+            rows: Vec::new(),
+        };
     }
-    rows.reverse();
+    let f = Field::new(p);
+    let residues = ModMatrix::from_matrix_prime(a, p);
+    let src = residues.as_slice();
+    let mut work = src.to_vec();
+    let e = decompose(f, &mut work, m, n);
+    let mut rows: Vec<usize> = if rows_too {
+        // `B[j][c] = A[m − 1 − c][j]`: column `c` of `B` is row `m − 1 − c` of `A`.
+        let mut b = vec![0u64; n * m];
+        for (i, row) in src.chunks_exact(n).enumerate() {
+            for (j, &x) in row.iter().enumerate() {
+                b[j * m + (m - 1 - i)] = x;
+            }
+        }
+        decompose(f, &mut b, n, m)
+            .pivots
+            .iter()
+            .map(|&c| m - 1 - c)
+            .collect()
+    } else {
+        e.perm[..e.rank].to_vec()
+    };
+    rows.sort_unstable();
     Candidate {
-        cols: basis.into_iter().map(|(l, _)| l).collect(),
+        cols: e.pivots,
         rows,
     }
 }
@@ -180,16 +168,21 @@ fn prove(a: &Matrix<Number>, c: &Candidate, rows_too: bool) -> Option<Basis> {
             rows: Vec::new(),
             others,
             minor: Matrix::zeros(0, 0),
-            det: Number::from(1u8),
+            det: OnceCell::from(Number::from(1u8)),
             x: Matrix::zeros(0, n),
-            y: rows_too.then(|| Matrix::zeros(m, 0)),
+            n: rows_too.then(|| Matrix::zeros(m, 0)),
+            hj: OnceCell::new(),
         });
     }
     let minor = select(a, &c.rows, &c.cols);
-    let det = minor.det().abs();
-    let x = minor
-        .solve(&select(a, &c.rows, &free))
-        .expect("a minor that is nonsingular modulo a prime");
+    // With every column in `J` there is nothing to solve for (and no elimination to spend on it).
+    let x = if free.is_empty() {
+        Matrix::zeros(r, 0)
+    } else {
+        minor
+            .solve(&select(a, &c.rows, &free))
+            .expect("a minor that is nonsingular modulo a prime")
+    };
     // A column of `K` may depend only on the columns of `J` before it.
     for (f, &col) in free.iter().enumerate() {
         for (k, &p) in c.cols.iter().enumerate() {
@@ -205,21 +198,25 @@ fn prove(a: &Matrix<Number>, c: &Candidate, rows_too: bool) -> Option<Basis> {
             return None;
         }
     }
-    let y = if rows_too {
-        let y = minor
-            .transpose()
-            .solve(&select(a, &others, &c.cols).transpose())
-            .expect("a nonsingular minor")
-            .transpose();
+    let det = OnceCell::new();
+    let n = if rows_too {
+        // `N = δ·A[S, J]·M⁻¹`, of integers (`δ·M⁻¹` is the adjugate up to sign), from its
+        // residues; it is zero where `Y` is.
+        let n = if others.is_empty() {
+            Matrix::zeros(0, r)
+        } else {
+            let delta = det.get_or_init(|| minor.det().abs());
+            times_inverse(&select(a, &others, &c.cols), &minor, delta, delta)
+        };
         // A row of `S` may depend only on the rows of `R` below it.
         for (s, &row) in others.iter().enumerate() {
             for (k, &p) in c.rows.iter().enumerate() {
-                if p < row && !y[(s, k)].is_zero() {
+                if p < row && !n[(s, k)].is_zero() {
                     return None;
                 }
             }
         }
-        Some(y)
+        Some(n)
     } else {
         None
     };
@@ -232,6 +229,32 @@ fn prove(a: &Matrix<Number>, c: &Candidate, rows_too: bool) -> Option<Basis> {
         minor,
         det,
         x,
-        y,
+        n,
+        hj: OnceCell::new(),
+    })
+}
+
+/// The profiles of the square `a` of order [`pernet::FROM`] or more when Pernet and Stein's method
+/// finds its Hermite form of full rank, which proves it nonsingular: every column and every row,
+/// the minor `a` itself, its determinant the product of the pivots, and the form; `None`
+/// otherwise (a singular matrix, or one whose leading block is singular), for [`basis`].
+pub(crate) fn square_basis(a: &Matrix<Number>) -> Option<Basis> {
+    let n = a.rows();
+    if !a.is_square() || n < pernet::FROM.max(3) {
+        return None;
+    }
+    let h = pernet::square(a)?;
+    let det: Number = (0..n).map(|i| h[i][i].clone()).product();
+    Some(Basis {
+        rank: n,
+        cols: (0..n).collect(),
+        free: Vec::new(),
+        rows: (0..n).collect(),
+        others: Vec::new(),
+        minor: a.clone(),
+        det: OnceCell::from(det),
+        x: Matrix::zeros(n, 0),
+        n: Some(Matrix::zeros(0, n)),
+        hj: OnceCell::from(matrix_of(&h, n, n)),
     })
 }

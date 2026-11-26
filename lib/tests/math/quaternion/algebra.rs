@@ -243,6 +243,148 @@ fn the_ring_identities_hold_on_random_quaternions_to_rounding() {
     assert!(worst32 <= 3.0);
 }
 
+/// Hamilton's formula in `f32`, the products added from the left.
+fn formula32(l: Q32, r: Q32) -> Q32 {
+    Q32::new(
+        l.w * r.w - l.x * r.x - l.y * r.y - l.z * r.z,
+        l.w * r.x + l.x * r.w + l.y * r.z - l.z * r.y,
+        l.w * r.y - l.x * r.z + l.y * r.w + l.z * r.x,
+        l.w * r.z + l.x * r.y - l.y * r.x + l.z * r.w,
+    )
+}
+
+#[test]
+fn f32_products_are_the_formula_bit_for_bit_where_it_is_finite() {
+    // On aarch64 the f32 product runs in the lanes of a NEON vector: it must be the formula
+    // exactly, signed zeros and subnormals included, wherever every part of the formula is
+    // finite, and the scaled product of the other tests elsewhere.
+    let mut rng = Rng(32);
+    let specials = [
+        0.0f32,
+        -0.0,
+        1.0,
+        -1.0,
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE / 8.0,
+        1e-45,
+        3.0e38,
+        -2.0e19,
+        1.5e19,
+        f32::MAX,
+        f32::INFINITY,
+        f32::NAN,
+    ];
+    let part = |rng: &mut Rng| -> f32 {
+        let k = rng.next_u64();
+        if k.is_multiple_of(4) {
+            specials[(k >> 8) as usize % specials.len()]
+        } else {
+            let m = (k >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+            (m * pow2(((k >> 2) % 60) as i32 - 30)) as f32
+        }
+    };
+    let mut checked = 0;
+    for _ in 0..if cfg!(miri) { 200 } else { 200_000 } {
+        let a = Q32::new(
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+        );
+        let b = Q32::new(
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+        );
+        let f = formula32(a, b);
+        if f.is_finite() {
+            assert!(
+                identical32(a * b, f),
+                "{a:?} * {b:?}: {:?}, not {f:?}",
+                a * b
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > if cfg!(miri) { 50 } else { 50_000 }, "{checked}");
+}
+
+/// Hamilton's formula in `f64`, the products added from the left.
+fn formula64(l: Q, r: Q) -> Q {
+    q(
+        l.w * r.w - l.x * r.x - l.y * r.y - l.z * r.z,
+        l.w * r.x + l.x * r.w + l.y * r.z - l.z * r.y,
+        l.w * r.y - l.x * r.z + l.y * r.w + l.z * r.x,
+        l.w * r.z + l.x * r.y - l.y * r.x + l.z * r.w,
+    )
+}
+
+#[test]
+fn f64_products_are_the_formula_bit_for_bit_where_it_is_finite() {
+    // On aarch64 the f64 product runs in the lanes of two NEON vectors: it must be the formula
+    // exactly, signed zeros and subnormals included, wherever every part of the formula is
+    // finite. A quarter of the parts are special values (signed zeros, ±1, subnormals, the ends
+    // of the range, ∞, NaN), a quarter have exponents over the whole range, so that products
+    // underflow to subnormals and to zeros of either sign, and the rest are of moderate size.
+    let mut rng = Rng(64);
+    let specials = [
+        0.0f64,
+        -0.0,
+        1.0,
+        -1.0,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE / 8.0,
+        5e-324,
+        -5e-324,
+        1.5e308,
+        -2.0e154,
+        1.5e154,
+        f64::MAX,
+        f64::INFINITY,
+        f64::NAN,
+    ];
+    let part = |rng: &mut Rng| -> f64 {
+        let k = rng.next_u64();
+        let m = (k >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+        match k & 3 {
+            0 => specials[(k >> 8) as usize % specials.len()],
+            1 => m * pow2(((k >> 2) % 1500) as i32 - 1074),
+            _ => m * pow2(((k >> 2) % 60) as i32 - 30),
+        }
+    };
+    let (mut checked, mut zeros, mut subnormals) = (0, 0, 0);
+    for _ in 0..if cfg!(miri) { 200 } else { 200_000 } {
+        let a = q(
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+        );
+        let b = q(
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+            part(&mut rng),
+        );
+        let f = formula64(a, b);
+        if f.is_finite() {
+            assert!(identical(a * b, f), "{a:?} * {b:?}: {:?}, not {f:?}", a * b);
+            checked += 1;
+            for x in [f.w, f.x, f.y, f.z] {
+                zeros += usize::from(x == 0.0);
+                subnormals += usize::from(x != 0.0 && x.abs() < f64::MIN_POSITIVE);
+            }
+        }
+    }
+    // The sample reaches what it is meant to: many products, zeros and subnormals among them.
+    let least = if cfg!(miri) { 50 } else { 50_000 };
+    assert!(
+        checked > least && zeros > least / 500 && subnormals > least / 100,
+        "{checked} {zeros} {subnormals}"
+    );
+}
+
 #[test]
 fn the_norm_neither_overflows_nor_underflows_and_is_accurate() {
     assert_eq!(q(1.0, 2.0, 2.0, 4.0).norm(), 5.0);

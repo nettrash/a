@@ -46,7 +46,7 @@ fn shanks(f: &ExtensionField) -> Shanks {
             n += &Number::from(1u8);
         }
     };
-    let c = ext_arith::pow(&z, &t).c.iter().map(Fp::value).collect();
+    let c = ext_arith::pow(&z, &t).c().iter().map(Fp::value).collect();
     Shanks { s, half, c }
 }
 
@@ -59,6 +59,9 @@ pub(super) fn legendre(a: &Fpk<'_>) -> i32 {
     if *f.base.modulus() == 2u8 {
         return 1;
     }
+    if let Some(z) = &f.zech {
+        return z.legendre(a);
+    }
     ext_maps::norm(a).legendre()
 }
 
@@ -66,7 +69,7 @@ pub(super) fn legendre(a: &Fpk<'_>) -> i32 {
 /// order of the coefficients from the top down.
 fn smaller<'f>(r: Fpk<'f>) -> Fpk<'f> {
     let p = r.field().base.modulus();
-    match r.c.iter().rev().find(|c| !c.is_zero()) {
+    match r.c().iter().rev().find(|c| !c.is_zero()) {
         Some(top) if &(top.value() << 1usize) > p => -r,
         _ => r,
     }
@@ -75,8 +78,8 @@ fn smaller<'f>(r: Fpk<'f>) -> Fpk<'f> {
 /// A square root for `p = 2`: `√a = Σ a₂ᵢ·xⁱ + √x·Σ a₂ᵢ₊₁·xⁱ`, `√x = x^(2ᵏ⁻¹) mod g`.
 fn sqrt_two<'f>(a: &Fpk<'f>) -> Fpk<'f> {
     let f = a.field();
-    let even: Vec<Fp<'f>> = a.c.iter().step_by(2).cloned().collect();
-    let odd: Vec<Fp<'f>> = a.c.iter().skip(1).step_by(2).cloned().collect();
+    let even: Vec<Fp<'f>> = a.c().iter().step_by(2).cloned().collect();
+    let odd: Vec<Fp<'f>> = a.c().iter().skip(1).step_by(2).cloned().collect();
     let even = f.reduced(even);
     if odd.iter().all(Fp::is_zero) {
         return even;
@@ -98,6 +101,9 @@ pub(super) fn sqrt<'f>(a: &Fpk<'f>) -> Option<Fpk<'f>> {
     }
     if *f.base.modulus() == 2u8 {
         return Some(sqrt_two(a));
+    }
+    if let Some(z) = &f.zech {
+        return z.sqrt_smaller(a);
     }
     if let Some(c) = a.to_base() {
         if c.legendre() == 1 {
@@ -188,6 +194,9 @@ pub(super) fn multiplicative_order(a: &Fpk<'_>) -> Option<Number> {
         return None;
     }
     let f = a.field();
+    if let Some(z) = &f.zech {
+        return z.order(a);
+    }
     let mut n = &f.q - &Number::from(1u8);
     for (r, e) in f.factored_unit_order().factors() {
         n = &n / &r.pow(*e);
@@ -207,6 +216,9 @@ pub(super) fn is_primitive(a: &Fpk<'_>) -> bool {
     }
     let f = a.field();
     let units = &f.q - &Number::from(1u8);
+    if let Some(z) = &f.zech {
+        return z.order(a).is_some_and(|n| n == units);
+    }
     f.factored_unit_order()
         .factors()
         .iter()

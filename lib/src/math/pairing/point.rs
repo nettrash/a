@@ -13,7 +13,6 @@ pub(super) trait Coordinate: Clone + PartialEq {
     fn double(&self) -> Self;
     fn neg(&self) -> Self;
     fn is_zero(&self) -> bool;
-    fn inverse(&self) -> Option<Self>;
     /// 0 of the element's field.
     fn zero(&self) -> Self;
     /// 1 of the element's field.
@@ -41,9 +40,6 @@ impl Coordinate for Fp<'_> {
     }
     fn is_zero(&self) -> bool {
         Fp::is_zero(self)
-    }
-    fn inverse(&self) -> Option<Self> {
-        Fp::inverse(self)
     }
     fn zero(&self) -> Self {
         self.field().zero()
@@ -74,9 +70,6 @@ impl Coordinate for Fp2<'_> {
     }
     fn is_zero(&self) -> bool {
         Fp2::is_zero(self)
-    }
-    fn inverse(&self) -> Option<Self> {
-        Fp2::inverse(self)
     }
     fn zero(&self) -> Self {
         Fp2::zero(self.tower())
@@ -113,13 +106,6 @@ impl<F: Coordinate> Jacobian<F> {
 
     pub(super) fn is_identity(&self) -> bool {
         self.z.is_zero()
-    }
-
-    /// `(x, y)`, or `None` at infinity: one inversion.
-    pub(super) fn to_affine(&self) -> Option<(F, F)> {
-        let zi = self.z.inverse()?;
-        let zi2 = zi.square();
-        Some((self.x.mul(&zi2), self.y.mul(&zi2.mul(&zi))))
     }
 
     pub(super) fn neg(&self) -> Self {
@@ -230,11 +216,6 @@ impl<F: Coordinate> Jacobian<F> {
     }
 }
 
-/// Whether `(x, y)` satisfies `y² = x³ + b`.
-pub(super) fn on_curve<F: Coordinate>(x: &F, y: &F, b: &F) -> bool {
-    y.square() == x.square().mul(x).add(b)
-}
-
 /// The 64-bit limbs of `|k|`, least significant first.
 pub(super) fn limbs(k: &Number) -> Vec<u64> {
     let mut bytes = k.value.clone();
@@ -310,24 +291,6 @@ fn add_small(l: &mut [u64], x: u64) {
     }
 }
 
-/// `x` in big-endian order in exactly `len` bytes.
-///
-/// # Panics
-///
-/// Panics if `x` does not fit.
-pub(super) fn to_be_bytes(x: &Number, len: usize) -> Vec<u8> {
-    let mut bytes = x.value.clone();
-    if x.byte_order == ByteOrder::LittleEndian {
-        bytes.reverse();
-    }
-    let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
-    let bytes = &bytes[start..];
-    assert!(bytes.len() <= len, "the value does not fit");
-    let mut out = vec![0u8; len - bytes.len()];
-    out.extend_from_slice(bytes);
-    out
-}
-
 /// The operators of a group of points (`G1` or `G2`): `+`, `-`, unary `-`, and `*` by a
 /// [`Number`] on either side, for owned and borrowed operands, with their assignments; and
 /// `PartialEq`, `Eq`, `Hash`, `Debug` and `Display`.
@@ -336,8 +299,7 @@ macro_rules! group_ops {
         impl<'c> core::ops::AddAssign<&$ty<'c>> for $ty<'c> {
             #[track_caller]
             fn add_assign(&mut self, rhs: &$ty<'c>) {
-                self.curve.check(rhs.curve);
-                self.p = self.p.add(&rhs.p);
+                *self = self.sum(rhs);
             }
         }
         impl<'c> core::ops::AddAssign<$ty<'c>> for $ty<'c> {
@@ -349,8 +311,7 @@ macro_rules! group_ops {
         impl<'c> core::ops::SubAssign<&$ty<'c>> for $ty<'c> {
             #[track_caller]
             fn sub_assign(&mut self, rhs: &$ty<'c>) {
-                self.curve.check(rhs.curve);
-                self.p = self.p.add(&rhs.p.neg());
+                *self = self.sum(&rhs.negated());
             }
         }
         impl<'c> core::ops::SubAssign<$ty<'c>> for $ty<'c> {
@@ -365,10 +326,7 @@ macro_rules! group_ops {
         impl<'c> core::ops::Neg for &$ty<'c> {
             type Output = $ty<'c>;
             fn neg(self) -> $ty<'c> {
-                $ty {
-                    curve: self.curve,
-                    p: self.p.neg(),
-                }
+                self.negated()
             }
         }
         impl<'c> core::ops::Neg for $ty<'c> {
@@ -380,7 +338,7 @@ macro_rules! group_ops {
 
         impl<'c> core::ops::MulAssign<&Number> for $ty<'c> {
             fn mul_assign(&mut self, k: &Number) {
-                self.p = self.p.mul(k);
+                *self = self.times(k);
             }
         }
         impl<'c> core::ops::MulAssign<Number> for $ty<'c> {
@@ -391,10 +349,7 @@ macro_rules! group_ops {
         impl<'c> core::ops::Mul<&Number> for &$ty<'c> {
             type Output = $ty<'c>;
             fn mul(self, k: &Number) -> $ty<'c> {
-                $ty {
-                    curve: self.curve,
-                    p: self.p.mul(k),
-                }
+                self.times(k)
             }
         }
         impl<'c> core::ops::Mul<Number> for &$ty<'c> {
@@ -445,8 +400,7 @@ macro_rules! group_ops {
         impl PartialEq for $ty<'_> {
             #[track_caller]
             fn eq(&self, other: &Self) -> bool {
-                self.curve.check(other.curve);
-                self.p.equals(&other.p)
+                self.same_point(other)
             }
         }
 

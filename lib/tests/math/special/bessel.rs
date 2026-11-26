@@ -971,3 +971,54 @@ fn the_reflection_keeps_its_terms_apart_where_one_overflows() {
         "{i:e}"
     );
 }
+
+#[test]
+fn f32_kernels_of_the_integer_orders_follow_the_f64_path() {
+    // The `f32` forms of `Y₀`, `Y₁` (pieces and the logarithmic form below 1/2) and of the integer
+    // orders (the plain recurrence and, for `J` below its turning point, the power series) against
+    // the `f64` path, whose error (a few ulps of `M` in `f64`) is far below an `f32`'s: within
+    // 0.51 ulp of `f32` of `max(|v|, M)` (of `|v|` for `J` at `x ≤ n`). Exhaustively, over every
+    // `f32` of `[0, 25.5]` (orders 0, 1) and `[0, 1000]` (orders 2, 3, 7, 20, 40), at most 5 results
+    // of an order differ from the `f64` path rounded, all of them within 0.5000 ulp.
+    // The f32 form is the f64 form rounded, signed zeros included: J₁(−0) is +0 in both.
+    let (z32, z64) = (bessel_j(1.0f32, -0.0), bessel_j(1.0f64, -0.0));
+    assert!(
+        z32 == 0.0 && z32.is_sign_positive() && z64.is_sign_positive(),
+        "{z32:?} {z64:?}"
+    );
+    let mut n_cases = 0;
+    for n in [0u32, 1, 2, 3, 5, 7, 12, 20, 40, 100, 400] {
+        let mut x = 1e-3f64;
+        while x < 2000.0 {
+            let xf = x as f32;
+            let xd = xf as f64;
+            let (j, y) = (bessel_j(n as f64, xd), bessel_y(n as f64, xd));
+            let m = (j * j + y * y).sqrt();
+            for (got, want, scale) in [
+                (
+                    bessel_j(n as f32, xf) as f64,
+                    j,
+                    if xd <= n as f64 { j.abs() } else { m },
+                ),
+                (bessel_y(n as f32, xf) as f64, y, m),
+            ] {
+                if !want.is_finite() || want.abs() > f32::MAX as f64 {
+                    assert!(
+                        got.is_infinite() && got.signum() == want.signum(),
+                        "{n}, {x}: {got} for {want}"
+                    );
+                    continue;
+                }
+                let s = scale.max(want.abs()).min(f32::MAX as f64);
+                let e = (got - want).abs() / ulp(s, F32);
+                assert!(
+                    e <= 0.51,
+                    "order {n} at {xf}: {e:.4} ulps of f32 ({got:e} for {want:e})"
+                );
+                n_cases += 1;
+            }
+            x *= 1.013;
+        }
+    }
+    assert!(n_cases > 10_000, "{n_cases}");
+}

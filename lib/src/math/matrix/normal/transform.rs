@@ -8,7 +8,9 @@
 //! - its last `m − r` rows, `(−z·Y, z)` on the columns `R` and `S`, for the rows `z` of the Hermite
 //!   form of the lattice `Λ = {z ∈ Z^{m−r} : z·N ≡ 0 (mod δ)}` of the left kernel on `S`;
 //! - its first `r` rows, `((Z_i − w·N) / δ, w)` for `Z = δ·H[:, J]·M⁻¹` and `w` the one solution of
-//!   `w·N ≡ Z_i (mod δ)` that the rows of the form of `Λ` leave reduced.
+//!   `w·N ≡ Z_i (mod δ)` that the rows of the form of `Λ` leave reduced; with every row in `R`
+//!   (no `S`), simply `H·M⁻¹`. Both products by `M⁻¹`, matrices of integers, come from their
+//!   residues modulo word primes ([`super::inverse`]).
 //!
 //! The quotient `Z^{m−r} / Λ` is the subgroup of `(Z/δ)^r` that the rows `N_k` span, of order at
 //! most `δ^r`, so the form of `Λ` has at most `log₂ |Z^{m−r} / Λ|` pivots above 1: its pivot at
@@ -22,6 +24,7 @@
 //! where the Hermite form of the `m × m` matrix `[A[:, J] | E_S]` would cost `O(m³)`.
 
 use super::super::Matrix;
+use super::inverse::times_inverse;
 use super::profile::Basis;
 use crate::math::numbers::{Divisor, Number};
 use crate::math::rational::Rational;
@@ -266,7 +269,7 @@ impl Group {
 }
 
 /// `y·δ`, an integer.
-fn times(y: &Rational, delta: &Number) -> Number {
+pub(super) fn times(y: &Rational, delta: &Number) -> Number {
     let (p, q) = (y.numer(), y.denom());
     p * &delta.div_exact(q)
 }
@@ -278,11 +281,11 @@ fn times(y: &Rational, delta: &Number) -> Number {
 pub(super) fn transform(m: usize, b: &Basis, hj: &Matrix<Number>) -> Transform {
     let r = b.rank;
     let s = &b.others;
-    let delta = &b.det;
-    let y = b.y.as_ref().expect("the rows of the profile");
+    let delta = b.det();
+    let n = b.n.as_ref().expect("the rows of the profile");
     // `N = δ·Y`, exactly and modulo δ.
     let n_exact: Vec<Vec<Number>> = (0..s.len())
-        .map(|k| (0..r).map(|j| times(&y[(k, j)], delta)).collect())
+        .map(|k| (0..r).map(|j| n[(k, j)].clone()).collect())
         .collect();
     let by = Divisor::new(delta);
     let n_mod: Vec<Vec<Number>> = n_exact
@@ -293,17 +296,31 @@ pub(super) fn transform(m: usize, b: &Basis, hj: &Matrix<Number>) -> Transform {
             row
         })
         .collect();
-    // `Z = δ·H[:, J]·M⁻¹`.
+    if s.is_empty() {
+        // Every row in `R`: `U = H·M⁻¹` on the columns `R`, and no kernel.
+        let u = times_inverse(hj, &b.minor, delta, &Number::from(1u8));
+        let top = (0..r)
+            .map(|i| {
+                let mut row = vec![Number::default(); m];
+                for (j, &col) in b.rows.iter().enumerate() {
+                    row[col] = u[(i, j)].clone();
+                }
+                row
+            })
+            .collect();
+        return Transform {
+            size: m,
+            top,
+            kernel: Vec::new(),
+        };
+    }
+    // `Z = δ·H[:, J]·M⁻¹`, of integers.
     let z_top: Vec<Vec<Number>> = if r == 0 {
         Vec::new()
     } else {
-        let hw = b
-            .minor
-            .transpose()
-            .solve(&hj.transpose())
-            .expect("a nonsingular minor");
+        let z = times_inverse(hj, &b.minor, delta, delta);
         (0..r)
-            .map(|i| (0..r).map(|j| times(&hw[(j, i)], delta)).collect())
+            .map(|i| (0..r).map(|j| z[(i, j)].clone()).collect())
             .collect()
     };
     // The form of `Λ`, from its last row up.

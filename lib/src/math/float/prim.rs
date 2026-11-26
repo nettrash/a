@@ -3,28 +3,23 @@
 //! type, a float at its own precision, a `Number` at its bits), and the operation is rounded to
 //! nearest at the precision of the `BigFloat`, once.
 //!
-//! A primitive operand is made a float in a number that each thread keeps for it, so that it
+//! A primitive operand is made a float of at most two limbs, kept in the number itself, so that it
 //! allocates nothing; the result is the operation's own, and an assigning operator writes it into
 //! the vector of the number it changes.
 
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::Number;
-use core::cell::Cell;
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
-std::thread_local! {
-    /// The float that a primitive operand is made in, kept between operators.
-    static OPERAND: Cell<Option<BigFloat>> = const { Cell::new(None) };
-}
-
-/// Runs `f` on the primitive `v` as a float, built in the thread's number.
+/// Runs `f` on the primitive `v` as a float: of at most 128 bits, its limbs in the number.
 #[inline]
 fn with_operand<T: Primitive, R>(v: T, f: impl FnOnce(&BigFloat) -> R) -> R {
-    let mut x = OPERAND.take().unwrap_or_else(|| BigFloat::zero(1));
+    let mut x = BigFloat {
+        prec: 1,
+        kind: Kind::Nan,
+    };
     v.store(&mut x);
-    let r = f(&x);
-    OPERAND.set(Some(x));
-    r
+    f(&x)
 }
 
 /// Sets `x` to `±m·2^e` exactly at the precision `prec`, which holds the bits of `m`, reusing
@@ -32,23 +27,17 @@ fn with_operand<T: Primitive, R>(v: T, f: impl FnOnce(&BigFloat) -> R) -> R {
 #[inline]
 fn set_exact(x: &mut BigFloat, negative: bool, m: u128, e: i64, prec: u64) {
     x.prec = prec;
-    let mut mant = match core::mem::replace(&mut x.kind, Kind::Nan) {
-        Kind::Finite { mant, .. } => mant,
-        _ => Vec::new(),
-    };
     if m == 0 {
         x.kind = Kind::Zero { negative };
         return;
     }
     let lz = m.leading_zeros();
     let top = m << lz;
-    mant.clear();
-    if prec <= 64 {
-        mant.push((top >> 64) as u64);
+    let mant = if prec <= 64 {
+        Mant::One((top >> 64) as u64)
     } else {
-        mant.push(top as u64);
-        mant.push((top >> 64) as u64);
-    }
+        Mant::Two([top as u64, (top >> 64) as u64])
+    };
     x.kind = Kind::Finite {
         negative,
         exp: e + 128 - i64::from(lz),

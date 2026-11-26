@@ -152,3 +152,146 @@ macro_rules! fir_complex {
         }
     };
 }
+
+/// `y[k] = Σ_{t < nt} taps[t]·x[k + t]` for `k < ny` and `1 ≤ nt ≤ 4`, real, reading `x` below
+/// `ny + nt − 1` only (in place on the caller's sequence): the taps in registers, blocks of four
+/// vectors of outputs, then single vectors, then the last values one by one.
+macro_rules! fir_real_few {
+    ($(#[$m:meta])* $name:ident, $t:ty, $w:literal) => {
+        /// `y[k] = Σ_{t < nt} taps[t]·x[k + t]` for `k < ny`, `1 ≤ nt ≤ 4`.
+        ///
+        /// # Safety
+        ///
+        /// `x` must be valid for reads of `ny + nt − 1` values, `taps` of `nt` and `y` for writes
+        /// of `ny`.
+        $(#[$m])*
+        pub(crate) unsafe fn $name(x: *const $t, taps: *const $t, nt: usize, y: *mut $t, ny: usize) {
+            $(#[$m])*
+            #[inline]
+            unsafe fn run<const NT: usize>(x: *const $t, taps: *const $t, y: *mut $t, ny: usize) {
+                // SAFETY: an output `k < ny` reads `x` below `k + NT ≤ ny + NT − 1`.
+                unsafe {
+                    let mut tv = [zero(); NT];
+                    for (t, v) in tv.iter_mut().enumerate() {
+                        *v = splat(*taps.add(t));
+                    }
+                    let mut k = 0;
+                    while k + 4 * $w <= ny {
+                        let mut a = [zero(); 4];
+                        for (t, &v) in tv.iter().enumerate() {
+                            for (i, a) in a.iter_mut().enumerate() {
+                                *a = fma(*a, ld(x.add(k + i * $w + t)), v);
+                            }
+                        }
+                        for (i, &a) in a.iter().enumerate() {
+                            st(y.add(k + i * $w), a);
+                        }
+                        k += 4 * $w;
+                    }
+                    while k + $w <= ny {
+                        let mut a = zero();
+                        for (t, &v) in tv.iter().enumerate() {
+                            a = fma(a, ld(x.add(k + t)), v);
+                        }
+                        st(y.add(k), a);
+                        k += $w;
+                    }
+                    while k < ny {
+                        let mut s: $t = 0.0;
+                        for t in 0..NT {
+                            s += *taps.add(t) * *x.add(k + t);
+                        }
+                        *y.add(k) = s;
+                        k += 1;
+                    }
+                }
+            }
+            debug_assert!((1..=4).contains(&nt));
+            // SAFETY: the caller's.
+            unsafe {
+                match nt {
+                    1 => run::<1>(x, taps, y, ny),
+                    2 => run::<2>(x, taps, y, ny),
+                    3 => run::<3>(x, taps, y, ny),
+                    _ => run::<4>(x, taps, y, ny),
+                }
+            }
+        }
+    };
+}
+
+/// [`fir_real_few`] for complex values on interleaved parts, the sums `A = Σ x·tr` and
+/// `B = Σ x·ti` combined once per vector as in [`fir_complex`].
+macro_rules! fir_complex_few {
+    ($(#[$m:meta])* $name:ident, $t:ty, $w:literal) => {
+        /// `y[k] = Σ_{t < nt} taps[t]·x[k + t]` for `k < ny`, `1 ≤ nt ≤ 4`, complex values as
+        /// pairs of parts.
+        ///
+        /// # Safety
+        ///
+        /// `x` must be valid for reads of `ny + nt − 1` complex values, `taps` of `nt` and `y`
+        /// for writes of `ny`.
+        $(#[$m])*
+        pub(crate) unsafe fn $name(x: *const $t, taps: *const $t, nt: usize, y: *mut $t, ny: usize) {
+            $(#[$m])*
+            #[inline]
+            unsafe fn run<const NT: usize>(x: *const $t, taps: *const $t, y: *mut $t, ny: usize) {
+                const C: usize = $w / 2;
+                // SAFETY: as for the real kernel, in pairs of parts.
+                unsafe {
+                    let (mut tr, mut ti) = ([zero(); NT], [zero(); NT]);
+                    for t in 0..NT {
+                        tr[t] = splat(*taps.add(2 * t));
+                        ti[t] = splat(*taps.add(2 * t + 1));
+                    }
+                    let mut k = 0;
+                    while k + 2 * C <= ny {
+                        let (mut a0, mut b0, mut a1, mut b1) = (zero(), zero(), zero(), zero());
+                        for t in 0..NT {
+                            let (v0, v1) = (ld(x.add(2 * (k + t))), ld(x.add(2 * (k + C + t))));
+                            a0 = fma(a0, v0, tr[t]);
+                            b0 = fma(b0, v0, ti[t]);
+                            a1 = fma(a1, v1, tr[t]);
+                            b1 = fma(b1, v1, ti[t]);
+                        }
+                        st(y.add(2 * k), combine(a0, b0));
+                        st(y.add(2 * (k + C)), combine(a1, b1));
+                        k += 2 * C;
+                    }
+                    while k + C <= ny {
+                        let (mut a, mut b) = (zero(), zero());
+                        for t in 0..NT {
+                            let v = ld(x.add(2 * (k + t)));
+                            a = fma(a, v, tr[t]);
+                            b = fma(b, v, ti[t]);
+                        }
+                        st(y.add(2 * k), combine(a, b));
+                        k += C;
+                    }
+                    while k < ny {
+                        let (mut re, mut im): ($t, $t) = (0.0, 0.0);
+                        for t in 0..NT {
+                            let (xr, xi) = (*x.add(2 * (k + t)), *x.add(2 * (k + t) + 1));
+                            let (wr, wi) = (*taps.add(2 * t), *taps.add(2 * t + 1));
+                            re += xr * wr - xi * wi;
+                            im += xr * wi + xi * wr;
+                        }
+                        *y.add(2 * k) = re;
+                        *y.add(2 * k + 1) = im;
+                        k += 1;
+                    }
+                }
+            }
+            debug_assert!((1..=4).contains(&nt));
+            // SAFETY: the caller's.
+            unsafe {
+                match nt {
+                    1 => run::<1>(x, taps, y, ny),
+                    2 => run::<2>(x, taps, y, ny),
+                    3 => run::<3>(x, taps, y, ny),
+                    _ => run::<4>(x, taps, y, ny),
+                }
+            }
+        }
+    };
+}

@@ -163,14 +163,7 @@ impl<T: Coefficient> Polynomial<T> {
 
     /// The derivative.
     pub fn derivative(&self) -> Self {
-        let c = self
-            .c
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(i, c)| T::mul(c, &T::from_u64(i as u64)))
-            .collect();
-        Polynomial::new(c)
+        Polynomial::new(T::poly_derivative(&self.c))
     }
 
     /// The composition `self(g)`: by Horner's rule on polynomials for short ones, and by divide
@@ -188,6 +181,9 @@ impl<T: Coefficient> Polynomial<T> {
     /// assert_eq!(p.compose(&g).coeffs(), [2.0, 2.0, 1.0]);
     /// ```
     pub fn compose(&self, g: &Self) -> Self {
+        if let Some(c) = T::poly_compose(&self.c, &g.c) {
+            return Polynomial::new(c);
+        }
         self.compose_dc(g)
     }
 

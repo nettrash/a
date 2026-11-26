@@ -1101,9 +1101,10 @@ fn gmres_measures_the_residual_of_the_system_whatever_the_preconditioner() {
 fn gmres_keeps_its_basis_orthogonal_on_an_ill_conditioned_matrix() {
     // With the basis orthogonal to working precision, a cycle over the whole space solves a
     // system as far as its conditioning allows, and a short second one reaches a tolerance
-    // near the rounding level. Here κ = 10⁶ and rtol = 10⁻¹²: 43 and 44 iterations of 40-step
-    // cycles; with one pass of Gram-Schmidt only (the review of round 1 deleted the second and
-    // no test noticed), 69 and 62.
+    // near the rounding level. Here κ = 10⁶ and rtol = 10⁻¹²: 46 and 44 iterations of 40-step
+    // cycles with classical Gram-Schmidt and its second pass (43 and 44 with the modified
+    // Gram-Schmidt of before the speed pass); with one pass of modified Gram-Schmidt only (the
+    // review of round 1 deleted the second and no test noticed), 69 and 62.
     fn check<T: Num>() {
         let n = 40;
         let d: Vec<f64> = (0..n)
@@ -1192,8 +1193,9 @@ fn bicgstab_is_van_der_vorsts_method() {
     );
     let (a, b, _) = problem::<f64>("lap2d20");
     let r = bicgstab_with(&a, &b, &opts, None).unwrap();
-    // 51 in the textbook form, 52 in scipy's, 55 with the fused multiply-adds of this one (a
-    // Python model of its arithmetic gives 55 too).
+    // 51 in the textbook form, 52 in scipy's, 54 with the fused multiply-adds and the inner
+    // products in four running sums of this one (55 with the sequential inner products of the
+    // version before, which a Python model of its arithmetic gave too).
     assert!(
         r.converged && (48..=60).contains(&r.iterations),
         "2-D Laplacian: {}",

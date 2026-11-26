@@ -299,7 +299,13 @@ fn perfect_power_small() {
                 }
             }
         }
-        let got = Number::new_from_i64(x, ByteOrder::LittleEndian).perfect_power();
+        let n = Number::new_from_i64(x, ByteOrder::LittleEndian);
+        assert_eq!(
+            n.is_perfect_power(),
+            best.is_some(),
+            "is_perfect_power({x})"
+        );
+        let got = n.perfect_power();
         let got = got.map(|(b, k)| (i64::try_from(&b).unwrap(), k));
         assert_eq!(got, best, "perfect_power({x})");
     }
@@ -317,6 +323,15 @@ fn perfect_power_of_large_powers() {
         assert_eq!(n.perfect_power(), Some((b.clone(), 3)));
         assert_eq!((-&n).perfect_power(), Some((-&b, 3)));
         assert!((&n + 1u8).perfect_power().is_none());
+        assert!(
+            three.pow(k).is_perfect_power() && n.is_perfect_power() && (-&n).is_perfect_power()
+        );
+        assert!(!(&n + 1u8).is_perfect_power());
+        // 3^256 is a power of exponent 2^8 only: -(3^256) is no odd power, so not a perfect power.
+        let sq = three.pow(256);
+        assert!(
+            sq.is_perfect_power() && !(-&sq).is_perfect_power() && (-&sq).perfect_power().is_none()
+        );
     }
 }
 
@@ -397,6 +412,11 @@ fn perfect_power_of_words_and_two_limbs() {
                     (u128::try_from(&b.abs()).unwrap(), k)
                 });
                 assert_eq!(got, expected, "perfect_power({n})");
+                assert_eq!(
+                    n.is_perfect_power(),
+                    expected.is_some(),
+                    "is_perfect_power({n})"
+                );
             }
         }
     }
@@ -447,6 +467,14 @@ fn perfect_power_roots_of_many_limbs() {
             let inner = root.perfect_power().map_or(1, |(_, e)| e);
             assert_eq!(kk, k * inner, "perfect_power({root}^{k})");
             assert_eq!(b.pow(kk), n);
+            assert!(n.is_perfect_power());
+            for m in [&n + 2u8, &n - 2u8] {
+                assert_eq!(
+                    m.is_perfect_power(),
+                    m.perfect_power().is_some(),
+                    "is_perfect_power({m})"
+                );
+            }
             assert!((&n + 2u8).perfect_power().is_none_or(|(_, e)| e < k));
             assert!((&n - 2u8).perfect_power().is_none_or(|(_, e)| e < k));
         }

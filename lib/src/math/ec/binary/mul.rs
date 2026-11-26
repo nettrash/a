@@ -14,6 +14,7 @@
 //!   `(j + 1)·P` in projective form, `X / Z`, 6M + 5S a bit, and needs neither `y` nor `a`.
 
 use super::arith::{Affine, Ld, Ops};
+use super::narrow::Narrow;
 use crate::math::field::F2m;
 use crate::math::numbers::{ByteOrder, Number};
 
@@ -154,6 +155,9 @@ pub(super) fn wnaf_expansion<'f>(ops: &Ops<'f>, p: &Ld<'f>, k: &[u64]) -> Expans
 
 /// The sum of the expansions, read together from the top digit by Horner's rule.
 pub(super) fn horner<'f>(ops: &Ops<'f>, terms: &[Expansion<'f>], step: Step) -> Ld<'f> {
+    if let Some(narrow) = Narrow::new(ops) {
+        return narrow.horner(ops, terms, step);
+    }
     let len = terms.iter().map(|t| t.digits.len()).max().unwrap_or(0);
     let mut r = ops.identity();
     for i in (0..len).rev() {
@@ -178,6 +182,9 @@ pub(super) fn horner<'f>(ops: &Ops<'f>, terms: &[Expansion<'f>], step: Step) -> 
 pub(super) fn mul<'f>(ops: &Ops<'f>, p: &Ld<'f>, k: &[u64]) -> Ld<'f> {
     if bit_length(k) == 0 || p.z.is_zero() {
         return ops.identity();
+    }
+    if let Some(narrow) = Narrow::new(ops) {
+        return narrow.mul_naf(ops, p, k);
     }
     horner(ops, &[wnaf_expansion(ops, p, k)], Step::Double)
 }
@@ -342,6 +349,9 @@ pub(super) fn x_ladder<'f>(ops: &Ops<'f>, x: &F2m<'f>, k: &[u64]) -> Option<F2m<
     let bits = bit_length(k);
     if bits == 0 {
         return None;
+    }
+    if let Some(narrow) = Narrow::new(ops) {
+        return narrow.x_ladder(ops, x, k, bits);
     }
     let double = |p: &(F2m<'f>, F2m<'f>)| {
         let x2 = p.0.square();

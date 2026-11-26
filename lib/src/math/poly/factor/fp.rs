@@ -114,7 +114,7 @@ impl Fp {
         }
         let mut r = self.wrap(a.to_vec());
         r += &self.wrap(b.to_vec());
-        r.c
+        r.c.into_vec()
     }
 
     /// `a - b`.
@@ -132,7 +132,7 @@ impl Fp {
         }
         let mut r = self.wrap(a.to_vec());
         r -= &self.wrap(b.to_vec());
-        r.c
+        r.c.into_vec()
     }
 
     /// `a - x`.
@@ -197,7 +197,7 @@ impl Fp {
             nmod::trim(&mut r);
             return r;
         }
-        self.wrap(a.to_vec()).derivative().c
+        self.wrap(a.to_vec()).derivative().c.into_vec()
     }
 
     /// The polynomial of every `p`-th coefficient of `a`, `a = b(x^p)` with `b` returned, when the
@@ -233,7 +233,7 @@ impl Fp {
     pub(crate) fn rem_mf(&self, a: &[u64], mf: &Mf) -> P {
         match mf {
             Mf::W(m) => m.rem(a),
-            Mf::B(d) => d.rem(&self.wrap(a.to_vec())).c,
+            Mf::B(d) => d.rem(&self.wrap(a.to_vec())).c.into_vec(),
         }
     }
 
@@ -241,15 +241,10 @@ impl Fp {
     pub(crate) fn mulmod(&self, a: &[u64], b: &[u64], mf: &Mf) -> P {
         match mf {
             Mf::W(m) => m.mulmod(a, b),
-            Mf::B(d) => d.rem(&self.wrap(zn::mul_raw(&self.m, a, Some(b)))).c,
-        }
-    }
-
-    /// `a² mod f` for `a` reduced.
-    pub(crate) fn sqrmod(&self, a: &[u64], mf: &Mf) -> P {
-        match mf {
-            Mf::W(m) => m.sqrmod(a),
-            Mf::B(d) => d.rem(&self.wrap(zn::mul_raw(&self.m, a, None))).c,
+            Mf::B(d) => d
+                .rem(&self.wrap(zn::mul_raw(&self.m, a, Some(b))))
+                .c
+                .into_vec(),
         }
     }
 
@@ -257,13 +252,13 @@ impl Fp {
     pub(crate) fn powmod(&self, a: &[u64], e: &[u64], mf: &Mf) -> P {
         match mf {
             Mf::W(m) => m.powmod(a, e),
-            Mf::B(d) => {
-                d.pow_mod(
+            Mf::B(d) => d
+                .pow_mod(
                     &self.wrap(a.to_vec()),
                     &from_limbs(e, ByteOrder::LittleEndian),
                 )
                 .c
-            }
+                .into_vec(),
         }
     }
 

@@ -61,6 +61,7 @@ mod hyper;
 mod integer;
 pub(crate) mod limbs;
 mod log;
+pub(crate) mod mant;
 mod pow;
 mod power;
 mod power_fixed;
@@ -87,6 +88,7 @@ use core::fmt;
 
 pub use complex::BigComplex;
 pub use convert::TryFromBigFloatError;
+pub(crate) use mant::Mant;
 pub use text::{BigFloatErrorKind, ParseBigFloatError};
 
 /// A rounding mode: the direction in which a result that is not exact is rounded.
@@ -129,7 +131,7 @@ pub(crate) enum Kind {
     Finite {
         negative: bool,
         exp: i64,
-        mant: Vec<u64>,
+        mant: Mant,
     },
 }
 
@@ -218,10 +220,16 @@ impl BigFloat {
     #[track_caller]
     pub fn from_parts(m: &Number, e: i64, prec: u64, round: Round) -> (BigFloat, Ordering) {
         let prec = Self::check_prec(prec);
-        let limbs = limbs::of_number(m);
-        if limbs.is_empty() {
-            return (BigFloat::zero(prec), Ordering::Equal);
+        if let Some((negative, v)) = limbs::small_of_number(m) {
+            // At most two limbs: on the stack.
+            if v == 0 {
+                return (BigFloat::zero(prec), Ordering::Equal);
+            }
+            let l = [v as u64, (v >> 64) as u64];
+            let n = if l[1] == 0 { 1 } else { 2 };
+            return round::round_mag(negative, &l[..n], i128::from(e), false, prec, round);
         }
+        let limbs = limbs::of_number(m);
         round::round_mag(m.is_negative(), &limbs, i128::from(e), false, prec, round)
     }
 
@@ -312,11 +320,17 @@ impl BigFloat {
                 mant,
             } => {
                 let unused = 64 * mant.len() as u64 - self.prec;
-                let m = limbs::shr(mant, unused);
-                Some((
-                    limbs::to_number(&m, *negative, ByteOrder::LittleEndian),
-                    exp - self.prec as i64,
-                ))
+                let m = if mant.len() <= 2 {
+                    // One or two limbs: the integer in a word, its bytes straight from it.
+                    let w = match mant {
+                        Mant::One(a) => u128::from(*a),
+                        m => u128::from(m[1]) << 64 | u128::from(m[0]),
+                    };
+                    limbs::word_number(w >> unused, *negative, ByteOrder::LittleEndian)
+                } else {
+                    limbs::to_number_shr(mant, unused as u32, *negative)
+                };
+                Some((m, exp - self.prec as i64))
             }
             _ => None,
         }
@@ -328,6 +342,19 @@ impl BigFloat {
     pub fn prec_round(&self, prec: u64, round: Round) -> (BigFloat, Ordering) {
         let prec = Self::check_prec(prec);
         match &self.kind {
+            // As long or longer in as many limbs: the number itself, its bits below its
+            // precision being zeros.
+            Kind::Finite { mant, .. }
+                if prec >= self.prec && prec.div_ceil(64) as usize == mant.len() =>
+            {
+                (
+                    BigFloat {
+                        prec,
+                        kind: self.kind.clone(),
+                    },
+                    Ordering::Equal,
+                )
+            }
             Kind::Finite {
                 negative,
                 exp,

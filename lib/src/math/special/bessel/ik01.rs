@@ -74,6 +74,7 @@ fn i1_small(x: f64) -> Dd {
 }
 
 /// `I₀(x)`, or `e^(−|x|)·I₀(x)` when `scaled`.
+#[inline]
 pub(crate) fn i0(x: f64, scaled: bool) -> f64 {
     let ax = x.abs();
     if ax < 1.0 {
@@ -102,6 +103,7 @@ pub(crate) fn i0(x: f64, scaled: bool) -> f64 {
 }
 
 /// `I₁(x)`, or `e^(−|x|)·I₁(x)` when `scaled`.
+#[inline]
 pub(crate) fn i1(x: f64, scaled: bool) -> f64 {
     let ax = x.abs();
     let v = if ax < 1.0 {
@@ -129,6 +131,7 @@ pub(crate) fn i1(x: f64, scaled: bool) -> f64 {
 }
 
 /// `K₀(x)`, or `e^x·K₀(x)` when `scaled` (NaN for `x < 0`, `∞` at 0).
+#[inline]
 pub(crate) fn k0(x: f64, scaled: bool) -> f64 {
     if x <= 1.0 {
         if x <= 0.0 {
@@ -164,6 +167,7 @@ pub(crate) fn k0(x: f64, scaled: bool) -> f64 {
 }
 
 /// `K₁(x)`, or `e^x·K₁(x)` when `scaled` (NaN for `x < 0`, `∞` at 0).
+#[inline]
 pub(crate) fn k1(x: f64, scaled: bool) -> f64 {
     if x <= 1.0 {
         if x <= 0.0 {
@@ -194,5 +198,66 @@ pub(crate) fn k1(x: f64, scaled: bool) -> f64 {
         0.0
     } else {
         times_exp(v, -x)
+    }
+}
+
+/// `(K₀(x), K₁(x))`, or both times `e^x` when `scaled`: the same values as `k0` and `k1` (the same
+/// operations), with what they share computed once (for the recurrences of the integer orders):
+/// below 1 the logarithm and `x²`, above it the piece, `1/x`, `1/√x` and the exponential.
+pub(crate) fn k01(x: f64, scaled: bool) -> (f64, f64) {
+    if x.is_nan() || x <= 1.0 || x == f64::INFINITY {
+        if (1e-300..=1.0).contains(&x) {
+            let lx = ln_dd(x);
+            let (sh, sl) = two_prod(x, x);
+            let v0 = lx.mul(i0_small(x)).neg().add(poly_dd(
+                sh,
+                sl,
+                dd2(&K0_SMALL, 0),
+                dd2(&K0_SMALL, 2),
+                &K0_SMALL[4..],
+            ));
+            let inv = Dd::new(1.0).div(Dd::new(x));
+            let v1 = inv.add(lx.mul(i1_small(x))).add(
+                poly_dd(sh, sl, dd2(&K1_SMALL, 0), dd2(&K1_SMALL, 2), &K1_SMALL[4..]).mul_f64(x),
+            );
+            return if scaled {
+                (times_exp(v0, x), times_exp(v1, x))
+            } else {
+                (v0.value(), v1.value())
+            };
+        }
+        return (k0(x, scaled), k1(x, scaled));
+    }
+    let t = 1.0 / x;
+    let j = piece(t, &K_CUTS);
+    let q0 = piece_poly(t, &K0_LARGE[j]);
+    let q1 = piece_poly(t, &K1_LARGE[j]);
+    // `over_sqrt` of both, its 1/√x once.
+    let r = x.sqrt();
+    let (p, e) = two_prod(r, r);
+    let rl = ((x - p) - e) * (0.5 * t) * r;
+    let inv = r * t;
+    let (p, e) = two_prod(r, inv);
+    let il = inv * (((1.0 - p) - e) - rl * inv);
+    let os = |q: Dd| -> Dd {
+        let (h, l) = two_prod(q.hi, inv);
+        Dd {
+            hi: h,
+            lo: l + mla(q.hi, il, q.lo * inv),
+        }
+    };
+    let (v0, v1) = (os(q0), os(q1));
+    if scaled {
+        (v0.value(), v1.value())
+    } else if x > 750.0 {
+        (0.0, 0.0)
+    } else {
+        // `times_exp` of both, its exponential once.
+        let (m, k) = exp_parts_lite(-x);
+        let te = |v: Dd| -> f64 {
+            let (p, pe) = two_prod(v.hi, m.hi);
+            ldexp(p + (pe + mla(v.hi, m.lo, v.lo * m.hi)), k)
+        };
+        (te(v0), te(v1))
     }
 }

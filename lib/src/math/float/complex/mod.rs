@@ -397,7 +397,7 @@ impl BigComplex {
         prec: u64,
         round: Round,
     ) -> (BigComplex, (Ordering, Ordering)) {
-        self.mul_i(negative).prec_round(prec, round)
+        self.mul_i_round_parts(negative, (prec, prec), (round, round))
     }
 
     /// [`mul_i_round`](BigComplex::mul_i_round) with a precision and a mode for each part.
@@ -418,7 +418,23 @@ impl BigComplex {
         prec: (u64, u64),
         round: (Round, Round),
     ) -> (BigComplex, (Ordering, Ordering)) {
-        self.mul_i(negative).prec_round_parts(prec, round)
+        // `z·i = -im + re·i`, `z·(-i) = im - re·i`: each part rounded once from the other, with
+        // no copy of the number first.
+        let (re, a) = neg_round(&self.im, !negative, prec.0, round.0);
+        let (im, b) = neg_round(&self.re, negative, prec.1, round.1);
+        (BigComplex::new(re, im), (a, b))
+    }
+}
+
+/// `x` (`-x` when `negate`) rounded to `prec` bits in the mode `round`, and the direction.
+#[inline]
+#[track_caller]
+fn neg_round(x: &BigFloat, negate: bool, prec: u64, round: Round) -> (BigFloat, Ordering) {
+    if negate {
+        let (y, o) = x.prec_round(prec, crate::math::float::arith::round_for(round, true));
+        (-y, o.reverse())
+    } else {
+        x.prec_round(prec, round)
     }
 }
 

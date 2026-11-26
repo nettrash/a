@@ -20,7 +20,7 @@ use super::super::limbs::{self, Work};
 use super::super::round::{Rounded, round_into, seal, signed};
 use super::super::small::{add2, div1, div2, mul2, round_top, round_top2, wide_mul};
 use super::super::sum::Zeros;
-use super::super::{BigFloat, Kind, Round};
+use super::super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::nat;
 use core::cmp::Ordering;
 
@@ -41,7 +41,9 @@ std::thread_local! {
 #[inline]
 pub(crate) fn take_mant(x: &mut BigFloat) -> Vec<u64> {
     match core::mem::replace(&mut x.kind, Kind::Nan) {
-        Kind::Finite { mant, .. } => mant,
+        Kind::Finite { mant, .. } => mant.into_spare(),
+        // A result of one or two limbs is kept in the number: no vector to lend it.
+        _ if x.prec <= 128 => Vec::new(),
         _ => pool_take(),
     }
 }
@@ -52,7 +54,7 @@ pub(crate) fn take_mant(x: &mut BigFloat) -> Vec<u64> {
 pub(crate) fn put_kind(out: &mut BigFloat, kind: Kind) {
     debug_assert!(!matches!(kind, Kind::Finite { .. }));
     if let Kind::Finite { mant, .. } = core::mem::replace(&mut out.kind, kind) {
-        pool_give(mant);
+        pool_give_mant(mant);
     }
 }
 
@@ -81,11 +83,17 @@ pub(crate) fn put(out: &mut BigFloat, r: Rounded, round: Round) -> Ordering {
         debug_assert_eq!(mant.len(), prec.div_ceil(64) as usize);
         *negative = r.negative;
         *exp = r.exp as i64;
-        if let [lo, hi] = mant.as_mut_slice() {
-            *lo = r.m as u64;
-            *hi = (r.m >> 64) as u64;
-        } else {
-            mant[0] = (r.m >> 64) as u64;
+        match mant {
+            Mant::One(a) => *a = (r.m >> 64) as u64,
+            Mant::Two(a) => *a = [r.m as u64, (r.m >> 64) as u64],
+            Mant::Heap(v) => {
+                if let [lo, hi] = v.as_mut_slice() {
+                    *lo = r.m as u64;
+                    *hi = (r.m >> 64) as u64;
+                } else {
+                    v[0] = (r.m >> 64) as u64;
+                }
+            }
         }
         return signed(r.negative, r.magnitude);
     }
@@ -133,7 +141,12 @@ pub(super) fn set_part(out: &mut BigFloat, x: &BigFloat, negate: bool, round: Ro
                 // Exact: the bits below the precision of `x` are zeros.
                 *n = negative;
                 *e = *exp;
-                m.copy_from_slice(mant);
+                match (m, mant) {
+                    (Mant::One(d), Mant::One(s)) => *d = *s,
+                    (Mant::Two(d), Mant::Two(s)) => *d = *s,
+                    (Mant::Heap(d), Mant::Heap(s)) => d.copy_from_slice(s),
+                    (d, s) => d.copy_from_slice(s),
+                }
                 return Ordering::Equal;
             }
             let lsb = i128::from(*exp) - 64 * mant.len() as i128;
@@ -177,7 +190,7 @@ pub(super) fn short_product(x: &BigFloat, y: &BigFloat, negate: bool) -> Option<
                 exp: ey, mant: my, ..
             },
         ) => {
-            let ([a], [b]) = (mx.as_slice(), my.as_slice()) else {
+            let (Mant::One(a), Mant::One(b)) = (mx, my) else {
                 return None;
             };
             let p = u128::from(*a) * u128::from(*b);
@@ -581,6 +594,14 @@ pub(crate) fn pool_give(v: Vec<u64>) {
     POOL.set(pool);
 }
 
+/// Gives the vector of a mantissa kept on the heap to the thread's pool.
+#[inline]
+pub(crate) fn pool_give_mant(m: Mant) {
+    if let Mant::Heap(v) = m {
+        pool_give(v);
+    }
+}
+
 /// The most vectors the thread's pool keeps.
 const POOL_LEN: usize = 1024;
 
@@ -593,15 +614,20 @@ pub(crate) fn pooled_copy(x: &BigFloat) -> BigFloat {
             exp,
             mant,
         } => {
-            let mut v = pool_take();
-            v.clear();
-            v.extend_from_slice(mant);
+            let mant = if mant.len() <= 2 {
+                Mant::from_slice(mant)
+            } else {
+                let mut v = pool_take();
+                v.clear();
+                v.extend_from_slice(mant);
+                Mant::Heap(v)
+            };
             BigFloat {
                 prec: x.prec,
                 kind: Kind::Finite {
                     negative: *negative,
                     exp: *exp,
-                    mant: v,
+                    mant,
                 },
             }
         }
@@ -613,7 +639,7 @@ pub(crate) fn pooled_copy(x: &BigFloat) -> BigFloat {
 #[inline]
 pub(crate) fn recycle(x: BigFloat) {
     if let Kind::Finite { mant, .. } = x.kind {
-        pool_give(mant);
+        pool_give_mant(mant);
     }
 }
 
@@ -1009,6 +1035,14 @@ pub(super) fn sum_products(
 ) -> Ordering {
     let v = take_mant(out);
     let prec = out.prec;
+    let n = prec.div_ceil(64) as usize;
+    let v = match short_products(n, [(x1, y1, n1), (x2, y2, n2)], 0, prec, round, v) {
+        Ok((kind, o)) => {
+            out.kind = kind;
+            return o;
+        }
+        Err(v) => v,
+    };
     let (kind, o) = limbs::with_work(|w| {
         let Work { a, b, scratch, .. } = w;
         let p = product_into(a, scratch, x1, y1, n1);
@@ -1017,6 +1051,93 @@ pub(super) fn sum_products(
     });
     out.kind = kind;
     o
+}
+
+/// Whether `x` suits [`short_products`] for a result of `prec` bits: normal, of the result's limbs
+/// (the low one not zero, else the exact product of the shorter mantissa costs less), and as many
+/// as make a short product cost less than the whole one ([`general::short_pays`]).
+pub(super) fn fits_short(x: &BigFloat, prec: u64) -> bool {
+    let n = prec.div_ceil(64) as usize;
+    general::short_pays(n + 2) && x.op().is_some_and(|a| a.m.len() == n && a.m[0] != 0)
+}
+
+/// The terms `±x·y` of operands of `n` limbs each (the result's) from short products of the
+/// operands padded below with two zero limbs (`m = n + 2` limbs): the high half `A` of each padded
+/// product is the product's top `m` limbs from its limb `n - 2`, below the exact one by less than
+/// `m - 1 + 1 = n + 2` units of `A`'s last limb (`nat::mulhigh_to`'s contract, and the fraction),
+/// so within `2^(lsb + bits(n + 2))`; `A` has `64m - 1` bits at least, its error some `64·2 -
+/// bits(n + 2) - 1` bits below `prec`'s last place, under the window of
+/// [`round_approx_sum`](super::super::sum::round_approx_sum), which rounds the sum when the window
+/// decides; the sum times `2^scale`. `Err(out)` for other operands, when the window does not decide
+/// (the exact products then), or for small `n`.
+fn short_products<const K: usize>(
+    n: usize,
+    terms: [(&BigFloat, &BigFloat, bool); K],
+    scale: i128,
+    prec: u64,
+    round: Round,
+    out: Vec<u64>,
+) -> Result<(Kind, Ordering), Vec<u64>> {
+    use super::super::sum::{Approx, round_approx_sum};
+    if !general::short_pays(n + 2) {
+        return Err(out);
+    }
+    let mut ops: [Option<(Op<'_>, Op<'_>, bool, bool)>; K] = [None; K];
+    for (slot, &(x, y, negate)) in ops.iter_mut().zip(&terms) {
+        let (Some(a), Some(b)) = (x.op(), y.op()) else {
+            return Err(out);
+        };
+        if a.m.len() != n || b.m.len() != n || a.m[0] == 0 || b.m[0] == 0 {
+            return Err(out);
+        }
+        *slot = Some((a, b, core::ptr::eq(x, y), negate));
+    }
+    let m = n + 2;
+    let err = u64::from(64 - (m as u64).leading_zeros());
+    limbs::with_work(|w| {
+        let Work {
+            a: pads,
+            b: prods,
+            scratch,
+            ..
+        } = w;
+        prods.clear();
+        prods.resize(2 * m * K, 0);
+        pads.clear();
+        pads.resize(2 * m, 0);
+        for (i, op) in ops.iter().enumerate() {
+            let (a, b, same, _) = op.expect("set above");
+            let (xp, yp) = pads.split_at_mut(m);
+            xp[2..].copy_from_slice(a.m);
+            let r = &mut prods[2 * m * i..2 * m * (i + 1)];
+            if same {
+                nat::sqrhigh_to(r, xp, scratch);
+            } else {
+                yp[2..].copy_from_slice(b.m);
+                nat::mulhigh_to(r, xp, yp, scratch);
+            }
+        }
+        let mut parts = [Approx {
+            negative: false,
+            m: &[],
+            lsb: 0,
+            err,
+        }; K];
+        for (i, (part, op)) in parts.iter_mut().zip(&ops).enumerate() {
+            let (a, b, _, negate) = op.expect("set above");
+            let hi = &prods[2 * m * i + m..2 * m * (i + 1)];
+            let k = hi.iter().rposition(|&v| v != 0).map_or(0, |j| j + 1);
+            // `x·y = 0.X·0.Y·2^(ex + ey)`, `X·Y·2^(ex + ey - 128n)`; `A = ⌊X·Y / B^(n-2)⌋`.
+            *part = Approx {
+                negative: (a.negative != b.negative) != negate,
+                m: &hi[..k],
+                lsb: a.exp + b.exp - 128 * n as i128 + 64 * (n as i128 - 2) + scale,
+                err,
+            };
+        }
+        let mut out = out;
+        round_approx_sum(&parts, prec, round, &mut out).ok_or(out)
+    })
 }
 
 /// Sets `out` to `±x·y·2^k` for finite numbers that are not zero, rounded once at its precision.
@@ -1029,6 +1150,14 @@ pub(super) fn scaled_product(
 ) -> Ordering {
     let v = take_mant(out);
     let prec = out.prec;
+    let n = prec.div_ceil(64) as usize;
+    let v = match short_products(n, [(x, y, false)], k, prec, round, v) {
+        Ok((kind, o)) => {
+            out.kind = kind;
+            return o;
+        }
+        Err(v) => v,
+    };
     let (kind, o) = limbs::with_work(|w| {
         let Work { a, scratch, .. } = w;
         let p = product_into(a, scratch, x, y, false);
@@ -1094,7 +1223,7 @@ pub(super) fn hypot_into(out: &mut BigFloat, x: &BigFloat, y: &BigFloat, round: 
         };
         general::sqrt(m, prec, round, w, v)
     });
-    s.limbs = mant;
+    s.limbs = mant.into_spare();
     out.kind = r.0;
     r.1
 }
@@ -1290,9 +1419,9 @@ impl Reg {
             }
         } else {
             let mant = if prec <= 64 {
-                vec![(self.m >> 64) as u64]
+                Mant::One((self.m >> 64) as u64)
             } else {
-                vec![self.m as u64, (self.m >> 64) as u64]
+                Mant::Two([self.m as u64, (self.m >> 64) as u64])
             };
             Kind::Finite {
                 negative: self.negative,

@@ -61,6 +61,8 @@ mod s32 {
 
     fir_real!(fir, f32, 4, 8, 2, [0, 1, 2, 3]);
     fir_complex!(firc, f32, 4, 8, [(0, 0, 1), (1, 2, 3)]);
+    fir_real_few!(fir_few, f32, 4);
+    fir_complex_few!(firc_few, f32, 4);
 
     /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
     ///
@@ -141,6 +143,8 @@ mod s64 {
 
     fir_real!(fir, f64, 2, 8, 2, [0, 1]);
     fir_complex!(firc, f64, 2, 8, [(0, 0, 1)]);
+    fir_real_few!(fir_few, f64, 2);
+    fir_complex_few!(firc_few, f64, 2);
 
     /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
     ///
@@ -169,5 +173,11 @@ mod s64 {
     }
 }
 
-pub(super) use s32::{cmul as cmul_f32, fir as fir_f32, firc as firc_f32};
-pub(super) use s64::{cmul as cmul_f64, fir as fir_f64, firc as firc_f64};
+pub(super) use s32::{
+    cmul as cmul_f32, fir as fir_f32, fir_few as fir_few_f32, firc as firc_f32,
+    firc_few as firc_few_f32,
+};
+pub(super) use s64::{
+    cmul as cmul_f64, fir as fir_f64, fir_few as fir_few_f64, firc as firc_f64,
+    firc_few as firc_few_f64,
+};

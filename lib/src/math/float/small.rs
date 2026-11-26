@@ -1277,6 +1277,19 @@ pub(crate) fn with_vec(
     f: impl FnOnce(&mut [u64]) -> Option<(bool, i64, Ordering)>,
 ) -> Option<(super::Kind, Ordering)> {
     let n = prec.div_ceil(64) as usize;
+    if n <= 2 {
+        // One or two limbs are kept in the number itself: no vector.
+        let mut t = [0u64; 2];
+        let (negative, exp, o) = f(&mut t[..n])?;
+        return Some((
+            super::Kind::Finite {
+                negative,
+                exp,
+                mant: super::Mant::from_slice(&t[..n]),
+            },
+            o,
+        ));
+    }
     out.clear();
     out.resize(n, 0);
     let (negative, exp, o) = f(out)?;
@@ -1284,7 +1297,7 @@ pub(crate) fn with_vec(
         super::Kind::Finite {
             negative,
             exp,
-            mant: core::mem::take(out),
+            mant: super::Mant::Heap(core::mem::take(out)),
         },
         o,
     ))

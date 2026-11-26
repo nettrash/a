@@ -292,22 +292,32 @@ fn column_products_of<T: Num>() {
         let d = a.to_matrix();
         let x: Vec<T> = random_vector(&mut r, cols);
         let w: Vec<T> = random_vector(&mut r, rows);
-        // By columns the terms of each entry are added in the same order as by rows: the same
-        // bits, as products of the dense matrix to rounding.
-        assert_eq!(c.mul_vec(&x), a.mul_vec(&x));
-        assert_eq!(c.mul_vec_transpose(&w), a.mul_vec_transpose(&w));
-        assert_eq!(c.mul_vec_adjoint(&w), a.mul_vec_adjoint(&w));
+        // By columns a product is the scatter of the rows and by rows the four-sum gather (and
+        // the other way round for the transposes): the same terms in other orders, the same to
+        // rounding; and the same bits where the gathered rows or columns hold under four.
+        let column = |v: &[T]| Matrix::from_column_major(v.len(), 1, v.to_vec());
+        let close = |p: &[T], q: &[T]| assert_close(&column(p), &column(q), 16.0);
+        close(&c.mul_vec(&x), &a.mul_vec(&x));
+        close(&c.mul_vec_transpose(&w), &a.mul_vec_transpose(&w));
+        close(&c.mul_vec_adjoint(&w), &a.mul_vec_adjoint(&w));
         let mut y = vec![T::real(9.0); rows];
         c.mul_vec_into(&x, &mut y);
-        assert_eq!(y, a.mul_vec(&x));
+        close(&y, &a.mul_vec(&x));
+        assert_eq!(y, c.mul_vec(&x));
         let mut z = vec![T::real(-9.0); cols];
         c.mul_vec_transpose_into(&w, &mut z);
         assert_eq!(z, a.transpose().mul_vec(&w));
         z.fill(T::real(5.0));
         c.mul_vec_adjoint_into(&w, &mut z);
         assert_eq!(z, a.conjugate_transpose().mul_vec(&w));
-        assert_eq!(c.mul_vec_adjoint(&w), c.conjugate_transpose().mul_vec(&w));
-        let column = |v: &[T]| Matrix::from_column_major(v.len(), 1, v.to_vec());
+        close(&c.mul_vec_adjoint(&w), &c.conjugate_transpose().mul_vec(&w));
+        let short = |m: &SparseMatrix<T>| (0..m.rows()).all(|i| m.row(i).count() < 4);
+        if short(&a) {
+            assert_eq!(c.mul_vec(&x), a.mul_vec(&x));
+        }
+        if short(&a.transpose()) {
+            assert_eq!(c.mul_vec_transpose(&w), a.mul_vec_transpose(&w));
+        }
         assert_close(&column(&c.mul_vec(&x)), &(&d * &column(&x)), 16.0);
         assert_close(
             &column(&c.mul_vec_adjoint(&w)),

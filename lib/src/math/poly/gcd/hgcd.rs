@@ -68,6 +68,11 @@ pub(crate) trait Engine {
     fn euclid_mat(&self, _a: &Self::P, _b: &Self::P) -> Option<(Mat<Self::P>, Self::P)> {
         None
     }
+    /// Euclid's steps of [`hgcd_base`] from `(a, b)` while the degree of the divisor is at least
+    /// `m` (without a record), by a kernel of the engine's own, when it has one.
+    fn hgcd_steps(&self, _a: &Self::P, _b: &Self::P, _m: usize) -> Option<Steps<Self::P>> {
+        None
+    }
     /// Below this degree [`hgcd`] takes Euclid's steps one by one.
     fn hgcd_cutoff(&self) -> usize;
     /// Below this degree the greatest common divisor is Euclid's.
@@ -75,6 +80,10 @@ pub(crate) trait Engine {
     /// Below this degree the extended greatest common divisor is Euclid's.
     fn xgcd_cutoff(&self) -> usize;
 }
+
+/// What Euclid's steps of [`hgcd_base`] give: the product of their quotient matrices and the two
+/// remainders.
+pub(crate) type Steps<P> = (Mat<P>, P, P);
 
 /// A product of quotient matrices `[[a, b], [c, d]]`, with its determinant, `-1` when `neg`.
 pub(crate) struct Mat<P> {
@@ -142,6 +151,11 @@ fn hgcd_base<E: Engine>(
     mut rec: Option<&mut Rec<E::C>>,
     shift: usize,
 ) -> (Mat<E::P>, E::P, E::P) {
+    if rec.is_none()
+        && let Some(r) = e.hgcd_steps(a, b, m)
+    {
+        return r;
+    }
     let mut mat = Mat::identity(e);
     let (mut x, mut y) = (a.clone(), b.clone());
     while e.len(&y) > m {

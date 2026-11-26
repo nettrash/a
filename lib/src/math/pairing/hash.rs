@@ -3,7 +3,7 @@
 //! `_NU_`; and to BN254's `G1` in the same manner by the Shallue–van de Woestijne map, as
 //! gnark-crypto does it, for which RFC 9380 has no suite.
 //!
-//! * [`bls12_381_g1`]: [`G1Suite`], hashing to `G1` by [`hash_to_field`] into `F_p`, the
+//! * [`bls12_381_g1`]: [`G1Suite`], hashing to `G1` by [`hash_to_field`](crate::math::ec::hash::hash_to_field) into `F_p`, the
 //!   simplified SWU map of [`a::math::ec::hash`](crate::math::ec::hash) to the curve `E'`
 //!   isogenous to BLS12-381 (`Z = 11`), the 11-isogeny of appendix E.2, and the product by
 //!   `h_eff = 1 − x = 0xd201000000010001`.
@@ -13,7 +13,7 @@
 //!   cleared by Budroni and Pintore's method of appendix G.3, [`G2::clear_cofactor`], which is the
 //!   product by RFC 9380's `h_eff`.
 //! * [`bn254_g1`]: a [`G1Suite`] for BN254, `BN254G1_XMD:SHA-256_SVDW_RO_` and `_NU_` as
-//!   gnark-crypto names them: [`hash_to_field`] with SHA-256, the Shallue–van de Woestijne map of
+//!   gnark-crypto names them: [`hash_to_field`](crate::math::ec::hash::hash_to_field) with SHA-256, the Shallue–van de Woestijne map of
 //!   section 6.6.1 with `Z = 1` to `y² = x³ + 3` itself, and nothing to clear, as `E(F_p)` is `G1`.
 //!
 //! Each suite has, as the suites of `a::math::ec::hash` do, `hash_to_curve` (the `_RO_` suite),
@@ -21,9 +21,12 @@
 //! `map_to_curve` and `clear_cofactor`. `F_p²` is the tower's, `F_p[u]/(u² + 1)`, whose `u` is the
 //! RFC's `I`, and `sgn0` on it is [`Fp2::sgn0`] (section 4.1).
 //!
-//! The maps are the straightforward ones of section 6, with an inversion and one or two square
-//! roots for each element, not the straight-line forms of appendices F and G. BN254's `G2` has no
-//! hashing here.
+//! The suites compute on the pairing's own arithmetic. `G1`'s simplified SWU map is the
+//! straight-line form of appendix F.2, one exponentiation and no inversion, its point kept as a
+//! fraction that the 11-isogeny takes homogeneously; `hash_to_curve` adds the two points on `E′`
+//! and applies the isogeny once to their sum, as section 6.6.3 allows. The map over `F_p²` and the
+//! Shallue–van de Woestijne map keep the forms of section 6, an inversion and one or two square
+//! roots for each element. BN254's `G2` has no hashing here.
 //!
 //! **Nothing here is constant-time**: the maps branch on whether an element is a square. They are
 //! for public messages, such as those of a BLS signature's verification, not for hashing secrets
@@ -51,12 +54,13 @@
 //! ```
 
 use super::curve::PairingCurve;
+use super::fast::group::Jac;
+use super::fast::h2c::{Iso, SswuFp, SswuFp2, Svdw, add_a, from_okm};
+use super::fast::{self, Bls, Bn, ops};
 use super::g1::G1;
 use super::g2::G2;
 use crate::hash::{Digest, Sha256, expand_message_xmd};
-use crate::math::ec::hash::{
-    IsogenyMap, ShallueVanDeWoestijne, SimplifiedSwu, element_bytes, hash_to_field, hex,
-};
+use crate::math::ec::hash::{IsogenyMap, ShallueVanDeWoestijne, SimplifiedSwu, element_bytes, hex};
 use crate::math::field::{Fp, Fp2, PrimeField, Tower};
 use crate::math::numbers::{ByteOrder, Number};
 use std::sync::OnceLock;
@@ -612,6 +616,14 @@ pub struct G1Suite {
     l: usize,
     /// `h_eff`.
     h_eff: Number,
+    /// The map on the pairing's own arithmetic.
+    fast: G1Fast,
+}
+
+/// The maps of the two suites on the engines.
+enum G1Fast {
+    Bls(SswuFp<Bls, 6>, Iso<fast::Fp<Bls, 6>>),
+    Bn(Svdw<Bn, 4>),
 }
 
 /// How a suite of `G1` maps an element to its curve.
@@ -629,6 +641,20 @@ impl core::fmt::Debug for G1Suite {
             .field("ro", &self.ro_id())
             .field("nu", &self.nu_id())
             .finish_non_exhaustive()
+    }
+}
+
+impl G1Suite {
+    /// `count` elements' bytes, `L` each, by `expand_message_xmd` with SHA-256.
+    #[track_caller]
+    fn expand(&self, msg: &[u8], dst: &[u8], count: usize) -> Vec<u8> {
+        let len = count.checked_mul(self.l).unwrap_or_else(|| {
+            panic!(
+                "{count} elements of {} bytes are too many to expand",
+                self.l
+            )
+        });
+        expand_message_xmd::<Sha256>(msg, dst, len)
     }
 }
 
@@ -716,7 +742,7 @@ impl G1Suite {
     }
 
     /// `count` elements of `F_p` from `msg` and the domain separation tag `dst`, by
-    /// [`hash_to_field`] with SHA-256 and `k = 128`.
+    /// [`hash_to_field`](crate::math::ec::hash::hash_to_field) with SHA-256 and `k = 128`.
     ///
     /// # Panics
     ///
@@ -725,7 +751,14 @@ impl G1Suite {
     #[track_caller]
     #[must_use]
     pub fn hash_to_field(&self, msg: &[u8], dst: &[u8], count: usize) -> Vec<Fp<'static>> {
-        hash_to_field::<Sha256>(self.field(), msg, dst, count, 128)
+        let bytes = self.expand(msg, dst, count);
+        bytes
+            .chunks_exact(self.l)
+            .map(|tv| match self.fast {
+                G1Fast::Bls(..) => from_okm::<Bls, 6>(tv).to_public(),
+                G1Fast::Bn(..) => from_okm::<Bn, 4>(tv).to_public(),
+            })
+            .collect()
     }
 
     /// The point of the curve that `u` maps to, before the cofactor is cleared: on BLS12-381 by
@@ -739,17 +772,19 @@ impl G1Suite {
     #[must_use]
     pub fn map_to_curve<'c>(&self, u: &Fp<'c>) -> G1<'c> {
         let curve: &'c PairingCurve = self.curve;
-        let xy = match &self.map {
-            G1Map::SswuIsogeny(m, iso) => {
-                let (x, y) = m.map(u);
-                iso.map(&x, &y)
+        assert!(
+            u.field().modulus() == curve.base_field().modulus(),
+            "elements of different fields"
+        );
+        match &self.fast {
+            G1Fast::Bls(m, iso) => {
+                let (xn, xd, y) = m.map(&fast::Fp::from_public(u));
+                G1::from_jac::<Bls, 6>(curve, &iso.map(&xn, &xd, &y), false)
             }
-            G1Map::Svdw(m) => Some(m.map(u)),
-        };
-        match xy {
-            None => curve.g1_identity(),
-            Some((x, y)) => G1::new_on_curve(curve, x, y)
-                .unwrap_or_else(|_| unreachable!("the map gives points of the curve")),
+            G1Fast::Bn(m) => {
+                let (x, y) = m.map(&fast::Fp::from_public(u));
+                G1::from_jac::<Bn, 4>(curve, &Jac::from_affine(x, y), true)
+            }
         }
     }
 
@@ -787,8 +822,32 @@ impl G1Suite {
     #[track_caller]
     #[must_use]
     pub fn hash_to_curve(&self, msg: &[u8], dst: &[u8]) -> G1<'static> {
-        let u = self.hash_to_field(msg, dst, 2);
-        self.clear_cofactor(&(self.map_to_curve(&u[0]) + self.map_to_curve(&u[1])))
+        let bytes = self.expand(msg, dst, 2);
+        let (t0, t1) = bytes.split_at(self.l);
+        let curve = self.curve;
+        match &self.fast {
+            G1Fast::Bls(m, iso) => {
+                // Both points on E′, their sum, the isogeny once, the cofactor.
+                let on_e = |t: &[u8]| {
+                    let (xn, xd, y) = m.map(&from_okm::<Bls, 6>(t));
+                    Jac {
+                        x: xn.mul(&xd),
+                        y: y.mul(&xd.square().mul(&xd)),
+                        z: xd,
+                    }
+                };
+                let sum = add_a(&on_e(t0), &on_e(t1), &m.a);
+                let p = iso.map_jac(&sum);
+                G1::from_jac::<Bls, 6>(curve, &ops::g1_clear(&p), true)
+            }
+            G1Fast::Bn(m) => {
+                let pt = |t: &[u8]| {
+                    let (x, y) = m.map(&from_okm::<Bn, 4>(t));
+                    Jac::from_affine(x, y)
+                };
+                G1::from_jac::<Bn, 4>(curve, &pt(t0).add(&pt(t1)), true)
+            }
+        }
     }
 
     /// `encode_to_curve`, the suite `BLS12381G1_XMD:SHA-256_SSWU_NU_`: the cofactor cleared from
@@ -801,8 +860,18 @@ impl G1Suite {
     #[track_caller]
     #[must_use]
     pub fn encode_to_curve(&self, msg: &[u8], dst: &[u8]) -> G1<'static> {
-        let u = self.hash_to_field(msg, dst, 1);
-        self.clear_cofactor(&self.map_to_curve(&u[0]))
+        let bytes = self.expand(msg, dst, 1);
+        let curve = self.curve;
+        match &self.fast {
+            G1Fast::Bls(m, iso) => {
+                let (xn, xd, y) = m.map(&from_okm::<Bls, 6>(&bytes));
+                G1::from_jac::<Bls, 6>(curve, &ops::g1_clear(&iso.map(&xn, &xd, &y)), true)
+            }
+            G1Fast::Bn(m) => {
+                let (x, y) = m.map(&from_okm::<Bn, 4>(&bytes));
+                G1::from_jac::<Bn, 4>(curve, &Jac::from_affine(x, y), true)
+            }
+        }
     }
 }
 
@@ -840,6 +909,9 @@ pub struct G2Suite {
     l: usize,
     /// `h_eff`.
     h_eff: Number,
+    /// The map and the isogeny on the pairing's own arithmetic.
+    fast_map: SswuFp2<Bls, 6>,
+    fast_iso: Iso<fast::Fp2<Bls, 6>>,
 }
 
 impl core::fmt::Debug for G2Suite {
@@ -848,6 +920,25 @@ impl core::fmt::Debug for G2Suite {
             .field("ro", &self.ro_id())
             .field("nu", &self.nu_id())
             .finish_non_exhaustive()
+    }
+}
+
+impl G2Suite {
+    /// `count` elements of `F_p²` in the engine's arithmetic, as `hash_to_field` gives them.
+    #[track_caller]
+    fn fast_field(&self, msg: &[u8], dst: &[u8], count: usize) -> Vec<fast::Fp2<Bls, 6>> {
+        let l = self.l;
+        let len = count
+            .checked_mul(2)
+            .and_then(|c| c.checked_mul(l))
+            .unwrap_or_else(|| {
+                panic!("{count} elements of {} bytes are too many to expand", 2 * l)
+            });
+        let bytes = expand_message_xmd::<Sha256>(msg, dst, len);
+        bytes
+            .chunks_exact(2 * l)
+            .map(|tv| fast::Fp2::new(from_okm(&tv[..l]), from_okm(&tv[l..])))
+            .collect()
     }
 }
 
@@ -925,14 +1016,10 @@ impl G2Suite {
     #[track_caller]
     #[must_use]
     pub fn hash_to_field(&self, msg: &[u8], dst: &[u8], count: usize) -> Vec<Fp2<'static>> {
-        to_field_fp2(
-            self.tower(),
-            expand_message_xmd::<Sha256>,
-            self.l,
-            msg,
-            dst,
-            count,
-        )
+        self.fast_field(msg, dst, count)
+            .iter()
+            .map(|u| u.to_public())
+            .collect()
     }
 
     /// The point of the twist that `u` maps to, by the simplified SWU map to `E'` and the
@@ -945,12 +1032,14 @@ impl G2Suite {
     #[must_use]
     pub fn map_to_curve<'c>(&self, u: &Fp2<'c>) -> G2<'c> {
         let curve: &'c PairingCurve = self.curve;
-        let (x, y) = self.map.map(u);
-        match self.iso.map(&x, &y) {
-            None => curve.g2_identity(),
-            Some((x, y)) => G2::new_on_curve(curve, x, y)
-                .unwrap_or_else(|_| unreachable!("the isogeny maps E' onto the twist")),
-        }
+        let t = curve.tower();
+        assert!(
+            u.tower().base().modulus() == t.base().modulus() && u.tower().xi() == t.xi(),
+            "elements of different towers"
+        );
+        let (x, y) = self.fast_map.map(&fast::Fp2::from_public(u));
+        let q = self.fast_iso.map(&x, &fast::Fp2::one(), &y);
+        G2::from_jac::<Bls, 6>(curve, &q, false)
     }
 
     /// `h_eff · q`, a point of `G2`, by [`G2::clear_cofactor`]: Budroni and Pintore's
@@ -988,8 +1077,14 @@ impl G2Suite {
     #[track_caller]
     #[must_use]
     pub fn hash_to_curve(&self, msg: &[u8], dst: &[u8]) -> G2<'static> {
-        let u = self.hash_to_field(msg, dst, 2);
-        self.clear_cofactor(&(self.map_to_curve(&u[0]) + self.map_to_curve(&u[1])))
+        let u = self.fast_field(msg, dst, 2);
+        let on_e = |u: &fast::Fp2<Bls, 6>| {
+            let (x, y) = self.fast_map.map(u);
+            Jac::from_affine(x, y)
+        };
+        let sum = add_a(&on_e(&u[0]), &on_e(&u[1]), &self.fast_map.a);
+        let q = self.fast_iso.map_jac(&sum);
+        G2::from_jac::<Bls, 6>(self.curve, &ops::g2_clear(&q), true)
     }
 
     /// `encode_to_curve`, the suite `BLS12381G2_XMD:SHA-256_SSWU_NU_`: the cofactor cleared from
@@ -1002,8 +1097,10 @@ impl G2Suite {
     #[track_caller]
     #[must_use]
     pub fn encode_to_curve(&self, msg: &[u8], dst: &[u8]) -> G2<'static> {
-        let u = self.hash_to_field(msg, dst, 1);
-        self.clear_cofactor(&self.map_to_curve(&u[0]))
+        let u = self.fast_field(msg, dst, 1);
+        let (x, y) = self.fast_map.map(&u[0]);
+        let q = self.fast_iso.map(&x, &fast::Fp2::one(), &y);
+        G2::from_jac::<Bls, 6>(self.curve, &ops::g2_clear(&q), true)
     }
 }
 
@@ -1037,6 +1134,17 @@ pub fn bls12_381_g1() -> &'static G1Suite {
             &all(&G1_ISO_Y_NUM),
             &monic(&G1_ISO_Y_DEN),
         );
+        let fp = |x: &Fp<'static>| fast::Fp::<Bls, 6>::from_public(x);
+        let fv = |c: &[Fp<'static>]| c.iter().map(fp).collect::<Vec<_>>();
+        let fast = G1Fast::Bls(
+            SswuFp::new(fp(map.a()), fp(map.b()), fp(map.z())),
+            Iso {
+                x_num: fv(iso.x_num()),
+                x_den: fv(iso.x_den()),
+                y_num: fv(iso.y_num()),
+                y_den: fv(iso.y_den()),
+            },
+        );
         G1Suite {
             ids: [
                 "BLS12381G1_XMD:SHA-256_SSWU_RO_",
@@ -1046,13 +1154,14 @@ pub fn bls12_381_g1() -> &'static G1Suite {
             map: G1Map::SswuIsogeny(map, iso),
             l: element_bytes(f, 128),
             h_eff: Number::from(0xd201_0000_0001_0001_u64),
+            fast,
         }
     })
 }
 
 /// A hashing of BN254's `G1` in the manner of RFC 9380, which defines no suite for BN254:
 /// `BN254G1_XMD:SHA-256_SVDW_RO_` and `BN254G1_XMD:SHA-256_SVDW_NU_`, as gnark-crypto names and
-/// defines them, built on the first call. They take [`hash_to_field`] with SHA-256, `k = 128` and
+/// defines them, built on the first call. They take [`hash_to_field`](crate::math::ec::hash::hash_to_field) with SHA-256, `k = 128` and
 /// `L = 48`, the Shallue–van de Woestijne map of section 6.6.1 to `y² = x³ + 3` with the `Z = 1`
 /// of appendix H.1, and `h_eff = 1`, as `E(F_p)` is `G1`.
 ///
@@ -1079,6 +1188,8 @@ pub fn bn254_g1() -> &'static G1Suite {
         let curve = PairingCurve::bn254();
         let f = curve.base_field();
         let map = ShallueVanDeWoestijne::new(&f.zero(), &curve.b(), &f.one());
+        let fp = |x: &Fp<'static>| fast::Fp::<Bn, 4>::from_public(x);
+        let fast = G1Fast::Bn(Svdw::new(fp(map.a()), fp(map.b()), fp(map.z())));
         G1Suite {
             ids: [
                 "BN254G1_XMD:SHA-256_SVDW_RO_",
@@ -1088,6 +1199,7 @@ pub fn bn254_g1() -> &'static G1Suite {
             map: G1Map::Svdw(map),
             l: element_bytes(f, 128),
             h_eff: Number::from(1u8),
+            fast,
         }
     })
 }
@@ -1132,12 +1244,23 @@ pub fn bls12_381_g2() -> &'static G2Suite {
         );
         let h_eff = Number::from_str_radix(G2_H_EFF, 16, ByteOrder::LittleEndian)
             .unwrap_or_else(|_| unreachable!("the constant is valid hexadecimal"));
+        let fp2 = |x: &Fp2<'static>| fast::Fp2::<Bls, 6>::from_public(x);
+        let fv = |c: &[Fp2<'static>]| c.iter().map(fp2).collect::<Vec<_>>();
+        let fast_map = SswuFp2::new(fp2(map.a()), fp2(map.b()), fp2(map.z()));
+        let fast_iso = Iso {
+            x_num: fv(iso.x_num()),
+            x_den: fv(iso.x_den()),
+            y_num: fv(iso.y_num()),
+            y_den: fv(iso.y_den()),
+        };
         G2Suite {
             curve,
             map,
             iso,
             l: element_bytes(f, 128),
             h_eff,
+            fast_map,
+            fast_iso,
         }
     })
 }

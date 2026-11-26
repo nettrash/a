@@ -136,11 +136,11 @@ impl Clmul {
 fn pmull_available() -> bool {
     #[cfg(all(target_arch = "aarch64", target_feature = "aes", not(miri)))]
     {
-        true
+        !cfg!(a_baseline)
     }
     #[cfg(all(target_arch = "aarch64", not(target_feature = "aes"), not(miri)))]
     {
-        std::arch::is_aarch64_feature_detected!("aes")
+        !cfg!(a_baseline) && std::arch::is_aarch64_feature_detected!("aes")
     }
     #[cfg(not(all(target_arch = "aarch64", not(miri))))]
     {
@@ -152,11 +152,11 @@ fn pmull_available() -> bool {
 fn pclmulqdq_available() -> bool {
     #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq", not(miri)))]
     {
-        true
+        !cfg!(a_baseline)
     }
     #[cfg(all(target_arch = "x86_64", not(target_feature = "pclmulqdq"), not(miri)))]
     {
-        std::arch::is_x86_feature_detected!("pclmulqdq")
+        !cfg!(a_baseline) && std::arch::is_x86_feature_detected!("pclmulqdq")
     }
     #[cfg(not(all(target_arch = "x86_64", not(miri))))]
     {
@@ -166,9 +166,12 @@ fn pclmulqdq_available() -> bool {
 
 /// Runs `f` on a scratch buffer of `len` words, on the stack when it is small.
 fn with_scratch<R>(len: usize, f: impl FnOnce(&mut [u64]) -> R) -> R {
-    const STACK: usize = 192;
-    if len <= STACK {
-        let mut buf = [0u64; STACK];
+    // Buffers of a few sizes, so that a small field zeroes a few words, not 1.5 KiB.
+    if len <= 32 {
+        let mut buf = [0u64; 32];
+        f(&mut buf[..len])
+    } else if len <= 192 {
+        let mut buf = [0u64; 192];
         f(&mut buf[..len])
     } else {
         f(&mut vec![0u64; len])
@@ -232,6 +235,8 @@ pub struct BinaryField {
     sqrt_x: Vec<u64>,
     /// Bit `i`: `Tr(xⁱ)`.
     trace: Vec<u64>,
+    /// `f⁻¹ mod x⁶⁴` when `f(0) = 1` (odd then), for the inverse by division steps; else 0.
+    finv: u64,
 }
 
 impl BinaryField {
@@ -349,6 +354,11 @@ impl BinaryField {
             f[e as usize / 64] |= 1 << (e % 64);
         }
         let reduction = choose_reduction(m, n, &low, &f, clmul);
+        let finv = if f[0] & 1 == 1 {
+            super::binary_inv::inverse_mod_x64(f[0], clmul::clmul_portable)
+        } else {
+            0
+        };
         let scratch = match reduction {
             Reduction::Sparse { .. } => clmul::scratch_len(n),
             Reduction::Barrett { .. } => 4 * n + clmul::scratch_len(n),
@@ -363,6 +373,7 @@ impl BinaryField {
             scratch,
             sqrt_x: Vec::new(),
             trace: Vec::new(),
+            finv,
         }
     }
 
@@ -570,23 +581,48 @@ impl BinaryField {
 
     /// The product of two elements' words, reduced.
     fn mul_words(&self, a: &[u64], b: &[u64]) -> Vec<u64> {
+        let mut r = vec![0u64; self.words];
+        self.mul_into(a, b, &mut r);
+        r
+    }
+
+    /// The square of an element's words, reduced.
+    fn square_words(&self, a: &[u64]) -> Vec<u64> {
+        let mut r = a.to_vec();
+        self.square_assign_words(&mut r);
+        r
+    }
+
+    /// Writes `a b mod f` to `out` (`n` words).
+    fn mul_into(&self, a: &[u64], b: &[u64], out: &mut [u64]) {
         let n = self.words;
         with_scratch(2 * n + self.scratch, |s| {
             let (p, s) = s.split_at_mut(2 * n);
             clmul::mul(self.clmul, a, b, p, s);
             self.reduce(p, s);
-            p[..n].to_vec()
+            out.copy_from_slice(&p[..n]);
         })
     }
 
-    /// The square of an element's words, reduced.
-    fn square_words(&self, a: &[u64]) -> Vec<u64> {
+    /// `a b mod f` in place of `a`.
+    fn mul_assign_words(&self, a: &mut [u64], b: &[u64]) {
+        let n = self.words;
+        with_scratch(2 * n + self.scratch, |s| {
+            let (p, s) = s.split_at_mut(2 * n);
+            clmul::mul(self.clmul, a, b, p, s);
+            self.reduce(p, s);
+            a.copy_from_slice(&p[..n]);
+        })
+    }
+
+    /// `a² mod f` in place.
+    fn square_assign_words(&self, a: &mut [u64]) {
         let n = self.words;
         with_scratch(2 * n + self.scratch, |s| {
             let (p, s) = s.split_at_mut(2 * n);
             clmul::square(a, p);
             self.reduce(p, s);
-            p[..n].to_vec()
+            a.copy_from_slice(&p[..n]);
         })
     }
 
@@ -887,15 +923,20 @@ impl<'f> F2m<'f> {
     pub fn pow_u64(&self, e: u64) -> F2m<'f> {
         let mut r = self.f.one();
         for i in (0..u64::BITS - e.leading_zeros()).rev() {
-            r = r.square();
+            self.f.square_assign_words(&mut r.w);
             if e >> i & 1 == 1 {
-                r = &r * self;
+                self.f.mul_assign_words(&mut r.w, &self.w);
             }
         }
         r
     }
 
-    /// The inverse, by the extended Euclidean algorithm over `GF(2)[x]`, or `None` for 0.
+    /// The inverse, or `None` for 0: by Bernstein and Yang's division steps, a batch of 63 on the
+    /// low words and then its matrix on the whole polynomials by carry-less products, at most
+    /// `⌈2m / 63⌉` batches; by the extended Euclidean algorithm over `GF(2)[x]` for a modulus
+    /// without a constant term (`x`), for moduli longer than the division steps take with the
+    /// instruction (128 words with PMULL, 40 with PCLMULQDQ), and with the portable kernel except
+    /// for `24 ≤ m ≤ 31`, where the steps are faster.
     ///
     /// # Examples
     ///
@@ -908,6 +949,14 @@ impl<'f> F2m<'f> {
     /// ```
     #[must_use]
     pub fn inverse(&self) -> Option<F2m<'f>> {
+        if self.is_zero() {
+            return None;
+        }
+        if self.f.finv != 0
+            && let Some(w) = clmul::inverse(self.f.clmul, &self.w, &self.f.f, self.f.m, self.f.finv)
+        {
+            return Some(F2m { f: self.f, w });
+        }
         poly::inverse(&self.w, &self.f.f, self.f.words).map(|w| F2m { f: self.f, w })
     }
 
@@ -991,8 +1040,11 @@ impl<'f> F2m<'f> {
         let mut h = self.clone();
         let mut s = self.clone();
         for _ in 0..(self.f.m - 1) / 2 {
-            s = s.square().square();
-            h = &h + &s;
+            self.f.square_assign_words(&mut s.w);
+            self.f.square_assign_words(&mut s.w);
+            for (h, s) in h.w.iter_mut().zip(&s.w) {
+                *h ^= s;
+            }
         }
         h
     }
@@ -1094,6 +1146,18 @@ fn sum<'f>(a: &F2m<'f>, b: &F2m<'f>) -> F2m<'f> {
     }
 }
 
+/// `a += b` in place.
+fn sum_assign<'f>(a: &mut F2m<'f>, b: &F2m<'f>) {
+    for (x, y) in a.w.iter_mut().zip(&b.w) {
+        *x ^= y;
+    }
+}
+
+/// `a *= b` in place: the product into `a`'s own words.
+fn product_assign<'f>(a: &mut F2m<'f>, b: &F2m<'f>) {
+    a.f.mul_assign_words(&mut a.w, &b.w);
+}
+
 /// `a·b`: the carry-less product, then the reduction modulo `f`.
 fn product<'f>(a: &F2m<'f>, b: &F2m<'f>) -> F2m<'f> {
     F2m {
@@ -1105,7 +1169,7 @@ fn product<'f>(a: &F2m<'f>, b: &F2m<'f>) -> F2m<'f> {
 /// The binary operators for the four combinations of owned and borrowed operands, and their
 /// assignments, from the one on two borrows.
 macro_rules! binary {
-    ($tr:ident, $m:ident, $atr:ident, $am:ident, $f:expr) => {
+    ($tr:ident, $m:ident, $atr:ident, $am:ident, $f:expr, $assign:expr) => {
         impl<'f> $tr<&F2m<'f>> for &F2m<'f> {
             type Output = F2m<'f>;
             #[track_caller]
@@ -1138,7 +1202,8 @@ macro_rules! binary {
         impl<'f> $atr<&F2m<'f>> for F2m<'f> {
             #[track_caller]
             fn $am(&mut self, rhs: &F2m<'f>) {
-                *self = (&*self).$m(rhs);
+                self.f.check(rhs);
+                $assign(self, rhs);
             }
         }
         impl<'f> $atr<F2m<'f>> for F2m<'f> {
@@ -1150,13 +1215,17 @@ macro_rules! binary {
     };
 }
 
-binary!(Add, add, AddAssign, add_assign, sum);
-binary!(Sub, sub, SubAssign, sub_assign, sum);
-binary!(Mul, mul, MulAssign, mul_assign, product);
+binary!(Add, add, AddAssign, add_assign, sum, sum_assign);
+binary!(Sub, sub, SubAssign, sub_assign, sum, sum_assign);
+binary!(Mul, mul, MulAssign, mul_assign, product, product_assign);
 binary!(
     Div,
     div,
     DivAssign,
     div_assign,
-    |a: &F2m<'f>, b: &F2m<'f>| { product(a, &b.inverse().expect("division by zero")) }
+    |a: &F2m<'f>, b: &F2m<'f>| { product(a, &b.inverse().expect("division by zero")) },
+    |a: &mut F2m<'f>, b: &F2m<'f>| {
+        let inv = b.inverse().expect("division by zero");
+        product_assign(a, &inv);
+    }
 );

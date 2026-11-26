@@ -263,3 +263,92 @@ fn the_agm_agrees_with_newtons_iteration() {
         }
     }
 }
+
+/// The neighbours of `y ≠ 0` of `prec` bits: the numbers of `prec` bits just below and above.
+fn neighbours(y: &BigFloat, prec: u64) -> (BigFloat, BigFloat) {
+    let (m, e) = y.mantissa_exponent().unwrap();
+    let sh = prec - m.bits();
+    let (m, e) = (&m << sh as usize, e - sh as i64);
+    let one = Number::from(1);
+    let at = |m: &Number, e: i64| BigFloat::from_parts(m, e, prec, Round::Nearest).0;
+    let mag = m.abs();
+    let up = at(&(&mag + &one), e);
+    let down = if mag == &one << (prec - 1) as usize {
+        at(&(&(&one << prec as usize) - &one), e - 1)
+    } else {
+        at(&(&mag - &one), e)
+    };
+    if y.is_sign_negative() {
+        (-up, -down)
+    } else {
+        (down, up)
+    }
+}
+
+/// Whether `ln x` (`x ≠ 1`, so not a number of any precision) is what `(y, o)` says it is, `y`
+/// its rounding to `prec` bits in the mode `round` with the ternary `o`: by the exponential of the
+/// ends of the interval of reals that round to `y`, 64 bits past `prec` and rounded outward, and
+/// of `y` itself for the ternary (`ln x < t` from `x < exp(t)` rounded down, `ln x > t` from `x >
+/// exp(t)` rounded up).
+fn ln_is(x: &BigFloat, (y, o): &(BigFloat, Ordering), prec: u64, round: Round) -> bool {
+    let w = prec + 64;
+    let below = |t: &BigFloat| *x < t.exp_round(w, Round::Down).0;
+    let above = |t: &BigFloat| *x > t.exp_round(w, Round::Up).0;
+    let (lo, hi) = neighbours(y, prec);
+    let mid = |a: &BigFloat, b: &BigFloat| {
+        a.add_round(b, prec + 2, Round::Nearest)
+            .0
+            .div_round(&BigFloat::from(2), prec + 2, Round::Nearest)
+            .0
+    };
+    let up = match round {
+        Round::Nearest => {
+            return above(&mid(&lo, y))
+                && below(&mid(y, &hi))
+                && match o {
+                    Ordering::Greater => below(y),
+                    Ordering::Less => above(y),
+                    Ordering::Equal => false,
+                };
+        }
+        Round::Up => true,
+        Round::Down => false,
+        Round::TowardZero => y.is_sign_negative(),
+    };
+    if up {
+        *o == Ordering::Greater && below(y) && above(&lo)
+    } else {
+        *o == Ordering::Less && above(y) && below(&hi)
+    }
+}
+
+/// The logarithm by the AGM where its roots' short products stop: precisions from 25,250 to
+/// 25,700 bits, whose AGM runs on 397 to 405 limbs (the short products up to 399, the exact ones
+/// from 400), arguments of the precision in `[1/8, 8)` and near 1, every mode, against the
+/// exponential of the ends of the rounding interval.
+#[test]
+fn logarithms_by_the_agm_round_correctly_at_the_short_products_edge() {
+    let mut s = 0x10_6005u64;
+    let precs: Vec<u64> = (25_250..=25_700).step_by(25).collect();
+    for &p in &precs[..size(precs.len(), 1)] {
+        let x = float(&mut s, p, 3).abs();
+        let x = if below(&mut s, 3) == 0 {
+            // Near 1: `1 + x·2^-40`.
+            let d = BigFloat::from_parts(&Number::from(1), -40, 1, Round::Nearest).0;
+            let d = x.mul_round(&d, p, Round::Nearest).0;
+            BigFloat::from(1).add_round(&d, p + 41, Round::Nearest).0
+        } else {
+            x.prec_round(p, Round::Nearest).0
+        };
+        if !x.is_normal() || x == 1 {
+            continue;
+        }
+        let round = MODES[below(&mut s, 4) as usize];
+        let got = x.ln_round(p, round);
+        assert!(
+            ln_is(&x, &got, p, round),
+            "ln at {p} {round:?}: {:?}",
+            got.1
+        );
+    }
+}

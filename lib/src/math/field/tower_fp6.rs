@@ -1,7 +1,9 @@
 //! `F_p⁶ = F_p²[v] / (v³ − ξ)`, the second floor of a [`Tower`].
 
 use super::tower::{Tower, tower_ops};
+use super::tower_fast::fast;
 use super::tower_fp2::Fp2;
+use crate::math::ec::field::limbs_of;
 use crate::math::numbers::Number;
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -119,6 +121,7 @@ impl<'t> Fp6<'t> {
     /// `s₃ = 2c₁c₂`, `s₄ = c₂²`, and then `s₀ + ξs₃`, `s₁ + ξs₄`, `s₁ + s₂ + s₃ − s₀ − s₄`.
     #[must_use]
     pub fn square(&self) -> Fp6<'t> {
+        fast!(self.c0.t, k => k.st6(k.sqr6(&k.ld6(self))));
         let (a0, a1, a2) = (&self.c0, &self.c1, &self.c2);
         let s0 = a0.square();
         let s1 = (a0 * a1).double();
@@ -132,9 +135,82 @@ impl<'t> Fp6<'t> {
         }
     }
 
+    /// Negates the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bn254();
+    /// let n = |x: u32| Number::from(x);
+    /// let mut a = Fp6::new(Fp2::from_numbers(t, &n(1), &n(2)), Fp2::from_numbers(t, &n(3), &n(4)), Fp2::one(t));
+    /// let b = -&a;
+    /// a.neg_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn neg_in_place(&mut self) {
+        let t = self.c0.t;
+        fast!(t, k => {
+            let r = k.neg6(&k.ld6(self));
+            k.put6(r, self)
+        });
+        *self = -&*self;
+    }
+
+    /// Doubles the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bn254();
+    /// let n = |x: u32| Number::from(x);
+    /// let mut a = Fp6::new(Fp2::from_numbers(t, &n(1), &n(2)), Fp2::from_numbers(t, &n(3), &n(4)), Fp2::one(t));
+    /// let b = &a + &a;
+    /// a.double_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn double_in_place(&mut self) {
+        let t = self.c0.t;
+        fast!(t, k => {
+            let r = k.dbl6(&k.ld6(self));
+            k.put6(r, self)
+        });
+        *self = &*self + &*self;
+    }
+
+    /// Squares the element in place, writing only its coefficients' limbs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bn254();
+    /// let n = |x: u32| Number::from(x);
+    /// let mut a = Fp6::new(Fp2::from_numbers(t, &n(1), &n(2)), Fp2::from_numbers(t, &n(3), &n(4)), Fp2::one(t));
+    /// let b = a.square();
+    /// a.square_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn square_in_place(&mut self) {
+        let t = self.c0.t;
+        fast!(t, k => {
+            let r = k.sqr6(&k.ld6(self));
+            k.put6(r, self)
+        });
+        *self = self.square();
+    }
+
     /// Twice the element.
     #[must_use]
     pub fn double(&self) -> Fp6<'t> {
+        fast!(self.c0.t, k => k.st6(k.dbl6(&k.ld6(self))));
         Fp6 {
             c0: self.c0.double(),
             c1: self.c1.double(),
@@ -146,6 +222,7 @@ impl<'t> Fp6<'t> {
     /// `ξ c₂ + c₀ v + c₁ v²`.
     #[must_use]
     pub fn mul_by_v(&self) -> Fp6<'t> {
+        fast!(self.c0.t, k => k.st6(k.mul_v(&k.ld6(self))));
         Fp6 {
             c0: self.c2.mul_by_xi(),
             c1: self.c0.clone(),
@@ -161,6 +238,8 @@ impl<'t> Fp6<'t> {
     #[track_caller]
     #[must_use]
     pub fn mul_by_fp2(&self, k: &Fp2<'t>) -> Fp6<'t> {
+        self.c0.t.check(k.t);
+        fast!(self.c0.t, q => q.st6(q.mul6_fp2(&q.ld6(self), &q.ld2(k))));
         Fp6 {
             c0: &self.c0 * k,
             c1: &self.c1 * k,
@@ -176,6 +255,9 @@ impl<'t> Fp6<'t> {
     #[track_caller]
     #[must_use]
     pub fn mul_by_01(&self, b0: &Fp2<'t>, b1: &Fp2<'t>) -> Fp6<'t> {
+        self.c0.t.check(b0.t);
+        self.c0.t.check(b1.t);
+        fast!(self.c0.t, k => k.st6(k.mul6_01(&k.ld6(self), &k.ld2(b0), &k.ld2(b1))));
         let (a0, a1, a2) = (&self.c0, &self.c1, &self.c2);
         let v0 = a0 * b0;
         let v1 = a1 * b1;
@@ -194,6 +276,8 @@ impl<'t> Fp6<'t> {
     #[track_caller]
     #[must_use]
     pub fn mul_by_1(&self, b1: &Fp2<'t>) -> Fp6<'t> {
+        self.c0.t.check(b1.t);
+        fast!(self.c0.t, k => k.st6(k.mul6_1(&k.ld6(self), &k.ld2(b1))));
         Fp6 {
             c0: (&self.c2 * b1).mul_by_xi(),
             c1: &self.c0 * b1,
@@ -205,6 +289,7 @@ impl<'t> Fp6<'t> {
     /// and `v^(pᵏ) = ξ^((pᵏ − 1)/3) v`.
     #[must_use]
     pub fn frobenius(&self, k: usize) -> Fp6<'t> {
+        fast!(self.c0.t, q => q.st6(q.frob6(&q.ld6(self), k)));
         let t = self.c0.t;
         let k = k % 6;
         Fp6 {
@@ -217,6 +302,7 @@ impl<'t> Fp6<'t> {
     /// The norm to `F_p²`, `x · x^(p²) · x^(p⁴) = c₀³ + ξ c₁³ + ξ² c₂³ − 3ξ c₀c₁c₂`.
     #[must_use]
     pub fn norm(&self) -> Fp2<'t> {
+        fast!(self.c0.t, k => k.st2(k.norm6(&k.ld6(self))));
         let (a, b, c) = self.adjugate();
         self.norm_from(&a, &b, &c)
     }
@@ -231,6 +317,7 @@ impl<'t> Fp6<'t> {
     /// the norm, which is `c₀ A + ξ (c₂ B + c₁ C)` for that adjugate `(A, B, C)`.
     #[must_use]
     pub fn inverse(&self) -> Option<Fp6<'t>> {
+        fast!(self.c0.t, k => k.inv6(&k.ld6(self)).map(|r| k.st6(r)));
         let (a, b, c) = self.adjugate();
         let n = self.norm_from(&a, &b, &c).inverse()?;
         Some(Fp6 {
@@ -259,6 +346,7 @@ impl<'t> Fp6<'t> {
             let inv = self.inverse().expect("0 has no inverse");
             return inv.pow(&-e);
         }
+        fast!(self.c0.t, k => k.st6(k.pow6(&k.ld6(self), &limbs_of(e))));
         let mut r = Fp6::one(self.c0.t);
         for i in (0..e.bits()).rev() {
             r = r.square();
@@ -284,9 +372,44 @@ impl<'t> Fp6<'t> {
         &self.c0 * a + (&self.c2 * b + &self.c1 * c).mul_by_xi()
     }
 
+    /// `a += b` in place.
+    #[track_caller]
+    pub(super) fn add_assign_ref(a: &mut Fp6<'t>, b: &Fp6<'t>) {
+        a.c0.t.check(b.c0.t);
+        fast!(a.c0.t, k => {
+            let r = k.add6(&k.ld6(a), &k.ld6(b));
+            k.put6(r, a)
+        });
+        *a = Self::add_ref(a, b);
+    }
+
+    /// `a -= b` in place.
+    #[track_caller]
+    pub(super) fn sub_assign_ref(a: &mut Fp6<'t>, b: &Fp6<'t>) {
+        a.c0.t.check(b.c0.t);
+        fast!(a.c0.t, k => {
+            let r = k.sub6(&k.ld6(a), &k.ld6(b));
+            k.put6(r, a)
+        });
+        *a = Self::sub_ref(a, b);
+    }
+
+    /// `a *= b` in place.
+    #[track_caller]
+    pub(super) fn mul_assign_ref(a: &mut Fp6<'t>, b: &Fp6<'t>) {
+        a.c0.t.check(b.c0.t);
+        fast!(a.c0.t, k => {
+            let r = k.mul6(&k.ld6(a), &k.ld6(b));
+            k.put6(r, a)
+        });
+        *a = Self::mul_ref(a, b);
+    }
+
     /// The sum.
     #[track_caller]
     pub(super) fn add_ref(a: &Fp6<'t>, b: &Fp6<'t>) -> Fp6<'t> {
+        a.c0.t.check(b.c0.t);
+        fast!(a.c0.t, k => k.st6(k.add6(&k.ld6(a), &k.ld6(b))));
         Fp6 {
             c0: &a.c0 + &b.c0,
             c1: &a.c1 + &b.c1,
@@ -297,6 +420,8 @@ impl<'t> Fp6<'t> {
     /// The difference.
     #[track_caller]
     pub(super) fn sub_ref(a: &Fp6<'t>, b: &Fp6<'t>) -> Fp6<'t> {
+        a.c0.t.check(b.c0.t);
+        fast!(a.c0.t, k => k.st6(k.sub6(&k.ld6(a), &k.ld6(b))));
         Fp6 {
             c0: &a.c0 - &b.c0,
             c1: &a.c1 - &b.c1,
@@ -309,6 +434,8 @@ impl<'t> Fp6<'t> {
     /// `c₂ = (a₀ + a₂)(b₀ + b₂) − v₀ − v₂ + v₁`.
     #[track_caller]
     pub(super) fn mul_ref(a: &Fp6<'t>, b: &Fp6<'t>) -> Fp6<'t> {
+        a.c0.t.check(b.c0.t);
+        fast!(a.c0.t, k => k.st6(k.mul6(&k.ld6(a), &k.ld6(b))));
         let (a0, a1, a2) = (&a.c0, &a.c1, &a.c2);
         let (b0, b1, b2) = (&b.c0, &b.c1, &b.c2);
         let v0 = a0 * b0;
@@ -330,6 +457,7 @@ impl<'t> Fp6<'t> {
 
     /// The negation.
     pub(super) fn neg_ref(&self) -> Fp6<'t> {
+        fast!(self.c0.t, k => k.st6(k.neg6(&k.ld6(self))));
         Fp6 {
             c0: -&self.c0,
             c1: -&self.c1,

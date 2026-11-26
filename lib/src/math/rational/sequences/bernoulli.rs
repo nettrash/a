@@ -1,6 +1,6 @@
 //! The Bernoulli numbers `B_n`, with `B_1 = -1/2`.
 //!
-//! Up to `B_100` from tables. Beyond, `|B_n| = 2 n! ζ(n) / (2π)^n` ([`by_zeta`]): the denominator
+//! Up to `B_200` from tables. Beyond, `|B_n| = 2 n! ζ(n) / (2π)^n` ([`by_zeta`]): the denominator
 //! `d` by von Staudt and Clausen's theorem, `K = 2 d n!` exactly, and `K ζ(n) / (2π)^n` to the bits
 //! of `|B_n| d` and 8 more, rounded; `π` from the table of the partition numbers (16,384 bits) or
 //! their Chudnovsky series, `(2π)^n` by powers cut to the precision, `1/ζ(n)` by its Euler product
@@ -14,9 +14,8 @@
 //! [`SCHOOL_DIVISION`] limbs by Knuth's algorithm D in them, so that a short number allocates a
 //! handful of times rather than at every step.
 //!
-//! The table of all the numbers up to an index ([`bernoulli_numbers`]) is computed from the tangent
-//! numbers when short ([`tangent_numbers`]), and otherwise by the same formula from the top index
-//! down ([`table_by_zeta`]).
+//! The table of all the numbers up to an index ([`bernoulli_numbers`]) is read from the tables up to
+//! `B_200`, and beyond computed by the same formula from the top index down ([`table_by_zeta`]).
 
 use super::super::Rational;
 use super::limbs::{
@@ -61,10 +60,11 @@ pub(super) const TABLE: [(i128, u64); 30] = [
     (84483613348880041862046775994036021, 354),
 ];
 
-/// The magnitudes of the numerators of `B_60, B_62, ..., B_100`, their limbs one after another,
+/// The magnitudes of the numerators of `B_60, B_62, ..., B_200`, their limbs one after another,
 /// the least significant first; the number of `B_(60 + 2i)` ends at [`LONG_END`]`[i]`. The signs
-/// are those of every Bernoulli number: negative for `n = 0 mod 4`.
-const LONG: [u64; 75] = [
+/// are those of every Bernoulli number: negative for `n = 0 mod 4`. Generated and checked against
+/// PARI's `bernfrac` and FLINT's `bernoulli_fmpq_ui` by an exact recurrence (`Σ C(m+1, k) B_k = 0`).
+const LONG: [u64; 492] = [
     0x5047DAA8A7E64393,
     0x3FCD77896A343F43,
     0x0000000000000DF3,
@@ -140,21 +140,510 @@ const LONG: [u64; 75] = [
     0xE99995EDA6EBF5A3,
     0x997E8AEAE3D14E99,
     0x00000000000C7744,
+    0xF3B5AC7F3FF729C7,
+    0x397D5914F12B9CD8,
+    0xCDAC622BB1082554,
+    0xAF9CFCDFECDBD340,
+    0x0000000001A637B3,
+    0xB3D7804C77980375,
+    0xFB79DA5F5E53B8D9,
+    0x0AE699A11A3F3125,
+    0x7ABD271ACE9E8A2D,
+    0x00000000A47B55BB,
+    0x04E868487E944C65,
+    0x21A464FD64875B1D,
+    0x33CF96DAF35F8288,
+    0x68981C301464A64B,
+    0x0000004923AD1715,
+    0xD60CA7CC5E0B9BC9,
+    0xCCADA531F98355E8,
+    0x503DB7DA1D455166,
+    0x49DAA85DEEC289D3,
+    0x9FCDC8928D1DC292,
+    0x0000000000000001,
+    0x22B77E46C4E5182B,
+    0x8059051C4734B5B1,
+    0x498DA98A833E512F,
+    0xF656ECAC7BFB8A23,
+    0x00EA97D492FB2ABD,
+    0x605B8B714117002D,
+    0xBF72E68B651B4A70,
+    0xB52CF65682BE0E00,
+    0x12D42690D4B918F0,
+    0x0E585391AB427A9B,
+    0x00000000000004D9,
+    0x2D7159315A505C59,
+    0x4C9E506100F87EF8,
+    0xB1982767DFB2ED27,
+    0xE95A262F9EAE6FCD,
+    0x2D4C90F12736D96D,
+    0x000000000000000A,
+    0x626AA61BF9C58903,
+    0x50496B2F15E61FA9,
+    0xE27E1E7F1852F3BF,
+    0x70AAAC1230710E43,
+    0x200B403E406B8CB1,
+    0x000000000002361B,
+    0x66B747E709459577,
+    0x0C800670258A6429,
+    0xF797318A49C7E779,
+    0xD344A38473B331D9,
+    0x41950DBC20F27418,
+    0x0000000000029F18,
+    0x1097F8923A1FFA73,
+    0xA0E798F1F57ECF67,
+    0xF6F1D67E2111556A,
+    0xC93A14239E876528,
+    0x3E33FA9DCA3EB62C,
+    0x0055ABAE5049FB29,
+    0xDFE022DCBAC570CF,
+    0xB9FFDFE00DD71C9A,
+    0xDB160A31C7881716,
+    0xF685B5E723599A04,
+    0xFF479520D1E0EF11,
+    0x0000000569069737,
+    0x7C6F0ED50C08C869,
+    0x31640D0B031C9949,
+    0x92093623086615F2,
+    0x4735A013929F7C0A,
+    0x18E5CC3BBA0B9F05,
+    0x000028D2EE1E4628,
+    0xCF99F4C9E3AB07BF,
+    0x895F3AA893B87FD4,
+    0xD795175175DFCA6D,
+    0xDFE0D97BAE982EAE,
+    0xCCF0B6455B2718A3,
+    0x0434CFD60BCFCBCA,
+    0x000000000000008D,
+    0x5971F67262899801,
+    0xC0B5EA74BB8E5EAB,
+    0x984C9C89CFDC0712,
+    0xF192E34D8D53FB98,
+    0xBCF8504B386383F8,
+    0xCBA32F410BF8AD4E,
+    0x0000000000000006,
+    0x6CCAF7075031CD5F,
+    0xC689B117DC9806BD,
+    0x4A69A8935A4F0D9C,
+    0x25EBAD9C0F35C7B8,
+    0x0B6E9FDD92910057,
+    0xFAC9E66490989C30,
+    0x000000000000BF28,
+    0x2FEF024ABD4A948F,
+    0xABF4CAB7C6CCFDB6,
+    0x4AC179A221A72207,
+    0x409A807E10381A27,
+    0xF7D66D564491F792,
+    0xE9E16656322C3D1F,
+    0x000000026DA8EB14,
+    0xD21D75E2B7E379D7,
+    0xBCDD25D28F2CFF67,
+    0x56F16DCF6A333719,
+    0x52E8A20AF487B367,
+    0x2141C728CD8B2699,
+    0xAB595D08E95901BF,
+    0x0000000000667708,
+    0x4F305B92094C6D09,
+    0x30B213BA98155679,
+    0x3B1CEA321CCDF50C,
+    0x2B7E89C44050B595,
+    0x4E5111E2A0E8D8D1,
+    0x60CAC802DFAAADBA,
+    0x000001F21474E760,
+    0x92BC0475351CF8ED,
+    0x4ABC7CBB4EDE97A0,
+    0x0BF439B143B9FD64,
+    0xF8E254E47EC5A252,
+    0xCC3A88EF03E4FFD0,
+    0xEBBE7CAAC06AC603,
+    0x00F2FC1CF199FF39,
+    0x47F8388A5C1947C1,
+    0xB0FC29A2C6CE0D82,
+    0x459F2C44C216F2C0,
+    0xAC4F4F2849642524,
+    0xBF7E996BD12A326E,
+    0x4B35A627A5C36531,
+    0x86979BDA57E904E0,
+    0x0000000000000004,
+    0x4A2934E944848307,
+    0xE987D72B96EA3A12,
+    0x8F3AF8040E8CB359,
+    0x64807627AB4EFABE,
+    0x8989D9E23E84F98C,
+    0x680B9C98DABB2D78,
+    0x05304F3742678E34,
+    0xD8677A2D17BF06ED,
+    0x1F0FF3D59DE06343,
+    0xB7B0BDC1543FF458,
+    0xEF5510B9656CAF21,
+    0x68DC597EB3F31279,
+    0x712B5A188BBD7801,
+    0xFF93A54FCF1414B9,
+    0x00000000FA22E4C8,
+    0xE11B4AEBC7B0E55F,
+    0xC4A3BA68C1CBC94D,
+    0x4969043DBBE6A15B,
+    0x1E72A06B25F7E411,
+    0xFDF231D24FCB3EBF,
+    0x7B7A1E64D1A209E5,
+    0x2AB8F4553068D227,
+    0x0000000000001625,
+    0x53A342D3DBA8F28D,
+    0xB66920E4DD23C2FF,
+    0xCBE1F5109D314E41,
+    0xFBD5C76A592525A5,
+    0x6DDC48B0A6DB6639,
+    0xC11BB5A2C324F964,
+    0xCE0055756D2A72FB,
+    0x000000008ABB4070,
+    0xDD5F1DE573417BA3,
+    0x96C525AD3620948A,
+    0x49B6256E82028B3E,
+    0xB20848B1E503131E,
+    0xCD3DE0499D764BAD,
+    0x32CB07B0EBEA931E,
+    0x303D12C1DF241D36,
+    0x000243CF6C45E5F3,
+    0x53187949EDA861A1,
+    0xEAA7A2EBD799872B,
+    0x3BD92084545458F4,
+    0xC872D37F6ED5D765,
+    0x1479931CF23DAF9D,
+    0x51947B47F3455958,
+    0x630567C6050C880B,
+    0x000004AD1761C335,
+    0xC28CCB998937AFD9,
+    0xB994AAEA70C03FEB,
+    0xBCFF913D225748DB,
+    0x054C31F0CC075375,
+    0x2FD3C37981CA9DC0,
+    0xB70EA33AF2E98BEE,
+    0x9408860E8050E502,
+    0x003226017E58D256,
+    0xA449D8C5D9A26E5D,
+    0x97CD44046183627E,
+    0x9CE0FAFD4F764E1E,
+    0x6EB264369DC354D7,
+    0xB0C9F5D535153418,
+    0x431649B5E4754FA1,
+    0xCD8CB2CB2B428653,
+    0x4C9228F47E9CA983,
+    0x00000000005CFFDD,
+    0x7641BC0B74984367,
+    0x753894C223677A27,
+    0x867CAF70C8A63BF5,
+    0xB0044E4359358393,
+    0x493287850E093CB4,
+    0x400EC4D01E91FB6A,
+    0xF49A6D4AE379A5EF,
+    0xCDCE90B494A77BCC,
+    0x000000000000000C,
+    0x4AF9D695406AFC83,
+    0xC4D7F639B68FC655,
+    0xFA6DF268B098C702,
+    0xF72EB54C698447F7,
+    0x91C6E3C5A9193DC3,
+    0xAECDFE66A63546B7,
+    0xD00546FE032B7154,
+    0xF7B2690499CB998A,
+    0x0000000012DA5277,
+    0x2668D3836C89BF91,
+    0xF2D67B5933C4884E,
+    0xEF41B10BBB68600F,
+    0xA022AF121FEF8246,
+    0x8E102E14B6EAB8C2,
+    0x8297D348ACCAD23A,
+    0xB6CF4511EF22F42D,
+    0x77781C3F72A16C48,
+    0x0000001B83B4F3FC,
+    0x41ECE66B35DC377B,
+    0xCD891EEA95D9B170,
+    0xD8E232CA6E18FB66,
+    0xB477E51CE77DBB6D,
+    0xC2AC152882E5FE0C,
+    0x0BF841E520AAAB2E,
+    0x85664F67D1F77E4D,
+    0xF16B03797F724C9D,
+    0x00000164A6535B7F,
+    0xEB97106B875A7881,
+    0x62AEB3A186D96739,
+    0x418981AB8729E006,
+    0x7B160262DEF8AF19,
+    0x2F8AE98690437D75,
+    0xAC749CE2C3B04E07,
+    0x4BFACF08C406FE1E,
+    0x986108099440A43F,
+    0x000184F537E7AEBB,
+    0x39AB7AA0F04EC905,
+    0xEC59208E7DB908F8,
+    0x135EEC11925D16C6,
+    0xD48CB7FAE63EA812,
+    0x3C5EBDE5B1698940,
+    0x175F4658F1BAE9B1,
+    0x261765F22251A78F,
+    0x574D66DE912BDBB8,
+    0xFA208C8FD9A80F6D,
+    0x0000000000000037,
+    0xBDB61B56F4BA0B45,
+    0x505D53695B020710,
+    0x754563E9B2547DD5,
+    0x0A1411A2AFA2D5DD,
+    0x3E397AD8FD028D08,
+    0x4892132690B33971,
+    0xB18B8894D921E971,
+    0x4B942EDB28568CCD,
+    0xCA2E631107AFC7E8,
+    0x28F12288B02990D5,
+    0x0431985AD09F54E6,
+    0xE1E36C6DE442C511,
+    0xB80103285F85D56E,
+    0x83DC3BA219D442BA,
+    0xDBD88112373971C6,
+    0x328305A2A6E0D1EC,
+    0xE74B816F950CEFB3,
+    0xE2E11F7BCA0FFBB5,
+    0x000000000000B4BC,
+    0xBCB022FD2336600B,
+    0x1C7B52F195E65F90,
+    0xB9E15922C7E230BC,
+    0x2F59A9817DD41133,
+    0x7D107A383AB6B5D6,
+    0x94F6F3DADED91BEF,
+    0x6A0BB1F465A92D18,
+    0x20A47D220FB190AA,
+    0xA089AE8CBAAC2C6A,
+    0x00000000010106E6,
+    0x0969B17FBC6A1A9F,
+    0x33F487F8D72F5693,
+    0xD4F5AD5B4B1E47D1,
+    0xD52985FAB0CC5457,
+    0xCE67B56CD8A88625,
+    0x2742A8E80F9ED527,
+    0xB5842236221F6F60,
+    0x47664FA5713B3FEC,
+    0xA2A171DEE48C0420,
+    0x0000050911DF8831,
+    0x67CFFB9A3910FBAD,
+    0x1BC3808BA0685677,
+    0x8AC634279D37EC22,
+    0x11E009C7BB32428E,
+    0x3081ABCDE519922B,
+    0x2ACED3E296483266,
+    0x8F72727322A27FD4,
+    0x953982F35CB9B688,
+    0xCB82CAC03B13C06A,
+    0x0000042257ADBA56,
+    0x2558D03DCD08A241,
+    0xC5FF8DB676901647,
+    0xB70EC13A7298B59C,
+    0x3720BCDF8919C115,
+    0xB89F0AB1FFA0D860,
+    0x19EF24140DCE37E8,
+    0x4A770587EEDB6FEF,
+    0x643530792D5C888C,
+    0x635520660F5C524B,
+    0xD1BB232A7D6771D4,
+    0x000000000014A549,
+    0x8AFFDF05439A96F7,
+    0x22066CA1ACD1EA3E,
+    0xFF4A0F80470DA1B7,
+    0x09E00EC582D9F671,
+    0x79C3558D339D644F,
+    0xE31A822338AA7E02,
+    0xC45885C990C69413,
+    0xDE712E4CD3A09971,
+    0xE8630251C240838D,
+    0x003D709224784443,
+    0xD46638028EBEFE4F,
+    0xFD39B1DE1583FF01,
+    0xF706CC3E01AD06BF,
+    0x018200EEDDDCF204,
+    0xD02C90CC5F35974F,
+    0x0A4D510AF2F7400F,
+    0x01E72BA3292622CB,
+    0x545627EE29B953C7,
+    0x7EDCFAE6363A2FC8,
+    0xE892E4516AD3CA1F,
+    0x00000000000000BB,
+    0x16A2278EBE4BF829,
+    0x13F71FD2BCA1D7CE,
+    0x13B13EC424981522,
+    0xFC90EE82E49171A8,
+    0x0AB83057F38CA1CF,
+    0xC3AB52BD6DF95DE3,
+    0x56CBB597E7A825BB,
+    0xC25F61ECFB567CB3,
+    0xF30BCED6C6827E4E,
+    0xABBD93FEDD979774,
+    0x000000000000130E,
+    0x8CBE87BCA10C14E9,
+    0x3278301BE173D18D,
+    0x7509B5965C5E5D23,
+    0x01725CE6A87E389C,
+    0xFCDC281B3C43B235,
+    0x63F803B5B92CD801,
+    0x57A311B688269122,
+    0xC74FC45E6F177C62,
+    0x73A76D7AE92EA197,
+    0x8DD0D0193D34E4A2,
+    0x00000000002F59F8,
+    0xD4578F8B1ADAEC13,
+    0x52C4FCCD96F870A9,
+    0xA9CE8F994E7739D3,
+    0xB5B1903B254AF9C6,
+    0x53B9AB5C27CEAFD6,
+    0xD07DBF8A1BE32413,
+    0x82DEEC929D53A7A3,
+    0xDCCC701DB788C03D,
+    0xCA717EC32E54D33F,
+    0xF495A8FAD4DA1277,
+    0x0000011429A84B24,
+    0x31556B4BF5EC283B,
+    0x49C734DE4115002D,
+    0xB259CE4FF95AECC8,
+    0x63E7153D64DEB815,
+    0xDAB88DCE4161BD53,
+    0x8484201669B8D719,
+    0x4438DD9DE0706C3B,
+    0x43203CA26C066FB3,
+    0xC609E4352DB3A68A,
+    0xB35CEA3AA52E1357,
+    0x1DDC6A148261AB9B,
+    0x0000000000000004,
+    0xC8F6726DEB962C7F,
+    0x90F7C1D6E50BF9FC,
+    0x911276B8688D3044,
+    0xDF72CB9398C7A082,
+    0x7192F9DB2CF0A6CB,
+    0x93450018EFA5557D,
+    0x71F4F05B4BB291D8,
+    0x3AC05F4F9216F585,
+    0x858979A501FBD4D6,
+    0x71ECE31ED275AFA2,
+    0x0001C4593A878336,
+    0xE79650C8587A5149,
+    0xB18E44DE74979FDA,
+    0x632E8C3372D034FB,
+    0x1DBCFB18CD54F832,
+    0xCFDF90BC92D49F6D,
+    0xA4CE9EB6C21DFA1A,
+    0x90FDE09E4C993EC1,
+    0x1CC426F7B83F4CCF,
+    0xF06E5B7BE8A96BDF,
+    0x164BBC62A3FBFC3A,
+    0x9F2124C549104736,
+    0x00000000000002E9,
+    0x2FA931941A16C039,
+    0x6AEDEF17A1B86686,
+    0xE0CEEDDE8FA4C8A8,
+    0x23CC4EE1E9F44A7E,
+    0x4BEEBFF978709303,
+    0x13BDEFA1ADE4B3C6,
+    0x74B621026F66010D,
+    0x86EE8EBEE828E3FC,
+    0xBC564A1AA88784A6,
+    0xFEA50F8E9F3A98F7,
+    0x075E0F03567164C9,
+    0x000000003EB24EB8,
+    0x70B5AB76220044EF,
+    0xBB00314100411E63,
+    0x827A013DF1803754,
+    0xB65FFA77992C9800,
+    0xF1D568EDC6802120,
+    0x09287CAE2BBBE5F0,
+    0x960333E6C6106646,
+    0x9EB1A318D308592C,
+    0x43861FACB9F63B00,
+    0x9DECDCF84B1C0292,
+    0x26C68B0752877B46,
+    0x0000000160F62273,
 ];
 
 /// Where each numerator of [`LONG`] ends.
-const LONG_END: [u8; 21] = [
-    3, 5, 8, 11, 14, 17, 20, 23, 26, 29, 33, 37, 41, 45, 49, 53, 57, 61, 66, 70, 75,
+const LONG_END: [u16; 71] = [
+    3, 5, 8, 11, 14, 17, 20, 23, 26, 29, 33, 37, 41, 45, 49, 53, 57, 61, 66, 70, 75, 80, 85, 90,
+    96, 101, 107, 113, 119, 125, 131, 137, 143, 150, 157, 164, 171, 178, 185, 192, 200, 207, 215,
+    223, 231, 239, 247, 255, 264, 273, 282, 291, 300, 309, 319, 328, 338, 348, 358, 368, 379, 389,
+    400, 411, 422, 433, 445, 456, 468, 480, 492,
 ];
 
-/// The denominators of `B_60, B_62, ..., B_100`.
-const LONG_DEN: [u64; 21] = [
-    56786730, 6, 510, 64722, 30, 4686, 140100870, 6, 30, 3318, 230010, 498, 3404310, 6, 61410,
-    272118, 1410, 6, 4501770, 6, 33330,
+/// The denominators of `B_60, B_62, ..., B_200`.
+const LONG_DEN: [u64; 71] = [
+    56786730,
+    6,
+    510,
+    64722,
+    30,
+    4686,
+    140100870,
+    6,
+    30,
+    3318,
+    230010,
+    498,
+    3404310,
+    6,
+    61410,
+    272118,
+    1410,
+    6,
+    4501770,
+    6,
+    33330,
+    4326,
+    1590,
+    642,
+    209191710,
+    1518,
+    1671270,
+    42,
+    1770,
+    6,
+    2328255930,
+    6,
+    30,
+    4357878,
+    510,
+    8646,
+    4206930,
+    6,
+    4110,
+    274386,
+    679470,
+    6,
+    2381714790,
+    6,
+    4470,
+    2162622,
+    30,
+    138,
+    1794590070,
+    6,
+    230010,
+    130074,
+    2490,
+    1002,
+    3404310,
+    66,
+    5190,
+    2478,
+    1043970,
+    1074,
+    7225713885390,
+    6,
+    1410,
+    42,
+    30,
+    12606,
+    868841610,
+    6,
+    171390,
+    244713882,
+    1366530,
 ];
 
 /// The last index of the tables.
-const TABLED: u64 = 100;
+const TABLED: u64 = 200;
 
 /// `B_n` for an even `n` up to [`TABLED`], from the tables, as numbers (in words they are taken
 /// inline by [`bernoulli`]).
@@ -220,12 +709,6 @@ fn beyond_words(n: u64, order: ByteOrder) -> Rational {
         to_number(&den, false, order),
     )
 }
-
-/// Up to this index, the table of Bernoulli numbers is computed from the tangent numbers; beyond,
-/// by the zeta function from the top down. Measured on an Apple M4 Max, `B_0, ..., B_150` took
-/// 142,000 cycles from the tangent numbers against 163,000, and `B_0, ..., B_200` 279,000 against
-/// 267,000.
-const TANGENT_TABLE: u64 = 150;
 
 /// The denominator of `B_n` for an even `n >= 2`, by von Staudt and Clausen's theorem: the product
 /// of the primes `p` with `p - 1` dividing `n`.
@@ -650,16 +1133,7 @@ pub(super) fn bernoulli_numbers(n: u64, order: ByteOrder) -> Vec<Rational> {
     }
     let top = n & !1;
     let low = TABLED + 2;
-    if top >= low && top <= TANGENT_TABLE {
-        let t = tangent_numbers((top / 2) as usize);
-        for k in low / 2..=top / 2 {
-            let (num, den) = from_tangent(k, &t[k as usize]);
-            v[2 * k as usize] = Rational::from_reduced(
-                to_number(&num, k.is_multiple_of(2), order),
-                to_number(&den, false, order),
-            );
-        }
-    } else if top >= low {
+    if top >= low {
         table_by_zeta(top, low, |k, num, den| {
             v[k as usize] = Rational::from_reduced(
                 to_number(&num, k.is_multiple_of(4), order),
@@ -927,62 +1401,4 @@ fn power_reciprocal(j: u64, k: u64, p: u64, nl: u64, work: &mut Work) -> Limbs {
     let mut q = Vec::new();
     quotient_into(&mut q, &[1], s, &jk.m, work);
     q
-}
-
-/// The tangent numbers `T_1, ..., T_m` (`tan x = Σ T_k x^(2k-1) / (2k-1)!`), by Brent and Harvey's
-/// recurrence ("Fast computation of Bernoulli, Tangent and Secant numbers", 2011): `T_k = (k-1)!`,
-/// then for each `k` from 2, `T_j <- (j - k) T_(j-1) + (j - k + 2) T_j` for `j` from `k` up, in
-/// place; `m^2 / 2` linear steps on numbers of up to `2m log2 m` bits.
-fn tangent_numbers(m: usize) -> Vec<Limbs> {
-    let mut t: Vec<Limbs> = Vec::with_capacity(m + 1);
-    t.push(Vec::new());
-    t.push(vec![1]);
-    for k in 2..=m {
-        let mut x = t[k - 1].clone();
-        mul_1(&mut x, (k - 1) as u64);
-        t.push(x);
-    }
-    for k in 2..=m {
-        for j in k..=m {
-            let (low, high) = t.split_at_mut(j);
-            combine(
-                &low[j - 1],
-                (j - k) as u64,
-                &mut high[0],
-                (j - k + 2) as u64,
-            );
-        }
-    }
-    t
-}
-
-/// `y <- a x + b y` for limbs `a` and `b` below `2^32`.
-#[inline]
-fn combine(x: &[u64], a: u64, y: &mut Limbs, b: u64) {
-    if y.len() < x.len() {
-        y.resize(x.len(), 0);
-    }
-    let mut carry = 0u128;
-    for (i, yi) in y.iter_mut().enumerate() {
-        let xi = x.get(i).copied().unwrap_or(0);
-        let t = u128::from(xi) * u128::from(a) + u128::from(*yi) * u128::from(b) + carry;
-        *yi = t as u64;
-        carry = t >> 64;
-    }
-    if carry != 0 {
-        y.push(carry as u64);
-    }
-}
-
-/// `(|B_2k| d_2k, d_2k)` from the tangent number `T_k`: `|B_2k| = 2k T_k / (4^k (4^k - 1))`.
-fn from_tangent(k: u64, t: &[u64]) -> (Limbs, Limbs) {
-    let d = denominator(2 * k);
-    let mut x = mul(t, &d);
-    mul_1(&mut x, 2 * k);
-    let x = shr(&x, 2 * k);
-    let mut q = shl(&[1], 2 * k);
-    sub(&mut q, &[1]);
-    let o = ByteOrder::LittleEndian;
-    let n = to_number(&x, false, o).div_exact(&to_number(&q, false, o));
-    (of_number(&n), d)
 }

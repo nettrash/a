@@ -243,7 +243,7 @@ pub(super) fn factor_limbs(x: Vec<u64>, words: &mut Vec<(u64, u32)>) -> Vec<(Vec
             out.push((m, e));
             continue;
         }
-        if let Some((b, k)) = power::perfect_power_limbs(m.clone(), false) {
+        if let Some((b, k)) = power::perfect_power_limbs(m.clone(), false, false) {
             stack.push((b, times(e, k)));
             continue;
         }

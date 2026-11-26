@@ -46,13 +46,14 @@ mod domain;
 mod koblitz;
 mod mul;
 pub mod named;
+mod narrow;
 mod point;
 
 pub use domain::BinaryDomain;
 pub use point::{BinaryPoint, BinaryPrepared};
 
 use super::{CurveError, NotOnCurve};
-use crate::math::field::{BinaryField, F2m};
+use crate::math::field::{BinaryField, Clmul, F2m};
 use crate::math::numbers::Number;
 use arith::{Affine, Ld, Ops};
 use koblitz::Frobenius;
@@ -477,7 +478,23 @@ impl BinaryCurve {
     /// `k·p`, by the τ-adic form on a Koblitz curve and the non-adjacent form otherwise.
     fn product<'c>(&'c self, p: &Ld<'c>, k: &Number) -> Ld<'c> {
         let ops = self.ops();
-        if let Some(frobenius) = self.frobenius() {
+        // The τ-adic form takes about m Frobenius maps whatever the length of k, and a fixed cost
+        // (its reduction of k, its digit set): shorter scalars go faster by doublings. Measured on
+        // an Apple M4 Max, k·P on the six Koblitz curves of SEC 2 by each way, alternated, for k
+        // of 2 bits to m: the doublings are the faster below 0.89m–0.92m bits on fields of up to
+        // 256 bits under PMULL (the inline elements, whose products are cheap against that fixed
+        // cost), 0.56m–0.61m there under the portable kernel, 0.53m–0.62m on the longer fields
+        // under PMULL, and about 92 bits (0.16m–0.34m) on those under the portable kernel; the
+        // bounds below sit under each crossover, and PCLMULQDQ keeps m/8 until it is measured.
+        let m = u64::from(self.field.degree());
+        let from = match (self.field.clmul(), m <= 256) {
+            (Clmul::Pmull, true) => 7 * m / 8,
+            (Clmul::Pmull, false) | (Clmul::Portable, true) => m / 2,
+            _ => m / 8,
+        };
+        if let Some(frobenius) = self.frobenius()
+            && k.bits() >= from
+        {
             return frobenius.mul(&ops, p, k);
         }
         let r = mul::mul(&ops, p, &mul::magnitude(k));
@@ -564,17 +581,17 @@ impl BinaryCurve {
     /// The element in the big-endian bytes, `None` when it has bits at or above `m`.
     fn element_of(&self, bytes: &[u8]) -> Option<F2m<'_>> {
         let m = self.field.degree() as usize;
-        let mut words = vec![0u64; m.div_ceil(64)];
+        let n = m.div_ceil(64);
+        let mut words = vec![0u64; n];
         for (i, &byte) in bytes.iter().rev().enumerate() {
-            for j in 0..8 {
-                if byte >> j & 1 == 1 {
-                    let at = 8 * i + j;
-                    if at >= m {
-                        return None;
-                    }
-                    words[at / 64] |= 1 << (at % 64);
-                }
+            if byte == 0 {
+                continue;
             }
+            // A set bit at or above m is not an element's.
+            if 8 * i + 8 - byte.leading_zeros() as usize > m {
+                return None;
+            }
+            words[i / 8] |= u64::from(byte) << (8 * (i % 8));
         }
         Some(self.field.element(&words))
     }

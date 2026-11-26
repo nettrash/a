@@ -6,7 +6,7 @@
 use super::common::*;
 use a::math::complex::Float;
 use a::math::matrix::{Matrix, Norm};
-use a::math::sparse::{Ordering, SparseMatrix, SparseQr};
+use a::math::sparse::{Ordering, SparseMatrix, SparseQr, elimination_tree};
 
 /// A random permutation of `0..n`.
 fn random_permutation(r: &mut Rng, n: usize) -> Vec<usize> {
@@ -606,6 +606,77 @@ fn the_factors_give_the_permuted_matrix_and_q_has_orthonormal_columns() {
 }
 
 #[test]
+fn large_fronts_are_reduced_by_blocks_of_reflections_as_the_dense_decomposition() {
+    // Fronts of more reflections than a panel: dense ones, whose panels are applied as blocks
+    // of reflections, and tall ones whose staircase fills too little of their rectangle to be
+    // held dense, whose panels are applied one reflection at a time; `R` up to the signs of its
+    // rows is that of the dense decomposition of `A·Q_c`, and so are the least squares.
+    fn check<T: Num>() {
+        let mut r = Rng(0x5eed_00b1);
+        let mut cases: Vec<(SparseMatrix<T>, Ordering)> = Vec::new();
+        for (m, n, per_row) in [
+            (size(260, 90), size(110, 70), 14),
+            (size(300, 120), size(200, 100), 9),
+            (size(600, 150), size(90, 64), 40),
+            // Nearly full: one front of nearly 300 reflections, held dense, its panels applied
+            // to the columns right of them as blocks.
+            (size(330, 40), size(290, 30), 90),
+        ] {
+            cases.push((
+                well_conditioned::<T>(&mut r, m, n, per_row),
+                Ordering::Colamd,
+            ));
+        }
+        // Rows that each begin at their own column and run on to the right, then many rows in
+        // the last eight columns alone: the late steps of the staircase are tall.
+        let n = size(96, 72);
+        let mut entries = Vec::new();
+        for j in 0..n {
+            entries.push((j, j, T::real(3.0)));
+            for _ in 0..3 {
+                let k = j + r.below(n - j);
+                if k != j {
+                    entries.push((j, k, T::random(&mut r) * T::real(0.2)));
+                }
+            }
+        }
+        let extra = 10 * n;
+        for i in 0..extra {
+            for _ in 0..3 {
+                entries.push((n + i, n - 8 + r.below(8), T::random(&mut r)));
+            }
+        }
+        cases.push((
+            SparseMatrix::from_coo(n + extra, n, &entries),
+            Ordering::Natural,
+        ));
+        for (a, ordering) in cases {
+            let (m, n) = (a.rows(), a.cols());
+            let qr = SparseQr::with_ordering(&a, &ordering);
+            assert_decomposition(&a, &qr, 32.0);
+            assert_eq!(qr.rank(), n, "a well-conditioned matrix lost rank");
+            let want = permuted(&a, qr.column_permutation()).qr().r();
+            let got = dense(&qr.r());
+            for i in 0..n {
+                let sign = |x: T| if x.re() < T::Real::ZERO { -1.0 } else { 1.0 };
+                let (s, t) = (sign(got[(i, i)]), sign(want[(i, i)]));
+                let row = Matrix::from_fn(1, n, |_, j| got[(i, j)] * T::real(s));
+                let other = Matrix::from_fn(1, n, |_, j| want[(i, j)] * T::real(t));
+                assert_close(&row, &other, 64.0);
+            }
+            let b = random_dense::<T>(&mut r, m, 2);
+            let x = qr.solve(&b).expect("full column rank");
+            assert_close(
+                &x,
+                &dense(&a).qr().solve(&b).expect("full column rank"),
+                64.0,
+            );
+        }
+    }
+    each_type!(check);
+}
+
+#[test]
 fn r_is_the_cholesky_factor_of_the_normal_matrix_up_to_the_sign_of_each_row() {
     fn check<T: Num>() {
         let mut r = Rng(0x5eed_0002);
@@ -660,6 +731,141 @@ fn strong_hall<T: Num>(r: &mut Rng, m: usize, n: usize, extra: usize) -> SparseM
         }
     }
     SparseMatrix::from_coo(m, n, &entries)
+}
+
+#[test]
+fn fronts_merged_in_a_large_matrix_give_the_least_squares_and_q_times_r() {
+    // From 128 columns on, small fronts are merged into their parents: the least squares of a
+    // 70 × 70 grid, the identity over the two differences with random weights. The residual is
+    // orthogonal to the columns, and Q·R is A·Q_c on random vectors.
+    fn check<T: Num>() {
+        let mut r = Rng(0x5eed_00a3);
+        let k = size(70, 5);
+        let n = k * k;
+        let mut entries = Vec::new();
+        for v in 0..n {
+            entries.push((v, v, T::real(1.0 + 0.5 * r.unit().abs())));
+        }
+        let mut row = n;
+        for y in 0..k {
+            for x in 0..k {
+                let v = y * k + x;
+                let right = (x + 1 < k).then_some(v + 1);
+                let below = (y + 1 < k).then_some(v + k);
+                for w in [right, below].into_iter().flatten() {
+                    let c = T::random(&mut r) + T::real(2.0);
+                    entries.push((row, v, T::zero() - c));
+                    entries.push((row, w, c));
+                    row += 1;
+                }
+            }
+        }
+        let m = row;
+        let a = SparseMatrix::from_coo(m, n, &entries);
+        let qr = SparseQr::new(&a);
+        assert_eq!(qr.rank(), n);
+        let b = random_dense::<T>(&mut r, m, 2);
+        let x = qr.solve(&b).expect("full column rank");
+        let normal = &a.conjugate_transpose() * &(&a * &x - &b);
+        let size_a = a
+            .values()
+            .iter()
+            .map(|v| v.abs().to_f64().powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let scale = size_a * (size_a * norm(&x) + norm(&b));
+        assert!(
+            norm(&normal) <= 16.0 * T::EPS * m as f64 * scale,
+            "Aᴴ·(A·x − b) is {}, not small against {scale}",
+            norm(&normal)
+        );
+        // Q·(R·z) against A·(Q_c·z): row `q[k]` of `Q_c·z` is row `k` of `z`.
+        let z = random_dense::<T>(&mut r, n, 2);
+        let q = qr.column_permutation();
+        let mut place = vec![0; n];
+        for (k, &old) in q.iter().enumerate() {
+            place[old] = k;
+        }
+        let spread = Matrix::from_fn(n, 2, |i, j| z[(place[i], j)]);
+        assert_close(&qr.apply_q(&(&qr.r() * &z)), &(&a * &spread), 64.0);
+    }
+    each_type!(check);
+}
+
+#[test]
+fn the_zeros_that_merged_fronts_add_to_r_stay_exact() {
+    // From 128 columns on, small fronts are merged into their parents along paths of the tree,
+    // which puts into the rows of `R` zeros of columns those rows do not reach. They must come out
+    // exactly zero, so that `r()` keeps the pattern the rows make: for a square matrix with a
+    // zero-free diagonal and a connected graph (strong Hall), the symbolic Cholesky factor of
+    // the normal matrix in the decomposition's column order, element for element. A merge of
+    // siblings leaves rounding residues outside it.
+    fn check<T: Num>() {
+        let mut r = Rng(0x5eed_00a5);
+        let k = size(64, 5);
+        let n = k * k;
+        let mut entries = Vec::new();
+        for v in 0..n {
+            entries.push((v, v, T::real(4.0) + T::random(&mut r)));
+            let (x, y) = (v % k, v / k);
+            for (near, w) in [(x + 1 < k, v + 1), (y + 1 < k, v + k)] {
+                if near {
+                    entries.push((v, w, T::real(-1.0) + T::random(&mut r) * T::real(0.25)));
+                    entries.push((w, v, T::real(-1.0) + T::random(&mut r) * T::real(0.25)));
+                }
+            }
+        }
+        let a = SparseMatrix::from_coo(n, n, &entries);
+        let qr = SparseQr::new(&a);
+        assert_eq!(qr.rank(), n);
+        // The pattern of `B = A·Q_c` with ones, and that of `Bᵀ·B`: no sum cancels.
+        let b = a.select(&(0..n).collect::<Vec<_>>(), qr.column_permutation());
+        let ones = vec![1.0f64; b.nnz()];
+        let b = SparseMatrix::from_csr(
+            n,
+            n,
+            b.row_pointers().to_vec(),
+            b.col_indices().to_vec(),
+            ones,
+        );
+        let normal = &b.transpose() * &b;
+        // Row `i` of the Cholesky factor: the columns reached from those of row `i` of the
+        // lower triangle by the elimination tree, up to `i`.
+        let parent = elimination_tree(&normal);
+        let mut mark = vec![usize::MAX; n];
+        let mut pattern = 0;
+        let rt = qr.r().transpose();
+        for i in 0..n {
+            mark[i] = i;
+            pattern += 1;
+            for &j in normal.col_indices()[normal.row_pointers()[i]..normal.row_pointers()[i + 1]]
+                .iter()
+                .filter(|&&j| j < i)
+            {
+                let mut c = j;
+                while mark[c] != i {
+                    mark[c] = i;
+                    pattern += 1;
+                    c = parent[c].expect("a column below i reaches i");
+                }
+            }
+            // Column `i` of `R` (row `i` of its transpose) lies in row `i` of the factor.
+            for &j in &rt.col_indices()[rt.row_pointers()[i]..rt.row_pointers()[i + 1]] {
+                assert_eq!(
+                    mark[j], i,
+                    "R has an element at ({j}, {i}) outside the pattern"
+                );
+            }
+        }
+        // And it fills the pattern, but for the odd element that rounding makes exactly zero (up
+        // to 6 of its 208 767 in single precision).
+        let held = qr.r().nnz();
+        assert!(
+            held <= pattern && 1000 * (pattern - held) <= pattern,
+            "R holds {held} of the {pattern} elements of the pattern"
+        );
+    }
+    each_type!(check);
 }
 
 #[test]

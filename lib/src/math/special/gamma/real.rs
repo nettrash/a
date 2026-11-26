@@ -80,7 +80,7 @@ pub(super) fn lgamma_stirling(x: f64) -> Dd {
     Dd { hi: s, lo }
 }
 
-/// `Γ(x)` of an `f64`.
+/// `Γ(x)` of an `f64` (not inlined into callers: here `gamma_shift` is specialised to `k = 0`).
 pub(crate) fn gamma_f64(x: f64) -> f64 {
     gamma_shift(x, 0)
 }
@@ -271,6 +271,7 @@ fn lgamma_small_dd(x: f64) -> Dd {
 }
 
 /// `ln |Γ(x)|` of an `f64`.
+#[inline]
 pub(crate) fn lgamma_f64(x: f64) -> f64 {
     if x > 0.0 {
         if x < STIRLING_X {
@@ -294,6 +295,13 @@ pub(crate) fn lgamma_f64(x: f64) -> f64 {
         let c = fma(xs, d.lo, -0.5 * l.hi * 5.421_010_862_427_522e-20);
         return (p + (e + c)) * 18_446_744_073_709_551_616.0;
     }
+    lgamma_nonpos(x)
+}
+
+/// `ln |Γ(x)|` of `x ≤ 0` or NaN, out of line (`lgamma_f64` is inlined into its callers for its
+/// positive arguments).
+#[inline(never)]
+fn lgamma_nonpos(x: f64) -> f64 {
     if x.is_nan() {
         return x;
     }

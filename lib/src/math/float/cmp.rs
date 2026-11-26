@@ -40,7 +40,31 @@ fn cmp_abs(a: &Kind, b: &Kind) -> Ordering {
 
 impl BigFloat {
     /// The order of the numbers by value, `None` when either is NaN.
+    #[inline]
     pub(crate) fn cmp_value(&self, other: &BigFloat) -> Option<Ordering> {
+        // Two finite numbers that are not zero, the commonest case, straight from the fields.
+        if let (
+            Kind::Finite {
+                negative: na,
+                exp: ea,
+                mant: ma,
+            },
+            Kind::Finite {
+                negative: nb,
+                exp: eb,
+                mant: mb,
+            },
+        ) = (&self.kind, &other.kind)
+        {
+            return Some(match (*na, *nb) {
+                (false, true) => Ordering::Greater,
+                (true, false) => Ordering::Less,
+                (n, _) => {
+                    let mag = ea.cmp(eb).then_with(|| cmp_mantissas(ma, mb));
+                    if n { mag.reverse() } else { mag }
+                }
+            });
+        }
         if self.is_nan() || other.is_nan() {
             return None;
         }

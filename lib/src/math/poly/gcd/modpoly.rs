@@ -33,6 +33,11 @@ impl ModPolynomial {
     #[track_caller]
     pub fn gcd(&self, other: &ModPolynomial) -> ModPolynomial {
         self.same_modulus(other);
+        if self.m.is_two() {
+            // Packed in and out; every non-zero polynomial modulo 2 is monic.
+            let g = crate::math::poly::arith::gf2::gcd(&self.c.bits(), &other.c.bits());
+            return ModPolynomial::of_bits(self.m.clone(), g);
+        }
         let g = match self.m.word() {
             Some(n) => hgcd::gcd(&Word::new(n), &self.c, &other.c),
             None => hgcd::gcd(&Limbs::of(&self.m), &self.c, &other.c),

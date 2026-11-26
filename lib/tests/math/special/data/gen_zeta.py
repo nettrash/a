@@ -833,6 +833,34 @@ def polylog_review2(rng, single):
     return rows
 
 
+def polylog_fits(rng, single):
+    """The fits of the speed pass (f64 only): s = 1/2, 3/2, 5/2 and 3 on −2.4·10¹⁶ ≤ x < 0, that is
+    x·G(x) on [−3/4, 0) (uniform and log-uniform to 10⁻³⁰⁰), −F(μ) on [−2, −3/4) and
+    −μˢR(μ)/Γ(s + 1) on the nine pieces of v = ln μ past −2 (μ = ln(−x)), with the ends of those
+    pieces (v = −3/8 + k/2) and of the three forms."""
+    if single:
+        return []
+    pts = []
+    for sv in (0.5, 1.5, 2.5, 3.0):
+        pts += [(sv, rng.uniform(-0.75, 0.0)) for _ in range(6)]
+        pts += [(sv, -math.exp(rng.uniform(math.log(1e-300), math.log(0.75)))) for _ in range(3)]
+        pts += [(sv, rng.uniform(-2.0, -0.75)) for _ in range(6)]
+        for k in range(1, 9):
+            pts.append((sv, -math.exp(math.exp(-0.375 + 0.5 * k))))
+        lo, hi = math.log(math.log(2.0)), math.log(math.log(2.4e16))
+        pts += [(sv, -math.exp(math.exp(rng.uniform(lo, hi)))) for _ in range(12)]
+        pts += [(sv, -0.75), (sv, math.nextafter(-0.75, 0.0)), (sv, -2.0), (sv, math.nextafter(-2.0, 0.0)),
+                (sv, -2.4e16), (sv, math.nextafter(-2.4e16, 0.0))]
+    rows = []
+    for sv, x in pts:
+        try:
+            v = polylog_ref2(sv, x)
+        except AssertionError:
+            continue
+        rows.append(((sv, x), [v, polylog_cond2(sv, x, v)]))
+    return rows
+
+
 def polylog_cond(s, x):
     """The condition number of Li_s(x) in its arguments, |x ∂ₓLi| + |s ∂ₛLi| over |Li|
     (x ∂ₓ Li_s = Li_(s−1)), for s < 0, where Li_s has real zeros; for an integer s < 0, whose
@@ -892,6 +920,7 @@ def gen_polylog():
         rows += polylog_regression(random.Random(705 + single), single)
         rows += polylog_review1(random.Random(715 + single), single)
         rows += polylog_review2(random.Random(725 + single), single)
+        rows += polylog_fits(random.Random(735 + single), single)
         out(
             f"polylog_{ty}",
             f"polylog Li_s(x), {ty}: arguments s, x; references Li_s(x), then its condition number "

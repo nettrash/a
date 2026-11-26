@@ -6,7 +6,9 @@
 use super::element::sealed;
 use super::{Element, Matrix, Norm};
 use crate::math::float::complex::fast::{self, Reg};
-use crate::math::float::sum::{Term, Work, round_summed, sqrt_summed, sum_terms_in};
+use crate::math::float::sum::{
+    Term, Work, round_summed, round_summed_into, sqrt_summed, sum_terms_in,
+};
 use crate::math::float::{BigComplex, BigFloat, Round};
 use core::cmp::Ordering;
 
@@ -239,6 +241,14 @@ impl sealed::Element for BigComplex {
     }
 }
 
+/// The most terms of a dot product of the elimination that [`Field::dot_sub_in`] keeps on the stack
+/// (a matrix of order 16). Measured on an Apple M4 Max (solves and inverses of order 4 to 64 at 256
+/// and 1,000 bits; bounds 1 to 65): the array is filled whole for each dot product, so that with 17
+/// terms the solves and inverses of order 4 to 16 take 0.92 to 0.99 of their time with 33, and the
+/// vectors of the longer dot products cost up to 1 % from order 24 at 1,000 bits and 1 to 2 % at
+/// 256 bits (the inverse of order 32: 1.4 to 2.3 % in four builds; with 9 terms 3 %).
+const DOT_STACK: usize = 17;
+
 /// The largest precision of the floats.
 fn max_prec<'a>(xs: impl Iterator<Item = &'a BigFloat>) -> u64 {
     xs.map(BigFloat::prec).max().unwrap_or(1)
@@ -359,6 +369,10 @@ impl Field for BigFloat {
         work: &mut Work,
     ) {
         debug_assert_eq!(out.prec(), prec);
+        if len == 0 && c.is_none() {
+            // `out` alone, of the precision: rounded already.
+            return;
+        }
         let done = {
             let c = c.unwrap_or(out);
             let finite = c.is_finite()
@@ -384,11 +398,30 @@ impl Field for BigFloat {
             fast::put_short(out, r, Round::Nearest);
             return;
         }
-        let v = {
+        // The terms on the stack when they are few, the exact sum in `work`'s buffers, and the
+        // rounding into the vector of `out`: no vector made for the element.
+        let s = {
             let c = c.unwrap_or(out);
-            Self::dot_sub(c, (0..len).map(xy), prec, work)
+            let term = |i: usize| {
+                if i == 0 {
+                    Term::one(c, false)
+                } else {
+                    let (x, y) = xy(i - 1);
+                    Term::product(x, y, true)
+                }
+            };
+            if len < DOT_STACK {
+                let mut t = [Term::one(c, false); DOT_STACK];
+                for (i, slot) in t[..=len].iter_mut().enumerate() {
+                    *slot = term(i);
+                }
+                sum_terms_in(&t[..=len], prec, work)
+            } else {
+                let t: Vec<Term<'_>> = (0..=len).map(term).collect();
+                sum_terms_in(&t, prec, work)
+            }
         };
-        *out = v;
+        round_summed_into(s, out, Round::Nearest, work);
     }
     #[inline]
     fn quotient_in(x: &mut Self, d: &Self, prec: u64) {
@@ -556,12 +589,9 @@ fn factor<T: Field>(a: &Matrix<T>, prec: u64) -> Option<Factors<T>> {
     let mut perm: Vec<usize> = (0..n).collect();
     let mut odd = false;
     let mut work = Work::default();
-    // `lu[at] -= Σ_{p<len} lu[x(p)]·lu[y(p)]`, the element taken out while the others are read.
-    let mut update = |lu: &mut Vec<T>,
-                      at: usize,
-                      len: usize,
-                      x: &dyn Fn(usize) -> usize,
-                      y: &dyn Fn(usize) -> usize| {
+    // `lu[at] -= Σ_{p<len} lu[x0 + p·n]·lu[y0 + p]`, the element taken out while the others are
+    // read: a row of `L` by a column of `U`, in the arithmetic of the storage by columns.
+    let mut update = |lu: &mut Vec<T>, at: usize, len: usize, x0: usize, y0: usize| {
         let mut v = core::mem::replace(&mut lu[at], T::zero());
         {
             let lu = &*lu;
@@ -569,7 +599,7 @@ fn factor<T: Field>(a: &Matrix<T>, prec: u64) -> Option<Factors<T>> {
                 &mut v,
                 None,
                 len,
-                |p| (&lu[x(p)], &lu[y(p)]),
+                |p| (&lu[x0 + p * n], &lu[y0 + p]),
                 prec,
                 &mut work,
             );
@@ -579,7 +609,7 @@ fn factor<T: Field>(a: &Matrix<T>, prec: u64) -> Option<Factors<T>> {
     for k in 0..n {
         // Column k from the diagonal down: `a_ik - Σ_{p<k} l_ip·u_pk`.
         for i in k..n {
-            update(&mut lu, i + k * n, k, &|p| i + p * n, &|p| p + k * n);
+            update(&mut lu, i + k * n, k, i, k * n);
         }
         // The pivot: the largest from the diagonal down.
         let mut r = k;
@@ -606,7 +636,7 @@ fn factor<T: Field>(a: &Matrix<T>, prec: u64) -> Option<Factors<T>> {
         }
         // Row k right of the diagonal: `a_kj - Σ_{p<k} l_kp·u_pj`.
         for j in k + 1..n {
-            update(&mut lu, k + j * n, k, &|p| k + p * n, &|p| p + j * n);
+            update(&mut lu, k + j * n, k, k, j * n);
         }
     }
     Some(Factors { lu, n, perm, odd })
@@ -699,19 +729,16 @@ impl RegFactors {
         let mut lu: Vec<Reg> = a.as_slice().iter().map(Reg::of).collect::<Option<_>>()?;
         let mut perm: Vec<usize> = (0..n).collect();
         let mut odd = false;
-        // `lu[at] - Σ_{p<len} lu[x(p)]·lu[y(p)]`.
-        let dot = |lu: &[Reg],
-                   at: usize,
-                   len: usize,
-                   x: &dyn Fn(usize) -> usize,
-                   y: &dyn Fn(usize) -> usize| {
+        // `lu[at] - Σ_{p<len} lu[x0 + p·n]·lu[y0 + p]`: a row of `L` by a column of `U`, the
+        // indices in the arithmetic of the storage by columns (no calls through pointers).
+        let dot = |lu: &[Reg], at: usize, len: usize, x0: usize, y0: usize| {
             fast::reg_dot(
                 len + 1,
                 |t| {
                     if t == 0 {
                         (lu[at], None, false)
                     } else {
-                        (lu[x(t - 1)], Some(lu[y(t - 1)]), true)
+                        (lu[x0 + (t - 1) * n], Some(lu[y0 + t - 1]), true)
                     }
                 },
                 prec,
@@ -719,7 +746,7 @@ impl RegFactors {
         };
         for k in 0..n {
             for i in k..n {
-                lu[i + k * n] = dot(&lu, i + k * n, k, &|p| i + p * n, &|p| p + k * n)?;
+                lu[i + k * n] = dot(&lu, i + k * n, k, i, k * n)?;
             }
             let mut r = k;
             for i in k + 1..n {
@@ -742,7 +769,7 @@ impl RegFactors {
                 lu[i + k * n] = lu[i + k * n].div(pivot, prec)?;
             }
             for j in k + 1..n {
-                lu[k + j * n] = dot(&lu, k + j * n, k, &|p| k + p * n, &|p| p + j * n)?;
+                lu[k + j * n] = dot(&lu, k + j * n, k, k, j * n)?;
             }
         }
         Some(Some(RegFactors { lu, n, perm, odd }))

@@ -556,13 +556,6 @@ pub(crate) fn divides(a: &[Int], g: &[Int]) -> Option<Vec<Int>> {
 
 // ----------------------------------------------------------------- greatest common divisors
 
-/// The content (the positive gcd of the coefficients) and the primitive part with a positive
-/// leading coefficient, of `c` not empty.
-fn content_pp(c: &[Number]) -> (Number, Vec<Int>) {
-    let (g, v) = content_pp_ints(ints(c));
-    (g.number(), v)
-}
-
 /// The binary gcd of two words, `gcd(0, b) = b`.
 fn gcd_word(mut a: u64, mut b: u64) -> u64 {
     if a == 0 {
@@ -585,7 +578,7 @@ fn gcd_word(mut a: u64, mut b: u64) -> u64 {
     }
 }
 
-/// [`content_pp`] on [`Int`]s: the content and the primitive part of a positive leading
+/// The content (the positive gcd of the coefficients) and the primitive part of a positive leading
 /// coefficient; for coefficients of one word, by the binary gcd and divisions of words.
 fn content_pp_ints(mut v: Vec<Int>) -> (Int, Vec<Int>) {
     let lneg = v.last().is_some_and(|x| x.neg);
@@ -690,7 +683,10 @@ fn check(a: &[Int], g: &[Int], s: usize) -> bool {
 }
 
 /// The multimodular gcd of the primitive `a` and `b`, `len a ≥ len b ≥ 2`.
-pub(crate) fn modular(a: &[Int], b: &[Int]) -> Vec<Int> {
+///
+/// `first`: the monic gcd modulo one prime already known (of polynomials whose primitive parts
+/// are `a` and `b`, the prime dividing neither leading coefficient), taken for that prime.
+fn modular_from(a: &[Int], b: &[Int], mut first: Option<(u64, Vec<u64>)>) -> Vec<Int> {
     let (la, lb) = (a.len(), b.len());
     let lead = a[la - 1].number().gcd(&b[lb - 1].number());
     let lead = Int::of(&lead);
@@ -700,11 +696,16 @@ pub(crate) fn modular(a: &[Int], b: &[Int]) -> Vec<Int> {
     let mut deg = usize::MAX;
     for p in Primes::new() {
         let mut t = Table::new(p, limbs);
-        let (ap, bp) = (t.poly(a), t.poly(b));
-        if ap.len() != la || bp.len() != lb {
-            continue;
-        }
-        let g = hgcd::gcd(&t.m, &ap, &bp);
+        let g = match first.take() {
+            Some((q, g)) if q == p => g,
+            _ => {
+                let (ap, bp) = (t.poly(a), t.poly(b));
+                if ap.len() != la || bp.len() != lb {
+                    continue;
+                }
+                hgcd::gcd(&t.m, &ap, &bp)
+            }
+        };
         let d = g.len() - 1;
         if d == 0 {
             return vec![Int {
@@ -741,8 +742,20 @@ pub(crate) fn modular(a: &[Int], b: &[Int]) -> Vec<Int> {
 /// The greatest common divisor of the integer polynomials `a` and `b`, of a positive leading
 /// coefficient, both not zero: the gcd of the contents times that of the primitive parts.
 pub(crate) fn gcd(a: &[Number], b: &[Number]) -> Vec<Number> {
-    let (ca, pa) = content_pp(a);
-    let (cb, pb) = content_pp(b);
+    let (ia, ib) = (ints(a), ints(b));
+    // One prime first where the contents cost (coefficients of several limbs) or the heuristic
+    // gcd would come first (short polynomials); its gcd serves the modular algorithm too.
+    let wide = ia.iter().chain(&ib).any(|x| x.m.len() > 1);
+    let mut first = None;
+    if wide || a.len().max(b.len()) <= HEURISTIC_MAX_SHORT {
+        match coprime_content(a, b, &ia, &ib) {
+            Ok(c) => return vec![c],
+            Err(f) => first = f,
+        }
+    }
+    let (ca, pa) = content_pp_ints(ia);
+    let (cb, pb) = content_pp_ints(ib);
+    let (ca, cb) = (ca.number(), cb.number());
     let c = Int::of(&ca.gcd(&cb));
     let (pa, pb) = if pa.len() >= pb.len() {
         (pa, pb)
@@ -757,9 +770,9 @@ pub(crate) fn gcd(a: &[Number], b: &[Number]) -> Vec<Number> {
     } else if pa == pb {
         pa
     } else if choose_heuristic(&pa, &pb) {
-        heuristic(&pa, &pb).unwrap_or_else(|| modular(&pa, &pb))
+        heuristic(&pa, &pb).unwrap_or_else(|| modular_from(&pa, &pb, first))
     } else {
-        modular(&pa, &pb)
+        modular_from(&pa, &pb, first)
     };
     let c = c.number();
     if crate::math::rational::is_one(&c) {
@@ -767,6 +780,47 @@ pub(crate) fn gcd(a: &[Number], b: &[Number]) -> Vec<Number> {
     } else {
         g.iter().map(|x| &x.number() * &c).collect()
     }
+}
+
+/// The gcd of `a` and `b` (not zero) when they are coprime over the rationals, which their images
+/// modulo a prime that divides neither leading coefficient show when their gcd there is a
+/// constant (the degree of the gcd modulo such a prime is at least that over the rationals): then
+/// the gcd over the integers is the positive gcd of all their coefficients, found without the
+/// contents and primitive parts. Otherwise `Err` with that prime and its monic gcd, for the
+/// modular algorithm, or `None` when the first two primes each divide a leading coefficient.
+fn coprime_content(
+    a: &[Number],
+    b: &[Number],
+    ia: &[Int],
+    ib: &[Int],
+) -> Result<Number, Option<(u64, Vec<u64>)>> {
+    if a.len() < 2 || b.len() < 2 {
+        return Err(None);
+    }
+    let limbs = ia.iter().chain(ib).map(|x| x.m.len()).max().unwrap_or(1);
+    for p in Primes::new().take(2) {
+        let t = Table::new(p, limbs);
+        let (ap, bp) = (t.poly(ia), t.poly(ib));
+        if ap.len() != a.len() || bp.len() != b.len() {
+            continue;
+        }
+        let g = hgcd::gcd(&t.m, &ap, &bp);
+        if g.len() != 1 {
+            // Monic, for the modular algorithm's first prime.
+            let w = &t.m.m;
+            let f = w.inv_lead(g[g.len() - 1]);
+            return Err(Some((p, g.iter().map(|&x| w.mul(x, f)).collect())));
+        }
+        let mut c = Number::default();
+        for x in a.iter().chain(b) {
+            c = c.gcd(x);
+            if crate::math::rational::is_one(&c) {
+                break;
+            }
+        }
+        return Ok(c);
+    }
+    Err(None)
 }
 
 /// Up to this length the heuristic gcd comes first, whatever the coefficients.

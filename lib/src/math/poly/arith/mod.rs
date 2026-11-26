@@ -4,6 +4,7 @@
 
 pub(crate) mod fdiv;
 pub(crate) mod field;
+pub(crate) mod gf2;
 pub(crate) mod lred;
 pub(crate) mod mdiv;
 pub(crate) mod mmul;
@@ -95,9 +96,59 @@ pub(crate) fn field_div_rem<T: Field>(
 /// The product of two polynomials of the same modulus, by the method their lengths and the
 /// modulus call for; a square when they are the same polynomial.
 pub(crate) fn mod_mul(a: &ModPolynomial, b: &ModPolynomial) -> ModPolynomial {
+    if let (Some(x), Some(y), Some(w)) = (a.c.plain(), b.c.plain(), a.m.word_mod())
+        && w.n != 2
+    {
+        // A word modulus but 2: on the vectors.
+        let (la, lb) = (x.len(), y.len());
+        if la == 0 || lb == 0 {
+            return a.zero_like();
+        }
+        let c = if la == 1 || lb == 1 {
+            // By a constant: no method to choose.
+            let (p, c) = if lb == 1 { (x, y[0]) } else { (y, x[0]) };
+            p.iter().map(|&v| w.mul(v, c)).collect()
+        } else if core::ptr::eq(a, b) || x == y {
+            wmul::sqr(x, w)
+        } else {
+            wmul::mul(x, y, w)
+        };
+        return ModPolynomial::of(a.m.clone(), c);
+    }
     let (la, lb) = (a.length(), b.length());
     if la == 0 || lb == 0 {
         return a.zero_like();
+    }
+    if a.m.is_two() {
+        let square = core::ptr::eq(a, b) || (la == lb && a.c == b.c);
+        let (s, l) = (la.min(lb).div_ceil(64), la.max(lb).div_ceil(64));
+        if !square && !a.c.is_given() && !b.c.is_given() && gf2::by_words(s, l) {
+            // Long operands of words whose product goes by the transforms on words: on the words
+            // themselves, the product left as words, without the packing and unpacking of the
+            // packed product's own switch to the transforms (which operands made packed take).
+            let w = a.m.word_mod().expect("the word modulus 2");
+            let mut r = vec![0u64; la + lb - 1];
+            wmul::mul_into_words(&mut r, &a.c, &b.c, w);
+            return ModPolynomial::of(a.m.clone(), r);
+        }
+        // Packed in and out: the operands' packed forms made once, the product left packed.
+        let (x, y) = (a.c.bits(), b.c.bits());
+        let p = if core::ptr::eq(a, b) || x == y {
+            gf2::sqr(&x)
+        } else {
+            gf2::mul(&x, &y)
+        };
+        return ModPolynomial::of_bits(a.m.clone(), p);
+    }
+    if let (Some(w), true) = (a.m.word_mod(), la == 1 || lb == 1) {
+        // By a constant: no method to choose.
+        let (p, c) = if lb == 1 {
+            (&a.c, b.c[0])
+        } else {
+            (&b.c, a.c[0])
+        };
+        let r: Vec<u64> = p.iter().map(|&x| w.mul(x, c)).collect();
+        return ModPolynomial::of(a.m.clone(), r);
     }
     let square = core::ptr::eq(a, b) || (la == lb && a.c == b.c);
     if let Some(w) = a.m.word_mod() {

@@ -214,6 +214,7 @@ fn far_phase(z: Dd, base: Dd, alpha: f64) -> (Dd, Dd) {
     sin_cos_quadrant_dd(n1.wrapping_add(n2).wrapping_add(k as i64), u)
 }
 
+#[inline]
 fn airy_f64(x: f64, w: Which) -> f64 {
     if x.is_nan() {
         return x;

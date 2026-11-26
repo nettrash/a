@@ -23,6 +23,40 @@ const MP64: [f64; 2] = [-1.0, 1.0];
 const PM32: [f32; 4] = [1.0, -1.0, 1.0, -1.0];
 const MP32: [f32; 4] = [-1.0, 1.0, -1.0, 1.0];
 
+/// The rotations `a + i·b` and `a − i·b` by FCADD (FEAT_FCMA, a feature of the Apple targets):
+/// one instruction, where the fallback swaps the parts of `b` and adds them with signs.
+#[cfg(target_feature = "fcma")]
+mod fc {
+    use core::arch::aarch64::*;
+    use core::arch::asm;
+
+    macro_rules! fcadd {
+        ($name:ident, $v:ty, $arr:literal, $rot:literal) => {
+            #[inline(always)]
+            pub(super) fn $name(a: $v, b: $v) -> $v {
+                let r: $v;
+                // SAFETY: FCADD on registers only; the target has FEAT_FCMA.
+                unsafe {
+                    asm!(
+                        concat!("fcadd {r:v}.", $arr, ", {a:v}.", $arr, ", {b:v}.", $arr, ", #", $rot),
+                        r = lateout(vreg) r,
+                        a = in(vreg) a,
+                        b = in(vreg) b,
+                        options(pure, nomem, nostack, preserves_flags)
+                    )
+                };
+                r
+            }
+        };
+    }
+    fcadd!(d90, float64x2_t, "2d", "90");
+    fcadd!(d270, float64x2_t, "2d", "270");
+    fcadd!(q90, float32x4_t, "4s", "90");
+    fcadd!(q270, float32x4_t, "4s", "270");
+    fcadd!(h90, float32x2_t, "2s", "90");
+    fcadd!(h270, float32x2_t, "2s", "270");
+}
+
 impl Blk<f64> for D1 {
     const K: usize = 1;
     type Tw = (float64x2_t, float64x2_t);
@@ -41,6 +75,11 @@ impl Blk<f64> for D1 {
     fn zero() -> Self {
         // SAFETY: NEON is always present on aarch64.
         D1(unsafe { vdupq_n_f64(0.0) })
+    }
+    #[inline(always)]
+    fn conj(self) -> Self {
+        // SAFETY: NEON is always present on aarch64; the signs (1, −1).
+        D1(unsafe { vmulq_f64(self.0, vld1q_f64(PM64.as_ptr())) })
     }
     #[inline(always)]
     fn add(self, b: Self) -> Self {
@@ -72,12 +111,58 @@ impl Blk<f64> for D1 {
         }
     }
     #[inline(always)]
+    fn add_rot_f<const INV: bool>(self, b: Self) -> Self {
+        #[cfg(target_feature = "fcma")]
+        {
+            D1(if INV {
+                fc::d90(self.0, b.0)
+            } else {
+                fc::d270(self.0, b.0)
+            })
+        }
+        #[cfg(not(target_feature = "fcma"))]
+        {
+            self.add_rot::<INV>(b)
+        }
+    }
+    #[inline(always)]
     fn sub_rot<const INV: bool>(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         unsafe {
             let sw = vextq_f64(b.0, b.0, 1);
             let sg = vld1q_f64(if INV { PM64.as_ptr() } else { MP64.as_ptr() });
             D1(vfmaq_f64(self.0, sw, sg))
+        }
+    }
+    #[inline(always)]
+    fn sub_rot_f<const INV: bool>(self, b: Self) -> Self {
+        #[cfg(target_feature = "fcma")]
+        {
+            D1(if INV {
+                fc::d270(self.0, b.0)
+            } else {
+                fc::d90(self.0, b.0)
+            })
+        }
+        #[cfg(not(target_feature = "fcma"))]
+        {
+            self.sub_rot::<INV>(b)
+        }
+    }
+    #[inline(always)]
+    fn rot<const INV: bool>(self) -> Self {
+        // SAFETY: as for `zero`; the parts swapped and signed, no addition.
+        unsafe {
+            let sg = vld1q_f64(if INV { MP64.as_ptr() } else { PM64.as_ptr() });
+            D1(vmulq_f64(vextq_f64(self.0, self.0, 1), sg))
+        }
+    }
+    #[inline(always)]
+    fn rot_neg<const INV: bool>(self) -> Self {
+        // SAFETY: as for `rot`.
+        unsafe {
+            let sg = vld1q_f64(if INV { PM64.as_ptr() } else { MP64.as_ptr() });
+            D1(vmulq_f64(vextq_f64(self.0, self.0, 1), sg))
         }
     }
     #[inline(always)]
@@ -89,6 +174,14 @@ impl Blk<f64> for D1 {
     unsafe fn tw_l(p: *const f64) -> Self::Tw {
         // SAFETY: the caller's contract.
         unsafe { (vld1q_f64(p), vld1q_f64(p.add(2))) }
+    }
+    #[inline(always)]
+    unsafe fn tw_c(p: *const f64) -> Self::Tw {
+        // SAFETY: the caller's contract: [wr, wr] and [−wi, wi] from [wr, wi].
+        unsafe {
+            let sg = vld1q_f64(MP64.as_ptr());
+            (vld1q_dup_f64(p), vmulq_f64(vld1q_dup_f64(p.add(1)), sg))
+        }
     }
     #[inline(always)]
     fn mul_tw<const INV: bool>(self, (a, b): Self::Tw) -> Self {
@@ -139,6 +232,11 @@ impl Blk<f32> for F2 {
         F2(unsafe { vdupq_n_f32(0.0) })
     }
     #[inline(always)]
+    fn conj(self) -> Self {
+        // SAFETY: NEON is always present on aarch64; the signs (1, −1).
+        F2(unsafe { vmulq_f32(self.0, vld1q_f32(PM32.as_ptr())) })
+    }
+    #[inline(always)]
     fn add(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         F2(unsafe { vaddq_f32(self.0, b.0) })
@@ -168,12 +266,58 @@ impl Blk<f32> for F2 {
         }
     }
     #[inline(always)]
+    fn add_rot_f<const INV: bool>(self, b: Self) -> Self {
+        #[cfg(target_feature = "fcma")]
+        {
+            F2(if INV {
+                fc::q90(self.0, b.0)
+            } else {
+                fc::q270(self.0, b.0)
+            })
+        }
+        #[cfg(not(target_feature = "fcma"))]
+        {
+            self.add_rot::<INV>(b)
+        }
+    }
+    #[inline(always)]
     fn sub_rot<const INV: bool>(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         unsafe {
             let sw = vrev64q_f32(b.0);
             let sg = vld1q_f32(if INV { PM32.as_ptr() } else { MP32.as_ptr() });
             F2(vfmaq_f32(self.0, sw, sg))
+        }
+    }
+    #[inline(always)]
+    fn sub_rot_f<const INV: bool>(self, b: Self) -> Self {
+        #[cfg(target_feature = "fcma")]
+        {
+            F2(if INV {
+                fc::q270(self.0, b.0)
+            } else {
+                fc::q90(self.0, b.0)
+            })
+        }
+        #[cfg(not(target_feature = "fcma"))]
+        {
+            self.sub_rot::<INV>(b)
+        }
+    }
+    #[inline(always)]
+    fn rot<const INV: bool>(self) -> Self {
+        // SAFETY: as for `zero`; the parts swapped and signed, no addition.
+        unsafe {
+            let sg = vld1q_f32(if INV { MP32.as_ptr() } else { PM32.as_ptr() });
+            F2(vmulq_f32(vrev64q_f32(self.0), sg))
+        }
+    }
+    #[inline(always)]
+    fn rot_neg<const INV: bool>(self) -> Self {
+        // SAFETY: as for `rot`.
+        unsafe {
+            let sg = vld1q_f32(if INV { PM32.as_ptr() } else { MP32.as_ptr() });
+            F2(vmulq_f32(vrev64q_f32(self.0), sg))
         }
     }
     #[inline(always)]
@@ -190,6 +334,14 @@ impl Blk<f32> for F2 {
     unsafe fn tw_l(p: *const f32) -> Self::Tw {
         // SAFETY: the caller's contract.
         unsafe { (vld1q_f32(p), vld1q_f32(p.add(4))) }
+    }
+    #[inline(always)]
+    unsafe fn tw_c(p: *const f32) -> Self::Tw {
+        // SAFETY: the caller's contract: [wr; 4] and [−wi, wi, −wi, wi] from [wr, wi].
+        unsafe {
+            let sg = vld1q_f32(MP32.as_ptr());
+            (vld1q_dup_f32(p), vmulq_f32(vld1q_dup_f32(p.add(1)), sg))
+        }
     }
     #[inline(always)]
     fn mul_tw<const INV: bool>(self, (a, b): Self::Tw) -> Self {
@@ -264,6 +416,11 @@ impl Blk<f32> for F1 {
         F1(unsafe { vdup_n_f32(0.0) })
     }
     #[inline(always)]
+    fn conj(self) -> Self {
+        // SAFETY: NEON is always present on aarch64; the signs (1, −1).
+        F1(unsafe { vmul_f32(self.0, vld1_f32(PM32.as_ptr())) })
+    }
+    #[inline(always)]
     fn add(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         F1(unsafe { vadd_f32(self.0, b.0) })
@@ -293,12 +450,58 @@ impl Blk<f32> for F1 {
         }
     }
     #[inline(always)]
+    fn add_rot_f<const INV: bool>(self, b: Self) -> Self {
+        #[cfg(target_feature = "fcma")]
+        {
+            F1(if INV {
+                fc::h90(self.0, b.0)
+            } else {
+                fc::h270(self.0, b.0)
+            })
+        }
+        #[cfg(not(target_feature = "fcma"))]
+        {
+            self.add_rot::<INV>(b)
+        }
+    }
+    #[inline(always)]
     fn sub_rot<const INV: bool>(self, b: Self) -> Self {
         // SAFETY: as for `zero`.
         unsafe {
             let sw = vrev64_f32(b.0);
             let sg = vld1_f32(if INV { PM32.as_ptr() } else { MP32.as_ptr() });
             F1(vfma_f32(self.0, sw, sg))
+        }
+    }
+    #[inline(always)]
+    fn sub_rot_f<const INV: bool>(self, b: Self) -> Self {
+        #[cfg(target_feature = "fcma")]
+        {
+            F1(if INV {
+                fc::h270(self.0, b.0)
+            } else {
+                fc::h90(self.0, b.0)
+            })
+        }
+        #[cfg(not(target_feature = "fcma"))]
+        {
+            self.sub_rot::<INV>(b)
+        }
+    }
+    #[inline(always)]
+    fn rot<const INV: bool>(self) -> Self {
+        // SAFETY: as for `zero`; the parts swapped and signed, no addition.
+        unsafe {
+            let sg = vld1_f32(if INV { MP32.as_ptr() } else { PM32.as_ptr() });
+            F1(vmul_f32(vrev64_f32(self.0), sg))
+        }
+    }
+    #[inline(always)]
+    fn rot_neg<const INV: bool>(self) -> Self {
+        // SAFETY: as for `rot`.
+        unsafe {
+            let sg = vld1_f32(if INV { PM32.as_ptr() } else { MP32.as_ptr() });
+            F1(vmul_f32(vrev64_f32(self.0), sg))
         }
     }
     #[inline(always)]
@@ -310,6 +513,14 @@ impl Blk<f32> for F1 {
     unsafe fn tw_l(p: *const f32) -> Self::Tw {
         // SAFETY: the caller's contract.
         unsafe { (vld1_f32(p), vld1_f32(p.add(2))) }
+    }
+    #[inline(always)]
+    unsafe fn tw_c(p: *const f32) -> Self::Tw {
+        // SAFETY: the caller's contract: [wr, wr] and [−wi, wi] from [wr, wi].
+        unsafe {
+            let sg = vld1_f32(MP32.as_ptr());
+            (vld1_dup_f32(p), vmul_f32(vld1_dup_f32(p.add(1)), sg))
+        }
     }
     #[inline(always)]
     fn mul_tw<const INV: bool>(self, (a, b): Self::Tw) -> Self {

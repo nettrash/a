@@ -24,7 +24,7 @@
 - `new` gives `Err(CurveError)` for a modulus that is not a prime above 3, by [`is_probable_prime`](prime.md), for a singular curve, and for an Edwards curve whose addition law is not complete.
 - Numbers come back reduced below the prime, in the byte order the prime was given in; the named curves' are little-endian. Coefficients and coordinates may be given unreduced, in either byte order.
 
-The examples, the method, the measurements and the efficiency below are those of the curves over prime fields. Two parts have sections of their own after them, with what they were verified against and no timings yet: [curves over binary fields](#curves-over-binary-fields), `a::math::ec::binary`, with the 18 curves of SEC 2 in `a::math::ec::binary::named`; and [hashing to curves](#hashing-to-curves), `a::math::ec::hash`, with RFC 9380's suites for the named curves. The hashing to the groups of pairings is on the page of [pairings](pairing.md#hashing-to-g1-and-g2).
+The examples, the method, the measurements and the efficiency below are those of the curves over prime fields. Two parts have sections of their own after them, with what they were verified against, and their measurements at the end, under [Measured](#measured): [curves over binary fields](#curves-over-binary-fields), `a::math::ec::binary`, with the 18 curves of SEC 2 in `a::math::ec::binary::named`; and [hashing to curves](#hashing-to-curves), `a::math::ec::hash`, with RFC 9380's suites for the named curves. The hashing to the groups of pairings is on the page of [pairings](pairing.md#hashing-to-g1-and-g2).
 
 ## Examples
 
@@ -222,9 +222,9 @@ assert!(k283.in_subgroup(&(k283.generator() * &a)));
 
 ### Methods
 
-- **Coordinates.** A point is held in López–Dahab coordinates (López and Dahab, *Improved algorithms for elliptic curve arithmetic in GF(2ⁿ)*, SAC 1998): `x = X/Z`, `y = Y/Z²`, `Z = 0` at infinity, so that the group's operations take no inversion; `coordinates()` takes one, and `coordinates_of` one for all its points by Montgomery's trick. In products `M` and squares `S` of the field: a doubling takes 4M + 5S (3M + 5S for `b = 1`), `Z₃ = X₁²·Z₁²`, `X₃ = X₁⁴ + b·Z₁⁴`, `Y₃ = b·Z₁⁴·Z₃ + X₃·(a·Z₃ + Y₁² + b·Z₁⁴)`; the addition of an affine point 8M + 5S (Al-Daboul, Lim, Kim and Lee, as Hankerson, Menezes and Vanstone give it, *Guide to Elliptic Curve Cryptography*, §3.2.3); the addition of two projective points 13M + 5S, from the chord over the common denominator `Z₁·Z₂·(X₁·Z₂ + X₂·Z₁)`; a product by `a` is free for `a ∈ {0, 1}` and one M otherwise. The additions fall back to the doubling for equal points and give the point at infinity for opposite ones, so every pair of points, of any order, adds correctly.
+- **Coordinates.** A point is held in López–Dahab coordinates (López and Dahab, *Improved algorithms for elliptic curve arithmetic in GF(2ⁿ)*, SAC 1998): `x = X/Z`, `y = Y/Z²`, `Z = 0` at infinity, so that the group's operations take no inversion; `coordinates()` takes one, and `coordinates_of` one for all its points by Montgomery's trick. In products `M` and squares `S` of the field: a doubling takes 4M + 5S (3M + 5S for `b = 1`), `Z₃ = X₁²·Z₁²`, `X₃ = X₁⁴ + b·Z₁⁴`, `Y₃ = b·Z₁⁴·Z₃ + X₃·(a·Z₃ + Y₁² + b·Z₁⁴)`; the addition of an affine point 8M + 5S (Al-Daboul, Lim, Kim and Lee, as Hankerson, Menezes and Vanstone give it, *Guide to Elliptic Curve Cryptography*, §3.2.3); the addition of two projective points 13M + 5S, from the chord over the common denominator `Z₁·Z₂·(X₁·Z₂ + X₂·Z₁)`; a product by `a` is free for `a ∈ {0, 1}` and one M otherwise. The additions fall back to the doubling for equal points and give the point at infinity for opposite ones, so every pair of points, of any order, adds correctly. On fields of at most 256 bits (every named curve up to `sect239k1`), the products by scalars (`*`, `in_subgroup`, `x_mul`, and Horner's rule of `mul_add` and short `multi_mul`) run on elements of four words held inline, with Karatsuba's carry-less products on the words (3, 6 and 9 of them for 2, 3 and 4 words, by `PMULL` inline where the target enables it at compile time, else by `Clmul::mul`), the squares by the same instruction or, under the portable kernel, by spreading the bits, and one of the public field's two reductions on the inline words, chosen for the field by a rough count of word operations, its crossover measured for each kernel, and kept with Barrett's constants for the thread's next products on the same field: the sparse one, chunks of at most `min(64, m − e₁)` bits folded down by the terms of `f`, which the moduli of the standards take, or Barrett's two products where the chunks would be many, for a term close to `xᵐ` or many terms; the same formulas giving the same points; the public field's elements are vectors, and their allocations cost more than the arithmetic on such fields.
 - **Products.** `k·P` takes the width-`w` non-adjacent form (`w` = 2 up to 23 bits of scalar, 3 up to 75, 4 up to 199, 5 up to 639, 6 up to 1,279, 7 up to 3,071 and 8 beyond, as on the curves over prime fields), odd digits at least `w − 1` zeros apart, over the odd multiples `P, 3P, …` put in affine form with one inversion: about `b` doublings and `b/(w + 1)` mixed additions for a scalar of `b` bits. Scalars may have any sign and length; they are not reduced, as the order of a point is not known.
-- **Koblitz curves** (`a ∈ {0, 1}`, `b = 1`) take the τ-adic non-adjacent form instead (Solinas, *Efficient arithmetic on Koblitz curves*, Designs, Codes and Cryptography 19, 2000; the *Guide*'s algorithms 3.61 to 3.70). The Frobenius map `τ(x, y) = (x², y²)`, three squares in López–Dahab coordinates, satisfies `τ² − μ·τ + 2 = 0` with `μ = (−1)^(1−a)`, and `τᵐ` is the identity on the points over `GF(2ᵐ)`. The scalar is reduced modulo `τᵐ − 1` in `Z[τ]` by Solinas's rounding, computed exactly in integers, which leaves an element `ρ` with `ρ·P = k·P` for every point of the curve, of norm at most 4/7 of the number of points; `ρ` is written in the width-`w` τ-adic form, digits `±α_u` for the odd `u < 2^(w−1)`, `α_u` the element of least norm congruent to `u` modulo `τʷ`, computed with the same rounding. A product so takes about `m` Frobenius maps and `m/(w + 1)` mixed additions, and no doublings, whatever the length of `k`. The expansion ends for every element of `Z[τ]` at the widths 2 to 8 it can take: `tests/math/ec/data/binary_tnaf_termination.py` bounds the region outside which each step lowers the norm and runs the algorithm from every element of a box holding it.
+- **Koblitz curves** (`a ∈ {0, 1}`, `b = 1`) take the τ-adic non-adjacent form instead (Solinas, *Efficient arithmetic on Koblitz curves*, Designs, Codes and Cryptography 19, 2000; the *Guide*'s algorithms 3.61 to 3.70). The Frobenius map `τ(x, y) = (x², y²)`, three squares in López–Dahab coordinates, satisfies `τ² − μ·τ + 2 = 0` with `μ = (−1)^(1−a)`, and `τᵐ` is the identity on the points over `GF(2ᵐ)`. The scalar is reduced modulo `τᵐ − 1` in `Z[τ]` by Solinas's rounding, computed exactly in integers, which leaves an element `ρ` with `ρ·P = k·P` for every point of the curve, of norm at most 4/7 of the number of points; `ρ` is written in the width-`w` τ-adic form, digits `±α_u` for the odd `u < 2^(w−1)`, `α_u` the element of least norm congruent to `u` modulo `τʷ`, computed with the same rounding. A product so takes about `m` Frobenius maps and `m/(w + 1)` mixed additions, and no doublings, whatever the length of `k`; a shorter scalar, as a cofactor is, takes the non-adjacent form's doublings instead, which the τ-adic form's fixed cost (the reduction of the scalar, the digit set) leaves faster up to about `0.9m` bits on fields of at most 256 bits under `PMULL`, `0.55m` there under the portable kernel and on the longer fields under `PMULL`, and about 90 bits on those under the portable kernel (measured on the six Koblitz curves of SEC 2): the doublings take the scalars of fewer than `7m/8`, `m/2`, `m/2` and `m/8` bits, and `m/8` under `PCLMULQDQ`, not yet measured. The expansion ends for every element of `Z[τ]` at the widths 2 to 8 it can take: `tests/math/ec/data/binary_tnaf_termination.py` bounds the region outside which each step lowers the norm and runs the algorithm from every element of a box holding it.
 - **The number of points of a Koblitz curve** is `2ᵐ + 1 − V_m` for the Lucas sequence `V_k(μ, 2)`, the trace of `τᵐ`, from [`Number::lucas_sequence`](sequences.md); the reduction above uses it as the norm of `τᵐ − 1`.
 - **Many products** take Straus's method below 64 terms, the expansions read together with one run of doublings, or of Frobenius maps on a Koblitz curve, for all of them; from 64 terms, Pippenger's, the terms sorted by the digits of signed windows of `log₂ n − 1` bits into buckets, each summed by a running sum.
 - **A prepared point**, and the generator of a domain, keeps its multiples by each digit of a signed window of 4 bits (3 below 64 bits) at each position, in affine form: a product takes one mixed addition a window and no doubling, about 143 additions for 571 bits, from a table of 1,144 points built once.
@@ -260,7 +260,7 @@ To run the tests: `cargo test --test math -- ec::binary::`; the larger sweeps: `
 
 - Not constant-time, and not for secret scalars: the non-adjacent forms, the τ-adic reduction and the additions all branch on the data.
 - Only the polynomial basis, and only curves `y² + x·y = x³ + a·x² + b`: no supersingular curves and no normal-basis coordinates. There is no point counting for curves other than Koblitz curves (SEA or Satoh's method): a domain is given its order and cofactor, and only `order·G = O` is checked.
-- The speed is that of the binary field below it, and has not been measured or tuned: every element is a vector, so every operation allocates. The table of a generator is built with general additions. `x_mul` has no `y` recovery; the products of full points take the non-adjacent forms.
+- Above 256 bits, and outside the products by scalars, the speed is that of the binary field below it: every element is a vector, so every operation allocates. The table of a generator is built with general additions. `x_mul` has no `y` recovery; the products of full points take the non-adjacent forms.
 - The window widths are first choices, not tuned: those of the non-adjacent forms are the prime-field curves', and the tables' are narrower.
 
 ## Hashing to curves
@@ -351,6 +351,69 @@ To run the tests: `cargo test --test math -- ec::hash`. The data file is written
 
 - **Not constant-time**, unlike what RFC 9380 recommends for its functions (section 4): the maps branch on whether an element is a square and on the exceptional cases, and the field's arithmetic on its data. For public messages, not for hashing secrets.
 - Prime fields only (`m = 1`) here; `F_p²`, for BLS12-381's `G2`, is on the page of [pairings](pairing.md#hashing-to-g1-and-g2). RFC 9380's suites for curve448 and edwards448 need `expand_message_xof` with SHAKE256, and neither those curves nor SHAKE are in the crate.
-- The maps are the plain ones of section 6, not the straight-line forms of appendices F and G, which compute the same points with fewer inversions and no branches; on secp256k1 the isogeny is applied to each of the two points and not once to their sum, the saving section 6.6.3 allows. Nothing is timed yet.
+- The maps are the plain ones of section 6, not the straight-line forms of appendices F and G, which compute the same points with fewer inversions and no branches; on secp256k1 the isogeny is applied to each of the two points and not once to their sum, the saving section 6.6.3 allows.
 - A `Suite` is made only for the named curves. For another curve the parts are public — `hash_to_field`, `ShallueVanDeWoestijne`, `SimplifiedSwu`, `Elligator2`, `IsogenyMap`, `Curve::point` and `Domain::clear_cofactor` — but there is no constructor of a `Suite` and no `h_eff` other than the cofactor.
 - On curve25519 no `u` gives `s = −1`, so the branch of the Edwards map for it, which the RFC requires, is reached by no test.
+
+## Measured
+
+The curves over binary fields and the hashing to curves, measured on an Apple M4 Max on 2026-11-26, between 06:22 and 06:23, with nothing else running on the machine, by the harness in the repository's `bench/curves` (its method in `bench/README.md` there). This crate is built as a user gets it, in the default release profile (opt-level 3, no LTO, no `target-cpu`) of rustc 1.100.0, and the Rust references in the same profile; OpenSSL 3.5.9 and 4.1.0 are Homebrew's, loaded at run time. One thread. Every output is compared with this crate's before the clock starts; then the sides alternate sample by sample in one process, on inputs cycled from pools of 16 to 64 seeded values, and a figure is the median of 21 samples of at least 1 ms each. A cell gives this crate's time and, in parentheses, that time over the time of the fastest reference that does the same work: below 1, this crate is faster. (The curves over prime fields, above, were measured earlier and apart.)
+
+### Curves over binary fields
+
+Against the faster of OpenSSL 3.5.9's and 4.1.0's EC2M (`EC_POINT_mul`, `EC_POINTs_mul` for the 64 terms of `multi_mul`, `EC_POINT_point2oct` and `EC_POINT_oct2point`), on scalars as long as the order and points of the subgroup; `+` and the encodings take points decoded from bytes. OpenSSL's points are affine, so that its sums and doublings each take a field division: its `EC_POINT_add` is compared with `+` followed by `coordinates`, and its products, which end on one division, a few per cent of their time, with `*`, `mul_add`, `multi_mul` and `in_subgroup` as they are:
+
+| Curve | `*` | `mul_add` | `multi_mul`, 64 terms | `in_subgroup` | `+` and `coordinates` | `compress` | `to_bytes` | `point_from_bytes`, compressed | uncompressed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| sect113r1 | 16.0 µs (0.378×) | 31.3 µs (0.361×) | 800 µs (0.233×) | 14.7 µs (0.368×) | 859 ns (0.467×) | 300 ns (0.186×) | 122 ns (1.68×) | 2.35 µs (0.496×) | 248 ns (1.44×) |
+| sect163k1 | 29.6 µs (0.239×) | 49.9 µs (0.199×) | 1.44 ms (0.174×) | 32.0 µs (0.267×) | 1.01 µs (0.315×) | 432 ns (0.150×) | 138 ns (1.70×) | 4.79 µs (0.503×) | 289 ns (0.916×) |
+| sect163r2 | 36.0 µs (0.273×) | 56.0 µs (0.210×) | 1.45 ms (0.177×) | 32.4 µs (0.255×) | 1.02 µs (0.317×) | 425 ns (0.151×) | 135 ns (1.71×) | 4.52 µs (0.472×) | 281 ns (0.914×) |
+| sect233k1 | 40.4 µs (0.227×) | 68.3 µs (0.189×) | 1.92 ms (0.124×) | 41.3 µs (0.239×) | 1.14 µs (0.258×) | 563 ns (0.140×) | 144 ns (1.40×) | 5.88 µs (0.406×) | 305 ns (0.933×) |
+| sect233r1 | 49.2 µs (0.258×) | 75.5 µs (0.196×) | 1.97 ms (0.128×) | 44.3 µs (0.238×) | 1.14 µs (0.259×) | 557 ns (0.138×) | 146 ns (1.40×) | 5.91 µs (0.414×) | 309 ns (0.946×) |
+| sect283k1 | 103 µs (0.283×) | 149 µs (0.204×) | 3.46 ms (0.151×) | 107 µs (0.299×) | 1.60 µs (0.293×) | 722 ns (0.152×) | 148 ns (1.36×) | 13.8 µs (0.686×) | 374 ns (0.716×) |
+| sect283r1 | 169 µs (0.428×) | 218 µs (0.273×) | 3.52 ms (0.154×) | 154 µs (0.395×) | 1.59 µs (0.293×) | 729 ns (0.153×) | 147 ns (1.33×) | 13.8 µs (0.688×) | 376 ns (0.718×) |
+| sect409k1 | 141 µs (0.178×) | 209 µs (0.131×) | 5.09 ms (0.115×) | 146 µs (0.186×) | 1.99 µs (0.240×) | 1.10 µs (0.153×) | 159 ns (1.07×) | 15.2 µs (0.453×) | 441 ns (0.540×) |
+| sect409r1 | 240 µs (0.269×) | 311 µs (0.175×) | 5.10 ms (0.116×) | 222 µs (0.253×) | 1.99 µs (0.242×) | 1.12 µs (0.156×) | 158 ns (1.08×) | 15.9 µs (0.479×) | 439 ns (0.547×) |
+| sect571k1 | 324 µs (0.187×) | 501 µs (0.144×) | 13.0 ms (0.149×) | 344 µs (0.201×) | 4.25 µs (0.346×) | 2.59 µs (0.247×) | 150 ns (0.833×) | 46.0 µs (0.727×) | 603 ns (0.490×) |
+| sect571r1 | 620 µs (0.316×) | 793 µs (0.201×) | 13.0 ms (0.148×) | 566 µs (0.291×) | 4.19 µs (0.346×) | 2.60 µs (0.247×) | 155 ns (0.847×) | 46.0 µs (0.717×) | 609 ns (0.494×) |
+
+Over all 18 curves, products take 0.178 to 0.428 of OpenSSL's time, `mul_add` 0.131 to 0.361, `multi_mul` of 64 terms 0.115 to 0.233, `in_subgroup` 0.186 to 0.395, a sum and its coordinates 0.240 to 0.467, the compressed encoding 0.138 to 0.247 and its decoding 0.369 to 0.727.
+
+With no reference that does the same work (OpenSSL's `EC_POINT_mul(G, k)` keeps no table of the generator, its ladder also recovers `y`, and its sums, doublings and doublings for the cofactor are affine), this crate's times:
+
+| Curve | `mul_generator` | `prepared.mul` | `x_mul` | `+` | `double` | `coordinates` | `clear_cofactor` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| sect113r1 | 10.7 µs | 10.6 µs | 14.2 µs | 499 ns | 291 ns | 275 ns | 397 ns |
+| sect163k1 | 19.3 µs | 19.2 µs | 30.8 µs | 576 ns | 281 ns | 417 ns | 631 ns |
+| sect163r2 | 19.3 µs | 19.0 µs | 34.9 µs | 569 ns | 295 ns | 422 ns | 660 ns |
+| sect233k1 | 26.4 µs | 26.2 µs | 41.0 µs | 571 ns | 282 ns | 560 ns | 671 ns |
+| sect233r1 | 26.9 µs | 26.5 µs | 46.3 µs | 575 ns | 295 ns | 540 ns | 548 ns |
+| sect283k1 | 46.7 µs | 46.2 µs | 136 µs | 809 ns | 383 ns | 754 ns | 1.74 µs |
+| sect283r1 | 47.4 µs | 46.9 µs | 145 µs | 810 ns | 418 ns | 757 ns | 1.35 µs |
+| sect409k1 | 67.8 µs | 67.5 µs | 196 µs | 855 ns | 402 ns | 1.11 µs | 2.02 µs |
+| sect409r1 | 69.3 µs | 68.5 µs | 209 µs | 843 ns | 436 ns | 1.11 µs | 1.58 µs |
+| sect571k1 | 177 µs | 176 µs | 524 µs | 1.49 µs | 611 ns | 2.66 µs | 3.94 µs |
+| sect571r1 | 175 µs | 171 µs | 572 µs | 1.43 µs | 683 ns | 2.66 µs | 3.27 µs |
+
+### Hashing to curves
+
+Against RustCrypto's `p256` 0.13.2, `p384` 0.13.1, `p521` 0.13.3 and `k256` 0.13.4 (their `hash2curve`, whose SHA-2 is `sha2` 0.10.9's portable code) and curve25519-dalek 5.0.0 (`EdwardsPoint::hash_to_curve` and `encode_to_curve`, SHA-512 by `sha2` 0.11.1 with the ARMv8 instructions), on a message of 32 bytes and the tags of the RFC's vectors; curve25519's suites have no reference here, nor have edwards25519's `hash_to_field` and `map_to_curve` (dalek keeps them private):
+
+| Suite | `hash_to_curve` | `encode_to_curve` | `hash_to_field`, 2 elements | `map_to_curve` |
+| --- | ---: | ---: | ---: | ---: |
+| P-256 | 7.86 µs (0.288× p256) | 3.80 µs (0.275× p256) | 452 ns (0.426× p256) | 3.48 µs (0.268× p256) |
+| P-384 | 22.4 µs (0.204× p384) | 13.6 µs (0.248× p384) | 630 ns (0.699× p384) | 11.1 µs (0.206× p384) |
+| P-521 | 21.7 µs (0.286× p521) | 11.4 µs (0.295× p521) | 723 ns (0.731× p521) | 12.0 µs (0.317× p521) |
+| secp256k1 | 9.17 µs (0.320× k256) | 4.54 µs (0.314× k256) | 410 ns (0.398× k256) | 4.56 µs (0.329× k256) |
+| curve25519 | 8.76 µs | 4.32 µs | 561 ns | 3.27 µs |
+| edwards25519 | 9.04 µs (1.75× dalek) | 4.59 µs (1.66× dalek) | 562 ns | 4.29 µs |
+
+On the NIST curves and secp256k1, `hash_to_curve`, `encode_to_curve` and `map_to_curve` take 0.204 to 0.329 of RustCrypto's time, and `hash_to_field` 0.398 to 0.731.
+
+### Where the references are faster
+
+Every case above 1.05 times the fastest reference that does the same work, by cause:
+
+- **`to_bytes` on the binary curves up to 409 bits** (1.07 to 1.89 times OpenSSL's, 120 to 159 ns against 71.1 to 148 ns): some seven allocations — the affine coordinates copied, a vector for each coordinate's bytes, the output and its growth — and a loop byte by byte, where OpenSSL writes into the caller's buffer; at 571 bits it is 0.833 and 0.847 of OpenSSL's time.
+- **`point_from_bytes` of the uncompressed form on sect113r1 and sect113r2** (1.44 and 1.41 times OpenSSL's, 248 and 240 ns against 172 and 170 ns): the coordinates are parsed into vectors and the equation checked on the binary field's elements, each a vector, a fixed cost that OpenSSL undercuts at two words; from 131 bits on, the decoding takes 0.490 to 0.983 of OpenSSL's time.
+- **edwards25519's `hash_to_curve` and `encode_to_curve`** (1.75 and 1.66 times dalek's): the maps are the plain ones of section 6, with their inversions, Elligator 2 to curve25519 and then RFC 7748's rational map, and each point is checked on its curve as it is built (see the method above); dalek's is the straight-line map in its own field arithmetic.

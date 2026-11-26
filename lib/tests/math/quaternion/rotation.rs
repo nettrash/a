@@ -211,6 +211,35 @@ fn rotation_vectors_agree_with_scipy() {
     );
 }
 
+/// The largest errors of `rotate` and of the round trip `rotate_inverse(rotate(v))` against
+/// `q·v·q⁻¹` in 160 bits, in units of `ε·|v|`, over `count` quaternions of norms `2^±500` (seeded).
+fn rotate_errors(seed: u64, count: usize) -> [f64; 2] {
+    let mut rng = Rng::new(seed);
+    let mut worst = [0.0f64; 2];
+    for _ in 0..count {
+        let x = rng.quaternion() * rng.log_uniform(-500.0, 500.0).abs();
+        let v = [0, 1, 2].map(|_| rng.signed());
+        let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let want = reference::rotate(x, v);
+        worst[0] = worst[0].max(vec_dist(x.rotate(v), want) / (n * EPS));
+        let back = x.rotate_inverse(x.rotate(v));
+        worst[1] = worst[1].max(vec_dist(back, v) / (n * EPS));
+    }
+    worst
+}
+
+#[test]
+#[ignore = "a heavier sweep: run it in release"]
+fn a_heavier_sweep_of_rotate_against_160_bits() {
+    // 200,000 quaternions more than the test below: the largest errors seen, which the page
+    // quotes as observed maxima, not as bounds.
+    let worst = rotate_errors(31, 200_000);
+    eprintln!(
+        "rotate over 200,000 quaternions of norms 2^±500, largest errors in ε·|v| (rotate, round trip): {worst:?}"
+    );
+    assert!(worst[0] <= 6.0 && worst[1] <= 10.0, "{worst:?}");
+}
+
 #[test]
 fn rotating_vectors_agrees_with_scipy_and_with_q_v_q_inverse_in_160_bits() {
     let mut rng = Rng::new(7);

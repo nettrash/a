@@ -21,7 +21,7 @@ fn unit_roundoff<R: Float>() -> R {
 /// subdiagonal `e`, ascending, into `d`, by the QL and QR algorithm without square roots of
 /// Pal, Walker and Kahan, as LAPACK's `dsterf`; `e` is destroyed. False if an eigenvalue takes
 /// more than `30 · n` iterations.
-pub(super) fn values<R: Float>(d: &mut [R], e: &mut [R]) -> bool {
+pub(crate) fn values<R: Float>(d: &mut [R], e: &mut [R]) -> bool {
     let n = d.len();
     let zero = R::ZERO;
     let eps = unit_roundoff::<R>();

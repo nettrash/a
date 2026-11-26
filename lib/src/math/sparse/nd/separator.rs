@@ -68,7 +68,11 @@ impl Weighted {
 
     /// The neighbours of `v` with the weights of the edges to them.
     fn edges(&self, v: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
-        (self.offsets[v]..self.offsets[v + 1]).map(|k| (self.targets[k], self.edge_weights[k]))
+        let (begin, end) = (self.offsets[v], self.offsets[v + 1]);
+        self.targets[begin..end]
+            .iter()
+            .copied()
+            .zip(self.edge_weights[begin..end].iter().copied())
     }
 
     /// The number of neighbours of `v`.
@@ -110,8 +114,21 @@ pub(super) fn separate(g: Weighted) -> Vec<u8> {
 /// times its share of the coarsest graph, so that no single vertex is too heavy to balance.
 fn coarsen(g: &Weighted) -> (Weighted, Vec<usize>) {
     let n = g.len();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_unstable_by_key(|&v| (g.degree(v), v));
+    // From the fewest neighbours up, vertices of one degree in their order: a counting sort.
+    let most = (0..n).map(|v| g.degree(v)).max().unwrap_or(0);
+    let mut first = vec![0usize; most + 2];
+    for v in 0..n {
+        first[g.degree(v) + 1] += 1;
+    }
+    for d in 0..=most {
+        first[d + 1] += first[d];
+    }
+    let mut order = vec![0usize; n];
+    for v in 0..n {
+        let d = g.degree(v);
+        order[first[d]] = v;
+        first[d] += 1;
+    }
     let heaviest = (3 * g.total).div_ceil(2 * COARSEST).max(2);
     let mut mate = vec![NONE; n];
     for &v in &order {
@@ -284,16 +301,59 @@ fn score(g: &Weighted, weight: &[usize; 3]) -> (usize, usize, usize) {
     )
 }
 
-/// What moving the separator vertex `v` into the part `to` takes out of the separator: its own
-/// weight, less that of its neighbours in the other part, which move into the separator.
-fn gain(g: &Weighted, side: &[u8], v: usize, to: u8) -> i64 {
-    let other = 1 - to;
-    let pulled: usize = g
-        .edges(v)
-        .filter(|&(u, _)| side[u] == other)
-        .map(|(u, _)| g.weights[u])
-        .sum();
-    g.weights[v] as i64 - pulled as i64
+/// The weights of the neighbours of the vertices in each part, kept up to date while a refinement
+/// moves vertices from part to part, so that a gain costs no walk over the neighbours.
+///
+/// A vertex's are summed when its gain is first asked for, and from then on every vertex that
+/// changes sides adds its weight to, or takes it from, those of its neighbours that have them.
+/// The gains are those summed afresh, to the unit.
+struct Near {
+    /// The weights of the neighbours in `LEFT` and in `RIGHT`, of the vertices that have them.
+    weights: Vec<[usize; 2]>,
+    /// Whether each vertex has them.
+    known: Vec<bool>,
+}
+
+impl Near {
+    fn new(n: usize) -> Self {
+        Self {
+            weights: vec![[0; 2]; n],
+            known: vec![false; n],
+        }
+    }
+
+    /// What moving the separator vertex `v` into the part `to` takes out of the separator: its
+    /// own weight, less that of its neighbours in the other part, which move into the separator.
+    fn gain(&mut self, g: &Weighted, side: &[u8], v: usize, to: u8) -> i64 {
+        if !self.known[v] {
+            let mut near = [0usize; 2];
+            for (u, _) in g.edges(v) {
+                let s = side[u];
+                if s != CUT {
+                    near[usize::from(s)] += g.weights[u];
+                }
+            }
+            self.weights[v] = near;
+            self.known[v] = true;
+        }
+        g.weights[v] as i64 - self.weights[v][usize::from(1 - to)] as i64
+    }
+
+    /// Records that `u` went from the part (or the separator) `from` to `to`.
+    fn moved(&mut self, g: &Weighted, u: usize, from: u8, to: u8) {
+        let w = g.weights[u];
+        for (x, _) in g.edges(u) {
+            if self.known[x] {
+                let near = &mut self.weights[x];
+                if from != CUT {
+                    near[usize::from(from)] -= w;
+                }
+                if to != CUT {
+                    near[usize::from(to)] += w;
+                }
+            }
+        }
+    }
 }
 
 /// Improves the cut `side` of `g` by passes of the vertex-separator Fiduccia-Mattheyses method.
@@ -303,36 +363,47 @@ fn gain(g: &Weighted, side: &[u8], v: usize, to: u8) -> i64 {
 /// it; those of its neighbours that were in the other part join the separator. Moves that gain
 /// nothing are made too, which lets a pass climb out of a local minimum, until a number of them
 /// in a row has brought nothing; then the pass is undone back to the best cut it went through.
+/// The gains come from [`Near`], kept up to date as vertices change sides, and a vertex whose
+/// gain a move leaves as it was keeps its entry in the heap.
 fn refine(g: &Weighted, side: &mut [u8]) {
     let n = g.len();
     let largest = (3 * g.total).div_ceil(5);
     let patience = (n / 50).clamp(25, 200);
     let mut weight = weights_of(g, side);
-    let mut locked = vec![false; n];
+    // The vertices moved in a pass are locked for the rest of it: marked with the pass.
+    let mut locked = vec![0usize; n];
     // Every gain pushed for a vertex and a part is stamped, and only the latest stamp counts:
     // the heaps are updated by pushing anew and skipping what is stale.
     let mut stamp = vec![[0u64; 2]; n];
     let mut heaps: [BinaryHeap<(i64, Reverse<usize>, u64)>; 2] =
         [BinaryHeap::new(), BinaryHeap::new()];
     let mut touched = vec![NONE; n];
+    let mut near = Near::new(n);
+    // The pass in which each vertex last had its gains pushed, and the gains its entries hold:
+    // a vertex of the separator not locked has one entry in each heap that counts, and one whose
+    // gain has not changed needs no new one.
+    let mut entered = vec![0usize; n];
+    let mut held = vec![[0i64; 2]; n];
     let mut moves: Vec<(usize, u8, usize)> = Vec::new();
     let mut pulled: Vec<usize> = Vec::new();
     let mut affected: Vec<usize> = Vec::new();
     let mut generation = 0;
-    for _ in 0..PASSES {
-        locked.fill(false);
+    // The separator, in no particular order: the heaps give out the moves by their keys alone,
+    // which no two entries share, whatever order they were pushed in.
+    let mut cut: Vec<usize> = (0..n).filter(|&v| side[v] == CUT).collect();
+    for pass in 1..=PASSES {
         for heap in &mut heaps {
             heap.clear();
         }
         moves.clear();
         pulled.clear();
-        for v in 0..n {
-            if side[v] == CUT {
-                for to in [LEFT, RIGHT] {
-                    let t = usize::from(to);
-                    stamp[v][t] += 1;
-                    heaps[t].push((gain(g, side, v, to), Reverse(v), stamp[v][t]));
-                }
+        for &v in &cut {
+            entered[v] = pass;
+            for to in [LEFT, RIGHT] {
+                let t = usize::from(to);
+                stamp[v][t] += 1;
+                held[v][t] = near.gain(g, side, v, to);
+                heaps[t].push((held[v][t], Reverse(v), stamp[v][t]));
             }
         }
         let start = score(g, &weight);
@@ -346,7 +417,7 @@ fn refine(g: &Weighted, side: &mut [u8]) {
             'parts: for to in [first, 1 - first] {
                 let t = usize::from(to);
                 while let Some(&(gain, Reverse(v), s)) = heaps[t].peek() {
-                    if side[v] != CUT || locked[v] || s != stamp[v][t] {
+                    if side[v] != CUT || locked[v] == pass || s != stamp[v][t] {
                         heaps[t].pop();
                         continue;
                     }
@@ -369,7 +440,8 @@ fn refine(g: &Weighted, side: &mut [u8]) {
             };
             let (t, other) = (usize::from(to), 1 - to);
             side[v] = to;
-            locked[v] = true;
+            near.moved(g, v, CUT, to);
+            locked[v] = pass;
             weight[2] -= g.weights[v];
             weight[t] += g.weights[v];
             let begin = pulled.len();
@@ -380,6 +452,9 @@ fn refine(g: &Weighted, side: &mut [u8]) {
                     weight[2] += g.weights[u];
                     pulled.push(u);
                 }
+            }
+            for &u in &pulled[begin..] {
+                near.moved(g, u, other, CUT);
             }
             moves.push((v, to, begin));
             // The gains that changed: of the separator neighbours of the moved vertex, of the
@@ -402,11 +477,18 @@ fn refine(g: &Weighted, side: &mut [u8]) {
                 }
             }
             for &x in &affected {
-                if !locked[x] {
+                if locked[x] != pass {
+                    // A vertex that has just joined the separator has no entry yet in this pass.
+                    let fresh = entered[x] != pass;
+                    entered[x] = pass;
                     for to in [LEFT, RIGHT] {
                         let t = usize::from(to);
-                        stamp[x][t] += 1;
-                        heaps[t].push((gain(g, side, x, to), Reverse(x), stamp[x][t]));
+                        let gain = near.gain(g, side, x, to);
+                        if fresh || gain != held[x][t] {
+                            stamp[x][t] += 1;
+                            held[x][t] = gain;
+                            heaps[t].push((gain, Reverse(x), stamp[x][t]));
+                        }
                     }
                 }
             }
@@ -428,16 +510,30 @@ fn refine(g: &Weighted, side: &mut [u8]) {
             let other = usize::from(1 - to);
             for &u in &pulled[begin..] {
                 side[u] = 1 - to;
+                near.moved(g, u, CUT, 1 - to);
                 weight[2] -= g.weights[u];
                 weight[other] += g.weights[u];
             }
             pulled.truncate(begin);
             side[v] = CUT;
+            near.moved(g, v, to, CUT);
             weight[usize::from(to)] -= g.weights[v];
             weight[2] += g.weights[v];
         }
         if best >= start {
             break;
         }
+        // The separator now: what it was and what the kept moves pulled into it, less what they
+        // moved out, each vertex once.
+        generation += 1;
+        let mark = generation;
+        let mut now = Vec::with_capacity(cut.len());
+        for &x in cut.iter().chain(&pulled) {
+            if side[x] == CUT && touched[x] != mark {
+                touched[x] = mark;
+                now.push(x);
+            }
+        }
+        cut = now;
     }
 }

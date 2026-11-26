@@ -283,6 +283,18 @@ impl<T: Float> Quaternion<T> {
         Quaternion::new(q.w / n, q.x / n, q.y / n, q.z / n)
     }
 
+    /// `self` divided by its norm, as [`normalize`](Self::normalize) gives it, with a unit
+    /// quaternion returned as it is: dividing by a norm of exactly 1 changes nothing. (Even with
+    /// half of random unit quaternions of norm 1 exactly, the test pays for itself.)
+    #[inline]
+    pub(super) fn unit(self) -> Self {
+        if self.norm_sqr() == T::ONE {
+            self
+        } else {
+            self.normalize()
+        }
+    }
+
     /// The inverse `self⁻¹ = conj(self) / |self|²`, with `self·self⁻¹ = self⁻¹·self = 1`; it is
     /// `1 / self`, with the scaling and the special values of the quotient: the reciprocal of a
     /// zero has the real part `1/w` (an infinity of the sign of the zero `w`) and NaN for the

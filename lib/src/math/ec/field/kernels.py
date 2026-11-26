@@ -250,8 +250,178 @@ def p384_sqr():
         L.append(f"csel {t[j]}, {t[j]}, {d[j]}, lo")
     return L, operands('a', a), t[:6]
 
+def redc_row_nc(m, q, T, p, L):
+    """T[0..n] += q m, for T of n + 1 words that the sum does not overflow (a spare top bit of m),
+    which leaves T[0] zero."""
+    n = len(m)
+    for j in range(n):
+        L.append(f"mul {p}, {m[j]}, {q}")
+        L.append(f"{'adds' if j == 0 else 'adcs'} {T[j]}, {T[j]}, {p}")
+    L.append(f"adc {T[n]}, {T[n]}, xzr")
+    for j in range(n):
+        L.append(f"umulh {p}, {m[j]}, {q}")
+        L.append(f"{'adds' if j == 0 else ('adc' if j == n - 1 else 'adcs')} {T[j+1]}, {T[j+1]}, {p}")
+
+def mont_mul_nc(n):
+    """Montgomery's product by rows (CIOS) modulo an m with a spare top bit, m < 2^(64 n - 1): then
+    the sum of a round, t + a b_i + q m, is at most (2 m - 1) 2^64, n + 1 limbs, and t stays below
+    2 m in n limbs, so that no limb above is carried and one subtraction ends it."""
+    if n == 4:
+        a = ['x4', 'x5', 'x6', 'x7']; b = ['x0', 'x1', 'x2', 'x3']; m = ['x8', 'x9', 'x10', 'x11']
+        t = ['x12', 'x13', 'x14', 'x15', 'x16']; p, q, minv = 'x17', 'x20', 'x21'
+        bi = lambda i, L: b[i]
+        inputs = operands('a', a) | operands('b', b) | operands('m', m) | {minv: 'minv'}
+    else:
+        a = ['x4', 'x5', 'x6', 'x7', 'x8', 'x9']; m = ['x10', 'x11', 'x12', 'x13', 'x14', 'x15']
+        t = ['x16', 'x17', 'x20', 'x21', 'x22', 'x23', 'x24']; p, q, minv, bp, br = 'x25', 'x26', 'x27', 'x0', 'x1'
+        def bi(i, L):
+            L.append(f"ldr {br}, [{bp}, #{8 * i}]")
+            return br
+        inputs = operands('a', a) | operands('m', m) | {minv: 'minv', bp: 'b.as_ptr()'}
+    L = []
+    rows_first(a, bi(0, L), t[:n+1], p, L)
+    for i in range(n):
+        if i > 0:
+            # t, n limbs, gets a b_i: the carry out of the low chain makes the new top limb.
+            row_add(a, bi(i, L), t[:n+1], p, L)
+        L.append(f"mul {q}, {t[0]}, {minv}")
+        redc_row_nc(m, q, t[:n+1], p, L)
+        t = t[1:] + t[:1]
+    # t < 2 m in t[0..n]: subtract m into the registers of a, keep t on a borrow.
+    d = a
+    for j in range(n):
+        L.append(f"{'subs' if j == 0 else 'sbcs'} {d[j]}, {t[j]}, {m[j]}")
+    for j in range(n):
+        L.append(f"csel {t[j]}, {t[j]}, {d[j]}, lo")
+    return L, inputs, t[:n]
+
+def mont_sqr_nc(n):
+    """Not generated: measured on an Apple M4 Max it took longer than the product of a by a (19.3 ns
+    against 15.1 for BN254's prime in a chain of squares), its n rounds of reduction a chain of
+    dependent quotients with nothing to overlap them, where the product's rows do.
+
+    Montgomery's square modulo an m with a spare top bit: the 2 n limbs of the square (the
+    triangle doubled, the squares added), n rounds of the reduction on the low half, each
+    (t + q m) / 2^64 in n limbs as t < 2^(64 n) and m < 2^(64 n - 1), then the high half added:
+    below m + a^2 / 2^(64 n) < 2 m, one subtraction."""
+    if n == 4:
+        a = ['x4', 'x5', 'x6', 'x7']; T = ['x8', 'x9', 'x10', 'x11', 'x12', 'x13', 'x14', 'x15']
+        m = ['x16', 'x17', 'x20', 'x21']; p, q, minv, extra = 'x22', 'x23', 'x24', 'x25'
+        inputs = operands('a', a) | operands('m', m) | {minv: 'minv'}
+        L = []
+        triangle4(a, T, p, L)
+        load_m = []
+    else:
+        a = ['x4', 'x5', 'x6', 'x7', 'x8', 'x9']
+        T = ['x10', 'x11', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17', 'x20', 'x21', 'x22', 'x23']
+        m = a  # loaded once the square is made
+        p, q, minv, extra, mp = 'x24', 'x25', 'x26', 'x27', 'x0'
+        inputs = operands('a', a) | {minv: 'minv', mp: 'm.as_ptr()'}
+        L = []
+        triangle(a, T, p, L)
+    double_add_squares(a, T, p, L)
+    if n == 6:
+        for j in range(0, 6, 2):
+            L.append(f"ldp {m[j]}, {m[j+1]}, [{mp}, #{8 * j}]")
+    t = T[:n] + [extra]
+    for _ in range(n):
+        L.append(f"mul {q}, {t[0]}, {minv}")
+        # t + q m into n + 1 limbs, the top one fresh; t[0] becomes zero and is the next fresh one.
+        for j in range(n):
+            L.append(f"mul {p}, {m[j]}, {q}")
+            L.append(f"{'adds' if j == 0 else 'adcs'} {t[j]}, {t[j]}, {p}")
+        L.append(f"cset {t[n]}, cs")
+        for j in range(n):
+            L.append(f"umulh {p}, {m[j]}, {q}")
+            L.append(f"{'adds' if j == 0 else ('adc' if j == n - 1 else 'adcs')} {t[j+1]}, {t[j+1]}, {p}")
+        t = t[1:] + t[:1]
+    hi = T[n:]
+    for j in range(n):
+        L.append(f"{'adds' if j == 0 else 'adcs'} {t[j]}, {t[j]}, {hi[j]}")
+    d = hi
+    for j in range(n):
+        L.append(f"{'subs' if j == 0 else 'sbcs'} {d[j]}, {t[j]}, {m[j]}")
+    for j in range(n):
+        L.append(f"csel {t[j]}, {t[j]}, {d[j]}, lo")
+    return L, inputs, t[:n]
+
 REGS = ['x4','x5','x6','x7','x8','x9','x10','x11','x12']
 B = ['x10', 'x11', 'x12', 'x13', 'x14', 'x15']
+# The double-width arithmetic of the lazy reduction (`Mont::mul_complex`): products of 2 n limbs,
+# sums and differences of them, and Montgomery's reduction of one, for a prime with spare bits.
+W = ['x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9', 'x10', 'x11', 'x12', 'x13',
+     'x14', 'x15', 'x16', 'x17', 'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26', 'x27', 'x28']
+
+def mul_wide(n):
+    """The 2 n limbs of `a b`, by rows: the first row's products, then each row's added one limb up,
+    its carry out the row's new top limb."""
+    a, out = W[:n], W[n:3 * n]
+    if n == 4:
+        b = W[3 * n:4 * n]; p = W[4 * n]
+        bi = lambda i, L: b[i]
+        inputs = operands('a', a) | operands('b', b)
+    else:
+        p, bp, br = W[3 * n], W[3 * n + 1], W[3 * n + 2]
+        def bi(i, L):
+            L.append(f"ldr {br}, [{bp}, #{8 * i}]")
+            return br
+        inputs = operands('a', a) | {bp: 'b.as_ptr()'}
+    L = []
+    rows_first(a, bi(0, L), out[:n + 1], p, L)
+    for i in range(1, n):
+        row_add(a, bi(i, L), out[i:i + n + 1], p, L)
+    return L, inputs, out
+
+def redc_wide(n):
+    """Montgomery's reduction of `t = l + h R`, below `m R`, for an `m` with a spare top bit:
+    `(l + Q m) / R` by the n rounds of the product's reduction on n + 1 limbs, which make it at
+    most `m`, then `+ h`, below `2 m` in n limbs, and one subtraction."""
+    T, h, m = W[:n + 1], W[n + 1:2 * n + 1], W[2 * n + 1:3 * n + 1]
+    q, p, minv = W[3 * n + 1], W[3 * n + 2], W[3 * n + 3]
+    inputs = operands('t', T[:n]) | {r: f"t[{n + i}]" for i, r in enumerate(h)} | operands('m', m) \
+        | {minv: 'minv'}
+    L = [f"mov {T[n]}, xzr"]
+    for i in range(n):
+        L.append(f"mul {q}, {T[0]}, {minv}")
+        redc_row_nc(m, q, T, p, L)
+        # The low limb is zero now: it becomes the top one of the next round.
+        T = T[1:] + T[:1]
+    chain('adds', 'adcs', T[:n], h, L)
+    for j in range(n):
+        L.append(f"{'subs' if j == 0 else 'sbcs'} {h[j]}, {T[j]}, {m[j]}")
+    for j in range(n):
+        L.append(f"csel {T[j]}, {T[j]}, {h[j]}, lo")
+    return L, inputs, T[:n]
+
+def sub_wide(n, modular):
+    """`a - b` in 2 n limbs, `b` read in pairs; `modular`: plus `m R` on a borrow, so that the result
+    is `a - b` modulo `m R` for `a`, `b` below `m R`."""
+    a, bp, t0, t1 = W[:2 * n], W[2 * n], W[2 * n + 1], W[2 * n + 2]
+    inputs = operands('a', a) | {bp: 'b.as_ptr()'}
+    L = []
+    for j in range(0, 2 * n, 2):
+        L.append(f"ldp {t0}, {t1}, [{bp}, #{8 * j}]")
+        L.append(f"{'subs' if j == 0 else 'sbcs'} {a[j]}, {a[j]}, {t0}")
+        L.append(f"sbcs {a[j + 1]}, {a[j + 1]}, {t1}")
+    if modular:
+        mp, mask = W[2 * n + 3], W[2 * n + 4]
+        inputs |= {mp: 'm.as_ptr()'}
+        L.append(f"csetm {mask}, cc")
+        for j in range(0, n, 2):
+            L.append(f"ldp {t0}, {t1}, [{mp}, #{8 * j}]")
+            L.append(f"and {t0}, {t0}, {mask}")
+            L.append(f"and {t1}, {t1}, {mask}")
+            L.append(f"{'adds' if j == 0 else 'adcs'} {a[n + j]}, {a[n + j]}, {t0}")
+            L.append(f"adcs {a[n + j + 1]}, {a[n + j + 1]}, {t1}")
+    return L, inputs, a
+
+def add_plain(n):
+    """`a + b` in n limbs, not reduced: for `a`, `b` below `m` and `2 m < R`."""
+    a, b = W[:n], W[n:2 * n]
+    L = []
+    chain('adds', 'adcs', a, b, L)
+    return L, operands('a', a) | operands('b', b), a
+
 B9 = ['x13', 'x14', 'x15', 'x17', 'x20', 'x21', 'x22', 'x23', 'x24']
 M = ['x16', 'x17', 'x20', 'x21', 'x22', 'x23']
 
@@ -319,7 +489,7 @@ def mont_sub(n):
         L.append(f"csel {r[j]}, {b[j]}, {r[j]}, ne")
     return L, operands('a', r) | operands('b', b) | operands('m', m), r
 
-def registers(name, doc, args, kernel):
+def registers(name, doc, args, kernel, readonly=False):
     """A kernel on registers: `kernel` gives the lines, the registers that take the operands' limbs
     and those of the result, the low limb first; every other register it names is a scratch one.
     Each register becomes an operand of its own for the compiler to place, as fixed registers left
@@ -328,6 +498,8 @@ def registers(name, doc, args, kernel):
     used = set(re.findall(r"\bx\d+\b", "\n".join(lines))) | set(inputs) | set(outputs)
     written = {l.split()[1].rstrip(",") for l in lines
                if " " in l and l.split()[0] not in ("cmn", "cmp", "tst") and not l.startswith("b.")}
+    # `ldp` writes its first two registers.
+    written |= {l.split()[2].rstrip(",") for l in lines if l.startswith("ldp ")}
     ops = []
     for r in sorted(used, key=lambda x: int(x[1:])):
         if r in inputs and r in outputs:
@@ -344,16 +516,19 @@ def registers(name, doc, args, kernel):
     body = ",\n".join(f'            "{re.sub(r"\b(x\d+)\b", r"{\1}", l)}"' for l in lines)
     ops = "\n".join(f"            {o}," for o in ops)
     docs = "\n".join(f"/// {d}" if d else "///" for d in doc)
+    safety = ("the block reads the limbs of the arrays whose pointers it takes, which their references\n"
+              "    // hold for it, and writes registers only." if readonly else
+              "the block reads and writes registers only.")
     return f'''{docs}
 #[inline(always)]
 pub(super) fn {name}({args}) -> [u64; {n}] {{
     let mut r = [0; {n}];
-    // SAFETY: the block reads and writes registers only.
+    // SAFETY: {safety}
     unsafe {{
         asm!(
 {body},
 {ops}
-            options(pure, nomem, nostack),
+            options(pure, {'readonly' if readonly else 'nomem'}, nostack),
         );
     }}
     r
@@ -395,6 +570,11 @@ HEAD = '''//! The aarch64 kernels of the curves' fields, in inline assembly. **T
 //! - [`pseudo_add_4`] and its like fold a carry back as `f`; [`mont_add_4`] and its like compare
 //!   with the prime, and their subtractions take the difference or the difference plus the prime,
 //!   the second chain a step behind the first, by the borrow.
+//! - [`mont_mul_nc_4`], [`mont_mul_nc_6`]: Montgomery's product by rows for a prime with a spare
+//!   top bit, which drops the carries above the rows.
+//! - [`mul_wide_4`], [`redc_wide_4`], [`sub_wide_4`], [`sub_wide_mod_4`], [`add_plain_4`] and those
+//!   of six limbs: the double-width values of a lazy reduction, which sums and differences of
+//!   products before one reduction of the result (`Mont::mul_complex`).
 
 use core::arch::asm;
 '''
@@ -431,5 +611,27 @@ def main():
             f"{a}, {b}, m: &[u64; {n}]", mont_add(n)))
         out.append(registers(f"mont_sub_{n}", [f"`a - b` modulo `m`, for `a` and `b` below `m`."],
             f"{a}, {b}, m: &[u64; {n}]", mont_sub(n)))
+    for n in (4, 6):
+        a, b = {4: (A4, B4), 6: (A6, B6)}[n]
+        out.append(registers(f"mont_mul_nc_{n}",
+            [f"`a b / 2^{64*n}` modulo `m`, below it, for `a` and `b` below it and `m` below `2^{64*n-1}`;",
+             "`minv` is `-1 / m` modulo `2^64`."],
+            f"{a}, {b}, m: &[u64; {n}], minv: u64", mont_mul_nc(n), readonly=(n == 6)))
+    for n in (4, 6):
+        a, b = {4: (A4, B4), 6: (A6, B6)}[n]
+        w = f"&[u64; {2 * n}]"
+        out.append(registers(f"mul_wide_{n}", [f"The {2 * n} limbs of `a b`."],
+            f"{a}, {b}", mul_wide(n), readonly=(n == 6)))
+        out.append(registers(f"redc_wide_{n}",
+            [f"`t / 2^{64*n}` modulo `m`, below it, for `t` below `m 2^{64*n}` and `m` below `2^{64*n-1}`;",
+             "`minv` is `-1 / m` modulo `2^64`."],
+            f"t: {w}, m: &[u64; {n}], minv: u64", redc_wide(n)))
+        out.append(registers(f"sub_wide_{n}", [f"`a - b` in {2 * n} limbs, for `a` at least `b`."],
+            f"a: {w}, b: {w}", sub_wide(n, False), readonly=True))
+        out.append(registers(f"sub_wide_mod_{n}",
+            [f"`a - b` modulo `m 2^{64*n}`, for `a` and `b` below it."],
+            f"a: {w}, b: {w}, m: &[u64; {n}]", sub_wide(n, True), readonly=True))
+        out.append(registers(f"add_plain_{n}", [f"`a + b`, not reduced, for a sum below `2^{64*n}`."],
+            f"{a}, {b}", add_plain(n)))
     sys.stdout.write("\n".join(out))
 main()

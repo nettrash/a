@@ -73,9 +73,10 @@ const STACK_X: usize = 512;
 /// Measured on an Apple M4 Max by the bench's `calibrate` (`radix` the median of the four types,
 /// `slow` and `odd` per type from its lengths `11·2^k`, `13·2^k`, primes and odd real lengths,
 /// `mac` from sweeps of the direct path near the crossover, where its taps are longer than the
-/// fit of `calibrate` sees): `fft`, `call`, `plan`, `plan_call`, `pass`, `radix`, `slow` and `odd`
-/// are to be measured again whenever the transforms change, `mac`, `copy` and `direct` whenever
-/// the kernels do. Planning is charged at [`PLAN_SHARE`].
+/// fit of `calibrate` sees), and again for v0.2's final transforms and kernels (below the
+/// constants): `fft`, `call`, `plan`, `plan_call`, `pass`, `radix`, `slow` and `odd` are to be
+/// measured again whenever the transforms change, `mac`, `copy` and `direct` whenever the kernels
+/// do. Planning is charged at [`PLAN_SHARE`].
 pub struct Costs {
     /// A product added into a sum by the direct kernels, per output and tap.
     mac: f64,
@@ -113,16 +114,34 @@ pub struct Costs {
 /// keeps both within about 1.6 (2.0 for repeated `f32`), the geometric means within 1.03.
 const PLAN_SHARE: f64 = 0.5;
 
+// Measured again on an Apple M4 Max for the final transforms and kernels of v0.2: the direct
+// path's times (64 to 30,000 values against 5 to 384 taps) fit `mac` 0.0175, 0.0346, 0.0726 and
+// 0.139 ns, `copy` 0.038, 0.056, 0.091 and 0.35 and `direct` 45, 56, 59 and 77 (`f32`, `f64`,
+// `Complex<f32>`, `Complex<f64>`); the mean of a forward and an inverse transform of the smooth
+// lengths from 64 to 65,536 fits `fft` 0.043, 0.080, 0.080 and 0.153 (0.78 to 0.81 of the
+// constants before) with the weights of 3, 5 and 7 at about 2.25, 2.95 and 3.7, and planning
+// 64 to 2048 values `plan_call` 375, 306, 315 and 210 and `plan` 1.66, 2.24, 1.72 and 2.17. For
+// `f32`, `f64` and `Complex<f32>` the constants below take the direct path's fitted values and,
+// for the transforms, the constants before scaled by 0.85, 0.90 and 0.87, which keeps the
+// transform lengths they choose: against the constants before (the same code alternated, plans
+// kept, two runs) the shapes whose path changes take 0.51 to 0.75 of their time and no shape
+// measured more than 1.04 of it. `Complex<f64>` keeps the constants before. The fitted values,
+// or smaller factors, move the switch further (0.49 to 0.95 of the time on the shapes they
+// change) but slow others down: a lower `fft` weakens the bound that skips the search of the
+// transform lengths, so that small direct convolutions pay that search (about 0.2 µs: 1.15 to
+// 1.76 times at 200 × 12 in `Complex<f32>`, 1500 × 32 in `f64` and the circular `Complex<f64>`
+// of 16), and the fitted weights choose lengths up to 1.15 times slower inside overlap-add
+// (powers of two of 2048 in batches).
 /// `f32`, real.
 const COSTS_F32: Costs = Costs {
-    mac: 0.019,
-    copy: 0.09,
-    direct: 100.0,
-    fft: 0.055,
-    call: 16.0,
-    plan: 1.32,
-    plan_call: 500.0,
-    pass: 0.5,
+    mac: 0.0175,
+    copy: 0.038,
+    direct: 45.0,
+    fft: 0.04675,
+    call: 13.6,
+    plan: 1.122,
+    plan_call: 425.0,
+    pass: 0.425,
     radix: [2.1, 2.4, 3.0],
     slow: [4.9, 4.4, 2.5],
     odd: 2.7,
@@ -130,14 +149,14 @@ const COSTS_F32: Costs = Costs {
 
 /// `f64`, real.
 const COSTS_F64: Costs = Costs {
-    mac: 0.036,
-    copy: 0.13,
-    direct: 100.0,
-    fft: 0.102,
-    call: 12.0,
-    plan: 1.69,
-    plan_call: 400.0,
-    pass: 0.6,
+    mac: 0.0346,
+    copy: 0.056,
+    direct: 56.0,
+    fft: 0.0918,
+    call: 10.8,
+    plan: 1.521,
+    plan_call: 360.0,
+    pass: 0.54,
     radix: [2.1, 2.4, 3.0],
     slow: [5.6, 9.5, 2.3],
     odd: 1.6,
@@ -145,14 +164,14 @@ const COSTS_F64: Costs = Costs {
 
 /// `Complex<f32>`.
 const COSTS_C32: Costs = Costs {
-    mac: 0.072,
-    copy: 0.17,
-    direct: 100.0,
-    fft: 0.1,
-    call: 10.0,
-    plan: 2.26,
-    plan_call: 200.0,
-    pass: 0.8,
+    mac: 0.0726,
+    copy: 0.091,
+    direct: 59.0,
+    fft: 0.087,
+    call: 8.7,
+    plan: 1.9662,
+    plan_call: 174.0,
+    pass: 0.696,
     radix: [2.1, 2.4, 3.0],
     slow: [4.8, 6.9, 1.2],
     odd: 1.0,
@@ -193,6 +212,40 @@ unsafe fn fir<T: FftFloat>(x: *const T, taps: *const T, nt: usize, y: *mut T, ny
             kernels::fir_f32(x.cast(), taps.cast(), nt, y.cast(), ny)
         } else {
             kernels::fir_f64(x.cast(), taps.cast(), nt, y.cast(), ny)
+        }
+    }
+}
+
+/// The real direct kernel of `T` for `1 ≤ nt ≤ 4` taps.
+///
+/// # Safety
+///
+/// `x` must be valid for reads of `ny + nt − 1` values, `taps` of `nt` and `y` for writes of `ny`.
+#[inline]
+unsafe fn fir_few<T: FftFloat>(x: *const T, taps: *const T, nt: usize, y: *mut T, ny: usize) {
+    // SAFETY: forwarded; `T` is `f32` or `f64`.
+    unsafe {
+        if is::<T, f32>() {
+            kernels::fir_few_f32(x.cast(), taps.cast(), nt, y.cast(), ny)
+        } else {
+            kernels::fir_few_f64(x.cast(), taps.cast(), nt, y.cast(), ny)
+        }
+    }
+}
+
+/// The complex direct kernel of `T` for `1 ≤ nt ≤ 4` taps, the counts in complex values.
+///
+/// # Safety
+///
+/// As for [`fir_few`], in complex values.
+#[inline]
+unsafe fn firc_few<T: FftFloat>(x: *const T, taps: *const T, nt: usize, y: *mut T, ny: usize) {
+    // SAFETY: forwarded; `T` is `f32` or `f64`.
+    unsafe {
+        if is::<T, f32>() {
+            kernels::firc_few_f32(x.cast(), taps.cast(), nt, y.cast(), ny)
+        } else {
+            kernels::firc_few_f64(x.cast(), taps.cast(), nt, y.cast(), ny)
         }
     }
 }
@@ -377,6 +430,13 @@ pub(crate) mod sealed {
         /// `x` must be valid for reads of `ny + nt − 1 + PAD` values, `taps` of `nt` and `y` for
         /// writes of `ny`.
         unsafe fn fir(x: *const Self, taps: *const Self, nt: usize, y: *mut Self, ny: usize);
+        /// The direct kernel for `1 ≤ nt ≤ 4` taps: as [`fir`](Self::fir), `x` valid for reads
+        /// of `ny + nt − 1` values only.
+        ///
+        /// # Safety
+        ///
+        /// As for [`fir`](Self::fir), without the padding.
+        unsafe fn fir_few(x: *const Self, taps: *const Self, nt: usize, y: *mut Self, ny: usize);
     }
 }
 
@@ -426,6 +486,10 @@ impl<T: FftFloat> sealed::Sample for T {
         // SAFETY: the caller's.
         unsafe { fir(x, taps, nt, y, ny) }
     }
+    unsafe fn fir_few(x: *const T, taps: *const T, nt: usize, y: *mut T, ny: usize) {
+        // SAFETY: the caller's.
+        unsafe { fir_few(x, taps, nt, y, ny) }
+    }
 }
 
 impl<T: FftFloat> sealed::Sample for Complex<T> {
@@ -464,6 +528,10 @@ impl<T: FftFloat> sealed::Sample for Complex<T> {
     unsafe fn fir(x: *const Self, taps: *const Self, nt: usize, y: *mut Self, ny: usize) {
         // SAFETY: the caller's; `Complex` is `repr(C)`, its two parts.
         unsafe { firc::<T>(x.cast(), taps.cast(), nt, y.cast(), ny) }
+    }
+    unsafe fn fir_few(x: *const Self, taps: *const Self, nt: usize, y: *mut Self, ny: usize) {
+        // SAFETY: as for `fir`.
+        unsafe { firc_few::<T>(x.cast(), taps.cast(), nt, y.cast(), ny) }
     }
 }
 
@@ -589,6 +657,11 @@ fn choose<S: Sample>(nl: usize, nt: usize) -> (Path, f64) {
     let len = nl + nt - 1;
     let direct = c.direct + c.copy * len as f64 + c.mac * kernels::mac_scale() * (len * nt) as f64;
     let mut best = (Path::Direct, direct);
+    // Every transform path plans and makes three transform calls at least: below that, without
+    // the logarithm of the bound after it, the direct path is the cheapest.
+    if c.plan_cost(0) + 3.0 * c.call >= direct {
+        return best;
+    }
     // A lower bound of every transform path below, so that its search is skipped when the direct
     // path is cheaper anyway: each has a length `L ≥ 2nt − 1` (the padded product `L ≥ len`,
     // overlap-add `L ≥ 2nt`), plans it, transforms the shorter operand once and transforms the
@@ -632,15 +705,42 @@ fn choose<S: Sample>(nl: usize, nt: usize) -> (Path, f64) {
 
 /// The linear convolution of the sequences `a` and `b`, of lengths at least 1.
 fn linear<S: Sample>(a: Op<'_, S>, b: Op<'_, S>) -> Vec<S> {
+    let len = a.len() + b.len() - 1;
+    let mut c: Vec<S> = Vec::with_capacity(len);
+    // SAFETY: room for the `len` values, each written once before the length is set.
+    unsafe {
+        linear_into(a, b, c.as_mut_ptr());
+        c.set_len(len);
+    }
+    c
+}
+
+/// [`linear`] into the `len(a) + len(b) − 1` values at `y`.
+///
+/// # Safety
+/// `y` must be valid for writing those values (they need not be initialised) and not overlap
+/// the operands.
+unsafe fn linear_into<S: Sample>(a: Op<'_, S>, b: Op<'_, S>, y: *mut S) {
     let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
     let (nl, nt) = (long.len(), short.len());
     let path = choose::<S>(nl, nt).0;
-    match path {
-        Path::Scalar => scalar(long, short),
-        Path::Direct => direct(long, short),
-        Path::Fft { l } => by_fft(long, short, l),
+    // SAFETY: the caller's contract, passed on.
+    unsafe {
+        match path {
+            Path::Scalar => scalar(long, short, y),
+            Path::Direct => direct(long, short, y),
+            Path::Fft { l } => by_fft_into(long, short, l, y),
+        }
     }
 }
+
+/// The most taps of the direct path for which every output is computed in place, without
+/// copies: the outputs that take every tap by the kernel for few taps, the `nt − 1` at either
+/// end by their sums over the values inside.
+// Measured on an Apple M4 Max (1 to 4 taps, 16 to 10⁴ outputs, the four types): the kernels
+// for few taps take 0.5 to 1.0 of the general path's time (1.03 and 1.04 at 19 and 11 outputs
+// of 4 taps in `f32` and `Complex<f32>`); a kernel for more than 4 would hold more registers.
+const FEW_TAPS: usize = 4;
 
 /// The outputs of the direct path computed in place on the longer operand are a multiple of this,
 /// a multiple of the outputs a step of every kernel computes (which then read no value past the
@@ -650,7 +750,10 @@ const INTERIOR: usize = 64;
 /// The linear convolution by the direct kernels: in place on `long` for the outputs to which all
 /// of `short` contributes (a multiple of [`INTERIOR`] of them), and on short copies between
 /// zeros for the rest at either end.
-fn direct<S: Sample>(long: Op<'_, S>, short: Op<'_, S>) -> Vec<S> {
+///
+/// # Safety
+/// As for [`linear_into`].
+unsafe fn direct<S: Sample>(long: Op<'_, S>, short: Op<'_, S>, y: *mut S) {
     // conv(op(u), v) = op(conv(u, op(v))) for op a reversal, a conjugation or both: the kernels
     // read `long` as it is.
     let (rev, conj) = (long.rev, long.conj && !S::real());
@@ -667,8 +770,26 @@ fn direct<S: Sample>(long: Op<'_, S>, short: Op<'_, S>) -> Vec<S> {
     let mut taps_heap = Vec::new();
     let taps = zeros(&mut taps_st, &mut taps_heap, nt);
     short.reversed().write(taps, 0);
-    let mut c: Vec<S> = Vec::with_capacity(len);
-    let y = c.as_mut_ptr();
+    if nt <= FEW_TAPS {
+        // SAFETY: the outputs `nt − 1 ..= nl − 1` read `long` below `nl`; the others are the
+        // sums over the values inside. Each output below `len` is written once (the caller's
+        // `y` has room for them), before the slice of them is made.
+        unsafe {
+            S::fir_few(long.as_ptr(), taps.as_ptr(), nt, y.add(nt - 1), nl + 1 - nt);
+            for k in (0..nt - 1).chain(nl..len) {
+                // The output k: Σ taps[t]·long[k + t − (nt − 1)] for the indices inside.
+                let lo = (nt - 1).saturating_sub(k);
+                let hi = (len - k).min(nt);
+                let mut acc = S::zero();
+                for t in lo..hi {
+                    acc = acc + taps[t] * long[k + t + 1 - nt];
+                }
+                y.add(k).write(acc);
+            }
+            finish(core::slice::from_raw_parts_mut(y, len), rev, conj);
+        }
+        return;
+    }
     let m = (nl + 1 - nt) / INTERIOR * INTERIOR;
     let ends = if m == 0 {
         [(0, len), (len, len)]
@@ -679,7 +800,8 @@ fn direct<S: Sample>(long: Op<'_, S>, short: Op<'_, S>) -> Vec<S> {
     let mut buf_heap = Vec::new();
     // SAFETY: the outputs `nt − 1 .. nt − 1 + m` read `long` below `m + nt − 1 ≤ nl`, as `m` is
     // a multiple of every kernel's step; the others read copies of `ny + nt − 1 + PAD` values.
-    // Each output below `len` is written once, before the length is set.
+    // Each output below `len` is written once (the caller's `y` has room for them), before
+    // the slice of them is made.
     unsafe {
         S::fir(long.as_ptr(), taps.as_ptr(), nt, y.add(nt - 1), m);
         for (k0, k1) in ends {
@@ -690,8 +812,13 @@ fn direct<S: Sample>(long: Op<'_, S>, short: Op<'_, S>) -> Vec<S> {
                 S::fir(buf.as_ptr(), taps.as_ptr(), nt, y.add(k0), k1 - k0);
             }
         }
-        c.set_len(len);
+        finish(core::slice::from_raw_parts_mut(y, len), rev, conj);
     }
+}
+
+/// The outputs `c` of [`direct`] reversed when `rev` and conjugated when `conj`.
+#[inline]
+fn finish<S: Sample>(c: &mut [S], rev: bool, conj: bool) {
     if rev {
         c.reverse();
     }
@@ -700,7 +827,6 @@ fn direct<S: Sample>(long: Op<'_, S>, short: Op<'_, S>) -> Vec<S> {
             *x = x.conj();
         }
     }
-    c
 }
 
 /// `n` zeros, in `stack` when they fit, else in `heap`.
@@ -726,7 +852,10 @@ fn zeros<'a, S: Sample, const N: usize>(
 
 /// The linear convolution by the double loop, for `len(a) ≤ SCALAR_LEN` and
 /// `len(b) ≤ SCALAR_LEN`, on copies on the stack.
-fn scalar<S: Sample>(a: Op<'_, S>, b: Op<'_, S>) -> Vec<S> {
+///
+/// # Safety
+/// As for [`linear_into`].
+unsafe fn scalar<S: Sample>(a: Op<'_, S>, b: Op<'_, S>, out: *mut S) {
     let (mut xs, mut ys) = (
         [MaybeUninit::<S>::uninit(); SCALAR_LEN],
         [MaybeUninit::<S>::uninit(); SCALAR_LEN],
@@ -736,13 +865,20 @@ fn scalar<S: Sample>(a: Op<'_, S>, b: Op<'_, S>) -> Vec<S> {
     let y = zeros(&mut ys, &mut yh, b.len());
     a.write(x, 0);
     b.write(y, 0);
-    let mut c = vec![S::zero(); a.len() + b.len() - 1];
+    let len = a.len() + b.len() - 1;
+    // SAFETY: the caller's contract: room for the `len` values, each written before the slice
+    // of them is made.
+    let c = unsafe {
+        for k in 0..len {
+            out.add(k).write(S::zero());
+        }
+        core::slice::from_raw_parts_mut(out, len)
+    };
     for (i, &u) in x.iter().enumerate() {
         for (c, &v) in c[i..].iter_mut().zip(y.iter()) {
             *c = *c + u * v;
         }
     }
-    c
 }
 
 /// The values a batch of blocks of the overlap-add holds at most, unless one block is longer.
@@ -751,6 +887,21 @@ const BATCH: usize = 65536;
 /// The linear convolution by transforms of the length `l ≥ len(short) + 1`: blocks of
 /// `l − len(short) + 1` values of `long`, each convolved with `short` and added in.
 fn by_fft<S: Sample>(long: Op<'_, S>, short: Op<'_, S>, l: usize) -> Vec<S> {
+    let len = long.len() + short.len() - 1;
+    let mut c: Vec<S> = Vec::with_capacity(len);
+    // SAFETY: room for the `len` values, each written before the length is set.
+    unsafe {
+        by_fft_into(long, short, l, c.as_mut_ptr());
+        c.set_len(len);
+    }
+    c
+}
+
+/// [`by_fft`] into the `len(long) + len(short) − 1` values at `out`.
+///
+/// # Safety
+/// As for [`linear_into`].
+unsafe fn by_fft_into<S: Sample>(long: Op<'_, S>, short: Op<'_, S>, l: usize, out: *mut S) {
     let (nl, nt) = (long.len(), short.len());
     let len = nl + nt - 1;
     let b = l + 1 - nt;
@@ -769,11 +920,18 @@ fn by_fft<S: Sample>(long: Op<'_, S>, short: Op<'_, S>, l: usize) -> Vec<S> {
         S::forward(&plan, &x, &mut spec);
         cmul(&mut spec, &kernel, scale);
         S::inverse(&plan, &spec, &mut x);
-        x.truncate(len);
-        return x;
+        // SAFETY: the caller's contract: room for `len ≤ l` values.
+        unsafe { core::ptr::copy_nonoverlapping(x.as_ptr(), out, len) };
+        return;
     }
     let per = (BATCH / l).clamp(1, blocks);
-    let mut c = vec![S::zero(); len];
+    // SAFETY: the caller's contract: room for the `len` values, zeroed before the slice.
+    let c = unsafe {
+        for k in 0..len {
+            out.add(k).write(S::zero());
+        }
+        core::slice::from_raw_parts_mut(out, len)
+    };
     x.resize(per * l, S::zero());
     let mut spec = vec![Complex::ZERO; per * h];
     let mut j = 0;
@@ -799,7 +957,6 @@ fn by_fft<S: Sample>(long: Op<'_, S>, short: Op<'_, S>, l: usize) -> Vec<S> {
         }
         j += k;
     }
-    c
 }
 
 /// The linear convolution of `a` and `b`: the `len(a) + len(b) − 1` values
@@ -848,6 +1005,61 @@ pub fn correlate<S: Sample>(a: &[S], b: &[S]) -> Vec<S> {
         return Vec::new();
     }
     linear(Op::new(a), Op::new(b).rev_conj())
+}
+
+/// [`convolve`] into `out`, which must hold `len(a) + len(b) − 1` values (none when either is
+/// empty): the same values, without allocating the result. Panics when `out` has another
+/// length.
+///
+/// # Examples
+///
+/// ```
+/// use a::math::fft::convolve_into;
+///
+/// let mut c = [0.0; 5];
+/// convolve_into(&[1.0, 2.0, 3.0], &[0.0, 1.0, 0.5], &mut c);
+/// assert_eq!(c, [0.0, 1.0, 2.5, 4.0, 1.5]);
+/// ```
+#[track_caller]
+pub fn convolve_into<S: Sample>(a: &[S], b: &[S], out: &mut [S]) {
+    into(Op::new(a), Op::new(b), out, "convolve_into");
+}
+
+/// [`correlate`] into `out`, which must hold `len(a) + len(b) − 1` values (none when either is
+/// empty): the same values, without allocating the result. Panics when `out` has another
+/// length.
+///
+/// # Examples
+///
+/// ```
+/// use a::math::fft::correlate_into;
+///
+/// let mut c = [0.0; 5];
+/// correlate_into(&[1.0, 2.0, 3.0], &[0.0, 1.0, 0.5], &mut c);
+/// assert_eq!(c, [0.5, 2.0, 3.5, 3.0, 0.0]);
+/// ```
+#[track_caller]
+pub fn correlate_into<S: Sample>(a: &[S], b: &[S], out: &mut [S]) {
+    into(Op::new(a), Op::new(b).rev_conj(), out, "correlate_into");
+}
+
+#[track_caller]
+fn into<S: Sample>(a: Op<'_, S>, b: Op<'_, S>, out: &mut [S], what: &str) {
+    let len = if a.len() == 0 || b.len() == 0 {
+        0
+    } else {
+        a.len() + b.len() - 1
+    };
+    assert_eq!(
+        out.len(),
+        len,
+        "{what}: the output needs len(a) + len(b) − 1 values"
+    );
+    if len > 0 {
+        // SAFETY: `out` holds the `len` values and does not overlap the operands, which are
+        // shared borrows.
+        unsafe { linear_into(a, b, out.as_mut_ptr()) }
+    }
 }
 
 /// How a circular convolution is computed.

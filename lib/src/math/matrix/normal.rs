@@ -1,36 +1,55 @@
 //! Normal forms of matrices of integers: the Hermite normal form and the Smith normal form, with
 //! their unimodular transformations.
 //!
-//! - The Hermite normal form of the rows is computed modulo the determinant `D` of a nonsingular
-//!   minor of full rank, as Domich, Kannan and Trotter showed it can be (*Hermite normal form
-//!   computation using modulo determinant arithmetic*, Math. Oper. Res. 12, 1987; Cohen, *A
-//!   Course in Computational Algebraic Number Theory*, Algorithm 2.4.8), so that no element grows
-//!   past `D`; the minor is that of the rank profiles, found modulo a prime and proved exactly
-//!   ([`profile`]). The columns outside the profile and the transformation come from exact solutions
-//!   with that minor ([`hermite`]).
-//! - The diagonal of the Smith normal form is computed modulo the same `D` (Cohen, Algorithm
-//!   2.4.14, for any shape and rank), and the form with its transformations by alternating
-//!   Hermite forms of the rows and of the columns, as Kannan and Bachem do (*Polynomial algorithms
-//!   for computing the Smith and Hermite normal forms of an integer matrix*, SIAM J. Comput. 8,
-//!   1979), the divisibility of the diagonal then fixed by steps `diag(a, b) → diag(gcd, lcm)`
-//!   ([`smith`]).
+//! - The Hermite normal form of the rows starts from a nonsingular minor `M` of full rank, that of
+//!   the rank profiles, found modulo a prime and proved exactly ([`profile`]). The form of `M` is
+//!   Pernet and Stein's (*Fast computation of Hermite normal forms of random integer matrices*, J.
+//!   Number Theory 130, 2010): two determinants of order `r − 1` and a solution by Dixon's
+//!   lifting, a form modulo their greatest common divisor, and two rows added ([`pernet`]); the
+//!   other rows are added to it. Small minors, and those the method does not apply to, take the
+//!   form modulo `D = |det M|`, as Domich, Kannan and Trotter showed it can be computed (*Hermite
+//!   normal form computation using modulo determinant arithmetic*, Math. Oper. Res. 12, 1987;
+//!   Cohen, *A Course in Computational Algebraic Number Theory*, Algorithm 2.4.8), so that no
+//!   element grows past `D`, in words when `D` is below `2^63` ([`word`]). The columns outside the
+//!   profile and the transformation come from exact solutions with that minor ([`hermite`]), the
+//!   products by `M⁻¹` from their residues modulo primes ([`inverse`]).
+//! - The diagonal of the Smith normal form comes from the Hermite form: a pivot 1 gives a divisor
+//!   1, and the block of the other pivots' rows has the other divisors, computed modulo the
+//!   product of its pivots (Cohen, Algorithm 2.4.14, for any shape and rank). The form with its
+//!   transformations is computed by alternating Hermite forms of the rows and of the columns, as
+//!   Kannan and Bachem do (*Polynomial algorithms for computing the Smith and Hermite normal forms
+//!   of an integer matrix*, SIAM J. Comput. 8, 1979), the divisibility of the diagonal then fixed
+//!   by steps `diag(a, b) → diag(gcd, lcm)` ([`smith`]).
 
 mod hermite;
+mod inverse;
+mod pernet;
 mod profile;
 mod smith;
 mod transform;
+mod word;
 
 use super::Matrix;
 use crate::math::numbers::{ByteOrder, Number};
 use crate::math::rational::in_order;
 
-/// The matrix `m` in the byte order `order`.
+/// `x` in the byte order `order`, a zero as the empty number of that order, whichever way the
+/// arithmetic made it.
+fn canonical(x: Number, order: ByteOrder) -> Number {
+    if x.is_zero() {
+        in_order(Number::default(), order)
+    } else {
+        in_order(x, order)
+    }
+}
+
+/// The matrix `m` in the byte order `order`, its zeros the empty number.
 fn ordered(m: Matrix<Number>, order: ByteOrder) -> Matrix<Number> {
     let (rows, cols) = m.shape();
     let data = m
         .into_vec()
         .into_iter()
-        .map(|x| in_order(x, order))
+        .map(|x| canonical(x, order))
         .collect();
     Matrix::from_column_major(rows, cols, data)
 }
@@ -60,21 +79,36 @@ impl Matrix<Number> {
     /// full row rank `U` is the only one.
     ///
     /// Method: the rank profiles (the pivot columns `J`, and the rows `R` from the bottom that
-    /// are independent) modulo a prime below `2^62`, proved exactly by the solutions with the
-    /// minor `M = A[R, J]` (another prime when the proof fails); the Hermite form of the rows of
-    /// `A[:, J]` modulo `D = |det M|`, so that no element grows past `D` (Domich, Kannan and
-    /// Trotter), and the other columns of `H` by an exact solution with `M`. `U` is built from the
-    /// structure of `[A[:, J] | E_S]`, `[A | I]` on the columns of its pivots, `E_S` the columns of
-    /// the identity for the rows `S` outside `R`: with `N = D·A[S, J]·M⁻¹`, its last `m − r` rows
-    /// are the Hermite form of the lattice `{z : z·N ≡ 0 (mod D)}` on the columns `S`, whose
-    /// pivots above 1 are at most `log₂ D`, found from the last row up with the subgroup of
-    /// `(Z/D)^r` that the rows after each span; its first `r` rows are the solutions of
-    /// `w·N ≡ D·H[:, J]·M⁻¹ (mod D)` those rows leave reduced. The work is about `m·r²`
-    /// operations on numbers below `D` for `H` and `m·(r² + r·t + t²)` more for `U`, `t` the
-    /// pivots above 1, besides the determinant of `M`, the solutions with it and the `m × m`
-    /// result; `D` has at most `r·(b + ½·log₂ r)` bits for elements of `b` bits (Hadamard's
-    /// bound). [`hermite_form`] skips `U`. The results are in the byte order of the top left
-    /// element.
+    /// are independent) modulo a prime below `2^62` by PLE decompositions, proved exactly by the
+    /// solutions with the minor `M = A[R, J]` (another prime when the proof fails). The form of
+    /// `M`, from order 8, by Pernet and Stein's method: for `W₁` its leading block of order
+    /// `r − 1` and `W₂` that block with the last row of `M` for the one before, `d₁ = det W₁`,
+    /// `d₂ = det W₂` and the solution `W₁⁻¹·[w | e]` (`w` the last column, `e` a unit vector)
+    /// from one lifting of Dixon's and the residues of `d₁` modulo a prime or two; the block `W` with `s·c + t·d` for its last row, `c` and `d` the last two rows and
+    /// `g = s·d₁ + t·d₂ = gcd(d₁, d₂)`, has the determinant `g`, small as a rule, so its form is
+    /// computed modulo `g`, the last column by Sherman and Morrison's formula from the solution;
+    /// then the last two rows of `M` are added, by extended Euclidean steps against the pivots.
+    /// The rows of `A[:, J]` outside `R` are added to that form in the same way, every element
+    /// kept below `D = |det M|`, the product of its pivots. A smaller minor, or one whose leading
+    /// block is singular, takes the form of the rows of `A[:, J]` modulo `D` (Domich, Kannan and
+    /// Trotter), in words when `D` is below `2^63`. The other columns of `H` come from an exact
+    /// solution with `M`. `U` is built from the structure of `[A[:, J] | E_S]`, `[A | I]` on the
+    /// columns of its pivots, `E_S` the columns of the identity for the rows `S` outside `R`: with
+    /// `N = D·A[S, J]·M⁻¹`, its last `m − r` rows are the Hermite form of the lattice
+    /// `{z : z·N ≡ 0 (mod D)}` on the columns `S`, whose pivots above 1 are at most `log₂ D`,
+    /// found from the last row up with the subgroup of `(Z/D)^r` that the rows after each span;
+    /// its first `r` rows are the solutions of `w·N ≡ D·H[:, J]·M⁻¹ (mod D)` those rows leave
+    /// reduced, `N` and `D·H[:, J]·M⁻¹` (`H·M⁻¹` itself when every row is in `R`) computed from
+    /// their residues modulo word primes, as many as Hadamard's bound on the adjugate asks for. For a
+    /// random square matrix the form is the identity but for its last column and the work is
+    /// about that of one solution of order `n − 1`: `O(n³)` operations on words and `O(n²·L)`
+    /// for a lifting of `L` steps, `L` about the length of `D` over 61 bits; `U` then costs
+    /// `O(n^ω)` operations on words for each of about as many primes. The form modulo `D` is about
+    /// `m·r²` operations on numbers below `D`, and the general `U` `m·(r² + r·t + t²)` more, `t`
+    /// the pivots above 1, besides the solutions with `M` and the `m × m` result; `D` has at
+    /// most `r·(b + ½·log₂ r)` bits for elements of `b` bits (Hadamard's bound).
+    /// [`hermite_form`] skips `U`. The results are in the byte order of the top left element,
+    /// each zero the empty number.
     ///
     /// [`hermite_form`]: Matrix::<Number>::hermite_form
     ///
@@ -94,18 +128,20 @@ impl Matrix<Number> {
     #[must_use]
     pub fn hermite_normal_form(&self) -> (Matrix<Number>, Matrix<Number>) {
         let order = order_of(self);
-        let basis = profile::basis(self, true);
+        let basis = profile::square_basis(self).unwrap_or_else(|| profile::basis(self, true));
         let (h, u) = hermite::form_and_transform(self, &basis);
         (ordered(h, order), ordered(u.into_matrix(false), order))
     }
 
     /// The Hermite normal form `H` of the rows, as
     /// [`hermite_normal_form`](Matrix::<Number>::hermite_normal_form) gives it, without the
-    /// transformation: the Hermite form of the rows of `A[:, J]` modulo `D = |det A[R, J]|`, of `r`
-    /// columns rather than `m`, about `m·r²` operations on numbers below `D`, and the other
-    /// columns by one exact solution with `A[R, J]`. A square nonsingular matrix takes the
-    /// elimination modulo a prime, its determinant and the form modulo it, and nothing else. The
-    /// result is in the byte order of the top left element.
+    /// transformation: the form of the minor `A[R, J]` by Pernet and Stein's method and the other
+    /// rows of `A[:, J]` added to it (or the form of the rows of `A[:, J]` modulo
+    /// `D = |det A[R, J]|`), and the other columns by one exact solution with `A[R, J]`. A square
+    /// matrix of order 8 or more takes the method first, with no profile: a form of full rank
+    /// proves it nonsingular, its profiles every row and column; for a random one, about the
+    /// work of one solution of a system of order `n − 1`. The result
+    /// is in the byte order of the top left element, each zero the empty number.
     ///
     /// # Examples
     ///
@@ -120,7 +156,7 @@ impl Matrix<Number> {
     #[must_use]
     pub fn hermite_form(&self) -> Matrix<Number> {
         let order = order_of(self);
-        let basis = profile::basis(self, false);
+        let basis = profile::square_basis(self).unwrap_or_else(|| profile::basis(self, false));
         ordered(hermite::form(self, &basis), order)
     }
 
@@ -134,8 +170,9 @@ impl Matrix<Number> {
     /// `E_K` the columns of the identity for them), which leave a lower triangular matrix of order
     /// `r`; only their first `r` rows (of `U`) and columns (of `V`) change after that. That matrix
     /// is put in its Hermite form by rows and by columns in turn until it is diagonal (Kannan and
-    /// Bachem), each form computed modulo its determinant with the unique transformation of a
-    /// nonsingular matrix; then steps `diag(a, b) → diag(gcd(a, b), lcm(a, b))` make each element
+    /// Bachem), each form computed as [`hermite_form`](Matrix::<Number>::hermite_form) computes
+    /// that of a square nonsingular matrix, with the unique transformation `H·B⁻¹` from its
+    /// residues modulo primes; then steps `diag(a, b) → diag(gcd(a, b), lcm(a, b))` make each element
     /// divide the next, in the order of Batcher's odd-even merge sort, which takes each position
     /// through `O(log² r)` steps, with the larger of each step's two factors on the side, `U` or
     /// `V`, whose two lines are the shorter; last, the first rows of `U` are reduced modulo its
@@ -156,7 +193,7 @@ impl Matrix<Number> {
     /// transformations about 40 times as long on such a `50 × 50` matrix. The transformation of
     /// the Hermite form stayed within the bound on all these matrices. This is FLINT's `fmpz_mat_snf`; PARI's
     /// `matsnf` gives the diagonal in the opposite order. The results are in the byte order of
-    /// the top left element.
+    /// the top left element, each zero the empty number.
     ///
     /// # Examples
     ///
@@ -173,18 +210,26 @@ impl Matrix<Number> {
     #[must_use]
     pub fn smith_normal_form(&self) -> (Matrix<Number>, Matrix<Number>, Matrix<Number>) {
         let order = order_of(self);
-        let basis = profile::basis(self, true);
+        let basis = profile::square_basis(self).unwrap_or_else(|| profile::basis(self, true));
         let (s, u, v) = smith::form(self, &basis);
         (ordered(s, order), ordered(u, order), ordered(v, order))
     }
 
     /// The diagonal of the Smith normal form, the elementary divisors `d₁ | d₂ | …`, as many as
-    /// the smaller dimension, the zeros last; without the transformations. The rank `r` and the
-    /// nonsingular minor `M` of the rank profiles come as for the Hermite form; the product
-    /// `d₁⋯d_r` divides `D = |det M|`, so the Smith form over `Z/DZ` gives the divisors, each
+    /// the smaller dimension, the zeros last; without the transformations. They are those of the
+    /// Hermite form `H` of [`hermite_form`](Matrix::<Number>::hermite_form): a row of `H` whose
+    /// pivot is 1 gives a divisor 1, as the pivot is alone in its column (the elements above it
+    /// are in `[0, 1)`) and the column steps that clear the rest of its row change nothing else;
+    /// the rows of the other pivots are zero in those columns, and their block, on their pivots'
+    /// columns and the columns outside the profile, has the other divisors, whose product divides
+    /// the product `P` of its pivots. So the Smith form of that block over `Z/PZ` gives them, each
     /// position's pivot made to divide the rest of its block and the modulus then divided by it
-    /// (Cohen, Algorithm 2.4.14), every element below `D`: about `m·n·r` operations on numbers as
-    /// long as `D`. The results are in the byte order of the top left element.
+    /// (Cohen, Algorithm 2.4.14). For a random square matrix `H` is the identity but for its last
+    /// column, the divisors are `1, …, 1, |det A|`, and the work is that of the Hermite form;
+    /// otherwise add about `t²·(t + k)` operations on numbers below `P`, for `t` pivots above 1
+    /// and `k` columns outside the profile; a wide matrix is taken by its transpose, which has the
+    /// same divisors and fewer columns (none outside the profile at full rank). The results are in
+    /// the byte order of the top left element, each zero the empty number.
     ///
     /// # Examples
     ///
@@ -202,10 +247,19 @@ impl Matrix<Number> {
     #[must_use]
     pub fn elementary_divisors(&self) -> Vec<Number> {
         let order = order_of(self);
-        let basis = profile::basis(self, false);
-        smith::divisors(self, &basis)
+        // A matrix and its transpose have the same divisors; a wide one is taken by its columns,
+        // which spares the solution for the columns outside the profile.
+        let t;
+        let a = if self.cols() > self.rows() {
+            t = self.transpose();
+            &t
+        } else {
+            self
+        };
+        let basis = profile::square_basis(a).unwrap_or_else(|| profile::basis(a, false));
+        smith::divisors(a, &basis)
             .into_iter()
-            .map(|x| in_order(x, order))
+            .map(|x| canonical(x, order))
             .collect()
     }
 }

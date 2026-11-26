@@ -17,6 +17,12 @@ fn window(parts: &[&BigFloat]) -> bool {
         .all(|x| x.is_normal() && x.prec() < super::arith::MUL3)
 }
 
+/// Whether the parts of a square or a norm suit the short products of the sums of products (see
+/// [`fast::fits_short`]) for the parts' precisions `prec`, alike.
+fn long(parts: &[&BigFloat], prec: (u64, u64)) -> bool {
+    prec.0 == prec.1 && parts.iter().all(|x| fast::fits_short(x, prec.0))
+}
+
 /// A zero of the precision, without a vector, to write into.
 #[inline]
 fn blank(prec: u64) -> BigFloat {
@@ -81,7 +87,7 @@ impl BigComplex {
                     fast::put_short(&mut self.im, q, round.1),
                 );
             }
-            if window(&parts) {
+            if window(&parts) || long(&parts, prec) {
                 let [a, b] = parts;
                 return (
                     fast::sum_products(&mut self.re, (a, a, false), (b, b, true), round.0),
@@ -607,7 +613,7 @@ impl BigComplex {
                     fast::put_short(&mut self.im, q, round.1),
                 );
             }
-            if window(&parts) {
+            if window(&parts) || long(&parts, prec) {
                 // The real part into a spare number first: the imaginary part reads it.
                 let [a, b] = parts;
                 let mut re = blank(prec.0);
@@ -676,7 +682,7 @@ impl BigFloat {
             let r = fast::long_sum(aa, bb, self.prec, round);
             return fast::put_short(self, r, round);
         }
-        if window(&[&z.re, &z.im]) {
+        if window(&[&z.re, &z.im]) || long(&[&z.re, &z.im], (self.prec, self.prec)) {
             return fast::sum_products(self, (&z.re, &z.re, false), (&z.im, &z.im, false), round);
         }
         let mut acc = Acc::new();

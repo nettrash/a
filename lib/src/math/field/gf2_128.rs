@@ -17,6 +17,8 @@
 
 use super::binary::Clmul;
 use super::binary_clmul as clmul;
+#[cfg(all(target_arch = "aarch64", target_feature = "aes", not(miri)))]
+use super::gf2_128_pmull as pmull;
 use core::fmt;
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -165,6 +167,9 @@ impl Gf2_128 {
     /// ```
     #[must_use]
     pub fn square(self) -> Gf2_128 {
+        #[cfg(all(target_arch = "aarch64", target_feature = "aes", not(miri)))]
+        return Gf2_128(pmull::sqr(self.0));
+        #[allow(unreachable_code)]
         let mut p = [0u64; 4];
         clmul::square(&[self.0 as u64, (self.0 >> 64) as u64], &mut p);
         reduce(p)
@@ -299,6 +304,18 @@ fn reduce(p: [u64; 4]) -> Gf2_128 {
 
 /// `y` after GHASH's steps over `x`, its last block padded with zeros.
 fn absorb(mut y: Gf2_128, h: Gf2_128, x: &[u8]) -> Gf2_128 {
+    #[cfg(all(target_arch = "aarch64", target_feature = "aes", not(miri)))]
+    {
+        let whole = x.len() & !15;
+        y = Gf2_128(pmull::ghash(y.0, h.0, &x[..whole]));
+        if whole == x.len() {
+            return y;
+        }
+        let mut block = [0u8; 16];
+        block[..x.len() - whole].copy_from_slice(&x[whole..]);
+        return (y + Gf2_128::from_bytes(block)) * h;
+    }
+    #[allow(unreachable_code)]
     for chunk in x.chunks(16) {
         let mut block = [0u8; 16];
         block[..chunk.len()].copy_from_slice(chunk);
@@ -346,7 +363,11 @@ impl Sub for Gf2_128 {
 
 impl Mul for Gf2_128 {
     type Output = Gf2_128;
+    #[inline]
     fn mul(self, rhs: Gf2_128) -> Gf2_128 {
+        #[cfg(all(target_arch = "aarch64", target_feature = "aes", not(miri)))]
+        return Gf2_128(pmull::mul(self.0, rhs.0));
+        #[allow(unreachable_code)]
         self.mul_with(rhs, Clmul::detect())
     }
 }
@@ -358,7 +379,8 @@ impl Div for Gf2_128 {
     /// Panics if `rhs` is 0.
     #[track_caller]
     fn div(self, rhs: Gf2_128) -> Gf2_128 {
-        self.mul_with(rhs.inverse().expect("division by zero"), Clmul::detect())
+        let inv = rhs.inverse().expect("division by zero");
+        Mul::mul(self, inv)
     }
 }
 

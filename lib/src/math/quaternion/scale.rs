@@ -79,6 +79,34 @@ pub(super) fn in_range<T: Float>(s: T) -> bool {
     s >= T::MIN_POSITIVE / T::EPSILON && s <= T::EPSILON / T::MIN_POSITIVE
 }
 
+/// The length of `v`, as [`direction`] gives it, without the direction: `None` for the zero
+/// vector, the `hypot` of the parts where one is not finite, the root of the squares where they
+/// are in range, else the same scaled exactly by a power of two.
+#[inline]
+pub(super) fn length<T: Float>(v: [T; 3]) -> Option<T> {
+    let [a, b, c] = v;
+    let s = a * a + b * b + c * c;
+    if in_range(s) {
+        return Some(s.sqrt());
+    }
+    length_cold(v)
+}
+
+#[cold]
+#[inline(never)]
+fn length_cold<T: Float>(v: [T; 3]) -> Option<T> {
+    let [a, b, c] = v;
+    if a == T::ZERO && b == T::ZERO && c == T::ZERO {
+        return None;
+    }
+    if !(a.is_finite() && b.is_finite() && c.is_finite()) {
+        return Some(a.hypot(b).hypot(c));
+    }
+    let k = exponent(a.abs().max(b.abs()).max(c.abs()));
+    let (a, b, c) = (ldexp(a, -k), ldexp(b, -k), ldexp(c, -k));
+    Some(ldexp((a * a + b * b + c * c).sqrt(), k))
+}
+
 /// The length of a 3-vector without overflow or underflow in the squares, and the unit vector of
 /// its direction: `None` for the zero vector, NaN parts for one with a part that is not finite
 /// (and the length then `∞` for an infinite part, as `hypot` gives it, or NaN).
@@ -91,6 +119,10 @@ pub(super) fn direction<T: Float>(v: [T; 3]) -> Option<([T; 3], T)> {
         return Some(([T::NAN; 3], a.hypot(b).hypot(c)));
     }
     let s = a * a + b * b + c * c;
+    if s == T::ONE {
+        // A unit vector already: its parts divided by 1 are themselves.
+        return Some((v, T::ONE));
+    }
     if in_range(s) {
         let r = s.sqrt();
         return Some(([a / r, b / r, c / r], r));

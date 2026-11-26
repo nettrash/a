@@ -276,6 +276,9 @@ pub(crate) fn divrem(w: &Wm, a: &[u64], f: &[u64]) -> (Vec<u64>, Vec<u64>) {
     if a.len() < n {
         return (Vec::new(), a.to_vec());
     }
+    if w.n == 2 {
+        return super::super::arith::gf2::div_rem_words(a, f);
+    }
     let lq = a.len() + 1 - n;
     let (mut q, mut r) = if lq < NEWTON_DIV || n < NEWTON_DIV {
         wmul::div_rem_school(a, f, inv, w)
@@ -319,6 +322,10 @@ pub(crate) fn rem(w: &Wm, a: &[u64], f: &[u64]) -> Vec<u64> {
         trim(&mut r);
         return r;
     }
+    if w.n == 2 {
+        let _ = lead_inv(w, f);
+        return super::super::arith::gf2::div_rem_words(a, f).1;
+    }
     let lq = a.len() + 1 - n;
     if lq < NEWTON_DIV || n < NEWTON_DIV {
         let mut r = wmul::rem_school(a, f, lead_inv(w, f), w, None);
@@ -350,6 +357,9 @@ const OWN_GCD: usize = 3;
 /// Measured (Apple M4): the gcd area's from degree 4 (2 to 4 times faster at degrees 8 to 64),
 /// this one at degree 2 (by 20%).
 pub(crate) fn gcd(w: &Wm, a: &[u64], b: &[u64]) -> Vec<u64> {
+    if w.n == 2 {
+        return super::super::arith::gf2::gcd_words(a, b);
+    }
     if a.len().min(b.len()) > OWN_GCD {
         return super::super::gcd::word_gcd(w.n, a, b);
     }
@@ -396,6 +406,8 @@ enum Path {
     Own(Vec<u64>),
     /// [`WordRem`]'s, on working memory reused from call to call.
     Shared(Box<WordRem>, RefCell<wrem::Work>),
+    /// For the modulus 2: the packed division.
+    Gf2(super::super::arith::gf2::Div),
 }
 
 /// A monic modulus `f` of `n ≥ 2` coefficients with what its remainders, products and powers
@@ -495,7 +507,11 @@ impl Modf {
     pub(crate) fn new(w: &Wm, f: &[u64]) -> Modf {
         debug_assert!(f.len() >= 2 && f[f.len() - 1] == 1);
         let n = f.len();
-        let path = if n <= own_school() {
+        let path = if w.n == 2 {
+            Path::Gf2(super::super::arith::gf2::Div::reused(
+                &super::super::arith::gf2::pack(f),
+            ))
+        } else if n <= own_school() {
             Path::School
         } else if w.bits() <= own_bits() {
             let rev: Vec<u64> = f.iter().rev().copied().collect();
@@ -541,6 +557,10 @@ impl Modf {
                 r.rem(&mut v, &mut work.borrow_mut());
                 v
             }
+            Path::Gf2(d) => {
+                use super::super::arith::gf2;
+                gf2::unpack(&d.rem(&gf2::pack(a)))
+            }
         };
         trim(&mut v);
         v
@@ -579,6 +599,10 @@ impl Modf {
         if a.is_empty() || b.is_empty() {
             return Vec::new();
         }
+        if let Path::Gf2(d) = &self.path {
+            use super::super::arith::gf2;
+            return gf2::unpack(&d.mul_mod(&gf2::pack(a), &gf2::pack(b)));
+        }
         if let Path::Shared(r, work) = &self.path {
             let mut out = Vec::new();
             r.mul(&mut out, a, b, &mut work.borrow_mut());
@@ -595,6 +619,10 @@ impl Modf {
     pub(crate) fn sqrmod(&self, a: &[u64]) -> Vec<u64> {
         if a.is_empty() {
             return Vec::new();
+        }
+        if let Path::Gf2(d) = &self.path {
+            use super::super::arith::gf2;
+            return gf2::unpack(&d.sqr_mod(&gf2::pack(a)));
         }
         if let Path::Shared(r, work) = &self.path {
             let mut out = Vec::new();
@@ -644,6 +672,10 @@ impl Modf {
             let mut r = r.pow(a, &from_limbs(e, ByteOrder::LittleEndian));
             trim(&mut r);
             return r;
+        }
+        if let Path::Gf2(d) = &self.path {
+            use super::super::arith::gf2;
+            return gf2::unpack(&d.pow(&gf2::pack(a), e));
         }
         let bit = |i: u64| (e[(i / 64) as usize] >> (i % 64)) & 1 == 1;
         if a == [0, 1] {

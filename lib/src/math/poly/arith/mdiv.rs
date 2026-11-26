@@ -64,7 +64,7 @@ impl ModPolynomial {
         let c = self.c.get(n * k..).map_or_else(Vec::new, <[u64]>::to_vec);
         ModPolynomial {
             m: self.m.clone(),
-            c,
+            c: c.into(),
         }
     }
 
@@ -88,7 +88,7 @@ impl ModPolynomial {
         c.extend_from_slice(&self.c);
         ModPolynomial {
             m: self.m.clone(),
-            c,
+            c: c.into(),
         }
     }
 
@@ -123,6 +123,20 @@ impl ModPolynomial {
     pub fn inv_series(&self, n: usize) -> ModPolynomial {
         if n == 0 {
             return self.zero_like();
+        }
+        if let Some(w) = self.m.word_mod() {
+            // The constant's inverse and the series without a vector of limbs between.
+            let c0 = self.c.first().copied().unwrap_or(0);
+            let Some(inv) = w.inv(c0) else {
+                panic!("the constant coefficient is not a unit modulo n");
+            };
+            let f = if self.is_zero() {
+                &[0u64][..]
+            } else {
+                &self.c[..]
+            };
+            let g = super::wrem::inv_series(f, n, inv, w);
+            return ModPolynomial::of(self.m.clone(), g);
         }
         let k = self.m.k();
         let c0 = if self.is_zero() {
@@ -196,6 +210,34 @@ impl ModPolynomial {
         self.same_modulus(d);
         let ld = d.length();
         assert!(ld > 0, "division by the zero polynomial");
+        if self.m.is_two() {
+            // Packed in and out (every leading coefficient modulo 2 is the unit 1).
+            if self.length() < ld {
+                return (self.zero_like(), self.clone());
+            }
+            let (q, r) = super::gf2::Div::new(&d.c.bits()).div_rem(&self.c.bits());
+            return (
+                ModPolynomial::of_bits(self.m.clone(), q),
+                ModPolynomial::of_bits(self.m.clone(), r),
+            );
+        }
+        if let Some(w) = self.m.word_mod() {
+            // The word path without a vector for the inverse of the leading coefficient.
+            let Some(inv) = w.inv(d.c[ld - 1]) else {
+                panic!("the leading coefficient is not a unit modulo n");
+            };
+            let la = self.length();
+            if la < ld {
+                return (self.zero_like(), self.clone());
+            }
+            if la - ld < div_school_max(1) || ld <= div_school_max(1) {
+                let (q, r) = wmul::div_rem_school(&self.c, &d.c, inv, w);
+                return (
+                    ModPolynomial::of(self.m.clone(), q),
+                    ModPolynomial::of(self.m.clone(), r),
+                );
+            }
+        }
         let inv = self.unit_inverse(d.limbs(ld - 1), "leading");
         let la = self.length();
         if la < ld {
@@ -208,6 +250,22 @@ impl ModPolynomial {
         }
         let dinv = d.rev(ld).inv_newton(lq, &inv);
         let q = self.rev(la).low(lq).mul_low(&dinv, lq).rev(lq);
+        if let Some(w) = self.m.word_mod() {
+            // r = a - q d below x^(ld - 1) by q d modulo x^L - 1 for L at least both lengths: the
+            // coefficients of q d from ld - 1 on are those of a, so the wrapped ones are known,
+            // r_j = a_j - (q d mod x^L - 1)_j + a_(j + L).
+            let k = usize::BITS - (lq.max(ld) - 1).leading_zeros();
+            if let Some(c) = wmul::mul_cyclic_low(&q.c, &d.c, k, ld - 1, w) {
+                let (a, l) = (&self.c, 1usize << k);
+                let r: Vec<u64> = (0..ld - 1)
+                    .map(|j| {
+                        let hi = a.get(j + l).copied().unwrap_or(0);
+                        w.add(w.sub(a[j], c[j]), hi)
+                    })
+                    .collect();
+                return (q, ModPolynomial::of(self.m.clone(), r));
+            }
+        }
         let r = &self.low(ld - 1) - &q.mul_low(&d.low(ld - 1), ld - 1);
         (q, r)
     }
@@ -218,16 +276,24 @@ impl ModPolynomial {
         self.same_modulus(d);
         let ld = d.length();
         assert!(ld > 0, "division by the zero polynomial");
+        if self.m.is_two() {
+            if self.length() < ld {
+                return self.clone();
+            }
+            let r = super::gf2::Div::new(&d.c.bits()).rem(&self.c.bits());
+            return ModPolynomial::of_bits(self.m.clone(), r);
+        }
         if let Some(w) = self.m.word_mod() {
             let la = self.length();
-            if la < ld {
+            let Some(inv) = w.inv(d.c[ld - 1]) else {
                 // Still a unit check, as the division makes it.
-                let _ = self.unit_inverse(d.limbs(ld - 1), "leading");
+                panic!("the leading coefficient is not a unit modulo n");
+            };
+            if la < ld {
                 return self.clone();
             }
             if ld <= div_school_max(1) || la - ld < div_school_max(1) {
-                let inv = self.unit_inverse(d.limbs(ld - 1), "leading");
-                let r = wmul::rem_school(&self.c, &d.c, inv[0], w, None);
+                let r = wmul::rem_school(&self.c, &d.c, inv, w, None);
                 return ModPolynomial::of(self.m.clone(), r);
             }
         }
@@ -337,7 +403,7 @@ pub(crate) struct ModInverse {
     /// The inverse of the leading coefficient of `f`.
     inv: Vec<u64>,
     /// The same remainders on vectors of words, for a word modulus and `deg f ≥ 1`.
-    word: Option<super::wrem::WordRem>,
+    word: Option<Box<super::wrem::WordRem>>,
     /// The transforms of the inverse and of `f` for the products of the remainders modulo a
     /// modulus of several limbs, by the transforms on pieces of the coefficients.
     ready: Option<Ready>,
@@ -374,7 +440,7 @@ impl ModInverse {
             return ModInverse {
                 f: f.clone(),
                 finv: f.zero_like(),
-                word: Some(super::wrem::WordRem::new(&f.c, inv[0], *w, None)),
+                word: Some(Box::new(super::wrem::WordRem::new(&f.c, inv[0], *w, None))),
                 inv,
                 ready: None,
             };
@@ -392,7 +458,7 @@ impl ModInverse {
                         .as_ref()
                         .map_or(0, |_| 64 * k as u32 - f.m.d[k - 1].leading_zeros());
                 crate::math::numbers::nat::limb_poly_plan(lf - 1, lf - 1, bits).map(|p| {
-                    let mut fi = finv.c.clone();
+                    let mut fi = finv.c.to_vec();
                     fi.resize((lf - 1) * k, 0);
                     Ready {
                         finv: crate::math::numbers::nat::limb_poly_transform(&fi, k, &p),
@@ -459,7 +525,7 @@ impl ModInverse {
             return a.zero_like();
         }
         if let Some(w) = &self.word {
-            let mut c = a.c.clone();
+            let mut c = a.c.to_vec();
             w.rem(&mut c, &mut super::wrem::Work::default());
             return ModPolynomial::of(a.m.clone(), c);
         }
@@ -502,7 +568,7 @@ impl ModInverse {
         let mut w = super::super::modular::Work::default();
         a.m.mul(&mut t, s.limbs(lf - 1), &self.inv, &mut w);
         let mut tf = self.f.scale(&a.m.number(&t));
-        tf.c.truncate((lf - 1) * k);
+        tf.c.words_mut().truncate((lf - 1) * k);
         let mut r = s.low(lf - 1);
         r -= &tf;
         r
@@ -646,16 +712,33 @@ impl ModInverse {
                 })
                 .collect()
         } else {
+            // The same matrix product on limbs: each coefficient of a block's combination a sum
+            // of products of residues, kept unreduced in 2k + 1 limbs (m < 2^64 products of two
+            // residues below n), and reduced once.
+            let red = a.m.l.as_ref().expect("several limbs");
+            let mut acc = vec![0u64; 2 * k + 1];
+            let mut t = vec![0u64; 2 * k];
+            let mut scratch = Vec::new();
             (0..blocks)
                 .map(|j| {
-                    let mut v = a.zero_like();
-                    for i in j * m..((j + 1) * m).min(la) {
-                        let c = a.m.number(&a.c[i * k..(i + 1) * k]);
-                        if !c.is_zero() {
-                            v += &pows[i - j * m].scale(&c);
+                    let lo = j * m;
+                    let hi = ((j + 1) * m).min(la);
+                    let mut out = vec![0u64; width * k];
+                    for (tt, o) in out.chunks_exact_mut(k).enumerate() {
+                        acc.fill(0);
+                        for i in lo..hi {
+                            let p = &pows[i - lo];
+                            if tt >= p.length() {
+                                continue;
+                            }
+                            let x = &a.c[i * k..(i + 1) * k];
+                            let y = p.limbs(tt);
+                            crate::math::numbers::nat::mul_to(&mut t, x, y, &mut scratch);
+                            crate::math::numbers::nat::add_assign(&mut acc, &t);
                         }
+                        red.reduce(&acc, o);
                     }
-                    v
+                    ModPolynomial::of(a.m.clone(), out)
                 })
                 .collect()
         };

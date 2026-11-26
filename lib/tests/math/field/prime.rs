@@ -237,7 +237,7 @@ fn cases() -> Vec<Case> {
         (m(7), three),
         (m(8), three),
         (m(9), three),
-        ("Number", three),
+        ("Montgomery, more than 9 limbs", three),
     ];
     for (k, &(form, sqrt)) in forms_above.iter().enumerate() {
         v.push(case(plus(pow2(64 * (k + 1)), above[k]), form, sqrt));
@@ -251,10 +251,18 @@ fn cases() -> Vec<Case> {
         case(two_adic(256, 64, 137), m(4), cip),
         case(two_adic(384, 4, 23), m(6), ts),
         case(two_adic(512, 5, 367), m(8), ts),
-        case(two_adic(600, 20, 637), "Number", ts),
-        case(two_adic(600, 90, 197), "Number", cip),
-        case(plus(Number::from(3u8) << 598usize, 485), "Number", atkin),
-        case(plus(Number::from(5u8) << 1497usize, 81), "Number", ts),
+        case(two_adic(600, 20, 637), "Montgomery, more than 9 limbs", ts),
+        case(two_adic(600, 90, 197), "Montgomery, more than 9 limbs", cip),
+        case(
+            plus(Number::from(3u8) << 598usize, 485),
+            "Montgomery, more than 9 limbs",
+            atkin,
+        ),
+        case(
+            plus(Number::from(5u8) << 1497usize, 81),
+            "Montgomery, more than 9 limbs",
+            ts,
+        ),
     ]);
     // The edges of ec's choice of the form 2^k - c, which takes c < 2^(62 - s) for s = 64 n - k:
     // for 4, 6 and 9 limbs and s = 0, 13, 32 and 55 (50 for six limbs, where no prime 2^329 - c
@@ -1215,4 +1223,129 @@ fn a_division_assignment_by_zero_panics() {
     let f = PrimeField::curve25519_base();
     let mut x = f.from_u64(3);
     x /= f.element(f.modulus());
+}
+
+#[test]
+fn the_in_place_operations_equal_the_others_in_every_form() {
+    // Every form: GF(2), Montgomery of 1 to 9 limbs, 2^k - c, the NIST primes, P-521, and the wide
+    // Montgomery form beyond nine limbs.
+    let mut fields: Vec<PrimeField> = [
+        "2",
+        "3",
+        "65537",
+        "18446744069414584321",
+        "340282366920938463463374607431768211297",
+    ]
+    .iter()
+    .map(|d| PrimeField::new(&Number::from_str_radix(d, 10, ByteOrder::LittleEndian).unwrap()))
+    .collect();
+    for f in [
+        PrimeField::bn254_base(),
+        PrimeField::bls12_381_base(),
+        PrimeField::secp256k1_base(),
+        PrimeField::p256_base(),
+        PrimeField::p384_base(),
+        PrimeField::p521_base(),
+        PrimeField::curve25519_base(),
+    ] {
+        fields.push(f.clone());
+    }
+    fields.push(PrimeField::new(
+        &(Number::from(1u8) << 607usize).next_prime(),
+    ));
+    fields.push(PrimeField::new(
+        &(Number::from(1u8) << 1279usize).next_prime(),
+    ));
+    for f in &fields {
+        let p = f.modulus();
+        for seed in 0..40u64 {
+            let x = f.element(
+                &(&Number::from(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                    * &(p - &Number::from(seed + 1))),
+            );
+            let (mut s, mut d, mut n) = (x.clone(), x.clone(), x.clone());
+            s.square_in_place();
+            d.double_in_place();
+            n.neg_in_place();
+            assert_eq!(s, x.square(), "{}", f.form());
+            assert_eq!(d, x.double(), "{}", f.form());
+            assert_eq!(n, -&x, "{}", f.form());
+            assert_eq!(s.value(), (&x.value() * &x.value()).rem_euclid(p));
+        }
+    }
+}
+
+#[test]
+fn the_in_place_operations_do_not_allocate_up_to_nine_limbs() {
+    let f = PrimeField::bls12_381_base();
+    let mut x = f.from_u64(1234567);
+    let ((), n) = count(|| {
+        x.square_in_place();
+        x.double_in_place();
+        x.neg_in_place();
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn long_fields_keep_decoded_values_until_an_operation() {
+    // Beyond nine limbs an element made from its value keeps it: the encodings, the value and the
+    // hash agree with an element made by arithmetic, and every operation on it (as either operand,
+    // by reference and in place) agrees with Number.
+    let one = Number::from(1u8);
+    let primes: Vec<Number> = if cfg!(miri) {
+        vec![&(&one << 607usize) - &one] // a Mersenne prime of ten limbs
+    } else {
+        [600usize, 1024, 2048]
+            .iter()
+            .map(|&b| (&one << b).next_prime())
+            .collect()
+    };
+    for p in primes {
+        let f = PrimeField::new(&p);
+        let len = f.byte_len();
+        for s in 1..6u64 {
+            let x = (&Number::from(s.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                * &(&p - &Number::from(s)))
+                .rem_euclid(&p);
+            let y = (&(&x * &x) + &Number::from(s)).rem_euclid(&p);
+            let mut bytes = x.value.clone();
+            if x.byte_order == ByteOrder::BigEndian {
+                bytes.reverse();
+            }
+            bytes.resize(len.max(bytes.len()), 0);
+            assert!(bytes[len..].iter().all(|&b| b == 0));
+            bytes.truncate(len);
+            bytes.reverse();
+            let a = f.from_bytes_be(&bytes).unwrap();
+            assert_eq!(a.to_bytes_be(), bytes);
+            assert_eq!(a.value(), x);
+            let made = &(&f.element(&x) * &f.one()) + &f.zero();
+            assert_eq!(a, made);
+            let hash = |v: &Fp| {
+                let mut h = DefaultHasher::new();
+                v.hash(&mut h);
+                h.finish()
+            };
+            assert_eq!(hash(&a), hash(&made));
+            assert_eq!(made.to_bytes_be(), bytes);
+            let c = f.element(&y);
+            assert_eq!((&a * &c).value(), (&x * &y).rem_euclid(&p));
+            assert_eq!((&c * &a).value(), (&x * &y).rem_euclid(&p));
+            assert_eq!((&a + &c).value(), (&x + &y).rem_euclid(&p));
+            assert_eq!((&c - &a).value(), (&y - &x).rem_euclid(&p));
+            let mut d = f.from_bytes_be(&bytes).unwrap();
+            d *= &c;
+            assert_eq!(d.value(), (&x * &y).rem_euclid(&p));
+            let mut d = f.from_bytes_be(&bytes).unwrap();
+            d += &c;
+            d -= &a;
+            assert_eq!(d.value(), y);
+            let mut d = f.from_u64(s);
+            d.square_in_place();
+            assert_eq!(d.value(), Number::from(s * s));
+            assert_eq!(a.inverse().unwrap().value(), x.mod_inverse(&p).unwrap());
+            assert_eq!(a.square().value(), (&x * &x).rem_euclid(&p));
+        }
+    }
 }

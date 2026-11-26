@@ -3,7 +3,7 @@
 //! precision in a mode, with the exponent range applied.
 
 use super::limbs;
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use core::cmp::Ordering;
 
 /// Whether a number of the sign `negative` whose magnitude is to be rounded is rounded away from
@@ -72,6 +72,22 @@ pub(crate) fn round_into(
     );
     let n = prec.div_ceil(64) as usize;
     let dropped = dropped(m, bits, prec, sticky);
+    let mant = if n <= 2 {
+        // One or two limbs are kept in the number itself: `out` is not needed.
+        let mut t = [0u64; 2];
+        window(m, bits, &mut t[..n]);
+        Mant::from_slice(&t[..n])
+    } else {
+        window_vec(m, bits, n, &mut out);
+        Mant::Heap(out)
+    };
+    finish(negative, mant, lsb + i128::from(bits), dropped, prec, round)
+}
+
+/// [`window`] into the vector `out`, its limbs replaced by the `n` of the window, each written
+/// once.
+#[inline]
+fn window_vec(m: &[u64], bits: u64, n: usize, out: &mut Vec<u64>) {
     out.clear();
     out.reserve(n);
     // Limb `i` of the window is bits `start + 64i..` of `M`.
@@ -109,7 +125,46 @@ pub(crate) fn round_into(
         }
     }
     debug_assert_eq!(out.len(), n);
-    finish(negative, out, lsb + i128::from(bits), dropped, prec, round)
+}
+
+/// The top `64n` bits of the magnitude `m` of `bits` bits into the `n` limbs `dst`, shifted so
+/// that the top bit of `m` is the top bit of the top limb (zeros below `m` when it is shorter).
+#[inline]
+fn window(m: &[u64], bits: u64, dst: &mut [u64]) {
+    let n = dst.len();
+    // Limb `i` of the window is bits `start + 64i..` of `M`.
+    let start = i128::from(bits) - 64 * n as i128;
+    if start >= 0 {
+        let (k, b) = ((start / 64) as usize, (start % 64) as u32);
+        if b == 0 {
+            dst.copy_from_slice(&m[k..k + n]);
+        } else {
+            // Pairs of limbs, which vectorises; the top limb of `M` alone when it is the last.
+            let pairs = n.min(m.len() - k - 1);
+            for (d, w) in dst[..pairs].iter_mut().zip(m[k..].windows(2)) {
+                *d = w[0] >> b | w[1] << (64 - b);
+            }
+            if pairs < n {
+                dst[n - 1] = m[m.len() - 1] >> b;
+            }
+        }
+    } else {
+        let s = (-start) as u64;
+        let (k, b) = ((s / 64) as usize, (s % 64) as u32);
+        dst[..k].fill(0);
+        if b == 0 {
+            dst[k..k + m.len()].copy_from_slice(m);
+        } else {
+            let mut carry = 0u64;
+            for (i, &x) in m.iter().enumerate() {
+                dst[k + i] = x << b | carry;
+                carry = x >> (64 - b);
+            }
+            if k + m.len() < n {
+                dst[k + m.len()] = carry;
+            }
+        }
+    }
 }
 
 /// [`round_into`] of the magnitude in the vector `v` itself, whose limbs become the mantissa: the
@@ -145,7 +200,14 @@ pub(crate) fn round_vec(
         }
     }
     v.truncate(n);
-    finish(negative, v, lsb + i128::from(bits), dropped, prec, round)
+    finish(
+        negative,
+        Mant::from(v),
+        lsb + i128::from(bits),
+        dropped,
+        prec,
+        round,
+    )
 }
 
 /// The bits a rounding to `prec` drops from the magnitude `m` of `bits` bits (with `sticky` for
@@ -170,7 +232,7 @@ fn dropped(m: &[u64], bits: u64, prec: u64, sticky: bool) -> Option<(bool, bool)
 #[inline]
 fn finish(
     negative: bool,
-    mut out: Vec<u64>,
+    mut out: Mant,
     e0: i128,
     dropped: Option<(bool, bool)>,
     prec: u64,
@@ -178,9 +240,12 @@ fn finish(
 ) -> (Kind, Ordering) {
     let n = out.len();
     let mut exp = e0;
+    // The limbs as a slice, once: not the mantissa's storage looked up at each limb.
+    let m: &mut [u64] = &mut out;
     let magnitude = match dropped {
         None => Ordering::Equal,
         Some((half, rest)) => {
+            let out = &mut *m;
             let sh = 64 * n as u64 - prec;
             let unit = 1u64 << sh;
             out[0] &= unit.wrapping_neg();
@@ -246,7 +311,7 @@ pub(crate) struct Rounded {
 /// The number that `r` describes, at the precision `prec` (at most 128) with the exponent range
 /// applied, its mantissa in `out`: the value and the direction of the rounding.
 #[inline]
-pub(crate) fn seal(r: Rounded, prec: u64, round: Round, mut out: Vec<u64>) -> (Kind, Ordering) {
+pub(crate) fn seal(r: Rounded, prec: u64, round: Round, out: Vec<u64>) -> (Kind, Ordering) {
     debug_assert!(prec <= 128 && r.m >> 127 == 1);
     if r.exp > i128::from(BigFloat::EXP_MAX) {
         return overflow(r.negative, prec, round).map_kind();
@@ -255,18 +320,18 @@ pub(crate) fn seal(r: Rounded, prec: u64, round: Round, mut out: Vec<u64>) -> (K
         let power = r.magnitude == Ordering::Equal && r.m == 1 << 127;
         return underflow(r.negative, r.e0, power, prec, round).map_kind();
     }
-    out.clear();
-    if prec <= 64 {
-        out.push((r.m >> 64) as u64);
+    // One or two limbs are kept in the number itself: `out` is not needed.
+    drop(out);
+    let mant = if prec <= 64 {
+        Mant::One((r.m >> 64) as u64)
     } else {
-        out.push(r.m as u64);
-        out.push((r.m >> 64) as u64);
-    }
+        Mant::Two([r.m as u64, (r.m >> 64) as u64])
+    };
     (
         Kind::Finite {
             negative: r.negative,
             exp: r.exp as i64,
-            mant: out,
+            mant,
         },
         signed(r.negative, r.magnitude),
     )
@@ -295,7 +360,7 @@ pub(crate) fn overflow(negative: bool, prec: u64, round: Round) -> (BigFloat, Or
 /// `±(1 - 2^-prec)·2^EXP_MAX`, the largest finite magnitude of the precision.
 pub(crate) fn largest(negative: bool, prec: u64) -> BigFloat {
     let n = prec.div_ceil(64) as usize;
-    let mut mant = vec![u64::MAX; n];
+    let mut mant = Mant::from(vec![u64::MAX; n]);
     mant[0] <<= 64 * n as u64 - prec;
     BigFloat {
         prec,
@@ -310,7 +375,7 @@ pub(crate) fn largest(negative: bool, prec: u64) -> BigFloat {
 /// `±2^(EXP_MIN - 1)`, the smallest positive magnitude.
 pub(crate) fn smallest(negative: bool, prec: u64) -> BigFloat {
     let n = prec.div_ceil(64) as usize;
-    let mut mant = vec![0u64; n];
+    let mut mant = Mant::zeroed(n);
     mant[n - 1] = 1 << 63;
     BigFloat {
         prec,

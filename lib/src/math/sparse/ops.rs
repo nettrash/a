@@ -12,7 +12,7 @@
 //! dense matrix would fill with NaNs, as `scipy.sparse` has it too. A stored element follows IEEE
 //! arithmetic: an infinity or a NaN times zero is a NaN, and stays stored.
 
-use super::{SparseMatrix, sort_rows, sorted_order};
+use super::{SHORT_ROW, SparseMatrix, sort_rows, sorted_order};
 use crate::math::complex::Float;
 use crate::math::matrix::{Matrix, Norm, Scalar};
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Range, Sub, SubAssign};
@@ -74,8 +74,14 @@ fn max_nan(m: f64, x: f64) -> f64 {
 
 /// The absolute value of `x` as an `f64`, in which the sums of the norms are kept whatever the
 /// type of the elements: a sum of millions of `f32`s loses nothing that way.
+#[inline]
 fn magnitude<T: Scalar>(x: T) -> f64 {
-    x.re().to_f64().hypot(x.im().to_f64())
+    if T::IS_COMPLEX {
+        x.re().to_f64().hypot(x.im().to_f64())
+    } else {
+        // `hypot(x, 0)` is `|x|` exactly, NaN and infinities included.
+        x.re().to_f64().abs()
+    }
 }
 
 /// The square root of the sum of the squares of the absolute values of `values`: the squares
@@ -83,17 +89,30 @@ fn magnitude<T: Scalar>(x: T) -> f64 {
 /// compensation. An infinite element gives infinity, and otherwise a NaN gives NaN, as `hypot`
 /// has it.
 fn frobenius<T: Scalar>(values: &[T]) -> T::Real {
-    let mut largest = 0.0f64;
+    // The largest part in four running maxima (the element `k` to the maximum `k mod 4`), and a
+    // flag for a NaN, which `f64::max` passes over.
+    let mut tops = [0.0f64; 4];
     let mut nan = false;
-    for x in values {
-        for part in [x.re().to_f64(), x.im().to_f64()] {
-            if part.is_nan() {
-                nan = true;
-            } else {
-                largest = largest.max(part.abs());
-            }
+    let (chunks, chunks_rest) = values.as_chunks::<4>();
+    let mut look = |top: &mut f64, x: T| {
+        let re = x.re().to_f64();
+        nan |= re.is_nan();
+        *top = top.max(re.abs());
+        if T::IS_COMPLEX {
+            let im = x.im().to_f64();
+            nan |= im.is_nan();
+            *top = top.max(im.abs());
+        }
+    };
+    for x4 in chunks.iter() {
+        for (top, &x) in tops.iter_mut().zip(x4) {
+            look(top, x);
         }
     }
+    for &x in chunks_rest {
+        look(&mut tops[0], x);
+    }
+    let largest = tops[0].max(tops[1]).max(tops[2].max(tops[3]));
     if largest.is_infinite() {
         return T::Real::INFINITY;
     }
@@ -107,14 +126,39 @@ fn frobenius<T: Scalar>(values: &[T]) -> T::Real {
     // has none in range, and is divided by itself.
     let power = f64::from_bits(largest.to_bits() & !((1u64 << 52) - 1));
     let scale = if power > 0.0 { power } else { largest };
-    let mut sum = Sum::new();
-    for x in values {
-        let re = x.re().to_f64() / scale;
-        sum.add(re * re);
-        if T::IS_COMPLEX {
-            let im = x.im().to_f64() / scale;
-            sum.add(im * im);
+    // Four compensated sums, the square of the element of the index `k` to the sum `k mod 4`
+    // (the last `len mod 4` to the first), added together with compensation at the end: four
+    // independent chains instead of one, the same order every time. The product by the
+    // reciprocal of a power of two is the quotient by it, exactly.
+    let reciprocal = if power > 0.0 { Some(1.0 / power) } else { None };
+    let part = |p: T::Real| match reciprocal {
+        Some(r) => p.to_f64() * r,
+        None => p.to_f64() / scale,
+    };
+    let mut lanes = [Sum::new(); 4];
+    let (chunks, chunks_rest) = values.as_chunks::<4>();
+    for x4 in chunks.iter() {
+        for (lane, &x) in lanes.iter_mut().zip(x4) {
+            let re = part(x.re());
+            lane.add(re * re);
+            if T::IS_COMPLEX {
+                let im = part(x.im());
+                lane.add(im * im);
+            }
         }
+    }
+    for &x in chunks_rest {
+        let re = part(x.re());
+        lanes[0].add(re * re);
+        if T::IS_COMPLEX {
+            let im = part(x.im());
+            lanes[0].add(im * im);
+        }
+    }
+    let mut sum = Sum::new();
+    for lane in lanes {
+        sum.add(lane.sum);
+        sum.add(lane.carry);
     }
     T::Real::from_f64(scale * sum.value().sqrt())
 }
@@ -144,6 +188,34 @@ fn inverse_permutation(p: &[usize], n: usize, what: &str) -> Vec<usize> {
     inverse
 }
 
+/// `Σ vals[k]·x[cols[k]]` for one row: four running sums, the element at the offset `k` going
+/// to the sum `k mod 4` (the last `len mod 4` to the first), added as `(s₀ + s₁) + (s₂ + s₃)` —
+/// four chains of additions instead of one, the same order every time. A row of fewer than
+/// four elements is summed one after another, as a single sum would.
+///
+/// Every column index must be below `x.len()` (the canonical form of a matrix with `x.len()`
+/// columns guarantees it).
+#[inline]
+fn row_dot<T: Scalar>(cols: &[usize], vals: &[T], x: &[T], op: impl Fn(T) -> T) -> T {
+    let (mut s0, mut s1, mut s2, mut s3) = (T::zero(), T::zero(), T::zero(), T::zero());
+    let (cc, cc_rest) = cols.as_chunks::<4>();
+    let (vc, vc_rest) = vals.as_chunks::<4>();
+    for (c, v) in cc.iter().zip(vc.iter()) {
+        // SAFETY: the caller's column indices are below `x.len()`.
+        unsafe {
+            s0 += op(v[0]) * *x.get_unchecked(c[0]);
+            s1 += op(v[1]) * *x.get_unchecked(c[1]);
+            s2 += op(v[2]) * *x.get_unchecked(c[2]);
+            s3 += op(v[3]) * *x.get_unchecked(c[3]);
+        }
+    }
+    for (&j, &a) in cc_rest.iter().zip(vc_rest) {
+        // SAFETY: as above.
+        s0 += op(a) * unsafe { *x.get_unchecked(j) };
+    }
+    (s0 + s1) + (s2 + s3)
+}
+
 impl<T: Scalar> SparseMatrix<T> {
     /// The product by the dense `x`, which has as many rows as the matrix has columns: `a·x`, in
     /// the time the stored elements cost for each column of `x`.
@@ -166,15 +238,72 @@ impl<T: Scalar> SparseMatrix<T> {
     #[track_caller]
     pub fn mul_matrix(&self, x: &Matrix<T>) -> Matrix<T> {
         assert_eq!(self.cols, x.rows(), "the shapes don't fit for a product");
-        let mut product = Matrix::zeros(self.rows, x.cols());
-        for c in 0..x.cols() {
-            self.mul_vec_into(x.column(c), product.column_mut(c));
+        let (m, n, k) = (self.rows, self.cols, x.cols());
+        let mut product = Matrix::zeros(m, k);
+        let (xs, ys) = (x.as_slice(), product.as_mut_slice());
+        // The columns of `x` four at a time: every stored element is read once for four of them.
+        // Each column is summed in the order `mul_vec` sums it, so the result is that of a
+        // product by each column alone, bit for bit.
+        // Measured on an Apple M4 Max (a Laplacian, an elasticity mesh and a random matrix, 4 to
+        // 64 columns): blocks of 8 are mixed, 4 % faster or slower on the Laplacian, up to 4 %
+        // slower on the random matrix and 5 to 8 % on the elasticity mesh from 8 columns on.
+        let mut c = 0;
+        while c + 4 <= k {
+            self.mul_block::<4>(&xs[c * n..(c + 4) * n], &mut ys[c * m..(c + 4) * m]);
+            c += 4;
+        }
+        for c in c..k {
+            self.mul_vec_into(&xs[c * n..(c + 1) * n], &mut ys[c * m..(c + 1) * m]);
         }
         product
     }
 
+    /// The products by the `B` columns of `x` (`cols` elements each, one after another) into the
+    /// `B` columns of `y` (`rows` each), every column summed as [`row_dot`] sums it.
+    fn mul_block<const B: usize>(&self, x: &[T], y: &mut [T]) {
+        let (m, n) = (self.rows, self.cols);
+        debug_assert!(x.len() == B * n && y.len() == B * m);
+        debug_assert!(self.col_indices.iter().all(|&j| j < n));
+        for (i, w) in self.row_ptrs.windows(2).enumerate() {
+            // SAFETY: the canonical form keeps the offsets nondecreasing with the last at the
+            // number of stored elements, which both arrays hold.
+            let (cols, vals) = unsafe {
+                (
+                    self.col_indices.get_unchecked(w[0]..w[1]),
+                    self.values.get_unchecked(w[0]..w[1]),
+                )
+            };
+            let mut lanes = [[T::zero(); 4]; B];
+            let (cc, cc_rest) = cols.as_chunks::<4>();
+            let (vc, vc_rest) = vals.as_chunks::<4>();
+            for (cs, vs) in cc.iter().zip(vc.iter()) {
+                for (t, lane) in lanes.iter_mut().enumerate() {
+                    for q in 0..4 {
+                        // SAFETY: every column index is below `cols` = `n` (the canonical
+                        // form), and column `t` of `x` takes the `n` elements from `t·n`.
+                        lane[q] += vs[q] * unsafe { *x.get_unchecked(t * n + cs[q]) };
+                    }
+                }
+            }
+            for (&j, &a) in cc_rest.iter().zip(vc_rest) {
+                for (t, lane) in lanes.iter_mut().enumerate() {
+                    // SAFETY: as above.
+                    lane[0] += a * unsafe { *x.get_unchecked(t * n + j) };
+                }
+            }
+            for (t, lane) in lanes.iter().enumerate() {
+                y[t * m + i] = (lane[0] + lane[1]) + (lane[2] + lane[3]);
+            }
+        }
+    }
+
     /// `y = a·x` written into `y`, for `x` of length `cols` and `y` of length `rows`: one pass over
     /// the stored elements and no allocation, which is what a Krylov method wants per iteration.
+    ///
+    /// Each row is summed in four running sums, the element at the offset `k` of the row going to
+    /// the sum `k mod 4` and the last `len mod 4` elements to the first, added as `(s₀ + s₁) +
+    /// (s₂ + s₃)`: always the same order, so the same input gives the same bits, and a row of
+    /// fewer than four elements is summed one element after another.
     ///
     /// # Panics
     ///
@@ -202,12 +331,17 @@ impl<T: Scalar> SparseMatrix<T> {
             self.rows,
             "the result has the wrong length for the matrix"
         );
-        for (i, y) in y.iter_mut().enumerate() {
-            let mut sum = T::zero();
-            for k in self.row_ptrs[i]..self.row_ptrs[i + 1] {
-                sum += self.values[k] * x[self.col_indices[k]];
-            }
-            *y = sum;
+        debug_assert!(self.col_indices.iter().all(|&j| j < x.len()));
+        for (w, y) in self.row_ptrs.windows(2).zip(y.iter_mut()) {
+            // SAFETY: the canonical form keeps the offsets nondecreasing with the last at the
+            // number of stored elements, which both arrays hold.
+            let (cols, vals) = unsafe {
+                (
+                    self.col_indices.get_unchecked(w[0]..w[1]),
+                    self.values.get_unchecked(w[0]..w[1]),
+                )
+            };
+            *y = row_dot(cols, vals, x, |a| a);
         }
     }
 
@@ -235,6 +369,12 @@ impl<T: Scalar> SparseMatrix<T> {
 
     /// `y = aᵀ·x` written into `y`, for `x` of length `rows` and `y` of length `cols`, without the
     /// transpose being formed: every stored element adds to the entry of `y` its column names.
+    ///
+    /// It agrees with the product by the formed transpose, `transpose().mul_vec(x)`, to rounding:
+    /// this one adds the terms of each entry one after another, in the order of the rows, and
+    /// that one in the four sums of [`mul_vec_into`](Self::mul_vec_into). The tests hold the two
+    /// within `16·ε·max(rows, cols)·(‖y₁‖ + ‖y₂‖ + 1)` of each other (Euclidean norms); where no
+    /// column holds four elements they are the same bits.
     ///
     /// # Panics
     ///
@@ -280,6 +420,9 @@ impl<T: Scalar> SparseMatrix<T> {
     /// `y = aᴴ·x` written into `y`, for `x` of length `rows` and `y` of length `cols`, without the
     /// conjugate transpose being formed. For a real matrix it is
     /// [`mul_vec_transpose_into`](Self::mul_vec_transpose_into).
+    ///
+    /// It agrees with `conjugate_transpose().mul_vec(x)` to rounding, as
+    /// [`mul_vec_transpose_into`](Self::mul_vec_transpose_into) does with the transpose.
     ///
     /// # Panics
     ///
@@ -340,12 +483,17 @@ impl<T: Scalar> SparseMatrix<T> {
             self.rows,
             "the result has the wrong length for the matrix"
         );
-        for (i, y) in y.iter_mut().enumerate() {
-            let mut sum = T::zero();
-            for k in self.row_ptrs[i]..self.row_ptrs[i + 1] {
-                sum += self.values[k].conj() * x[self.col_indices[k]];
-            }
-            *y = sum;
+        debug_assert!(self.col_indices.iter().all(|&j| j < x.len()));
+        for (w, y) in self.row_ptrs.windows(2).zip(y.iter_mut()) {
+            // SAFETY: the canonical form keeps the offsets nondecreasing with the last at the
+            // number of stored elements, which both arrays hold.
+            let (cols, vals) = unsafe {
+                (
+                    self.col_indices.get_unchecked(w[0]..w[1]),
+                    self.values.get_unchecked(w[0]..w[1]),
+                )
+            };
+            *y = row_dot(cols, vals, x, |a| a.conj());
         }
     }
 
@@ -365,9 +513,20 @@ impl<T: Scalar> SparseMatrix<T> {
             "the result has the wrong length for the matrix"
         );
         y.fill(T::zero());
-        for (i, &xi) in x.iter().enumerate() {
-            for k in self.row_ptrs[i]..self.row_ptrs[i + 1] {
-                y[self.col_indices[k]] += op(self.values[k]) * xi;
+        debug_assert!(self.col_indices.iter().all(|&j| j < y.len()));
+        for (w, &xi) in self.row_ptrs.windows(2).zip(x) {
+            // SAFETY: the canonical form keeps the offsets nondecreasing with the last at the
+            // number of stored elements, which both arrays hold.
+            let (cols, vals) = unsafe {
+                (
+                    self.col_indices.get_unchecked(w[0]..w[1]),
+                    self.values.get_unchecked(w[0]..w[1]),
+                )
+            };
+            for (&j, &a) in cols.iter().zip(vals) {
+                // SAFETY: every column index is below `cols`, the length of `y`, in the
+                // canonical form.
+                unsafe { *y.get_unchecked_mut(j) += op(a) * xi };
             }
         }
     }
@@ -497,7 +656,20 @@ impl<T: Scalar> SparseMatrix<T> {
     /// ```
     #[must_use]
     pub fn scale(&self, alpha: T) -> Self {
-        self.map(|_, _, x| x * alpha)
+        // The products first; the pattern is copied as it is unless one of them is zero (an
+        // underflow, or `alpha` zero), which must leave it.
+        let values: Vec<T> = self.values.iter().map(|&x| x * alpha).collect();
+        if values.iter().any(|v| v.is_zero()) {
+            return self.map(|_, _, x| x * alpha);
+        }
+        Self {
+            rows: self.rows,
+            cols: self.cols,
+            row_ptrs: self.row_ptrs.clone(),
+            col_indices: self.col_indices.clone(),
+            values,
+            zero: T::zero(),
+        }
     }
 
     /// A norm of the matrix, of the same kinds as [`Matrix::norm`]: `One` the largest column sum of
@@ -541,10 +713,27 @@ impl<T: Scalar> SparseMatrix<T> {
             }
             Norm::Frobenius => frobenius(&self.values),
             Norm::Max => {
-                let largest = self
-                    .values
-                    .iter()
-                    .fold(0.0, |m, &x| max_nan(m, magnitude(x)));
+                // Four running maxima and a flag for a NaN, which `f64::max` would pass over.
+                let mut lanes = [0.0f64; 4];
+                let mut nan = false;
+                let (chunks, chunks_rest) = self.values.as_chunks::<4>();
+                for x4 in chunks.iter() {
+                    for (lane, &x) in lanes.iter_mut().zip(x4) {
+                        let m = magnitude(x);
+                        nan |= m.is_nan();
+                        *lane = lane.max(m);
+                    }
+                }
+                for &x in chunks_rest {
+                    let m = magnitude(x);
+                    nan |= m.is_nan();
+                    lanes[0] = lanes[0].max(m);
+                }
+                let largest = if nan {
+                    f64::NAN
+                } else {
+                    lanes[0].max(lanes[1]).max(lanes[2].max(lanes[3]))
+                };
                 T::Real::from_f64(largest)
             }
             Norm::Two | Norm::Nuclear => self.to_matrix().norm(norm),
@@ -705,6 +894,24 @@ impl<T: Scalar> SparseMatrix<T> {
             }
         }
         first.push(order.len());
+        // A map from the columns of the matrix to their places in `picked` costs a pass over
+        // the columns; it is made when that is not much more than the searches would cost, and
+        // used for a row no longer than a few times the columns taken, so that the bound on the
+        // time stands.
+        // Measured on an Apple M4 Max (a Laplacian of 10⁶ unknowns, a random matrix of 10⁵ and
+        // an elasticity mesh, rows and columns taken one in 1 to 1000; factors 1 to 16): 8 and
+        // 16 are as fast (within 2.3 %), 1 and 2 up to 5.6 times slower where few rows and many
+        // columns are taken.
+        const FEW: usize = 4;
+        let length = |i: usize| self.row_ptrs[i + 1] - self.row_ptrs[i];
+        let shorter: usize = rows.iter().map(|&i| length(i).min(picked.len())).sum();
+        let map = (self.cols <= FEW * (shorter + cols.len() + rows.len())).then(|| {
+            let mut map = vec![usize::MAX; self.cols];
+            for (t, &j) in picked.iter().enumerate() {
+                map[j] = t;
+            }
+            map
+        });
         let mut row_ptrs = Vec::with_capacity(rows.len() + 1);
         let mut col_indices = Vec::new();
         let mut values = Vec::new();
@@ -720,8 +927,18 @@ impl<T: Scalar> SparseMatrix<T> {
                     values.push(self.values[k]);
                 }
             };
-            // The row and the columns taken both ascend, so the shorter of the two is searched for
-            // in the longer, each search beginning where the one before ended.
+            // With a map of the columns, a look-up an element; otherwise the row and the columns
+            // taken both ascend, so the shorter of the two is searched for in the longer, each
+            // search beginning where the one before ended.
+            if let Some(map) = map.as_ref().filter(|_| row.len() <= FEW * picked.len()) {
+                for (offset, &j) in row.iter().enumerate() {
+                    let t = map[j];
+                    if t != usize::MAX {
+                        take(begin + offset, t);
+                    }
+                }
+                continue;
+            }
             let mut from = 0;
             if row.len() <= picked.len() {
                 for (offset, j) in row.iter().enumerate() {
@@ -836,19 +1053,69 @@ impl<T: Scalar> SparseMatrix<T> {
     pub fn permute(&self, row_perm: &[usize], col_perm: &[usize]) -> Self {
         inverse_permutation(row_perm, self.rows, "rows");
         let new_column = inverse_permutation(col_perm, self.cols, "columns");
-        let mut row_ptrs = Vec::with_capacity(self.rows + 1);
-        let mut col_indices = Vec::with_capacity(self.values.len());
-        let mut values = Vec::with_capacity(self.values.len());
-        for &old in row_perm {
+        self.permuted(row_perm, &new_column)
+    }
+
+    /// The matrix whose row `new` is the row `row_perm[new]` of this one, its column `j` moved to
+    /// `new_column[j]`; both are permutations, unchecked. Short rows (none longer than
+    /// [`SHORT_ROW`]) are gathered in their new order and each sorted by insertion; longer ones
+    /// are dealt out twice by counting, first to their new columns in the order of the new rows,
+    /// then from the columns in order to the rows, which leaves every row ascending.
+    pub(crate) fn permuted(&self, row_perm: &[usize], new_column: &[usize]) -> Self {
+        let longest = self
+            .row_ptrs
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .max()
+            .unwrap_or(0);
+        if longest <= SHORT_ROW {
+            let mut row_ptrs = Vec::with_capacity(self.rows + 1);
+            let mut col_indices = Vec::with_capacity(self.values.len());
+            let mut values = Vec::with_capacity(self.values.len());
+            for &old in row_perm {
+                row_ptrs.push(col_indices.len());
+                let (begin, end) = (self.row_ptrs[old], self.row_ptrs[old + 1]);
+                col_indices.extend(self.col_indices[begin..end].iter().map(|&j| new_column[j]));
+                values.extend_from_slice(&self.values[begin..end]);
+            }
             row_ptrs.push(col_indices.len());
-            let (begin, end) = (self.row_ptrs[old], self.row_ptrs[old + 1]);
-            col_indices.extend(self.col_indices[begin..end].iter().map(|&j| new_column[j]));
-            values.extend_from_slice(&self.values[begin..end]);
+            // The new columns of a row come in the order of the old ones.
+            sort_rows(&row_ptrs, self.cols, &mut col_indices, &mut values);
+            return Self::from_canonical(self.rows, self.cols, row_ptrs, col_indices, values);
         }
-        row_ptrs.push(col_indices.len());
-        // The new columns of a row come in the order of the old ones.
-        sort_rows(&row_ptrs, self.cols, &mut col_indices, &mut values);
-        Self::from_canonical(self.rows, self.cols, row_ptrs, col_indices, values)
+        let (rows, cols, nnz) = (self.rows, self.cols, self.values.len());
+        let mut col_ptrs = vec![0usize; cols + 1];
+        for &j in &self.col_indices {
+            col_ptrs[new_column[j] + 1] += 1;
+        }
+        for j in 0..cols {
+            col_ptrs[j + 1] += col_ptrs[j];
+        }
+        let mut cursor = col_ptrs.clone();
+        let mut by_column: Vec<(usize, T)> = vec![(0, T::zero()); nnz];
+        let mut row_ptrs = Vec::with_capacity(rows + 1);
+        row_ptrs.push(0);
+        for (new, &old) in row_perm.iter().enumerate() {
+            let (begin, end) = (self.row_ptrs[old], self.row_ptrs[old + 1]);
+            for k in begin..end {
+                let at = &mut cursor[new_column[self.col_indices[k]]];
+                by_column[*at] = (new, self.values[k]);
+                *at += 1;
+            }
+            row_ptrs.push(row_ptrs[new] + end - begin);
+        }
+        let mut cursor = row_ptrs.clone();
+        let mut col_indices = vec![0usize; nnz];
+        let mut values = vec![T::zero(); nnz];
+        for j in 0..cols {
+            for &(i, x) in &by_column[col_ptrs[j]..col_ptrs[j + 1]] {
+                let at = &mut cursor[i];
+                col_indices[*at] = j;
+                values[*at] = x;
+                *at += 1;
+            }
+        }
+        Self::from_canonical(rows, cols, row_ptrs, col_indices, values)
     }
 }
 

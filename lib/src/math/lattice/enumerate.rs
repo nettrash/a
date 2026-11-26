@@ -5,8 +5,8 @@
 //! solving subset sum problems*, Math. Programming 66, 1994), on the Gram–Schmidt
 //! orthogonalisation of an LLL-reduced basis.
 //!
-//! Every answer is exact. The Gram–Schmidt data are computed exactly, as integers, and rounded
-//! once to `f64`; the search compares rigorous lower bounds of its partial norms with a radius
+//! Every answer is exact. The Gram–Schmidt data are computed exactly, as integers (from their
+//! residues modulo primes, [`Gso::of_residues`]), and rounded once to `f64`; the search compares rigorous lower bounds of its partial norms with a radius
 //! enlarged past their rounding, so it visits every node it must, and each leaf is checked in
 //! integers. Where floats cannot follow the data (Gram–Schmidt norms below `2⁻⁴⁰` of the
 //! radius, or coefficients beyond `2⁵⁰`) the same search runs in integers. The top levels no
@@ -68,7 +68,8 @@ impl Prepared {
         };
         let rows = take(r.basis());
         let trans = take(r.transform());
-        let gso = Gso::of(&rows, rows.len()).expect("the rows of a reduced basis are independent");
+        let gso = Gso::of_residues(&rows, rows.len())
+            .expect("the rows of a reduced basis are independent");
         Prepared { rows, trans, gso }
     }
 

@@ -8,6 +8,11 @@ use super::{Int, Uint};
 use crate::math::numbers::{ByteOrder, Magnitude, Number, TryFromNumberError};
 
 /// The little-endian bytes of `limbs`.
+/// The number of the limbs `l`, the low one first.
+pub(super) fn number_of_limbs(l: &[u64]) -> Number {
+    Number::new(bytes_of(l), ByteOrder::LittleEndian)
+}
+
 fn bytes_of(limbs: &[u64]) -> Vec<u8> {
     limbs.iter().flat_map(|l| l.to_le_bytes()).collect()
 }

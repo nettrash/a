@@ -20,7 +20,9 @@
 //!   pass elsewhere, `n^2` limb products either way.
 //! - From [`REDC_N`] limbs: REDC by products, [`redc_n`]: the quotient of all `n` limbs at once,
 //!   the low half of the product of the low limbs and `1/m mod R` (Hensel's quotient, see
-//!   [`mullo`]), then its product by `m`, whose high half is subtracted from the product's.
+//!   [`mullo`]), then the high half of its product by `m`, from a short product made exact by the
+//!   low half, which is known (below [`TRANSFORMS`] limbs), or from the whole product, and
+//!   subtracted from the product's.
 //!
 //! A residue in memory is kept below `R`, not always below `m`, as GMP's `mpn_powm` keeps it: REDC
 //! of a product of two such residues is below `R + m`, and one subtraction of `m` when it carries
@@ -79,7 +81,8 @@ pub(in super::super) const REGISTER_KERNELS: bool = registers::has_long(8);
 use super::super::div::limbs::{
     bdiv_q, binvert_limb, div_qr, div_qr_1, div_qr_2, invert_3by2, invert_limb, qr_itch, rshift,
 };
-use super::super::mul::limbs::{add_n, cmp_n, mul, mul_itch, sqr, sqr_itch, sub_n};
+use super::super::mul::limbs::{add_n, cmp_n, mul, mul_itch, sqr, sqr_itch, sub_1, sub_n};
+use super::super::mul::short::{TRANSFORMS, mulhigh, mulhigh_itch};
 use super::super::scratch::{Scratch, need};
 use super::kernels::redc;
 use super::low::{mullo, mullo_itch};
@@ -88,10 +91,30 @@ use core::cmp::Ordering;
 use core::ptr;
 
 /// From this many limbs in the modulus, REDC is computed by products, [`redc_n`], instead of by the
-/// kernel's passes: measured on an Apple M4 Max with exponents of 256 bits, a modulus of 64 limbs
-/// took 2.09 million cycles by passes against 2.40 million by products, one of 128 limbs 7.8 to 8.1
-/// million against 7.2 to 7.5, and one of 96 limbs about as long either way.
-pub(super) const REDC_N: usize = 100;
+/// kernel's passes: the low half of a product for the quotient and the short product of the
+/// quotient and the modulus for the high half, below [`TRANSFORMS`] limbs.
+// Measured on an Apple M4 Max against the passes (sweep 48..=128 limbs, `pow_mod` with exponents
+// of 256 bits and as long as the modulus, the Baillie-PSW test of 4608- to 8192-bit primes): with
+// exponents of 256 bits, which also pay for `1/m mod R`, a modulus of 72 to 80 limbs took 1.05 to
+// 1.07 times as long by products, 84 and 85 limbs 1.02, 86 and 87 limbs 1.00, 88 limbs 0.97 and 90
+// to 95 limbs 0.87 to 0.93; with exponents as long as the modulus 84 to 88 limbs 0.95 to 0.97 (and
+// 0.84 to 1.08 from 89 to 95 limbs, as the window's table of 128 residues meets the cache, 0.96 on
+// average), and in the Baillie-PSW test 72 limbs 1.02, 80 limbs 0.98 and 84 to 95 limbs 0.95 to
+// 0.97.
+pub(super) const REDC_N: usize = if cfg!(miri) { 12 } else { 86 };
+
+/// Whether REDC of a modulus of `n` limbs takes its high half from the short product of `n + 1`
+/// limbs: below the threshold of the transforms, which make the whole product of `n` limbs about as
+/// cheap as Mulders' method's parts.
+// Measured on an Apple M4 Max with `pow_mod` and exponents of 256 bits (sweep 256..=448 limbs),
+// the whole product took 1.01 to 1.08 times as long as the short one from 256 to 358 limbs, 0.99
+// to 1.04 from 360 to 376, 0.96 to 0.98 at 380 and 384, 1.01 to 1.06 at 388 to 400 and 0.99 to
+// 1.02 from 420 to 448; with exponents as long as the modulus 0.99 at 368 and 376 limbs and 0.98 at
+// 384: about as long from the threshold of the transforms, 360 limbs.
+#[inline(always)]
+const fn redc_short(n: usize) -> bool {
+    n + 1 < TRANSFORMS
+}
 
 /// `n` rounded up to an even number of limbs, so that a buffer after `n` limbs of an aligned one
 /// is aligned too.
@@ -208,6 +231,9 @@ pub(in super::super) struct Montgomery {
     minv: [u64; 2],
     /// `1/m mod R`, `n` limbs, for [`redc_n`]; null below [`REDC_N`] limbs.
     inv: *const u64,
+    /// The modulus shifted up a limb, `m B`, `n + 1` limbs, for the short products of [`redc_n`];
+    /// null where it takes whole products.
+    mb: *const u64,
     /// The modulus's limbs followed by `-1/m mod B`, for the kernels of [`registers::long`] at the
     /// lengths they take; null at the others.
     pub(in super::super) mk: *const u64,
@@ -217,7 +243,7 @@ impl Montgomery {
     /// The limbs of working memory that [`Montgomery::new`] keeps for a modulus of `n` limbs.
     pub(in super::super) fn new_itch(n: usize) -> usize {
         if n >= REDC_N {
-            2 * even(n)
+            2 * even(n) + if redc_short(n) { even(n + 1) } else { 0 }
         } else if registers::has_long(n) {
             even(n + 1)
         } else {
@@ -236,7 +262,11 @@ impl Montgomery {
     /// for the kernel's passes, and those of [`redc_n`] from [`REDC_N`] limbs.
     fn redc_itch(n: usize) -> usize {
         if n >= REDC_N {
-            n + 2 * n + mullo_itch(n).max(mul_itch(n, n))
+            if redc_short(n) {
+                (n + 1) + 2 * (n + 1) + mullo_itch(n).max(mulhigh_itch(n + 1))
+            } else {
+                n + 2 * n + mullo_itch(n).max(mul_itch(n, n))
+            }
         } else {
             0
         }
@@ -254,16 +284,24 @@ impl Montgomery {
         // SAFETY: as the caller guarantees.
         unsafe {
             let v = binvert_limb(*m);
-            let inv = if n >= REDC_N {
-                // `1/m mod B^n`, Hensel's quotient of 1 by `m`.
-                let (inv, one) = s.split(even(n));
+            let (inv, mb) = if n >= REDC_N {
+                // `1/m mod B^n`, Hensel's quotient of 1 by `m`; then `m B` after it.
+                let (inv, rest) = s.split(even(n));
+                let (mb, one) = if redc_short(n) {
+                    let (mb, one) = rest.split(even(n + 1));
+                    *mb = 0;
+                    ptr::copy_nonoverlapping(m, mb.add(1), n);
+                    (mb.cast_const(), one)
+                } else {
+                    (ptr::null(), rest)
+                };
                 let one = one.take(n);
                 ptr::write_bytes(one, 0, n);
                 *one = 1;
                 bdiv_q(inv, one, n, m, n, v);
-                inv.cast_const()
+                (inv.cast_const(), mb)
             } else {
-                ptr::null()
+                (ptr::null(), ptr::null())
             };
             // `1/m mod B^2`: the high limb of `v` corrected by Newton's step.
             let c = ((u128::from(*m) * u128::from(v)) >> 64) as u64;
@@ -284,6 +322,7 @@ impl Montgomery {
                 n,
                 minv: [v.wrapping_neg(), !v1],
                 inv,
+                mb,
                 mk,
             }
         }
@@ -304,7 +343,7 @@ impl Montgomery {
             if self.inv.is_null() {
                 redc_1(r, u, self.m, self.n, self.minv);
             } else {
-                redc_n(r, u, self.m, self.n, self.inv, t);
+                redc_n(r, u, self.m, self.n, self.inv, self.mb, t);
             }
         }
     }
@@ -433,26 +472,59 @@ unsafe fn redc_1(r: *mut u64, u: *mut u64, m: *const u64, n: usize, minv: [u64; 
 }
 
 /// REDC by products: sets the `n` limbs at `r` to `u / R mod m`, below `R`, for the `2n` limbs at
-/// `u`, below `R m`, with `inv = 1/m mod R`.
+/// `u`, below `R m`, with `inv = 1/m mod R`, and `mb = m B` (`n + 1` limbs) or null.
 ///
 /// Hensel's quotient `q = u inv mod R` makes `q m` agree with `u` in its low `n` limbs, so
 /// `(u - q m) / R` is the difference of the high halves exactly, at least `-m` as `q m < R m`: one
 /// addition of `m` when it is negative makes it a residue below `R`.
 ///
+/// The high half of `q m` is the high half of a whole product when `mb` is null. Otherwise it comes
+/// from the short product of `q B` and `m B`, `n + 1` limbs each, whose limbs from position `n`
+/// are `V = ⌊P / B^n⌋` for a `P` with `q m B² - n B^(n+1) < P <= q m B²` (see
+/// [`mulhigh`](super::super::mul::short)): so `P' = V B^(n-2)` is below `q m` by
+/// `E < n B^(n-1) < B^n`. The low half of `q m` is that of `u`, `L`, so `E` is `L - P'` modulo
+/// `B^n`, and the high half of `q m = P' + E` is that of `P'`, plus one when the low half of `P'`
+/// (its limbs at `n - 2` and `n - 1`, the two low limbs of `V`) exceeds `L`.
+///
 /// # Safety
 ///
-/// The limbs must be valid, `r` apart from `u`, and the scratch at `t` hold
-/// `3n + max(mullo_itch(n), mul_itch(n, n))` limbs.
-unsafe fn redc_n(r: *mut u64, u: *const u64, m: *const u64, n: usize, inv: *const u64, t: Scratch) {
-    need!(t, 3 * n + mullo_itch(n).max(mul_itch(n, n)));
-    // SAFETY: as the caller guarantees: the quotient's `n` limbs at `t`, the product's `2n` after
-    // them, and the scratch of both after that.
+/// The limbs must be valid, `r` apart from `u`, `n >= 2`, and the scratch at `t` hold
+/// [`Montgomery::redc_itch`]`(n)` limbs.
+unsafe fn redc_n(
+    r: *mut u64,
+    u: *const u64,
+    m: *const u64,
+    n: usize,
+    inv: *const u64,
+    mb: *const u64,
+    t: Scratch,
+) {
+    need!(t, Montgomery::redc_itch(n));
+    // SAFETY: as the caller guarantees: the quotient at `t`, the product after it, and the scratch
+    // of both after that.
     unsafe {
-        let (q, t) = t.split(n);
-        let (p, rest) = t.split(2 * n);
-        mullo(q, u, inv, n, rest);
-        mul(p, m, n, q, n, rest);
-        if sub_n(r, u.add(n), p.add(n), n) {
+        if mb.is_null() {
+            let (q, t) = t.split(n);
+            let (p, rest) = t.split(2 * n);
+            mullo(q, u, inv, n, rest);
+            mul(p, m, n, q, n, rest);
+            if sub_n(r, u.add(n), p.add(n), n) {
+                add_n(r, r, m, n);
+            }
+            return;
+        }
+        let (q, t) = t.split(n + 1);
+        let (h, rest) = t.split(2 * (n + 1));
+        *q = 0;
+        mullo(q.add(1), u, inv, n, rest);
+        mulhigh(h, q, mb, n + 1, rest);
+        let low = (u128::from(*u.add(n - 1)) << 64) | u128::from(*u.add(n - 2));
+        let v = (u128::from(*h.add(n + 1)) << 64) | u128::from(*h.add(n));
+        // `u_high - V_high - c`, `c` the carry of `E`: at most one of the two borrows is set, and
+        // either means the difference is negative.
+        let borrow = sub_n(r, u.add(n), h.add(n + 2), n);
+        let borrow = borrow | (sub_1(r, n, u64::from(low < v)) != 0);
+        if borrow {
             add_n(r, r, m, n);
         }
     }

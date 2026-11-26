@@ -3,6 +3,8 @@
 use super::Quaternion;
 use super::scale::{exponent, in_range};
 use crate::math::complex::Float;
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+use core::any::Any;
 use core::iter::{Product, Sum};
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -43,10 +45,52 @@ impl<T: Float> Quaternion<T> {
     /// overflows where the norm of the product does not. Where finite operands give a part that
     /// is not finite, a product in it overflowed and the formula met `∞ − ∞`, `∞·0` or the
     /// overflow itself; [`times_cold`](Self::times_cold) takes those parts again from scaled
-    /// operands.
+    /// operands. On aarch64 the four parts are the lanes of NEON vectors (one for `f32`, two for
+    /// `f64`), the same products added in the same order, and the test is of their sum.
     #[inline]
     fn times(l: Self, r: Self) -> Self {
+        // On aarch64: the same product in the lanes of NEON vectors, bit for bit.
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        if let Some(p) = Self::times_neon(l, r) {
+            return p;
+        }
         let p = Self::hamilton(l, r);
+        // The sum of the parts is finite only if they all are: one test for the common case, the
+        // rest out of line.
+        if (p.w + p.x + p.y + p.z).is_finite() {
+            p
+        } else {
+            Self::times_unusual(l, r, p)
+        }
+    }
+
+    /// The product by [`neon`] for `f32` and `f64`, `None` where a part is not finite or for
+    /// another type (there is none: the trait is sealed). The types are known at compilation, so
+    /// the checks of the type fold away.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+    #[inline(always)]
+    fn times_neon(l: Self, r: Self) -> Option<Self> {
+        let (a, b) = (&l as &dyn Any, &r as &dyn Any);
+        if let (Some(&a), Some(&b)) = (
+            a.downcast_ref::<Quaternion<f32>>(),
+            b.downcast_ref::<Quaternion<f32>>(),
+        ) {
+            let p = neon::times_f32(a, b)?;
+            return (&p as &dyn Any).downcast_ref::<Self>().copied();
+        }
+        if let (Some(&a), Some(&b)) = (
+            a.downcast_ref::<Quaternion<f64>>(),
+            b.downcast_ref::<Quaternion<f64>>(),
+        ) {
+            let p = neon::times_f64(a, b)?;
+            return (&p as &dyn Any).downcast_ref::<Self>().copied();
+        }
+        None
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn times_unusual(l: Self, r: Self, p: Self) -> Self {
         if p.is_finite() || !(l.is_finite() && r.is_finite()) {
             p
         } else {
@@ -372,5 +416,83 @@ impl<'a, T: Float> Product<&'a Quaternion<T>> for Quaternion<T> {
     /// The product in the order of the iterator, `q₁·q₂·…·qₙ`, multiplied from the left.
     fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
         iter.fold(Self::ONE, |p, q| p * q)
+    }
+}
+
+/// Hamilton's product in the lanes of NEON vectors: four `f32` parts in one, four `f64` parts in
+/// two.
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+mod neon {
+    use super::Quaternion;
+    use core::arch::aarch64::{
+        float32x4_t, float64x2_t, vaddq_f32, vaddq_f64, vaddvq_f32, vaddvq_f64, vextq_f32,
+        vextq_f64, vmulq_f32, vmulq_f64, vmulq_laneq_f32, vmulq_laneq_f64, vnegq_f64, vrev64q_f32,
+    };
+    use core::mem::transmute;
+
+    /// `l·r` in the lanes `(w, x, y, z)` as `l.w·r + l.x·(−r.x, r.w, −r.z, r.y) +
+    /// l.y·(−r.y, r.z, r.w, −r.x) + l.z·(−r.z, −r.y, r.x, r.w)`, added in that order: each lane
+    /// takes the products of [`Quaternion::hamilton`] in its order, so the result is the same
+    /// bit for bit, with no fused operation. `None` where the sum of the parts is not finite,
+    /// which it is when they all are but for an overflow of the sum, for the generic path to take
+    /// the product again.
+    #[inline(always)]
+    pub(super) fn times_f32(l: Quaternion<f32>, r: Quaternion<f32>) -> Option<Quaternion<f32>> {
+        const SIGNS: [[f32; 4]; 3] = [
+            [-1.0, 1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0, 1.0],
+        ];
+        // SAFETY: NEON is part of the baseline of the aarch64 targets. `Quaternion<f32>` is
+        // `#[repr(C)]` with four `f32` fields, 16 bytes like `float32x4_t` and `[f32; 4]`, and
+        // every bit pattern is valid for all three, so the transmutes move the parts in order into
+        // the lanes and back. The lane indices are constants in range.
+        unsafe {
+            let lv = transmute::<Quaternion<f32>, float32x4_t>(l);
+            let rv = transmute::<Quaternion<f32>, float32x4_t>(r);
+            let sign = |k: usize| transmute::<[f32; 4], float32x4_t>(SIGNS[k]);
+            // (x, w, z, y), (y, z, w, x) and (z, y, x, w) of r, with their signs.
+            let r_xwzy = vmulq_f32(vrev64q_f32(rv), sign(0));
+            let yzwx = vextq_f32::<2>(rv, rv);
+            let r_yzwx = vmulq_f32(yzwx, sign(1));
+            let r_zyxw = vmulq_f32(vrev64q_f32(yzwx), sign(2));
+            let mut p = vmulq_laneq_f32::<0>(rv, lv);
+            p = vaddq_f32(p, vmulq_laneq_f32::<1>(r_xwzy, lv));
+            p = vaddq_f32(p, vmulq_laneq_f32::<2>(r_yzwx, lv));
+            p = vaddq_f32(p, vmulq_laneq_f32::<3>(r_zyxw, lv));
+            vaddvq_f32(p)
+                .is_finite()
+                .then(|| transmute::<float32x4_t, Quaternion<f32>>(p))
+        }
+    }
+
+    /// The same for `f64`, the parts `(w, x)` in one vector and `(y, z)` in the other.
+    #[inline(always)]
+    pub(super) fn times_f64(l: Quaternion<f64>, r: Quaternion<f64>) -> Option<Quaternion<f64>> {
+        // SAFETY: as in `times_f32`: `Quaternion<f64>` is `#[repr(C)]` with four `f64` fields,
+        // 32 bytes like two `float64x2_t` and `[f64; 2]` pairs, every bit pattern valid.
+        unsafe {
+            let [l01, l23] = transmute::<Quaternion<f64>, [float64x2_t; 2]>(l);
+            let [r01, r23] = transmute::<Quaternion<f64>, [float64x2_t; 2]>(r);
+            let minus_plus = transmute::<[f64; 2], float64x2_t>([-1.0, 1.0]);
+            let plus_minus = transmute::<[f64; 2], float64x2_t>([1.0, -1.0]);
+            // (x, w) and (z, y) of r.
+            let r10 = vextq_f64::<1>(r01, r01);
+            let r32 = vextq_f64::<1>(r23, r23);
+            let mut p01 = vmulq_laneq_f64::<0>(r01, l01);
+            let mut p23 = vmulq_laneq_f64::<0>(r23, l01);
+            // l.x·(−r.x, r.w | −r.z, r.y)
+            p01 = vaddq_f64(p01, vmulq_laneq_f64::<1>(vmulq_f64(r10, minus_plus), l01));
+            p23 = vaddq_f64(p23, vmulq_laneq_f64::<1>(vmulq_f64(r32, minus_plus), l01));
+            // l.y·(−r.y, r.z | r.w, −r.x)
+            p01 = vaddq_f64(p01, vmulq_laneq_f64::<0>(vmulq_f64(r23, minus_plus), l23));
+            p23 = vaddq_f64(p23, vmulq_laneq_f64::<0>(vmulq_f64(r01, plus_minus), l23));
+            // l.z·(−r.z, −r.y | r.x, r.w)
+            p01 = vaddq_f64(p01, vmulq_laneq_f64::<1>(vnegq_f64(r32), l23));
+            p23 = vaddq_f64(p23, vmulq_laneq_f64::<1>(r10, l23));
+            vaddvq_f64(vaddq_f64(p01, p23))
+                .is_finite()
+                .then(|| transmute::<[float64x2_t; 2], Quaternion<f64>>([p01, p23]))
+        }
     }
 }

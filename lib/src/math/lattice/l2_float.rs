@@ -4,6 +4,7 @@
 //! [`BigFloat`] of a chosen precision, for the precision that Nguyen and Stehlé's proof asks
 //! for. Both round each operation to nearest, as the analysis of L² assumes.
 
+use super::zint::Z;
 use crate::math::float::{BigFloat, Round};
 use crate::math::numbers::{ByteOrder, Number};
 use crate::math::rational::Rational;
@@ -12,6 +13,16 @@ use crate::math::rational::Rational;
 pub(super) trait Fp: Clone {
     /// The nearest number of the precision `prec` to `n` (`prec` is 53 for [`Dpe`]).
     fn of_number(n: &Number, prec: u64) -> Self;
+    /// The same of the integer `z`.
+    fn of_z(z: &Z, prec: u64) -> Self {
+        Self::of_number(&z.number(), prec)
+    }
+    /// `z·2⁻ˢ`, as [`of_z`](Self::of_z) of `z` scaled exactly; the types with an exponent of
+    /// their own keep `z` as it is, which leaves every comparison and quotient of the run the same.
+    fn of_z_scaled(z: &Z, prec: u64, s: i64) -> Self {
+        let _ = s;
+        Self::of_z(z, prec)
+    }
     /// The nearest number of the precision `prec` to `x`.
     fn of_f64(x: f64, prec: u64) -> Self;
     /// `r` rounded in the direction `round` to the precision `prec`, for an `r` in the range of
@@ -106,6 +117,15 @@ fn top_of(n: &Number) -> (f64, i64) {
 }
 
 impl Fp for Dpe {
+    /// As [`of_number`](Self::of_number) rounds it: the top eight bytes, then to 53 bits.
+    fn of_z(z: &Z, _: u64) -> Dpe {
+        if z.is_zero() {
+            return Dpe { m: 0.0, e: 0 };
+        }
+        let (x, e) = z.top();
+        Dpe::new(if z.is_negative() { -x } else { x }, e)
+    }
+
     fn of_number(n: &Number, _: u64) -> Dpe {
         if n.is_zero() {
             return Dpe { m: 0.0, e: 0 };
@@ -187,6 +207,131 @@ impl Fp for Dpe {
         // An integer already: the 53 bits of the mantissa, shifted.
         let mi = (self.m * pow2(53)) as i64;
         Some(Number::from(mi) << (self.e - 53) as usize)
+    }
+}
+
+/// A plain `f64`, for Gram matrices whose entries fit its exponents: the arithmetic of [`Dpe`]
+/// without its exponent, so every operation rounds as `Dpe`'s does, the same result, while no
+/// exponent leaves the range. A result that overflows, underflows to a subnormal, or a product
+/// or a quotient of nonzero numbers that underflows to zero becomes a NaN, which ends the run
+/// (a coefficient that is not finite, a squared norm that is not positive) before it decides
+/// anything on a rounded value that `Dpe` would not have: the run then gives way to `Dpe`'s.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct F64(f64);
+
+impl F64 {
+    #[inline(always)]
+    fn checked(x: f64) -> F64 {
+        if x.is_finite() && (x == 0.0 || x.abs() >= f64::MIN_POSITIVE) {
+            F64(x)
+        } else {
+            F64(f64::NAN)
+        }
+    }
+
+    /// A product or a quotient: zero from nonzero operands is an underflow.
+    #[inline(always)]
+    fn checked_of(x: f64, a: f64, b: f64) -> F64 {
+        if x == 0.0 && a != 0.0 && b != 0.0 {
+            F64(f64::NAN)
+        } else {
+            F64::checked(x)
+        }
+    }
+
+    /// `x·2^e` for `1 ≤ |x| < 2^64`: NaN past the range of the normal doubles (an `e` below
+    /// `−1022` is taken as below it).
+    fn scaled(x: f64, e: i64) -> F64 {
+        if !(-1022..=1023).contains(&e) {
+            return F64(f64::NAN);
+        }
+        F64::checked(x * pow2(e))
+    }
+}
+
+impl Fp for F64 {
+    fn of_z(z: &Z, _: u64) -> F64 {
+        if z.is_zero() {
+            return F64(0.0);
+        }
+        // As Dpe takes it: the top eight bytes, rounded once to 53 bits, then scaled exactly.
+        let (x, e) = z.top();
+        F64::scaled(if z.is_negative() { -x } else { x }, e)
+    }
+
+    fn of_z_scaled(z: &Z, _: u64, s: i64) -> F64 {
+        if z.is_zero() {
+            return F64(0.0);
+        }
+        let (x, e) = z.top();
+        F64::scaled(if z.is_negative() { -x } else { x }, e - s)
+    }
+
+    fn of_number(n: &Number, _: u64) -> F64 {
+        if n.is_zero() {
+            return F64(0.0);
+        }
+        let (x, e) = top_of(n);
+        F64::scaled(if n.is_negative() { -x } else { x }, e)
+    }
+
+    fn of_f64(x: f64, _: u64) -> F64 {
+        F64::checked(x)
+    }
+
+    fn of_rational(r: &Rational, _: u64, round: Round) -> F64 {
+        let x = BigFloat::from_rational(r, 53, round).0;
+        F64::checked(x.to_f64_round(round).0)
+    }
+
+    #[inline(always)]
+    fn add(&self, o: &F64) -> F64 {
+        F64::checked(self.0 + o.0)
+    }
+
+    #[inline(always)]
+    fn sub(&self, o: &F64) -> F64 {
+        F64::checked(self.0 - o.0)
+    }
+
+    #[inline(always)]
+    fn mul(&self, o: &F64) -> F64 {
+        F64::checked_of(self.0 * o.0, self.0, o.0)
+    }
+
+    #[inline(always)]
+    fn div(&self, o: &F64) -> F64 {
+        F64::checked_of(self.0 / o.0, self.0, o.0)
+    }
+
+    #[inline(always)]
+    fn lt(&self, o: &F64) -> bool {
+        self.0 - o.0 < 0.0
+    }
+
+    #[inline(always)]
+    fn abs_le(&self, o: &F64) -> bool {
+        self.0.abs() - o.0 <= 0.0
+    }
+
+    fn is_positive(&self) -> bool {
+        self.0.is_finite() && self.0 > 0.0
+    }
+
+    fn is_finite(&self) -> bool {
+        self.0.is_finite()
+    }
+
+    fn rint(&self) -> Option<Number> {
+        if !self.0.is_finite() {
+            return None;
+        }
+        if self.0 == 0.0 {
+            return Some(Number::from(0u8));
+        }
+        // As Dpe rounds it, from its mantissa and exponent.
+        let (m, e) = split(self.0);
+        Dpe { m, e }.rint()
     }
 }
 

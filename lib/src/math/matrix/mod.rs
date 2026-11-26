@@ -39,6 +39,9 @@ mod schur;
 mod strassen;
 mod svd;
 mod tridiagonal;
+/// The eigenvalues of a real symmetric tridiagonal matrix, for the Gaussian rules of
+/// `a::math::numerics`, whose Jacobi matrices are tridiagonal to begin with.
+pub(crate) use tridiagonal::values as tridiagonal_eigenvalues;
 
 pub use cholesky::Cholesky;
 pub(crate) use cholesky::cholesky_in_place;

@@ -49,8 +49,11 @@ const KAPPA: [f64; 6] = [0.0, -0.1850, -1.0 / 9.0, -0.0823, -0.0415, 0.0];
 ///   so the formulas are always those of a constant step.
 /// * **The Newton iteration.** The modified Newton iteration on `(I − c·h·J)·Δ = …`,
 ///   `c = 1/((1 − κ)·γₖ)`, through one LU decomposition of `n × n` ([`Matrix::lu`]), formed again
-///   whenever `c·h` changes; the rate of convergence is watched and an iteration that diverges or
-///   would not converge within four iterates is abandoned. `J` is kept from step to step and
+///   whenever `c·h` changes, in the memory of the last
+///   ([`Lu::refactor`](crate::math::matrix::Lu::refactor)), each iterate's system solved into
+///   memory of its own ([`Lu::solve_into`](crate::math::matrix::Lu::solve_into)); the rate of
+///   convergence is watched and an iteration that diverges or would not converge within four
+///   iterates is abandoned. `J` is kept from step to step and
 ///   formed again only when an iteration fails with an old one.
 /// * **Error estimate.** `(κ·γₖ + 1/(k + 1))·∇ᵏ⁺¹yₙ₊₁`, from the correction the iteration made
 ///   to the prediction.
@@ -148,9 +151,14 @@ pub struct Bdf<T, J = NoJacobian<T>> {
     jac: Matrix<T>,
     jac_current: bool,
     jac_valid: bool,
-    /// The LU decomposition of `I − c·h·J` and the `c·h` it is for.
+    /// The LU decomposition of `I − c·h·J`, whether it is current, and the `c·h` it is for; the
+    /// matrix it is formed from, and the solution of its system, each in memory kept from one
+    /// decomposition to the next.
     lu: Option<Lu<T>>,
+    lu_valid: bool,
     lu_c: T,
+    iteration: Matrix<T>,
+    dy: Matrix<T>,
     /// `γₖ = Σ 1/j`, `(1 − κₖ)·γₖ` and the error constants `κₖ·γₖ + 1/(k + 1)`, by order.
     gamma: [T; MAX_ORDER + 1],
     alpha: [T; MAX_ORDER + 1],
@@ -218,7 +226,10 @@ impl<T: Real + Scalar, J> Bdf<T, J> {
             jac_current: false,
             jac_valid: false,
             lu: None,
+            lu_valid: false,
             lu_c: T::ZERO,
+            iteration: Matrix::zeros(0, 0),
+            dy: empty(),
             gamma: [T::ZERO; MAX_ORDER + 1],
             alpha: [T::ZERO; MAX_ORDER + 1],
             error: [T::ZERO; MAX_ORDER + 1],
@@ -415,7 +426,7 @@ where
                 self.njev += 1;
                 self.jac_current = true;
                 self.jac_valid = false;
-                self.lu = None;
+                self.lu_valid = false;
                 return false;
             }
         }
@@ -433,30 +444,35 @@ where
         self.njev += 1;
         self.jac_current = true;
         self.jac_valid = finite;
-        self.lu = None;
+        self.lu_valid = false;
         finite
     }
 
     /// The LU decomposition of `I − c·J`, unless it is there for this `c`. Whether it is regular.
     fn factorise(&mut self, c: T) -> bool {
         if let Some(lu) = &self.lu
+            && self.lu_valid
             && self.lu_c == c
         {
             return !lu.is_singular();
         }
         let n = self.y.rows();
-        let jac = &self.jac;
-        let lu = Matrix::from_fn(n, n, |i, j| {
-            if i == j {
-                T::ONE - c * jac[(i, j)]
-            } else {
-                -c * jac[(i, j)]
+        for j in 0..n {
+            for i in 0..n {
+                let x = self.jac[(i, j)];
+                self.iteration[(i, j)] = if i == j { T::ONE - c * x } else { -c * x };
             }
-        })
-        .lu();
+        }
+        let lu = match &mut self.lu {
+            Some(lu) => {
+                lu.refactor(&self.iteration);
+                lu
+            }
+            None => self.lu.insert(self.iteration.lu()),
+        };
         self.nlu += 1;
         let regular = !lu.is_singular();
-        self.lu = Some(lu);
+        self.lu_valid = true;
         self.lu_c = c;
         regular
     }
@@ -483,7 +499,11 @@ where
             for r in 0..n {
                 self.rhs[(r, 0)] = c * self.fy[(r, 0)] - self.psi[r] - self.corr[r];
             }
-            let dy = self.lu.as_ref()?.solve(&self.rhs)?;
+            let lu = self.lu.as_ref().filter(|_| self.lu_valid)?;
+            if !lu.solve_into(&self.rhs, &mut self.dy) {
+                return None;
+            }
+            let dy = &self.dy;
             let mut sum = T::ZERO;
             for (r, &s) in self.scale.iter().enumerate() {
                 let q = in_scale(dy[(r, 0)], s);
@@ -636,8 +656,10 @@ where
         self.d = vec![T::ZERO; (MAX_ORDER + 3) * n];
         self.jac = Matrix::zeros(n, n);
         self.differences = Jacobian::new(n);
-        self.lu = None;
+        self.lu_valid = false;
         self.lu_c = T::ZERO;
+        self.iteration = Matrix::zeros(n, n);
+        self.dy = y0.clone();
         self.order = 1;
         self.equal = 0;
         self.pending = None;

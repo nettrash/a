@@ -6,14 +6,17 @@
 //! greatest common divisor a coefficient, instead of a product, a sum and their greatest common
 //! divisors for each pair of coefficients.
 //!
-//! Over the floats, the schoolbook method computes each coefficient as a sum of rounded products,
-//! with the componentwise bound `|ĉ_k - c_k| <= γ_m Σ |a_i| |b_(k-i)|` (`γ_m = m ε / (1 - m ε)`,
-//! `ε = 2^-53`, `m` the terms); from about 512 coefficients in the shorter operand (80 for
-//! complex floats; see [`by_fft`]) the product
-//! is taken by a fast Fourier transform of length `N` (a power of 2 at least the product's
-//! length), whose error is bounded in norm rather than componentwise: `|ĉ_k - c_k| <= 11 log2(N)
-//! ε ‖a‖₂ ‖b‖₂` (Percival, 2003, with twiddles accurate to `ε`), so that coefficients much
-//! smaller than the norms may lose their relative accuracy.
+//! Over the floats and the complex floats, the schoolbook method computes each coefficient as a
+//! sum of rounded products, with the componentwise bound `|ĉ_k - c_k| <= γ_m Σ |a_i| |b_(k-i)|`
+//! (`γ_m = m ε / (1 - m ε)`, `ε = 2^-53`, `m` the terms), for every pair of lengths [`by_fft`]
+//! leaves to it: below 32 coefficients in the shorter operand, and while `la·lb ≤ c·N·log2(N)`
+//! (`c = 19` for floats, 5 for complex floats, `N` the least power of 2 at least the product's
+//! length), which for square products is up to 441 coefficients (101 complex). Beyond, the
+//! crate's linear convolution by fast Fourier transforms
+//! ([`fft::convolve`](crate::math::fft::convolve)), whose error is bounded in norm rather than
+//! componentwise, a few units of rounding times `‖a‖₂ ‖b‖₂ log2(N)` for a transform of length
+//! `N`, so that coefficients much smaller than the norms may lose their relative accuracy, and an
+//! infinity or a NaN among the coefficients may make every coefficient NaN.
 
 use super::zmul;
 use crate::math::complex::Complex;
@@ -423,189 +426,244 @@ pub(crate) fn rat_inv_series(a: &[Rational], n: usize) -> Option<Vec<Rational>> 
 
 // The fast Fourier transform
 
-/// Whether a product of `la` by `lb` coefficients goes by the transform: measured on an Apple M4,
-/// the schoolbook loop (which the compiler vectorizes) costs about 0.1 ns a product of floats and
-/// 0.45 of complex floats, and the transform about 1.9 ns a point and level of a length `N`, the
-/// power of 2 at least the product's length; so the transform from `la lb > c N log2(N)`, `c =
-/// 19` for floats and 5 for complex floats (from about 512 and 80 coefficients each).
-fn by_fft(la: usize, lb: usize, complex: bool) -> bool {
-    if cfg!(miri) {
-        return la.min(lb) >= 16;
+/// The composition `p(g)` over the rationals through the integers, as FLINT's
+/// `fmpq_poly_compose`: `p = P / dp` and `g = G / dg` over common denominators, so that
+/// `p(g) = Q(G) / (dp·dg^(n-1))` with the integer `Q_i = P_i·dg^(n-1-i)`, `Q(G)` composed over the
+/// integers and each coefficient brought to lowest terms once. `None` for a constant `p` or `g`.
+pub(crate) fn rat_compose(p: &[Rational], g: &[Rational]) -> Option<Vec<Rational>> {
+    let n = p.len();
+    if n < 2 || g.len() < 2 {
+        return None;
     }
-    let n = fft_len(la + lb - 1);
+    let (dp, pn) = common(p);
+    let (dg, gn) = common(g);
+    let mut q = vec![Number::default(); n];
+    let mut pw = Number::from(1u8);
+    for i in (0..n).rev() {
+        q[i] = &pn[i] * &pw;
+        if i > 0 {
+            pw = &pw * &dg;
+        }
+    }
+    // pw = dg^(n-1)
+    let h = crate::math::poly::Polynomial::new(q).compose(&crate::math::poly::Polynomial::new(gn));
+    Some(over(h.into_coeffs(), &(&dp * &pw)))
+}
+
+/// Whether a product of `la` by `lb` coefficients goes by the transforms, rather than by the
+/// schoolbook method: from 32 coefficients in the shorter operand when `la·lb > c·N·log2(N)`,
+/// `c = 19` for floats and 5 for complex floats, `N` the least power of 2 at least `la + lb - 1`
+/// (square products of 442 to 512 coefficients and of 655 or more, complex ones of 102 to 128
+/// and of 152 or more; against 5,000 coefficients from 405 in the shorter, 107 complex). This is
+/// the line the page and the rustdoc of `*` draw for the componentwise error bound of the
+/// schoolbook method, not a tuned
+/// crossover: it was the crossover of the radix-2 transform this module had before, and a faster
+/// transform is no reason to give the bound up for shorter products.
+fn by_fft(la: usize, lb: usize, complex: bool) -> bool {
+    let n = (la + lb - 1).next_power_of_two().max(2);
     let c = if complex { 5 } else { 19 };
     la.min(lb) >= 32 && la * lb > c * n * n.trailing_zeros() as usize
 }
 
-/// The twiddles `e^(-2πi j / n)` for `j < n / 2`, each from its own sine and cosine.
-fn twiddles(n: usize) -> (Vec<f64>, Vec<f64>) {
-    let h = n / 2;
-    let mut re = Vec::with_capacity(h);
-    let mut im = Vec::with_capacity(h);
-    for j in 0..h {
-        // The angle reduced to the first octant for the accuracy of sin and cos.
-        let t = -2.0 * core::f64::consts::PI * (j as f64) / (n as f64);
-        re.push(t.cos());
-        im.push(t.sin());
-    }
-    (re, im)
+/// The coefficients of a product the schoolbook kernels below compute together, in registers.
+/// Measured on an Apple M4 Max (8, 16 and 32 lanes, `la` 4 to 384, `lb/la` 1 to 64): 32 lanes
+/// (16 NEON registers of sums) 4 to 9% faster than 16 wherever the kernel runs, 8 slower than
+/// both.
+const LANES: usize = 32;
+
+/// The same for complex floats (twice as many sums, the real and the imaginary parts): measured,
+/// 8 faster than 4 and 16 wherever the kernel runs (sweep 4, 8, 16; `la` 2 to 64, `lb` 8 to
+/// 512).
+const CLANES: usize = 8;
+
+/// The terms `i` of the block of `w` coefficients `k0..k0 + w` of a product of `la` by `lb ≥ w`
+/// coefficients, ascending, in three ranges `(lo..p, p..q, q..hi)`: in the middle one every
+/// coefficient of the block has the term `i` (`0 ≤ k − i < lb`), in the others some do not.
+#[inline(always)]
+fn block_ranges(k0: usize, w: usize, la: usize, lb: usize) -> [(usize, usize); 3] {
+    // The block's terms: k0 + 1 - lb ≤ i ≤ k0 + w - 1, i < la; every coefficient has the term i
+    // when k0 + w - lb ≤ i ≤ k0.
+    let lo = (k0 + 1).saturating_sub(lb);
+    let hi = (k0 + w).min(la);
+    let p = (k0 + w).saturating_sub(lb).clamp(lo, hi);
+    let q = (k0 + 1).clamp(p, hi);
+    [(lo, p), (p, q), (q, hi)]
 }
 
-/// The transform of `(re, im)` in place, of a power-of-2 length, forward (`e^(-2πi/n)`) or the
-/// inverse without the factor `1/n`: iterative radix 2, decimation in frequency forward (the
-/// result in bit-reversed order) and in time inverse (from bit-reversed order), so that no
-/// permutation is needed between them.
-fn transform(re: &mut [f64], im: &mut [f64], tw: &(Vec<f64>, Vec<f64>), inverse: bool) {
-    let n = re.len();
-    let (wr, wi) = (&tw.0, &tw.1);
-    let sign = if inverse { -1.0 } else { 1.0 };
-    if !inverse {
-        // Gentleman–Sande: butterflies (a, b) -> (a + b, (a - b) w).
-        let mut len = n;
-        while len >= 2 {
-            let half = len / 2;
-            let step = n / len;
-            for start in (0..n).step_by(len) {
-                for j in 0..half {
-                    let (c, s) = (wr[j * step], sign * wi[j * step]);
-                    let (p, q) = (start + j, start + j + half);
-                    let (ar, ai, br, bi) = (re[p], im[p], re[q], im[q]);
-                    re[p] = ar + br;
-                    im[p] = ai + bi;
-                    let (dr, di) = (ar - br, ai - bi);
-                    re[q] = dr * c - di * s;
-                    im[q] = dr * s + di * c;
-                }
-            }
-            len = half;
+/// The sums `s` of the block `k0..k0 + LANES` of [`school_f64`] with the terms `i` of `r`, every
+/// coefficient of the block having each.
+#[inline(always)]
+fn f64_full(
+    mut s: [f64; LANES],
+    a: &[f64],
+    b: &[f64],
+    k0: usize,
+    r: (usize, usize),
+) -> [f64; LANES] {
+    for i in r.0..r.1 {
+        let x = a[i];
+        if x == 0.0 {
+            continue;
         }
-    } else {
-        // Cooley–Tukey: (a, b) -> (a + b w, a - b w), w conjugated.
-        let mut len = 2;
-        while len <= n {
-            let half = len / 2;
-            let step = n / len;
-            for start in (0..n).step_by(len) {
-                for j in 0..half {
-                    let (c, s) = (wr[j * step], sign * wi[j * step]);
-                    let (p, q) = (start + j, start + j + half);
-                    let (br, bi) = (re[q] * c - im[q] * s, re[q] * s + im[q] * c);
-                    let (ar, ai) = (re[p], im[p]);
-                    re[p] = ar + br;
-                    im[p] = ai + bi;
-                    re[q] = ar - br;
-                    im[q] = ai - bi;
-                }
-            }
-            len *= 2;
+        let y: &[f64; LANES] = b[k0 - i..][..LANES].try_into().expect("LANES values");
+        for j in 0..LANES {
+            s[j] += x * y[j];
         }
     }
+    s
 }
 
-/// The length of the transform of a product of `len` coefficients.
-fn fft_len(len: usize) -> usize {
-    len.next_power_of_two().max(2)
-}
-
-/// The product of the complex polynomials `(ar, ai)` and `(br, bi)` (a square when `b` is
-/// `None`) by the transform: `len` coefficients.
-fn fft_product(
-    a: (&[f64], &[f64]),
-    b: Option<(&[f64], &[f64])>,
-    len: usize,
-) -> (Vec<f64>, Vec<f64>) {
-    let n = fft_len(len);
-    let tw = twiddles(n);
-    let load = |x: (&[f64], &[f64])| {
-        let mut re = vec![0.0; n];
-        let mut im = vec![0.0; n];
-        re[..x.0.len()].copy_from_slice(x.0);
-        im[..x.1.len()].copy_from_slice(x.1);
-        (re, im)
-    };
-    let (mut xr, mut xi) = load(a);
-    transform(&mut xr, &mut xi, &tw, false);
-    match b {
-        None => {
-            for (r, i) in xr.iter_mut().zip(xi.iter_mut()) {
-                let (u, v) = (*r, *i);
-                *r = u * u - v * v;
-                *i = 2.0 * u * v;
-            }
+/// As [`f64_full`] for terms some coefficients of the block do not have: `bp` is `b` between
+/// `LANES` zeros, and a coefficient without the term keeps its sum (a select, so that `x·0`
+/// for an infinite `x` reaches no sum).
+#[inline(always)]
+fn f64_part(
+    mut s: [f64; LANES],
+    a: &[f64],
+    bp: &[f64],
+    lb: usize,
+    k0: usize,
+    r: (usize, usize),
+) -> [f64; LANES] {
+    for i in r.0..r.1 {
+        let x = a[i];
+        if x == 0.0 {
+            continue;
         }
-        Some(b) => {
-            let (mut yr, mut yi) = load(b);
-            transform(&mut yr, &mut yi, &tw, false);
-            for ((r, i), (s, t)) in xr.iter_mut().zip(xi.iter_mut()).zip(yr.iter().zip(&yi)) {
-                let (u, v) = (*r, *i);
-                *r = u * s - v * t;
-                *i = u * t + v * s;
-            }
+        let y: &[f64; LANES] = bp[k0 + LANES - i..][..LANES]
+            .try_into()
+            .expect("LANES values");
+        // The coefficients k0 + j with the term: i ≤ k0 + j < i + lb.
+        let (jlo, jhi) = (i.saturating_sub(k0), (i + lb).saturating_sub(k0));
+        for j in 0..LANES {
+            let v = s[j] + x * y[j];
+            s[j] = if j >= jlo && j < jhi { v } else { s[j] };
         }
     }
-    transform(&mut xr, &mut xi, &tw, true);
-    let scale = 1.0 / n as f64;
-    xr.truncate(len);
-    xi.truncate(len);
-    for (r, i) in xr.iter_mut().zip(xi.iter_mut()) {
-        *r *= scale;
-        *i *= scale;
-    }
-    (xr, xi)
+    s
 }
 
-/// The product of polynomials over the floats, both not empty.
-pub(crate) fn f64_mul(a: &[f64], b: &[f64]) -> Vec<f64> {
-    if !by_fft(a.len(), b.len(), false) {
+/// The product of the floats `a` and `b` by the schoolbook method, both not empty: bit for bit
+/// the generic schoolbook's (each `c_k` the sum from `+0` of the rounded products `a_i·b_(k-i)`
+/// over the non-zero `a_i`, by increasing `i`, so that a term with an infinity or a NaN reaches
+/// only the coefficients it belongs to). For an `a` of at least 16 coefficients and a `b` of at
+/// least 448 and 4 times as many (where it was measured faster), [`LANES`] coefficients at a
+/// time: their sums stay in registers while the terms run past them, each step one product of
+/// `a_i` by `LANES` consecutive values of `b` and one sum, which the compiler takes on vectors (a
+/// product and a sum, not a fused multiply-add, which would round otherwise); else the generic
+/// loop, which the compiler vectorizes over `b`.
+fn school_f64(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let (la, lb) = (a.len(), b.len());
+    // Measured on an Apple M4 Max (`la` 4 to 384, `lb` 8 to 12,288): the generic loop is faster
+    // below 16 coefficients in `a` and below about 450 in `b` (2.6 times at 16 by 64, 1.2 at 64
+    // by 256), the kernel from there for `lb ≥ 4·la` (1.2 times faster at 64 by 1,024, 1.4 at
+    // 192 by 2,048, more where the generic loop's loads and stores alias). The kernel takes any
+    // `la`, and `lb ≥ LANES`.
+    if la < 16 || lb < 4 * la || lb < 448 {
         return schoolbook(a, b);
     }
-    // Both real: a + i b transformed at once would mix their errors; one complex product of a
-    // and b as they are keeps the bound of the norms.
-    let zero_a = vec![0.0; a.len()];
-    let zero_b = vec![0.0; b.len()];
-    fft_product((a, &zero_a), Some((b, &zero_b)), a.len() + b.len() - 1).0
+    let mut bp = vec![0.0f64; lb + 2 * LANES];
+    bp[LANES..LANES + lb].copy_from_slice(b);
+    let mut c = vec![0.0f64; la + lb - 1];
+    for (blk, out) in c.chunks_mut(LANES).enumerate() {
+        let k0 = blk * LANES;
+        let [r0, r1, r2] = block_ranges(k0, LANES, la, lb);
+        let mut s = f64_part([0.0; LANES], a, &bp, lb, k0, r0);
+        s = f64_full(s, a, b, k0, r1);
+        s = f64_part(s, a, &bp, lb, k0, r2);
+        out.copy_from_slice(&s[..out.len()]);
+    }
+    c
+}
+
+/// [`school_f64`] for complex floats: each step the products `a_i·b_(k-i)` of [`CLANES`]
+/// coefficients as the generic schoolbook takes them (`(ar·br − ai·bi, ar·bi + ai·br)`, then
+/// added to the real and the imaginary sums), on copies of the real and the imaginary parts of
+/// `b`, bit for bit the generic schoolbook's; the generic loop for short operands (where it was
+/// measured faster).
+fn school_complex(a: &[Complex<f64>], b: &[Complex<f64>]) -> Vec<Complex<f64>> {
+    let (la, lb) = (a.len(), b.len());
+    // Measured on an Apple M4 Max (`la` 2 to 64, `lb` 8 to 512): the kernel 1.05 to 1.6 times
+    // faster than the generic loop from 12 coefficients in `a` and 64 in `b` (from 96 in `b` at 8
+    // in `a`, up to 12% slower below), the generic loop faster below them.
+    if la < CLANES || lb < 8 * CLANES {
+        return schoolbook(a, b);
+    }
+    let br: Vec<f64> = b.iter().map(|z| z.re).collect();
+    let bi: Vec<f64> = b.iter().map(|z| z.im).collect();
+    let mut c = vec![Complex::new(0.0, 0.0); la + lb - 1];
+    for (blk, out) in c.chunks_mut(CLANES).enumerate() {
+        let k0 = blk * CLANES;
+        let mut sr = [0.0f64; CLANES];
+        let mut si = [0.0f64; CLANES];
+        let [(l0, p), (p0, q), (q0, h)] = block_ranges(k0, CLANES, la, lb);
+        let partial = |sr: &mut [f64; CLANES], si: &mut [f64; CLANES], i: usize| {
+            let (xr, xi) = (a[i].re, a[i].im);
+            if xr == 0.0 && xi == 0.0 {
+                return;
+            }
+            for j in 0..CLANES {
+                // The term of the coefficient k0 + j, when it has one.
+                let t = (k0 + j).wrapping_sub(i);
+                if t < lb {
+                    sr[j] += xr * br[t] - xi * bi[t];
+                    si[j] += xr * bi[t] + xi * br[t];
+                }
+            }
+        };
+        for i in l0..p {
+            partial(&mut sr, &mut si, i);
+        }
+        for i in p0..q {
+            let (xr, xi) = (a[i].re, a[i].im);
+            if xr == 0.0 && xi == 0.0 {
+                continue;
+            }
+            let yr: &[f64; CLANES] = br[k0 - i..][..CLANES].try_into().expect("CLANES values");
+            let yi: &[f64; CLANES] = bi[k0 - i..][..CLANES].try_into().expect("CLANES values");
+            for j in 0..CLANES {
+                sr[j] += xr * yr[j] - xi * yi[j];
+                si[j] += xr * yi[j] + xi * yr[j];
+            }
+        }
+        for i in q0..h {
+            partial(&mut sr, &mut si, i);
+        }
+        for (j, z) in out.iter_mut().enumerate() {
+            *z = Complex::new(sr[j], si[j]);
+        }
+    }
+    c
+}
+
+/// The product of polynomials over the floats, both not empty: the schoolbook method
+/// ([`school_f64`]) wherever [`by_fft`] leaves the product to it, else the crate's linear
+/// convolution ([`fft::convolve`](crate::math::fft::convolve)), by real transforms of a length
+/// `2^a·3^b·5^c·7^d` (with overlap-add for unbalanced operands, the plans cached) or its direct
+/// kernels, as its model of their costs chooses.
+pub(crate) fn f64_mul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    if by_fft(a.len(), b.len(), false) {
+        return crate::math::fft::convolve(a, b);
+    }
+    school_f64(a, b)
 }
 
 /// The square of a polynomial over the floats, not empty.
 pub(crate) fn f64_sqr(a: &[f64]) -> Vec<f64> {
-    if !by_fft(a.len(), a.len(), false) {
-        return schoolbook(a, a);
-    }
-    let zero = vec![0.0; a.len()];
-    fft_product((a, &zero), None, 2 * a.len() - 1).0
+    f64_mul(a, a)
 }
 
-/// The parts of complex coefficients.
-fn parts(a: &[Complex<f64>]) -> (Vec<f64>, Vec<f64>) {
-    (
-        a.iter().map(|c| c.re).collect(),
-        a.iter().map(|c| c.im).collect(),
-    )
-}
-
-/// The product of polynomials over the complex floats, both not empty.
+/// The product of polynomials over the complex floats, both not empty: the schoolbook method
+/// ([`school_complex`]) wherever [`by_fft`] leaves the product to it, else the crate's linear
+/// convolution of complex values.
 pub(crate) fn complex_mul(a: &[Complex<f64>], b: &[Complex<f64>]) -> Vec<Complex<f64>> {
-    if !by_fft(a.len(), b.len(), true) {
-        return schoolbook(a, b);
+    if by_fft(a.len(), b.len(), true) {
+        return crate::math::fft::convolve(a, b);
     }
-    let (ar, ai) = parts(a);
-    let (br, bi) = parts(b);
-    let (r, i) = fft_product((&ar, &ai), Some((&br, &bi)), a.len() + b.len() - 1);
-    r.into_iter()
-        .zip(i)
-        .map(|(re, im)| Complex::new(re, im))
-        .collect()
+    school_complex(a, b)
 }
 
 /// The square of a polynomial over the complex floats, not empty.
 pub(crate) fn complex_sqr(a: &[Complex<f64>]) -> Vec<Complex<f64>> {
-    if !by_fft(a.len(), a.len(), true) {
-        return schoolbook(a, a);
-    }
-    let (ar, ai) = parts(a);
-    let (r, i) = fft_product((&ar, &ai), None, 2 * a.len() - 1);
-    r.into_iter()
-        .zip(i)
-        .map(|(re, im)| Complex::new(re, im))
-        .collect()
+    complex_mul(a, a)
 }

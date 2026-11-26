@@ -1,6 +1,7 @@
 //! The Riemann and Hurwitz zeta functions, the dilogarithm and the polylogarithm.
 
 mod complex;
+mod fd_tables;
 mod hurwitz;
 mod polylog;
 mod real;

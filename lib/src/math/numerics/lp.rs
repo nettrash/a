@@ -1,4 +1,4 @@
-//! Linear programming by the simplex method.
+//! Linear programming by the simplex method, primal and dual.
 //!
 //! A linear programme asks for the point that makes a linear function as small, or as large, as
 //! it can be among the points that satisfy linear inequalities, linear equations and bounds on
@@ -42,7 +42,30 @@
 
 use super::{DEFAULT_MAX_ITER, Real};
 use crate::math::complex::Float;
-use crate::math::matrix::{Matrix, Scalar};
+use crate::math::matrix::{Lu, Matrix, Scalar};
+
+mod dual;
+mod factor;
+
+/// The number of rows from which [`LpOptions::new`] has the dual simplex method solve a
+/// programme: [`LpOptions::dual_threshold`].
+// Measured on an Apple M4 Max, each programme solved by either method alone: on the random
+// programmes of the scoreboard's kind (dense and at density 0.1, 1 to 96 rows, 2 to 600
+// variables) the dual method is the faster from 3 rows; on the 600 random programmes of the
+// tests (a fifth unbounded, a quarter infeasible) only from about 20. Against 32, the threshold
+// 20 makes the battery's programmes of 20 to 23 and 24 to 31 rows 0.76 and 0.75 of their time
+// (geometric means, twice; 16 makes those of 16 to 19 rows 1.03), the netlib-like assignment and
+// transportation problems of 25 and 30 rows 0.47 and 0.56, and the random ones of 20 to 28 rows
+// 0.10 to 0.23 (sweep 1 to 96 rows; 16, 20 and 24 against 32). Unbounded programmes, which the
+// primal method finishes after the dual method's phase one, are the exception: the battery's of
+// 20 to 31 rows take 1.08 to 1.22 times as long (and the netlib-like ones of 80 and 110 rows,
+// dual already, 1.21 times the primal method's time).
+const DUAL_THRESHOLD: usize = 20;
+
+/// The magnitude from which a bound, in the units it was given in, is taken by the dual method
+/// to stand for an infinite one, as HiGHS takes it: a variable placed at such a bound would put
+/// its size into every row it meets.
+const INFINITE_BOUND: f64 = 1e20;
 
 /// How many changes of basis the product form absorbs before the basis is factorised afresh and
 /// the basic variables are computed again from the data.
@@ -77,8 +100,8 @@ const SCALE_SWEEPS: usize = 2;
 /// the method gives up. Over some fifty thousand solves of random and adversarial programmes in
 /// `f64` it resumed at most once in any; it resumes at every factorisation only where the
 /// rounding of a step is larger than the tolerance of the bounds (the cubes of Klee and Minty in
-/// tens and hundreds without the scaling, beyond nine dimensions; values up to `10⁸` in `f32`),
-/// and there the arithmetic cannot keep the point feasible.
+/// tens and hundreds without the scaling, beyond nine dimensions), and there the arithmetic
+/// cannot keep the point feasible.
 const RESUMPTIONS: usize = 10;
 
 /// The magnitude of `x`, named through [`Float`]: the elements of a matrix have an absolute value
@@ -145,7 +168,8 @@ pub enum LpStatus {
 }
 
 /// The options of the simplex method: its tolerance, how many pivots it may take, when Bland's
-/// rule takes over from Dantzig's, and whether the problem is scaled.
+/// rule takes over from Dantzig's, whether the problem is scaled, and from how many rows the dual
+/// method solves it.
 ///
 /// # Examples
 ///
@@ -169,16 +193,24 @@ pub struct LpOptions<T> {
     /// error its own value carries, which the basis gives it; [`LinearProgram`] says more.
     pub tol: T,
     /// The largest number of pivots, a move of a variable from one of its bounds to the other
-    /// counting as one.
+    /// counting as one. In the dual method an iteration — one change of basis, with whatever
+    /// moves to the other bound its ratio test makes — counts as one, and it may take half of
+    /// them; the primal method, which finishes from where it stops, the rest.
     pub max_iter: usize,
     /// How many pivots in a row may leave the objective where it was before Bland's rule takes
     /// over from Dantzig's, until the objective moves again. Zero is Bland's rule throughout;
-    /// `usize::MAX` is Dantzig's rule throughout, which can cycle.
+    /// `usize::MAX` is Dantzig's rule throughout, which can cycle. It governs the primal method;
+    /// the dual method perturbs its costs instead.
     pub stall_limit: usize,
     /// Whether the rows and the columns are scaled, by powers of two, until the largest element
     /// of each is near one, and the right-hand sides and the bounds together by the power of two
     /// that brings the median right-hand side near one.
     pub scaling: bool,
+    /// The number of rows from which the dual simplex method solves the programme, the primal
+    /// method checking its answer and finishing from it; a programme of fewer rows is solved by
+    /// the primal method alone. Zero is the dual method for every programme; `usize::MAX` the
+    /// primal method for every one.
+    pub dual_threshold: usize,
 }
 
 impl<T: Real> Default for LpOptions<T> {
@@ -189,7 +221,7 @@ impl<T: Real> Default for LpOptions<T> {
 
 impl<T: Real> LpOptions<T> {
     /// The defaults: `tol` `ε^(4/7)` (about `10⁻⁹` for `f64` and `10⁻⁴` for `f32`), `max_iter`
-    /// 10 000, `stall_limit` 100, and scaling on.
+    /// 10 000, `stall_limit` 100, scaling on, and `dual_threshold` 20.
     ///
     /// # Examples
     ///
@@ -201,6 +233,7 @@ impl<T: Real> LpOptions<T> {
     /// assert_eq!(opts.max_iter, 10_000);
     /// let single = LpOptions::<f32>::new();
     /// assert!(single.tol > 1e-4 && single.tol < 1.2e-4);
+    /// assert_eq!(opts.dual_threshold, 20);
     /// ```
     #[must_use]
     pub fn new() -> Self {
@@ -209,6 +242,7 @@ impl<T: Real> LpOptions<T> {
             max_iter: 100 * DEFAULT_MAX_ITER,
             stall_limit: DEFAULT_MAX_ITER,
             scaling: true,
+            dual_threshold: DUAL_THRESHOLD,
         }
     }
 
@@ -276,6 +310,23 @@ impl<T: Real> LpOptions<T> {
         self.scaling = scaling;
         self
     }
+
+    /// Sets [`dual_threshold`](Self::dual_threshold).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numerics::LpOptions;
+    ///
+    /// // The dual simplex method for every programme.
+    /// assert_eq!(LpOptions::<f64>::new().with_dual_threshold(0).dual_threshold, 0);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn with_dual_threshold(mut self, dual_threshold: usize) -> Self {
+        self.dual_threshold = dual_threshold;
+        self
+    }
 }
 
 /// What the simplex method found: how it ended, the point, and the dual values.
@@ -336,7 +387,8 @@ pub struct LpResult<T> {
     /// variable: the multipliers of the bounds.
     pub reduced_costs: Vec<T>,
     /// The number of pivots: the changes of basis and the moves of a variable from one of its
-    /// bounds to the other.
+    /// bounds to the other, an iteration of the dual method counting as one, of both methods
+    /// together.
     pub pivots: usize,
 }
 
@@ -351,7 +403,10 @@ pub struct LpResult<T> {
 ///
 /// # The method
 ///
-/// The primal simplex method in two phases, in the revised form, on bounded variables.
+/// The primal simplex method in two phases, in the revised form, on bounded variables; and for a
+/// programme of at least [`LpOptions::dual_threshold`] rows, 20 by default, the dual simplex
+/// method first, whose answer the primal method checks, and finishes from where it is not
+/// proven (see the dual method, below). The primal method:
 ///
 /// * **The working problem.** Every row is given a logical variable, `A·x + z = b`, with
 ///   `z ≥ 0` for an inequality and `z = 0` for an equation, so that the logical variables are a
@@ -400,6 +455,42 @@ pub struct LpResult<T> {
 ///   entering column is not pivoted on when it is below the smaller of the tolerance and
 ///   `ε^(4/7)`, times the larger of one and the column's largest element.
 ///
+/// The dual method works on the same scaled problem and keeps the reduced costs of the signs
+/// their bounds ask for while it brings the basic variables inside theirs, one leaving the basis
+/// at a time (the parts are those of Koberstein, *The dual simplex method, techniques for a fast
+/// and stable implementation*, 2005):
+///
+/// * **The basis** is factorised by a sparse LU decomposition: pivots by Markowitz's rule with
+///   threshold pivoting (Markowitz, 1957; Suhl and Suhl, 1990), the columns and rows of one
+///   element, such as those of the logical variables, first, and what is left factorised dense
+///   by [`Matrix::lu`] once it fills more than three tenths of its square. Changes of basis are
+///   factors of the product form, and the basis is factorised afresh every 64 of them. The
+///   matrix is kept by columns and by rows, and a row of `B⁻¹·A` is computed by whichever the
+///   density of the row of `B⁻¹` suits.
+/// * **Pricing** is by dual steepest edge (Forrest and Goldfarb, 1992): the basic variable that
+///   breaks a bound by the most against the norm of its row of `B⁻¹`.
+/// * **The ratio test** is the bound-flipping one (Fourer, 1994), with Harris's tolerance on the
+///   reduced costs: a variable with two finite bounds whose reduced cost would change sign moves
+///   to its other bound instead, as long as the leaving variable is still beyond its bound by
+///   more than its tolerance, and only then does a variable enter.
+/// * **Phase one** makes the reduced costs feasible where the bounds cannot, by the same method
+///   on Fourer's subproblem: right-hand sides zero and the bounds `[0, 1]`, `[−1, 0]` and
+///   `[−1000, 1000]` for a variable with only a lower, only an upper and no bound. Where its
+///   optimum leaves a reduced cost infeasible, the programme is infeasible or unbounded and the
+///   primal method decides which.
+/// * **Degeneracy**: after twenty steps in a row that leave the dual objective where it was, the
+///   costs are perturbed by small random amounts towards feasibility; they are restored at the
+///   end. A bound of `10²⁰` or more as it was given, or beyond `1/tol` after the scaling, is
+///   taken for infinite: a variable placed at it would put its size into every row it meets.
+///
+/// The basis the dual method ends at is handed to the primal method, factorised afresh by
+/// [`Matrix::lu`] with its basic variables computed from the data, and judged by the certificates
+/// below; where they fail, the primal method pivots on from that basis, and where it cannot, it
+/// starts again from its own start. Where the dual method found a row of `B⁻¹` along which the
+/// dual objective grows without end, that row alone is the candidate certificate of
+/// infeasibility. So every answer is checked as the primal method's are, whichever method found
+/// it.
+///
 /// # What an answer means
 ///
 /// Every status but [`LpStatus::IterationLimit`] is checked against the data before it is
@@ -417,9 +508,10 @@ pub struct LpResult<T> {
 ///   dual objective within what the rows' residuals, held to the tolerance, are worth at `y`: a
 ///   check that the two were computed consistently, which the first two parts already imply up
 ///   to rounding.
-/// * [`LpStatus::Infeasible`]: the multipliers of phase one are a certificate of Farkas's lemma —
-///   a combination of the rows whose value, over the box of the bounds, cannot reach the value
-///   the right-hand sides ask for. No reduced cost of phase one may be favourable by more than
+/// * [`LpStatus::Infeasible`]: the multipliers of phase one — of the costs `±1` of the basic
+///   variables that break a bound, or of that one alone in whose row the dual method found its
+///   ray — are a certificate of Farkas's lemma: a combination of the rows whose value, over the
+///   box of the bounds, cannot reach the value the right-hand sides ask for. No reduced cost of phase one may be favourable by more than
 ///   its tolerance and its error bound, as for an optimum, and the margin by which the value
 ///   falls short has to be larger than half the tolerance and than what the error of the
 ///   multipliers, their residual times the basic part of the point, could make of it: large
@@ -454,6 +546,18 @@ pub struct LpResult<T> {
 ///   column, and the rounding of its own sum, `(m + 2)·ε` times the sum of the magnitudes of its
 ///   terms. Multipliers that are large in rows its variable does not meet do not enter either.
 ///
+/// # Single precision
+///
+/// A programme in `f32` is solved in `f64`: its numbers, converted exactly, by the method above
+/// in `f64` arithmetic under its own options (the tolerance as given, about `10⁻⁴` by default),
+/// every certificate checked in `f64`. The point and the dual values are rounded to `f32` at the
+/// end, and the objective and the slacks computed again, in `f32`, from the point so rounded. As
+/// the method in `f32` arithmetic would, it gives `None` where a number of the scaled working
+/// problem, or the size of a row's terms at the point (on the working problem), is beyond the
+/// range of `f32`; a value of the answer beyond it is infinite. In `f32` arithmetic the bounds on the errors of
+/// the reduced costs, through the columns of `B⁻¹·A`, grow with the rows until, at a few hundred,
+/// every reduced cost can pass for rounding, and a basis far from the optimum for an optimal one.
+///
 /// # The dual values
 ///
 /// [`LpResult::dual_le`] and [`LpResult::dual_eq`] hold a multiplier `y` for every row and
@@ -468,12 +572,15 @@ pub struct LpResult<T> {
 ///
 /// # Limits
 ///
-/// The matrices are dense and so is the factorisation: a pivot costs `O(m² + m·n)` operations for
-/// `m` rows and `n` variables, and the basis is factorised afresh, at `O(m³)`, every twenty
-/// pivots and before every answer (and the magnitudes of its inverse, for the errors of the
-/// basic variables, cost as much again), which suits problems of up to a few hundred of each.
+/// The matrices are given dense. The primal method's factorisation is dense too: a pivot costs
+/// `O(m² + m·n)` operations for `m` rows and `n` variables, and the basis is factorised afresh,
+/// at `O(m³)`, every twenty pivots and before every answer (and the magnitudes of its inverse,
+/// for the errors of the basic variables, cost as much again), which suits a few dozen rows.
 /// Dantzig's rule can take a number of pivots exponential in the size of the problem (the cubes
-/// of Klee and Minty), and Bland's is slower still on most problems. The tolerances on the bounds
+/// of Klee and Minty), and Bland's is slower still on most problems. The dual method takes
+/// about one to two pivots a row on the random programmes it was measured on, each costing
+/// solves with the sparse factors and the elements of `A`, `O(m² + nnz(A))` at worst; its
+/// answer is checked once on a dense factorisation, at `O(m³)`. There is no presolve. The tolerances on the bounds
 /// and the rows have a floor of one after the scaling, so where the right-hand sides span many
 /// orders of magnitude, the ones far below the median are held only to `tol` times the median;
 /// and a programme that is infeasible, or unbounded, by less than the tolerance may be reported
@@ -754,28 +861,104 @@ impl<T: Real + Scalar> LinearProgram<T> {
     /// ```
     #[must_use]
     pub fn solve_with(&self, opts: &LpOptions<T>) -> Option<LpResult<T>> {
+        if T::MANTISSA_DIGITS < f64::MANTISSA_DIGITS {
+            self.solve_in_f64(opts)
+        } else {
+            self.solve_in_place(opts)
+        }
+    }
+
+    /// [`solve_with`](Self::solve_with) for a programme in a precision narrower than `f64`: the
+    /// programme in `f64`, each number converted exactly, solved under the same options, the
+    /// point and the dual values rounded at the end, and the objective and the slacks computed
+    /// again from the point so rounded, as for an answer computed in that precision. In `f32`
+    /// arithmetic the bounds on the errors of the reduced costs, through the columns of `B⁻¹·A`,
+    /// grow with the rows until every reduced cost can pass for rounding, and a basis far from
+    /// the optimum for an optimal one (on random programmes of 220 rows, optima of −184 and
+    /// −420 where the optimum is −527 and −533); in `f64` they stay small. As the method in the
+    /// precision of the programme would, it gives `None` where a number of the scaled working
+    /// problem, or the size of a row's terms at the point as the method measures it on the
+    /// working problem, is beyond the range of that precision; a value of the answer beyond it is
+    /// infinite, as the arithmetic of that precision makes it.
+    fn solve_in_f64(&self, opts: &LpOptions<T>) -> Option<LpResult<T>> {
+        // The working problem in the precision of the programme, as the method in that precision
+        // would have it: where a scaled number of it is beyond the range, there is no answer.
+        let working = self.working(opts)?;
+        let wide = |v: &[T]| -> Vec<f64> { v.iter().map(|x| x.to_f64()).collect() };
+        let programme = LinearProgram::<f64> {
+            cost: wide(&self.cost),
+            maximize: self.maximize,
+            le_rows: wide(&self.le_rows),
+            le_rhs: wide(&self.le_rhs),
+            eq_rows: wide(&self.eq_rows),
+            eq_rhs: wide(&self.eq_rhs),
+            lower: wide(&self.lower),
+            upper: wide(&self.upper),
+        };
+        let options = LpOptions::<f64> {
+            tol: opts.tol.to_f64(),
+            max_iter: opts.max_iter,
+            stall_limit: opts.stall_limit,
+            scaling: opts.scaling,
+            dual_threshold: opts.dual_threshold,
+        };
+        let answer = programme.solve_in_place(&options)?;
+        let narrow = |v: &[f64]| -> Vec<T> { v.iter().map(|x| T::from_f64(*x)).collect() };
+        // The point rounded to the precision stays inside the bounds, which it can state; beyond
+        // its range, as the method's report makes it there, it is infinite.
+        let x = narrow(&answer.x);
+        let n = self.cost.len();
+        let objective = dot(&self.cost, &x);
+        let slack: Vec<T> = (0..self.le_rhs.len())
+            .map(|i| self.le_rhs[i] - dot(&self.le_rows[i * n..(i + 1) * n], &x))
+            .collect();
+        // Nor is there one where the sizes of the rows' terms at the point, as the method
+        // measures them on the working problem, are beyond the range in that precision.
+        let Working {
+            a,
+            b,
+            column_scale,
+            primal,
+            ..
+        } = &working;
+        let scaled: Vec<T> = answer
+            .x
+            .iter()
+            .zip(column_scale)
+            .map(|(v, cs)| T::from_f64(*v * primal.to_f64() / cs.to_f64()))
+            .collect();
+        let mut sizes: Vec<T> = b.iter().map(|v| mag(*v)).collect();
+        for (j, &v) in scaled.iter().enumerate() {
+            if v != T::ZERO {
+                for (size, c) in sizes.iter_mut().zip(a.column(j)) {
+                    *size += mag(*c * v);
+                }
+            }
+        }
+        if !sizes.iter().all(|v| finite(*v)) {
+            return None;
+        }
+        // Any value beyond the range is infinite, as arithmetic in that precision makes it.
+        Some(LpResult {
+            status: answer.status,
+            x,
+            objective,
+            slack,
+            dual_le: narrow(&answer.dual_le),
+            dual_eq: narrow(&answer.dual_eq),
+            reduced_costs: narrow(&answer.reduced_costs),
+            pivots: answer.pivots,
+        })
+    }
+
+    /// The working problem of the programme under `opts`, as the method solves it: the rows of
+    /// both kinds as one matrix, the inequalities first, scaled; the right-hand sides, the costs
+    /// of the minimisation and the bounds of every variable, logical ones included, scaled with
+    /// them; and the scale factors. `None` when a scaled number is not finite or a bound NaN.
+    fn working(&self, opts: &LpOptions<T>) -> Option<Working<T>> {
         let n = self.cost.len();
         let (m_le, m_eq) = (self.le_rhs.len(), self.eq_rhs.len());
         let m = m_le + m_eq;
-        if !finite(opts.tol) || opts.tol <= T::ZERO {
-            return None;
-        }
-        let data = [
-            &self.cost,
-            &self.le_rows,
-            &self.le_rhs,
-            &self.eq_rows,
-            &self.eq_rhs,
-        ];
-        if data.iter().any(|part| part.iter().any(|v| !finite(*v))) {
-            return None;
-        }
-        let lower_ok = self.lower.iter().all(|l| *l < T::INFINITY);
-        let upper_ok = self.upper.iter().all(|u| *u > -T::INFINITY);
-        if !lower_ok || !upper_ok {
-            return None;
-        }
-
         // The rows of both kinds as one matrix, the inequalities first.
         let mut a = Matrix::from_fn(m, n, |i, j| {
             if i < m_le {
@@ -840,15 +1023,73 @@ impl<T: Real + Scalar> LinearProgram<T> {
                 .iter()
                 .zip(&upper)
                 .all(|(l, u)| !l.is_nan() && !u.is_nan());
-        if !all_finite {
+        all_finite.then_some(Working {
+            a,
+            b,
+            cost,
+            lower,
+            upper,
+            row_scale,
+            column_scale,
+            primal,
+        })
+    }
+
+    /// [`solve_with`](Self::solve_with) in the arithmetic of `T`.
+    fn solve_in_place(&self, opts: &LpOptions<T>) -> Option<LpResult<T>> {
+        let n = self.cost.len();
+        let (m_le, m_eq) = (self.le_rhs.len(), self.eq_rhs.len());
+        let m = m_le + m_eq;
+        if !finite(opts.tol) || opts.tol <= T::ZERO {
             return None;
         }
+        let data = [
+            &self.cost,
+            &self.le_rows,
+            &self.le_rhs,
+            &self.eq_rows,
+            &self.eq_rhs,
+        ];
+        if data.iter().any(|part| part.iter().any(|v| !finite(*v))) {
+            return None;
+        }
+        let lower_ok = self.lower.iter().all(|l| *l < T::INFINITY);
+        let upper_ok = self.upper.iter().all(|u| *u > -T::INFINITY);
+        if !lower_ok || !upper_ok {
+            return None;
+        }
+
+        let Working {
+            a,
+            b,
+            cost,
+            lower,
+            upper,
+            row_scale,
+            column_scale,
+            primal,
+        } = self.working(opts)?;
 
         // A variable whose bounds cross leaves nothing to search: there is no feasible point.
         let crossed = self.lower.iter().zip(&self.upper).any(|(l, u)| l > u);
         let mut engine = Engine::new(a, b, cost, lower, upper, opts)?;
         let status = if crossed {
             LpStatus::Infeasible
+        } else if m >= opts.dual_threshold {
+            // The bounds the dual method works to: those that stand for infinite ones, by their
+            // size as they were given, made infinite.
+            let huge = T::from_f64(INFINITE_BOUND);
+            let mut dual_lower = engine.lower.clone();
+            let mut dual_upper = engine.upper.clone();
+            for j in 0..n {
+                if self.lower[j] <= -huge {
+                    dual_lower[j] = -T::INFINITY;
+                }
+                if self.upper[j] >= huge {
+                    dual_upper[j] = T::INFINITY;
+                }
+            }
+            engine.run_dual(&dual_lower, &dual_upper)?
         } else {
             engine.run()?
         };
@@ -927,6 +1168,28 @@ impl<T: Real + Scalar> LinearProgram<T> {
             pivots: engine.pivots,
         }
     }
+}
+
+/// The working problem of a programme, scaled, and its scale factors: see
+/// [`LinearProgram::working`].
+struct Working<T> {
+    /// `A`, `m × n`: the rows of the inequalities, then those of the equations, scaled.
+    a: Matrix<T>,
+    /// The right-hand sides, scaled.
+    b: Vec<T>,
+    /// The costs of the minimisation, `n + m` of them, zero for the logical variables.
+    cost: Vec<T>,
+    /// The lower bounds of the `n + m` variables, scaled.
+    lower: Vec<T>,
+    /// The upper bounds of the `n + m` variables, scaled.
+    upper: Vec<T>,
+    /// The factors the rows were multiplied by.
+    row_scale: Vec<T>,
+    /// The factors the columns were multiplied by.
+    column_scale: Vec<T>,
+    /// The factor the right-hand sides and the bounds were multiplied by, after the rows and
+    /// the columns were scaled.
+    primal: T,
 }
 
 /// Appends the rows of `a` and their right-hand sides `b` to the rows and right-hand sides of one
@@ -1077,6 +1340,9 @@ struct Basis<T> {
     /// `|B₀⁻¹|`, the magnitudes of the elements of the inverse of `B₀`, column by column, from
     /// which [`bound_solve`](Self::bound_solve) bounds the errors of the basic variables.
     magnitudes: Matrix<T>,
+    /// The decomposition itself, for the blocked solves of [`invert_blocked`](Self::invert_blocked);
+    /// `None` for the identity.
+    lu: Option<Lu<T>>,
 }
 
 impl<T: Real> Basis<T> {
@@ -1179,6 +1445,7 @@ impl<T: Real + Scalar> Basis<T> {
             permutation: (0..m).collect(),
             updates: Vec::new(),
             magnitudes: Matrix::identity(m),
+            lu: None,
         }
     }
 
@@ -1204,6 +1471,45 @@ impl<T: Real + Scalar> Basis<T> {
                         *c = mag(*v);
                     }
                 }
+            }
+        }
+        self.magnitudes = magnitudes;
+    }
+
+    /// [`invert`](Self::invert) by one blocked solve of all the columns of the inverse it needs,
+    /// `B₀·X = [e_i …]` for the rows `i` whose logical variable is not basic, with the same
+    /// factors: the same magnitudes but for the order of the rounding, at the speed of products
+    /// of blocks. The dual simplex method's bases, of hundreds of rows, are checked so.
+    fn invert_blocked(&mut self, unit: &[Option<usize>]) {
+        let m = unit.len();
+        let rows: Vec<usize> = (0..m).filter(|&i| unit[i].is_none()).collect();
+        let solved = match &self.lu {
+            Some(lu) if !rows.is_empty() => {
+                let rhs =
+                    Matrix::from_fn(
+                        m,
+                        rows.len(),
+                        |r, t| {
+                            if r == rows[t] { T::ONE } else { T::ZERO }
+                        },
+                    );
+                lu.solve(&rhs)
+            }
+            _ => None,
+        };
+        let Some(solved) = solved else {
+            self.invert(unit);
+            return;
+        };
+        let mut magnitudes = Matrix::zeros(m, m);
+        for (i, position) in unit.iter().enumerate() {
+            if let Some(k) = position {
+                magnitudes.column_mut(i)[*k] = T::ONE;
+            }
+        }
+        for (t, &i) in rows.iter().enumerate() {
+            for (c, v) in magnitudes.column_mut(i).iter_mut().zip(solved.column(t)) {
+                *c = mag(*v);
             }
         }
         self.magnitudes = magnitudes;
@@ -1236,6 +1542,7 @@ impl<T: Real + Scalar> Basis<T> {
             permutation: lu.permutation().to_vec(),
             updates: Vec::new(),
             magnitudes: Matrix::zeros(0, 0),
+            lu: Some(lu),
         })
     }
 }
@@ -1345,6 +1652,9 @@ struct Engine<T> {
     pivots: usize,
     /// The number of pivots in a row that have left the objective where it was.
     stalled: usize,
+    /// Whether the magnitudes of the inverse of the basis are computed by one blocked solve
+    /// ([`Basis::invert_blocked`]), as they are once the dual simplex method has run.
+    blocked: bool,
 }
 
 impl<T: Real> Engine<T> {
@@ -2088,22 +2398,6 @@ impl<T: Real + Scalar> Engine<T> {
         opts: &LpOptions<T>,
     ) -> Option<Self> {
         let (m, n) = a.shape();
-        let mut x = vec![T::ZERO; n + m];
-        let mut place = vec![Place::Basic; n + m];
-        for j in 0..n {
-            // As near the origin as the bounds allow: at zero when it is inside them, else at the
-            // bound nearer to it. A start at a bound far from the data, such as a large number
-            // standing for an infinite one, would put that number into every row.
-            (place[j], x[j]) = if lower[j] == upper[j] {
-                (Place::Fixed, lower[j])
-            } else if lower[j] >= T::ZERO {
-                (Place::Lower, lower[j])
-            } else if upper[j] <= T::ZERO {
-                (Place::Upper, upper[j])
-            } else {
-                (Place::Zero, T::ZERO)
-            };
-        }
         let mut engine = Self {
             rows: m,
             columns: n,
@@ -2114,8 +2408,8 @@ impl<T: Real + Scalar> Engine<T> {
             cost,
             lower,
             upper,
-            x,
-            place,
+            x: vec![T::ZERO; n + m],
+            place: vec![Place::Basic; n + m],
             broken: vec![0; n + m],
             basis: (n..n + m).collect(),
             factor: Basis::identity(m),
@@ -2126,15 +2420,152 @@ impl<T: Real + Scalar> Engine<T> {
             stall_limit: opts.stall_limit,
             pivots: 0,
             stalled: 0,
+            blocked: false,
         };
-        let mut logical = engine.b.clone();
-        for j in 0..n {
-            engine.add_column(j, -engine.x[j], &mut logical);
-        }
-        engine.x[n..].copy_from_slice(&logical);
-        engine.measure()?;
-        engine.classify();
+        engine.start()?;
         Some(engine)
+    }
+
+    /// Puts the method at its start, on factors of the identity, whatever state it is in but for
+    /// the pivots it has counted: the logical variables basic, every structural variable at zero
+    /// when that is inside its bounds and at the bound nearer to zero otherwise. `None` when the
+    /// sizes of the rows' terms at that point are not finite.
+    fn start(&mut self) -> Option<()> {
+        let n = self.columns;
+        for j in 0..n {
+            // As near the origin as the bounds allow: at zero when it is inside them, else at the
+            // bound nearer to it. A start at a bound far from the data, such as a large number
+            // standing for an infinite one, would put that number into every row.
+            let (lower, upper) = (self.lower[j], self.upper[j]);
+            (self.place[j], self.x[j]) = if lower == upper {
+                (Place::Fixed, lower)
+            } else if lower >= T::ZERO {
+                (Place::Lower, lower)
+            } else if upper <= T::ZERO {
+                (Place::Upper, upper)
+            } else {
+                (Place::Zero, T::ZERO)
+            };
+        }
+        self.place[n..].fill(Place::Basic);
+        self.broken.fill(0);
+        for (k, j) in self.basis.iter_mut().enumerate() {
+            *j = n + k;
+        }
+        self.banned.fill(false);
+        self.stalled = 0;
+        let mut logical = self.b.clone();
+        for j in 0..n {
+            self.add_column(j, -self.x[j], &mut logical);
+        }
+        self.x[n..].copy_from_slice(&logical);
+        self.measure()?;
+        self.classify();
+        Some(())
+    }
+
+    /// Puts the method at the basis `basis`, the variables out of it at `place`: the end of the
+    /// dual simplex method. The basis is factorised afresh and the basic variables computed from
+    /// the data, as at any factorisation; `None` when it is singular to working precision, or
+    /// when `basis` and `place` do not describe a basis and places the method can stand at: one
+    /// variable for each row, no variable twice, exactly those placed in the basis, and every
+    /// other at a finite bound, at both when they are equal, or at zero strictly inside them.
+    fn adopt(&mut self, basis: &[usize], place: &[Place]) -> Option<()> {
+        let total = self.columns + self.rows;
+        if basis.len() != self.rows || place.len() != total {
+            return None;
+        }
+        let mut seen = vec![false; total];
+        for &j in basis {
+            if j >= total || seen[j] || place[j] != Place::Basic {
+                return None;
+            }
+            seen[j] = true;
+        }
+        for (j, &p) in place.iter().enumerate() {
+            let (lower, upper) = (self.lower[j], self.upper[j]);
+            let valid = match p {
+                Place::Basic => seen[j],
+                Place::Lower => finite(lower) && lower != upper,
+                Place::Upper => finite(upper) && lower != upper,
+                Place::Fixed => lower == upper,
+                Place::Zero => lower < T::ZERO && upper > T::ZERO,
+            };
+            if !valid {
+                return None;
+            }
+        }
+        for (j, &p) in place.iter().enumerate() {
+            self.place[j] = p;
+            self.x[j] = match p {
+                Place::Lower | Place::Fixed => self.lower[j],
+                Place::Upper => self.upper[j],
+                Place::Zero | Place::Basic => T::ZERO,
+            };
+        }
+        self.basis.copy_from_slice(basis);
+        self.broken.fill(0);
+        self.stalled = 0;
+        self.refactor()
+    }
+
+    /// Whether the row of basis position `r`, which the dual simplex method found a ray of the
+    /// dual programme in, proves that no point is feasible: the certificate of
+    /// [`certify_infeasible`](Self::certify_infeasible) for the multipliers of phase one that
+    /// mark only the basic variable of that row. A combination of rows is a certificate whatever
+    /// the marks are, and the dual simplex method finds it in a single row; the marks of the
+    /// other basic variables that break a bound are put back when it fails.
+    fn certify_ray(&mut self, r: usize) -> bool {
+        let j = self.basis[r];
+        if self.broken[j] == 0 {
+            return false;
+        }
+        let marks = self.broken.clone();
+        for &k in &self.basis {
+            if k != j {
+                self.broken[k] = 0;
+            }
+        }
+        let duals = self.duals(true);
+        let proven = duals.y.iter().all(|v| finite(*v))
+            && matches!(self.certify_infeasible(&duals), Verdict::Proven);
+        if !proven {
+            self.broken = marks;
+        }
+        proven
+    }
+
+    /// Runs the dual simplex method, then the primal method from the basis it ends at, which
+    /// checks its answer by the certificates of [`run`](Self::run) and pivots on where they fail;
+    /// and when that gives no answer, the primal method from its start. The pivots of all of
+    /// them count towards the limit. `lower` and `upper` are the bounds the dual method works to:
+    /// the working problem's, but for those that stand for infinite ones, made infinite; the
+    /// primal method keeps to the working problem's own.
+    fn run_dual(&mut self, lower: &[T], upper: &[T]) -> Option<LpStatus> {
+        let finish = dual::solve(
+            &self.a,
+            &self.b,
+            &self.cost,
+            lower,
+            upper,
+            self.tol,
+            self.max_iter,
+        );
+        self.pivots = finish.pivots;
+        self.blocked = true;
+        if self.adopt(&finish.basis, &finish.place).is_some() {
+            if let dual::Outcome::Infeasible(r) = finish.outcome
+                && self.certify_ray(r)
+            {
+                return Some(LpStatus::Infeasible);
+            }
+            if let Some(status) = self.run() {
+                return Some(status);
+            }
+        }
+        self.factor = Basis::identity(self.rows);
+        self.start()?;
+        self.run()
     }
 
     /// Factorises the basis afresh, computes the basic variables again from the data — the
@@ -2160,7 +2591,11 @@ impl<T: Real + Scalar> Engine<T> {
                 unit[j - n] = Some(k);
             }
         }
-        self.factor.invert(&unit);
+        if self.blocked {
+            self.factor.invert_blocked(&unit);
+        } else {
+            self.factor.invert(&unit);
+        }
         let mut rhs = self.b.clone();
         for j in 0..n + m {
             if self.place[j] != Place::Basic && self.x[j] != T::ZERO {

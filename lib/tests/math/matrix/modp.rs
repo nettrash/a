@@ -410,6 +410,52 @@ fn products_agree_with_the_classical_product_in_128_bits() {
     }
 }
 
+/// The products modulo primes below `2^32` on both sides of each edge of the doubles, against
+/// the classical product in 128 bits: whole residues from 13 rows and columns (16 and 20 bits),
+/// halves from 64 where the integer kernels hold a sum of products in one word (26 bits), and
+/// halves from 24 where they need two (31 and 32 bits), with thin shapes and an unreduced sum.
+#[test]
+fn products_at_the_edges_of_the_doubles_equal_the_classical_product() {
+    type Shapes = &'static [(usize, usize, usize)];
+    let mut r = Rng(0xD0_0B1E);
+    let cases: &[(u64, Shapes)] = if cfg!(miri) {
+        &[(65521, &[(12, 13, 13), (13, 13, 13)])]
+    } else {
+        &[
+            (
+                65521,
+                &[(12, 40, 40), (13, 13, 13), (40, 13, 41), (41, 40, 13)],
+            ),
+            (1_000_003, &[(13, 12, 13), (14, 15, 13), (300, 13, 14)]),
+            (
+                67_108_859,
+                &[(63, 64, 64), (64, 64, 64), (65, 70, 64), (64, 300, 66)],
+            ),
+            (
+                2_147_483_647,
+                &[(23, 24, 24), (24, 24, 24), (25, 30, 24), (24, 24, 300)],
+            ),
+            (4_294_967_291, &[(24, 23, 30), (24, 25, 26), (64, 64, 63)]),
+        ]
+    };
+    for &(p, shapes) in cases {
+        for &(m, k, n) in shapes {
+            // Every element p − 1 in one product of each shape: the largest sums.
+            let (a, b) = if m == 64 && k == 64 {
+                (vec![p - 1; m * k], vec![p - 1; k * n])
+            } else {
+                (random(&mut r, m, k, k, 8, p), random(&mut r, k, n, n, 8, p))
+            };
+            let c = &matrix(&a, m, k, p) * &matrix(&b, k, n, p);
+            assert_eq!(
+                c.as_slice(),
+                &naive_product(&a, &b, m, k, n, p)[..],
+                "{m} × {k} × {n} modulo {p}"
+            );
+        }
+    }
+}
+
 /// Strassen–Winograd from 128 rows and columns: at and around the crossover, odd and even,
 /// square and not, one level and two, against the classical product in 128 bits.
 #[test]

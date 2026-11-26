@@ -868,8 +868,10 @@ fn chebyshev_fits_agree_with_the_exact_interpolants() {
     //
     // The coefficients are checked twice. Against the transform of the fit's own samples,
     // computed to an ulp or so (`transform`): that is the rounding of the transform itself,
-    // 2.8 eps·max|c| at most on aarch64 and 3.4 on x86_64, where cosines of angles not reduced
-    // first (up to 100π) give 63. And against the exact interpolant, which adds the errors of
+    // here 2.0 eps·max|c| at most on both platforms, against a double-double reference good to
+    // an ulp or so (the fast DCT from 13 nodes on; the direct sums gave 2.8 on aarch64 and 3.4 on
+    // x86_64, and cosines of angles not reduced first, up to 100π, 63). Against mpmath's exact
+    // transform, degrees 16 to 256 of five functions, the largest measured is 2.13 (the page). And against the exact interpolant, which adds the errors of
     // the samples: within 64 eps·max|c|, except for cos(20t) on [-3, 7], which is conditioned
     // like |20t·sin 20t|, up to 140 — the nodes, within 6.3 eps of the exact ones, and 20t,
     // rounded to an ulp of 140, move its values by up to 145 eps — and whose coefficients the

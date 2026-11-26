@@ -43,6 +43,14 @@ pub(crate) struct MontCtx {
     r2: Vec<u64>,
 }
 
+impl core::fmt::Debug for MontCtx {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MontCtx")
+            .field("d", &self.d)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Calls `$f::<N>(m, $args)` with the products `m` of `N` limbs that `$any` holds.
 macro_rules! by_limbs {
     ($any:expr, $f:ident, $($args:expr),*) => {

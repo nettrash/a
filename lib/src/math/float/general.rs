@@ -14,7 +14,7 @@ use super::limbs::{self, Work};
 use super::round::{round_into, round_vec};
 use super::same::{self, Put};
 use super::small;
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::nat;
 use core::cmp::Ordering;
 
@@ -171,7 +171,7 @@ pub(crate) fn add(
                 Kind::Finite {
                     negative,
                     exp,
-                    mant: out,
+                    mant: Mant::Heap(out),
                 },
                 o,
             ),
@@ -403,6 +403,13 @@ pub(crate) fn mul(
     }
     let (x, y) = (x.strip(), y.strip());
     let n = prec.div_ceil(64) as usize;
+    if x.m.len() == n
+        && y.m.len() == n
+        && short_pays_for(same, n + 1)
+        && let Some(r) = mul_high(negative, x, y, same, prec, round, w, &mut out)
+    {
+        return r;
+    }
     let keep = n + 2;
     let cut = |m: &'_ [u64]| -> bool { m.len() > keep };
     let (ta, tb) = (cut(x.m), cut(y.m));
@@ -437,6 +444,180 @@ pub(crate) fn mul(
     round_into(negative, p, lsb, false, prec, round, out)
 }
 
+/// The fewest limbs of the padded operands of the short products of the area ([`mul_high`] and
+/// [`fma_high`] of different operands, the complex squares and norms, the reciprocal square root's
+/// Newton steps, the logarithm's AGM): below, the whole product costs no more than the short one
+/// for all of them. Measured on an Apple M4 Max with the numbers' short products of this release
+/// (bounds 22 to 40, results of 18 to 112 limbs): from 27 padded limbs the short products take 0.78
+/// to 0.96 of the whole one's time for `x·y` and `mul_add_round` and 0.77 to 0.92 for the complex
+/// squares and norms, and cost the reciprocal square root's Newton steps at most 2 %; with 26 they
+/// cost those 3 % (at 2,688 bits), with 24 the complex squares and `mul_add_round` 4 to 17 %.
+pub(crate) const SHORT_PRODUCT: usize = 27;
+
+/// The limbs of the padded operands from which the area's short products are not used (but for the
+/// squares of [`mul_high`] and [`fma_high`], [`SHORT_SQUARE_MAX`]): the numbers' short product is
+/// the whole one from 450 limbs (`FFT_MUL + FFT_MUL / 4` on aarch64), and the padding only costs.
+/// Measured on an Apple M4 Max (short against whole products, 360 to 760 limbs; bounds 400 to 450):
+/// the short products of `x·y` and `mul_add_round` take 0.90 to 1.00 of the whole one's time to 400
+/// limbs; past 400 they would gain 3 to 7 % at 418 to 434 limbs but lose up to 4 % (`mul_add_round`
+/// at 400 to 416 limbs), up to 3 % at 439 and 440 and 1 to 4 % from 449. The complex squares and
+/// norms, which take this bound too, would gain 8 to 21 % to 437 limbs and up to 14 % to 640.
+pub(crate) const SHORT_PRODUCT_MAX: usize = 400;
+
+/// [`SHORT_PRODUCT`] for the squares of [`mul_high`] and [`fma_high`] (`x·x`, `x·x + z`). Measured
+/// on an Apple M4 Max (bounds 22 to 40, results of 18 to 38 limbs; and 27 and 30 in builds of their
+/// own): from 30 padded limbs the short squares take 0.88 to 0.96 of the whole square's time for
+/// `x·x` and 0.86 to 1.01 for `x·x + z`; at 28 and 29 `x·x` would gain 2 to 5 % but `x·x + z` lose
+/// up to 3 % (5 % in the sweep).
+const SHORT_SQUARE: usize = 30;
+
+/// [`SHORT_PRODUCT_MAX`] for the squares of [`mul_high`] and [`fma_high`] (`x·x`, `x·x + z`): the
+/// numbers' short square is the whole one from 665 limbs (`FFT_SQR + FFT_SQR * 3 / 4` on aarch64).
+/// Measured on an Apple M4 Max (short against whole squares, 360 to 760 limbs): 0.78 to 0.99 of the
+/// whole square's time to 656 limbs (1.00 at 510), 0.98 to 1.00 from 656 to 662 and 1.01 to 1.02
+/// from 664.
+const SHORT_SQUARE_MAX: usize = 656;
+
+/// Whether operands padded to `m` limbs have short products that cost less than whole ones.
+#[inline]
+pub(crate) fn short_pays(m: usize) -> bool {
+    (SHORT_PRODUCT..SHORT_PRODUCT_MAX).contains(&m)
+}
+
+/// [`short_pays`] for a square (`square`: from [`SHORT_SQUARE`] to [`SHORT_SQUARE_MAX`]) or a
+/// product of different operands.
+#[inline]
+fn short_pays_for(square: bool, m: usize) -> bool {
+    if square {
+        (SHORT_SQUARE..SHORT_SQUARE_MAX).contains(&m)
+    } else {
+        short_pays(m)
+    }
+}
+
+/// `x·y` of operands of the result's `n` limbs from the short product of the operands padded below
+/// with a zero limb (`m = n + 1` limbs each, the same values): `nat::mulhigh_to` (or
+/// `nat::sqrhigh_to`) gives the high half `A` of the padded product, the `n + 1` limbs of `x·y`
+/// from its limb `n - 1` up, with `A ≤ ⌊x·y / B^(n-1)⌋ ≤ A + n` (short by at most `m - 1 = n`
+/// units of its last limb, by the contract of the short products), so that the exact product lies
+/// in `[A, A + n + 1)` of those units. When every integer of `[A, A + n]` rounds as `A` with a sticky
+/// bit ([`decided`], with `A` of `64n + 63` bits at least, past `prec + 2`), so does the product,
+/// which is not of `prec` bits nor halfway as its bits below the round bit are not all zero; that
+/// fails only for a low limb of `A` within `n` of a carry or of zero (about `n / 2^63`), and then
+/// `None`: the whole product.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn mul_high(
+    negative: bool,
+    x: Op<'_>,
+    y: Op<'_>,
+    same: bool,
+    prec: u64,
+    round: Round,
+    w: &mut Work,
+    out: &mut Vec<u64>,
+) -> Option<(Kind, Ordering)> {
+    let n = x.m.len();
+    let m = n + 1;
+    let Work {
+        a: r,
+        b: xp,
+        c: yp,
+        scratch,
+    } = w;
+    let pad = |v: &mut Vec<u64>, src: &[u64]| {
+        v.clear();
+        v.push(0);
+        v.extend_from_slice(src);
+    };
+    pad(xp, x.m);
+    r.clear();
+    r.resize(2 * m, 0);
+    if same {
+        nat::sqrhigh_to(r, xp, scratch);
+    } else {
+        pad(yp, y.m);
+        nat::mulhigh_to(r, xp, yp, scratch);
+    }
+    let a = &r[m..];
+    if !decided(a, 0, n as u64, prec) {
+        return None;
+    }
+    let lsb = x.lsb() + y.lsb() + 64 * (n as i128 - 1);
+    Some(round_into(
+        negative,
+        a,
+        lsb,
+        true,
+        prec,
+        round,
+        core::mem::take(out),
+    ))
+}
+
+/// `x·y + z` for factors of the result's `n` limbs from the short product of the factors padded
+/// below with two zero limbs (`m = n + 2` limbs): its high half `A`, the product's top `m` limbs
+/// from its limb `n - 2`, is below the exact product by less than `m` units of its last limb
+/// (`nat::mulhigh_to`'s contract and the fraction), so within `2^(lsb + bits(m))`, under the window
+/// of [`round_approx_sum`](super::sum::round_approx_sum) with `z` exact, which rounds the sum when
+/// the window decides; `None` otherwise (a cancellation, a sum near a boundary), for the exact
+/// product.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn fma_high(
+    negative: bool,
+    x: Op<'_>,
+    y: Op<'_>,
+    z: Op<'_>,
+    same: bool,
+    prec: u64,
+    round: Round,
+    w: &mut Work,
+    out: &mut Vec<u64>,
+) -> Option<(Kind, Ordering)> {
+    use super::sum::{Approx, round_approx_sum};
+    let n = x.m.len();
+    let m = n + 2;
+    let Work {
+        a: r,
+        b: xp,
+        c: yp,
+        scratch,
+    } = w;
+    let pad = |v: &mut Vec<u64>, src: &[u64]| {
+        v.clear();
+        v.extend_from_slice(&[0, 0]);
+        v.extend_from_slice(src);
+    };
+    pad(xp, x.m);
+    r.clear();
+    r.resize(2 * m, 0);
+    if same {
+        nat::sqrhigh_to(r, xp, scratch);
+    } else {
+        pad(yp, y.m);
+        nat::mulhigh_to(r, xp, yp, scratch);
+    }
+    let hi = &r[m..];
+    let k = hi.iter().rposition(|&v| v != 0).map_or(0, |j| j + 1);
+    let zl = z.strip();
+    let parts = [
+        Approx {
+            negative,
+            m: &hi[..k],
+            lsb: x.lsb() + y.lsb() + 64 * (n as i128 - 2),
+            err: u64::from(64 - (m as u64).leading_zeros()),
+        },
+        Approx {
+            negative: zl.negative,
+            m: zl.m,
+            lsb: zl.lsb(),
+            err: 0,
+        },
+    ];
+    round_approx_sum(&parts, prec, round, out)
+}
+
 /// The longest divisor, in limbs, whose quotient [`div`] computes alone, with a shrinking divisor
 /// for its last limbs (about half the products of the schoolbook method), before it takes the
 /// remainder too: measured on an Apple M4 Max against the division with the remainder (divide and
@@ -450,6 +631,48 @@ pub(crate) const SHORT_DIV: usize = 480;
 #[inline(always)]
 fn word_exp(e: i128) -> bool {
     (i128::from(BigFloat::EXP_MIN)..=i128::from(BigFloat::EXP_MAX)).contains(&e)
+}
+
+/// [`div_short`] by one division of the top limbs `X` and `Y` (each with a tail): the quotient
+/// `T = floor(X·2^128 / Y)`, aligned at its top bit, and the exact quotient in `(X/(Y + 1),
+/// (X + 1)/Y)`, so above `T - 2^66` and below `T + 2^65 + 1` units of `2^-128` (`X, Y ≥ 2^63`,
+/// `T < 2^129`), four units of the top word below and three above (two and two for `X ≥ Y`, the
+/// quotient then shifted down by one): the rounding when the roundings of the two ends, each
+/// with a sticky bit, agree. `None` otherwise, or for an end that leaves the top word's range.
+#[inline]
+fn div_one(
+    negative: bool,
+    a: small::Term<u64>,
+    b: small::Term<u64>,
+    sh: u32,
+    round: Round,
+) -> Option<small::Fit<u64>> {
+    let v = nat::invert_limb(b.m);
+    let top = a.m >= b.m;
+    let x1 = if top { a.m - b.m } else { a.m };
+    let (q1, r1) = nat::div_2by1(x1, 0, b.m, v);
+    let (q0, _) = nat::div_2by1(r1, 0, b.m, v);
+    let (hi, lo, e, below, above) = if top {
+        (
+            1 << 63 | q1 >> 1,
+            q1 << 63 | q0 >> 1,
+            a.exp - b.exp + 1,
+            2,
+            2,
+        )
+    } else {
+        (q1, q0, a.exp - b.exp, 4, 3)
+    };
+    let small_hi = hi.checked_sub(below).filter(|&h| h >> 63 == 1)?;
+    let large_hi = hi.checked_add(above)?;
+    let small_end = small::fit(negative, small_hi, lo, e, true, sh, round)?;
+    let large_end = small::fit(negative, large_hi, lo, e, true, sh, round)?;
+    let (lo_end, hi_end) = if negative {
+        (large_end, small_end)
+    } else {
+        (small_end, large_end)
+    };
+    small::between(lo_end, hi_end)
 }
 
 /// `x/y` of the sign `negative` for a result of at most 62 bits, from the top limbs of the
@@ -481,6 +704,9 @@ fn div_short(
         |a: Term<u64>, b: Term<u64>| small::div_fit1(negative, a.exp, a.m, b.exp, b.m, sh, round);
     if !(tx || ty) {
         return q(a, b);
+    }
+    if let Some(r) = div_one(negative, a, b, sh, round) {
+        return Some(r);
     }
     // The ends of the magnitude, then in the order of the signed values.
     let small_end = q(a, if ty { b.bump() } else { b })?;
@@ -526,13 +752,11 @@ pub(crate) fn div(
         && word_exp(y.exp)
         && let Some(r) = div_short(negative, x, y, prec, round)
     {
-        let mut out = out;
-        out.clear();
-        out.push(r.m);
+        drop(out);
         let kind = Kind::Finite {
             negative: r.negative,
             exp: r.exp,
-            mant: out,
+            mant: Mant::One(r.m),
         };
         return (kind, r.o);
     }
@@ -677,6 +901,15 @@ pub(crate) fn fma(
 ) -> (Kind, Ordering) {
     let same = core::ptr::eq(x.m, y.m);
     let (x, y) = (x.strip(), y.strip());
+    let n = prec.div_ceil(64) as usize;
+    let mut out = out;
+    if x.m.len() == n
+        && y.m.len() == n
+        && short_pays_for(same, n + 2)
+        && let Some(r) = fma_high(negative, x, y, z, same, prec, round, w, &mut out)
+    {
+        return r;
+    }
     let mut p = core::mem::take(&mut w.c);
     if same {
         nat::sqr_into(&mut p, x.m, &mut w.scratch);

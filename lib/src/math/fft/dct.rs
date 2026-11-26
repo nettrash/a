@@ -17,8 +17,9 @@
 //! The shortest lengths (up to 8, 16 for type I) are summed directly from a table of the whole
 //! matrix.
 
-use super::real::{as_complex_mut, as_reals_mut, roots, with_work};
+use super::real::{as_complex_mut, as_reals_mut, roots};
 use super::twiddle;
+use super::with_work;
 use super::{Fft, FftFloat, RealFft, check_batch};
 use crate::math::complex::Complex;
 use std::sync::Arc;
@@ -126,8 +127,8 @@ enum Fam {
 enum Plan<T> {
     /// Length 0.
     Empty,
-    /// The matrix column after column, each padded to 16 entries with zeros:
-    /// `y[k] = Σ_j mat[16j + k]·x[j]`, the 16 sums held in registers.
+    /// The matrix column after column, each padded to `P` entries with zeros (8 for `n ≤ 8`,
+    /// else 16): `y[k] = Σ_j mat[P·j + k]·x[j]`, the `P` sums held in registers.
     Direct { n: usize, mat: Vec<T> },
     /// Types II and III by Makhoul's reordering and the real transform of `n`;
     /// `w[k] = e^(−πi·k/2n)` for `k ≤ n/2`.
@@ -177,6 +178,172 @@ fn entry(fam: Fam, kind: u8, n: usize, k: usize, j: usize) -> f64 {
     }
 }
 
+/// The entries a column of a [`Plan::Direct`] matrix is padded to. Measured with `DIRECT` and
+/// `DIRECT_I` on an Apple M4 Max (types I to IV of 4 to 16 values, `f32` and `f64`, one run and
+/// batches of 32): one run of the sums takes 0.15 to 1.02 of the fast paths' time at every length
+/// up to 16, but the sums of a batch of types II to IV take 0.75 to 1.09 times the fast paths'
+/// time at 8 and 1.08 to 1.61 at 16, so they stop at 8; type I's sums stay faster to 16 (0.46 to
+/// 0.89 of the split's time on batches).
+fn direct_width(n: usize) -> usize {
+    if n <= 8 { 8 } else { 16 }
+}
+
+/// `y = mat·x` (`x` is `y` itself when `None`) for a [`Plan::Direct`] matrix of `P` rows: every
+/// value read before the first is written.
+#[inline(always)]
+fn direct<T: FftFloat, const P: usize>(mat: &[T], x: Option<&[T]>, y: &mut [T]) {
+    let n = y.len();
+    let acc = {
+        let src: &[T] = match x {
+            Some(x) => x,
+            None => y,
+        };
+        // Two banks of sums, for the even and the odd columns, so that no sum waits for the
+        // previous product more than every other column.
+        let (mut a, mut b) = ([T::ZERO; P], [T::ZERO; P]);
+        let cols = mat.as_chunks::<P>().0;
+        let mut j = 0;
+        while j + 2 <= n {
+            let (x0, x1) = (src[j], src[j + 1]);
+            for ((a, b), (&m0, &m1)) in a
+                .iter_mut()
+                .zip(b.iter_mut())
+                .zip(cols[j].iter().zip(&cols[j + 1]))
+            {
+                *a += m0 * x0;
+                *b += m1 * x1;
+            }
+            j += 2;
+        }
+        if j < n {
+            for (a, &m) in a.iter_mut().zip(&cols[j]) {
+                *a += m * src[j];
+            }
+        }
+        for (a, b) in a.iter_mut().zip(b) {
+            *a += b;
+        }
+        a
+    };
+    y.copy_from_slice(&acc[..n]);
+}
+
+/// [`direct`] for the length `N` (even, the width of `mat`'s columns too) known when compiled:
+/// the loops unrolled and the slices checked once.
+#[inline(always)]
+fn direct_fixed<T: FftFloat, const N: usize>(mat: &[T], x: Option<&[T]>, y: &mut [T]) {
+    let cols: &[[T; N]; N] = mat.as_chunks::<N>().0[..N]
+        .try_into()
+        .expect("N columns of N");
+    let src: [T; N] = match x {
+        Some(x) => x.try_into().expect("N values"),
+        None => (&*y).try_into().expect("N values"),
+    };
+    let (mut a, mut b) = ([T::ZERO; N], [T::ZERO; N]);
+    for j in (0..N).step_by(2) {
+        for k in 0..N {
+            a[k] += cols[j][k] * src[j];
+            b[k] += cols[j + 1][k] * src[j + 1];
+        }
+    }
+    for (a, b) in a.iter_mut().zip(b) {
+        *a += b;
+    }
+    y.copy_from_slice(&a);
+}
+
+/// The shortest type II of the split step of type I taken by [`split_i_makhoul`]. Measured on an
+/// Apple M4 Max (DCT-I and DST-I of 2⁸ ± 1 to 2¹⁴ ± 1 values, the bound swept from 256 to never):
+/// the two ways within ±2 % of each other from 256 on but at DST-I of 16,383, where the fused
+/// step takes 0.86 of the separate passes' time; `f32`, forced to it, within ±2.5 % (its scalar
+/// loops against the vector loops of the separate passes), so it keeps the separate passes.
+const FUSED_SPLIT_I: usize = 1024;
+
+/// Type I of the odd `n` by the split step when the type II `b` of length `lb` (even) is Makhoul's
+/// on the real transform of its pairs: `a` on the copy of its values; `b`'s values reordered
+/// straight from `xs` (every other value, then every fourth) and its spectrum post-processed
+/// straight into the combined output, with no copy of `b`'s values or of its result.
+#[allow(clippy::too_many_arguments)]
+fn split_i_makhoul<T: FftFloat>(
+    fam: Fam,
+    n: usize,
+    a: &Plan<T>,
+    lb: usize,
+    rfft: &RealFft<T>,
+    w: &[Complex<T>],
+    x: Option<&[T]>,
+    y: &mut [T],
+    work: &mut [Complex<T>],
+) {
+    let la = a.len();
+    let (ea, rest) = work.split_at_mut(la.div_ceil(2));
+    let ea = &mut as_reals_mut(ea)[..la];
+    // Every value read (from `y` itself when `x` is `None`) before any is written; `a` does not
+    // write `y`.
+    // Cosines: a of the even-indexed values, b of the odd ones; sines the other way.
+    let (pa, pb) = if fam == Fam::Cos { (0, 1) } else { (1, 0) };
+    {
+        let xs = x.unwrap_or(y);
+        for (i, v) in ea.iter_mut().enumerate() {
+            *v = xs[2 * i + pa];
+        }
+    }
+    a.run(fam, 1, None, ea, rest);
+    let (spec, rest) = rest.split_at_mut(lb / 2 + 1);
+    {
+        // Makhoul's order of b's values u[i] = xs[2i + pb]: v[i] = u[2i] and
+        // v[lb − 1 − i] = ±u[2i + 1].
+        let xs = x.unwrap_or(y);
+        let h = lb / 2;
+        let sg = if fam == Fam::Sin { -T::ONE } else { T::ONE };
+        let v = &mut as_reals_mut(&mut spec[..h])[..lb];
+        let (front, back) = v.split_at_mut(h);
+        let quads = xs[pb..pb + 4 * h - 1].chunks(4);
+        for ((q, f), b) in quads.zip(front.iter_mut()).zip(back.iter_mut().rev()) {
+            *f = q[0];
+            *b = q[2] * sg;
+        }
+    }
+    rfft.forward_packed(spec, rest);
+    let two = T::TWO;
+    let q = (lb - 1) / 2;
+    let mid = (w[lb / 2] * spec[lb / 2]).re * two;
+    let b0 = two * spec[0].re;
+    let ea = &*ea;
+    if fam == Fam::Cos {
+        // B = DCT-II: B[0] = 2·Re V[0], B[k] = 2·Re c, B[lb − k] = −2·Im c for c = w[k]·V[k],
+        // B[lb/2] = mid; then y[k] = A[k] + B[k], y[n − 1 − k] = A[k] − B[k] (k < lb) and
+        // y[lb] = A[lb].
+        let mut put = |k: usize, bk: T| {
+            y[k] = ea[k] + bk;
+            y[n - 1 - k] = ea[k] - bk;
+        };
+        put(0, b0);
+        for k in 1..=q {
+            let c = w[k] * spec[k];
+            put(k, two * c.re);
+            put(lb - k, -two * c.im);
+        }
+        put(lb / 2, mid);
+        y[lb] = ea[lb];
+    } else {
+        // B = DST-II: B[k − 1] = −2·Im c, B[lb − 1 − k] = 2·Re c, B[lb − 1] = 2·Re V[0],
+        // B[lb/2 − 1] = mid; then y[k] = A[k] + B[k], y[n − 1 − k] = B[k] − A[k] (k < la) and
+        // y[la] = B[la].
+        let mut put = |k: usize, bk: T| {
+            y[k] = ea[k] + bk;
+            y[n - 1 - k] = bk - ea[k];
+        };
+        for k in 1..=q {
+            let c = w[k] * spec[k];
+            put(k - 1, -two * c.im);
+            put(lb - 1 - k, two * c.re);
+        }
+        put(lb / 2 - 1, mid);
+        y[la] = b0;
+    }
+}
+
 /// `x` with the sign `−` when `odd`.
 #[inline(always)]
 fn sign<T: FftFloat>(x: T, odd: bool) -> T {
@@ -189,9 +356,10 @@ impl<T: FftFloat> Plan<T> {
             return Plan::Empty;
         }
         if n <= if kind == 1 { DIRECT_I } else { DIRECT } {
-            let mut mat = Vec::with_capacity(16 * n);
+            let p = direct_width(n);
+            let mut mat = Vec::with_capacity(p * n);
             for j in 0..n {
-                for k in 0..16 {
+                for k in 0..p {
                     mat.push(if k < n {
                         T::from_f64(entry(fam, kind, n, k, j))
                     } else {
@@ -241,6 +409,25 @@ impl<T: FftFloat> Plan<T> {
         }
     }
 
+    /// One run of a length summed directly, without the checks and the loop of [`apply`]:
+    /// whether it was (`x` is `y` itself when `None`).
+    #[inline(always)]
+    fn direct_one(&self, x: Option<&[T]>, y: &mut [T]) -> bool {
+        match self {
+            Plan::Direct { n, mat } if y.len() == *n && x.is_none_or(|x| x.len() == *n) => {
+                if *n == 8 {
+                    direct_fixed::<T, 8>(mat, x, y);
+                } else if direct_width(*n) == 8 {
+                    direct::<T, 8>(mat, x, y);
+                } else {
+                    direct::<T, 16>(mat, x, y);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             Plan::Empty => 0,
@@ -257,7 +444,7 @@ impl<T: FftFloat> Plan<T> {
     fn work_len(&self) -> usize {
         match self {
             Plan::Empty => 0,
-            Plan::Direct { n, .. } => n.div_ceil(2),
+            Plan::Direct { .. } => 0,
             Plan::Makhoul { n, rfft, .. } | Plan::FourOdd { n, rfft } => {
                 n / 2 + 1 + n.div_ceil(2) + rfft.work_len()
             }
@@ -276,15 +463,11 @@ impl<T: FftFloat> Plan<T> {
             Plan::Empty => {}
             Plan::Direct { n, mat } => {
                 let n = *n;
-                let buf = &mut as_reals_mut(&mut work[..n.div_ceil(2)])[..n];
-                buf.copy_from_slice(x.unwrap_or(y));
-                let mut acc = [T::ZERO; 16];
-                for (&x, col) in buf.iter().zip(mat.as_chunks::<16>().0) {
-                    for (a, &m) in acc.iter_mut().zip(col) {
-                        *a += m * x;
-                    }
+                if direct_width(n) == 8 {
+                    direct::<T, 8>(mat, x, y);
+                } else {
+                    direct::<T, 16>(mat, x, y);
                 }
-                y.copy_from_slice(&acc[..n]);
             }
             Plan::Makhoul { n, rfft, w } => {
                 let n = *n;
@@ -339,37 +522,60 @@ impl<T: FftFloat> Plan<T> {
             }
             Plan::SplitI { n, a, b } => {
                 let n = *n;
+                if let Plan::Makhoul { n: lb, rfft, w } = &**b
+                    && rfft.is_half()
+                    && *lb >= FUSED_SPLIT_I
+                    && T::MANTISSA_DIGITS >= 53
+                {
+                    split_i_makhoul(fam, n, a, *lb, rfft, w, x, y, work);
+                    return;
+                }
                 let (la, lb) = (a.len(), b.len());
                 let (ea, rest) = work.split_at_mut(la.div_ceil(2));
                 let (eb, rest) = rest.split_at_mut(lb.div_ceil(2));
                 let (ea, eb) = (&mut as_reals_mut(ea)[..la], &mut as_reals_mut(eb)[..lb]);
                 let xs = x.unwrap_or(y);
                 // Cosines: a of the even-indexed values, b of the odd ones; sines the other way.
-                let (pa, pb) = if fam == Fam::Cos { (0, 1) } else { (1, 0) };
-                for (i, v) in ea.iter_mut().enumerate() {
-                    *v = xs[2 * i + pa];
+                // The pairs in one pass (de-interleaving loads), the last value apart.
+                let (pe, po) = if fam == Fam::Cos {
+                    (&mut *ea, &mut *eb)
+                } else {
+                    (&mut *eb, &mut *ea)
+                };
+                let (pairs, last) = xs.as_chunks::<2>();
+                if let [last] = last {
+                    pe[n / 2] = *last;
                 }
-                for (i, v) in eb.iter_mut().enumerate() {
-                    *v = xs[2 * i + pb];
+                for ((c, e), o) in pairs.iter().zip(pe.iter_mut()).zip(po.iter_mut()) {
+                    *e = c[0];
+                    *o = c[1];
                 }
                 a.run(fam, 1, None, ea, rest);
                 b.run(fam, 2, None, eb, rest);
+                // The front half from the first, the back half reversed (vector reversals).
+                let (front, back) = y.split_at_mut(n / 2);
                 if fam == Fam::Cos {
                     // y[k] = A[k] + B[k], y[N − k] = A[k] − B[k] for N = n − 1, B[N/2] = 0.
                     let h = lb;
-                    for k in 0..h {
-                        y[k] = ea[k] + eb[k];
-                        y[n - 1 - k] = ea[k] - eb[k];
+                    back[0] = ea[h];
+                    let ab = ea.iter().zip(eb.iter());
+                    for ((f, r), (&a, &e)) in
+                        front.iter_mut().zip(back[1..].iter_mut().rev()).zip(ab)
+                    {
+                        *f = a + e;
+                        *r = a - e;
                     }
-                    y[h] = ea[h];
                 } else {
                     // With N = n + 1, from 1: y[k] = A[k] + B[k], y[N − k] = B[k] − A[k],
                     // y[N/2] = B[N/2].
-                    for k in 0..la {
-                        y[k] = ea[k] + eb[k];
-                        y[n - 1 - k] = eb[k] - ea[k];
+                    back[0] = eb[la];
+                    let ab = ea.iter().zip(eb.iter());
+                    for ((f, r), (&a, &e)) in
+                        front.iter_mut().zip(back[1..].iter_mut().rev()).zip(ab)
+                    {
+                        *f = a + e;
+                        *r = e - a;
                     }
-                    y[la] = eb[la];
                 }
             }
             Plan::PadI { n, rfft } => {
@@ -776,6 +982,9 @@ impl<T: FftFloat> Dct<T> {
     /// The transform of each run of `n` values of `data`, in place.
     #[track_caller]
     pub fn transform(&self, data: &mut [T]) {
+        if self.plan.direct_one(None, data) {
+            return;
+        }
         with_work(self.work, |work| self.transform_with_scratch(data, work));
     }
 
@@ -784,6 +993,9 @@ impl<T: FftFloat> Dct<T> {
     pub fn transform_to(&self, input: &[T], output: &mut [T]) {
         let k = dct_kind(self.kind);
         let (plan, work) = (&*self.plan, self.work);
+        if plan.direct_one(Some(input), output) {
+            return;
+        }
         with_work(work, |s| {
             apply(plan, work, Fam::Cos, k, Some(input), output, s, "Dct")
         });
@@ -816,6 +1028,9 @@ impl<T: FftFloat> Dct<T> {
     #[track_caller]
     pub fn transform_with_scratch(&self, data: &mut [T], scratch: &mut [Complex<T>]) {
         let (plan, k) = (&*self.plan, dct_kind(self.kind));
+        if plan.direct_one(None, data) {
+            return;
+        }
         apply(plan, self.work, Fam::Cos, k, None, data, scratch, "Dct");
     }
 }
@@ -853,6 +1068,9 @@ impl<T: FftFloat> Dst<T> {
     /// The transform of each run of `n` values of `data`, in place.
     #[track_caller]
     pub fn transform(&self, data: &mut [T]) {
+        if self.plan.direct_one(None, data) {
+            return;
+        }
         with_work(self.work, |work| self.transform_with_scratch(data, work));
     }
 
@@ -861,6 +1079,9 @@ impl<T: FftFloat> Dst<T> {
     pub fn transform_to(&self, input: &[T], output: &mut [T]) {
         let k = dst_kind(self.kind);
         let (plan, work) = (&*self.plan, self.work);
+        if plan.direct_one(Some(input), output) {
+            return;
+        }
         with_work(work, |s| {
             apply(plan, work, Fam::Sin, k, Some(input), output, s, "Dst")
         });
@@ -893,6 +1114,9 @@ impl<T: FftFloat> Dst<T> {
     #[track_caller]
     pub fn transform_with_scratch(&self, data: &mut [T], scratch: &mut [Complex<T>]) {
         let (plan, k) = (&*self.plan, dst_kind(self.kind));
+        if plan.direct_one(None, data) {
+            return;
+        }
         apply(plan, self.work, Fam::Sin, k, None, data, scratch, "Dst");
     }
 }

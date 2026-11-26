@@ -146,6 +146,10 @@ pub(in crate::math::matrix) fn product(
     (m, k, n): (usize, usize, usize),
     mode: Mode,
 ) {
+    // Primes below 2^32: exactly in doubles.
+    if super::doubles::product(f, c, ldc, a, lda, b, ldb, (m, k, n), mode) {
+        return;
+    }
     if m.min(k).min(n) < CROSSOVER {
         classical(f, c, ldc, a, lda, b, ldb, (m, k, n), mode);
         return;

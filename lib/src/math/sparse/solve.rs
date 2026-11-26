@@ -333,22 +333,64 @@ fn m_norm<T: Scalar>(
     }
 }
 
-/// The two parts of `Σ conj(s·uᵢ)·(t·vᵢ)` in `f64`.
+/// The two parts of `Σ conj(s·uᵢ)·(t·vᵢ)` in `f64`, in four running sums: the term of the index
+/// `i` to the sum `i mod 4` (the last `n mod 4` to the first), added as `(s₀ + s₁) + (s₂ + s₃)`
+/// — four independent chains of additions, in the same order every time.
 fn dot_parts<T: Scalar>(u: &[T], v: &[T], s: f64, t: f64) -> (f64, f64) {
-    let (mut re, mut im) = (0.0f64, 0.0f64);
+    let n = u.len().min(v.len());
+    let (u, v) = (&u[..n], &v[..n]);
+    let (mut re, mut im) = ([0.0f64; 4], [0.0f64; 4]);
+    let (uc, uc_rest) = u.as_chunks::<4>();
+    let (vc, vc_rest) = v.as_chunks::<4>();
     if T::IS_COMPLEX {
-        for (u, v) in u.iter().zip(v) {
+        let term = |re: &mut f64, im: &mut f64, u: T, v: T| {
             let (a, b) = (u.re().to_f64() * s, u.im().to_f64() * s);
             let (c, d) = (v.re().to_f64() * t, v.im().to_f64() * t);
-            re += a * c + b * d;
-            im += a * d - b * c;
+            *re += a * c + b * d;
+            *im += a * d - b * c;
+        };
+        for (u4, v4) in uc.iter().zip(vc.iter()) {
+            for q in 0..4 {
+                term(&mut re[q], &mut im[q], u4[q], v4[q]);
+            }
+        }
+        for (&u, &v) in uc_rest.iter().zip(vc_rest) {
+            term(&mut re[0], &mut im[0], u, v);
         }
     } else {
-        for (u, v) in u.iter().zip(v) {
-            re += (u.re().to_f64() * s) * (v.re().to_f64() * t);
+        for (u4, v4) in uc.iter().zip(vc.iter()) {
+            for q in 0..4 {
+                re[q] += (u4[q].re().to_f64() * s) * (v4[q].re().to_f64() * t);
+            }
+        }
+        for (&u, &v) in uc_rest.iter().zip(vc_rest) {
+            re[0] += (u.re().to_f64() * s) * (v.re().to_f64() * t);
         }
     }
-    (re, im)
+    (
+        (re[0] + re[1]) + (re[2] + re[3]),
+        (im[0] + im[1]) + (im[2] + im[3]),
+    )
+}
+
+/// `Σ |xᵢ|²` in `f64`, in four running sums as [`dot_parts`] has them; the elements are divided
+/// by `scale` first (1 for none).
+fn sum_squares<T: Scalar>(x: &[T], scale: f64) -> f64 {
+    let mut lanes = [0.0f64; 4];
+    let square = |x: T| {
+        let (a, b) = (x.re().to_f64() / scale, x.im().to_f64() / scale);
+        a * a + b * b
+    };
+    let (chunks, chunks_rest) = x.as_chunks::<4>();
+    for x4 in chunks.iter() {
+        for q in 0..4 {
+            lanes[q] += square(x4[q]);
+        }
+    }
+    for &x in chunks_rest {
+        lanes[0] += square(x);
+    }
+    (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
 }
 
 /// The largest part of an element of `x` in absolute value, in `f64`.
@@ -400,6 +442,13 @@ fn reciprocal_scale(x: f64) -> f64 {
 /// far that they lose their digits, the sum is taken again on the elements divided by the
 /// largest of them. A NaN among the elements gives NaN, and otherwise an infinity gives infinity.
 fn norm2<T: Scalar>(x: &[T]) -> T::Real {
+    norm2_from(x, sum_squares(x, 1.0))
+}
+
+/// [`norm2`] with the squares summed one after another: the norm of `b` and of every residual
+/// formed afresh, which decide what a run returns and against what, measured as they always
+/// were (the recurrences' estimates take the four-sum [`norm2`]).
+fn norm2_ordered<T: Scalar>(x: &[T]) -> T::Real {
     let mut sum = 0.0f64;
     for x in x {
         let (a, b) = (x.re().to_f64(), x.im().to_f64());
@@ -424,6 +473,139 @@ fn norm2<T: Scalar>(x: &[T]) -> T::Real {
         sum += a * a + b * b;
     }
     T::Real::from_f64(top * sum.sqrt())
+}
+
+/// [`norm2`] of `x` given the sum of its squares, `sum_squares(x, 1.0)`, already taken (as a
+/// fused update takes it): the same result.
+fn norm2_from<T: Scalar>(x: &[T], sum: f64) -> T::Real {
+    if sum.is_nan() {
+        return T::Real::NAN;
+    }
+    if sum.is_finite() && sum >= f64::MIN_POSITIVE / f64::EPSILON {
+        return T::Real::from_f64(sum.sqrt());
+    }
+    let mut top = 0.0f64;
+    for x in x {
+        top = top.max(x.re().to_f64().abs()).max(x.im().to_f64().abs());
+    }
+    if top == 0.0 || top.is_infinite() {
+        return T::Real::from_f64(top);
+    }
+    T::Real::from_f64(top * sum_squares(x, top).sqrt())
+}
+
+/// `x ← x + α·p` and `r ← r − α·q` in one pass, returning the sum of the squares of the new `r`
+/// as [`sum_squares`] takes it (the same bits), for [`norm2_from`].
+fn advance<T: Scalar>(x: &mut [T], p: &[T], r: &mut [T], q: &[T], alpha: T::Real) -> f64 {
+    let n = x.len();
+    debug_assert!(p.len() == n && r.len() == n && q.len() == n);
+    let mut lanes = [0.0f64; 4];
+    let (xc, xc_rest) = x.as_chunks_mut::<4>();
+    let (pc, pc_rest) = p.as_chunks::<4>();
+    let (rc, rc_rest) = r.as_chunks_mut::<4>();
+    let (qc, qc_rest) = q.as_chunks::<4>();
+    for (((x4, p4), r4), q4) in xc
+        .iter_mut()
+        .zip(pc.iter())
+        .zip(rc.iter_mut())
+        .zip(qc.iter())
+    {
+        for k in 0..4 {
+            x4[k] += p4[k].scale(alpha);
+            r4[k] -= q4[k].scale(alpha);
+            let (a, b) = (r4[k].re().to_f64(), r4[k].im().to_f64());
+            lanes[k] += a * a + b * b;
+        }
+    }
+    let rest = xc_rest.iter_mut().zip(pc_rest);
+    for ((x, &p), (r, &q)) in rest.zip(rc_rest.iter_mut().zip(qc_rest)) {
+        *x += p.scale(alpha);
+        *r -= q.scale(alpha);
+        let (a, b) = (r.re().to_f64(), r.im().to_f64());
+        lanes[0] += a * a + b * b;
+    }
+    (lanes[0] + lanes[1]) + (lanes[2] + lanes[3])
+}
+
+/// The elements of the vectors a pass of [`multi_dot`] and [`multi_subtract`] reads at a time,
+/// so that the piece of `w` stays in the first-level cache while every basis vector streams by:
+/// 16 KiB of `f64`, 32 KiB of `Complex<f64>`. A multiple of 4, which keeps the sums as they are.
+// Measured on an Apple M4 Max (`gmres_with` on convection-diffusion grids of 10⁴ and 10⁵
+// unknowns and a random matrix of 10⁶, restarts of 30 and 50, `f64` and `Complex<f64>`; sweep
+// 128 to 8192): 2048 against 512 takes 3 to 11 % off every one; 4096 is as fast, 8192 loses on
+// 10⁴ unknowns and in `f64`, 128 and 256 lose 1 to 8 %. On x86-64, whose first-level data cache
+// is 32 to 48 KiB against 128 KiB here, the complex block fills 32 KiB: the Actions run measures
+// it.
+const GS_BLOCK: usize = 2048;
+
+/// `h[i] = basis[i]ᴴ·w` for every basis vector, in one pass over the basis, each inner product
+/// summed in `f64` in four running sums (the term of the index `e` to the sum `e mod 4`), the
+/// same order every time.
+fn multi_dot<T: Scalar>(basis: &[Vec<T>], w: &[T], h: &mut Vec<T>) {
+    let n = w.len();
+    let mut re = vec![[0.0f64; 4]; basis.len()];
+    let mut im = vec![[0.0f64; 4]; basis.len()];
+    let mut start = 0;
+    while start < n {
+        // The blocks begin at multiples of 4, so that an element's sum is its index mod 4.
+        let end = (start + GS_BLOCK).min(n);
+        let wb = &w[start..end];
+        for (v, (re, im)) in basis.iter().zip(re.iter_mut().zip(im.iter_mut())) {
+            let (mut r, mut i) = (*re, *im);
+            let (vc, vc_rest) = v[start..end].as_chunks::<4>();
+            let (wc, wc_rest) = wb.as_chunks::<4>();
+            for (v4, w4) in vc.iter().zip(wc.iter()) {
+                for q in 0..4 {
+                    let (a, b) = (v4[q].re().to_f64(), v4[q].im().to_f64());
+                    let (c, d) = (w4[q].re().to_f64(), w4[q].im().to_f64());
+                    if T::IS_COMPLEX {
+                        r[q] += a * c + b * d;
+                        i[q] += a * d - b * c;
+                    } else {
+                        r[q] += a * c;
+                    }
+                }
+            }
+            for (&v, &x) in vc_rest.iter().zip(wc_rest) {
+                let (a, b) = (v.re().to_f64(), v.im().to_f64());
+                let (c, d) = (x.re().to_f64(), x.im().to_f64());
+                if T::IS_COMPLEX {
+                    r[0] += a * c + b * d;
+                    i[0] += a * d - b * c;
+                } else {
+                    r[0] += a * c;
+                }
+            }
+            *re = r;
+            *im = i;
+        }
+        start = end;
+    }
+    h.clear();
+    for (re, im) in re.iter().zip(&im) {
+        let (r, i) = (
+            (re[0] + re[1]) + (re[2] + re[3]),
+            (im[0] + im[1]) + (im[2] + im[3]),
+        );
+        h.push(T::from_parts(T::Real::from_f64(r), T::Real::from_f64(i)));
+    }
+}
+
+/// `w ← w − Σ h[i]·basis[i]`, in one pass over the basis, the terms of each element taken out
+/// in the order of the basis.
+fn multi_subtract<T: Scalar>(w: &mut [T], basis: &[Vec<T>], h: &[T]) {
+    let n = w.len();
+    let mut start = 0;
+    while start < n {
+        let end = (start + GS_BLOCK).min(n);
+        let wb = &mut w[start..end];
+        for (v, &c) in basis.iter().zip(h) {
+            for (w, &v) in wb.iter_mut().zip(&v[start..end]) {
+                *w = w.mul_sub(c, v);
+            }
+        }
+        start = end;
+    }
 }
 
 /// `y ← y + α·x`.
@@ -629,7 +811,7 @@ impl<'a, T: Scalar, A: LinearOperator<T> + ?Sized> Session<'a, T, A> {
         if !valid || !usable(opts.rtol) || !usable(opts.atol) {
             return Err(None);
         }
-        let norm_b = norm2(b);
+        let norm_b = norm2_ordered(b);
         if norm_b == T::Real::ZERO {
             return Err(Some(SolveResult {
                 x: vec![T::zero(); n],
@@ -684,7 +866,7 @@ impl<'a, T: Scalar, A: LinearOperator<T> + ?Sized> Session<'a, T, A> {
     fn residual(&mut self, x: &[T], r: &mut [T]) -> T::Real {
         self.a.residual(x, self.b, r);
         self.matvecs += 1;
-        norm2(r)
+        norm2_ordered(r)
     }
 
     /// `z = M⁻¹·r`, a copy of `r` when there is no preconditioner.
@@ -977,7 +1159,12 @@ where
         Err(done) => return done,
     };
     let n = b.len();
-    let mut z = vec![T::zero(); n];
+    // Without a preconditioner `z` is `r` itself, not a copy of it.
+    let mut z = if pre.is_some() {
+        vec![T::zero(); n]
+    } else {
+        Vec::new()
+    };
     let mut p = vec![T::zero(); n];
     let mut q = vec![T::zero(); n];
     let mut best = Best::new(opening_norm, opts.initial_guess.as_deref());
@@ -989,8 +1176,13 @@ where
     // The norm of the residual the recurrence carries for `x`.
     let mut estimate = opening_norm;
     let reason = loop {
-        s.precondition(&r, &mut z);
-        let rz_next = s.dot(&r, &z).re;
+        let zr: &[T] = if pre.is_some() {
+            s.precondition(&r, &mut z);
+            &z
+        } else {
+            &r
+        };
+        let rz_next = s.dot(&r, zr).re;
         if !rz_next.is_finite() {
             break StopReason::NonFinite;
         }
@@ -1000,10 +1192,10 @@ where
             break StopReason::NotPositiveDefinite;
         }
         if fresh {
-            p.copy_from_slice(&z);
+            p.copy_from_slice(zr);
         } else {
             let beta = T::Real::from_f64(rz_next / rz);
-            for (p, &z) in p.iter_mut().zip(&z) {
+            for (p, &z) in p.iter_mut().zip(zr) {
                 *p = z + p.scale(beta);
             }
         }
@@ -1025,13 +1217,8 @@ where
         if !alpha.is_finite() {
             break StopReason::NonFinite;
         }
-        for (x, &p) in x.iter_mut().zip(&p) {
-            *x += p.scale(alpha);
-        }
-        for (r, &q) in r.iter_mut().zip(&q) {
-            *r -= q.scale(alpha);
-        }
-        let norm = norm2(&r);
+        let squares = advance(&mut x, &p, &mut r, &q, alpha);
+        let norm = norm2_from(&r, squares);
         if !norm.is_finite() {
             break StopReason::NonFinite;
         }
@@ -1528,9 +1715,9 @@ fn set_basis<T: Scalar>(basis: &mut Vec<Vec<T>>, k: usize, v: &[T], length: T::R
 /// of the basis and four more (five with a preconditioner), and the work of an iteration at
 /// `m` inner products. The residual never grows.
 ///
-/// * The basis is orthogonalised by modified Gram-Schmidt, and once more when the first pass
-///   cancelled more than a factor `√2` of the vector, which is when it leaves the basis short
-///   of orthogonal.
+/// * The basis is orthogonalised by classical Gram–Schmidt, every coefficient from the same
+///   vector, and once more when the first pass cancelled more than a factor `√2` of the
+///   vector, which is when it leaves the basis short of orthogonal.
 /// * A vector that vanishes against the basis means the Krylov space is invariant, and then
 ///   the solution lies in it: the iterate is formed from the columns found so far, which is
 ///   exact but for rounding. This is the lucky breakdown, and it is how the identity matrix is
@@ -1650,6 +1837,7 @@ where
     // The right-hand side `‖r‖·e₁` of the least squares problem, rotated as the matrix is.
     let mut rhs: Vec<T> = Vec::new();
     let mut column: Vec<T> = Vec::new();
+    let mut correction: Vec<T> = Vec::new();
     let mut y: Vec<T> = Vec::new();
     let mut w = vec![T::zero(); n];
     let mut z = if pre.is_some() {
@@ -1686,18 +1874,17 @@ where
             if !length.is_finite() {
                 return Some(s.report(x, norm, iterations, StopReason::NonFinite));
             }
-            column.clear();
-            for v in &basis[..=k] {
-                let h = dot(v, &w);
-                subtract_scaled(&mut w, h, v);
-                column.push(h);
-            }
+            // Classical Gram–Schmidt with the test of Daniel, Gragg, Kaufman and Stewart: all
+            // the coefficients from one pass over the basis, the combination taken out in a
+            // second, and both again when the first shrank the vector by more than 1 − 1/√2.
+            multi_dot(&basis[..=k], &w, &mut column);
+            multi_subtract(&mut w, &basis[..=k], &column);
             let mut remainder = norm2(&w);
             if remainder < length * half_root {
-                for (v, h) in basis[..=k].iter().zip(&mut column) {
-                    let correction = dot(v, &w);
-                    subtract_scaled(&mut w, correction, v);
-                    *h += correction;
+                multi_dot(&basis[..=k], &w, &mut correction);
+                multi_subtract(&mut w, &basis[..=k], &correction);
+                for (h, &c) in column.iter_mut().zip(&correction) {
+                    *h += c;
                 }
                 let again = norm2(&w);
                 // Twice is enough: a vector that shrinks as much a second time has nothing
@@ -1901,12 +2088,12 @@ where
         Err(done) => return done,
     };
     let n = b.len();
-    // An inner product is taken for zero when it is below `ε²` times the norms of its two
-    // vectors, Eigen's measure of a breakdown. A small one that is not that small is still
-    // information: near convergence `ρ = r̂ᴴ·r` falls faster than `‖r‖`, to a cosine of 10⁻¹⁴
-    // on a Helmholtz problem that the method then solves in four more steps. A recurrence that
-    // has lost its accuracy is not taken for converged all the same, since every verdict is
-    // made on the residual formed afresh.
+    // An inner product is taken for zero when it is below `ε²` times the norms of its two vectors,
+    // Eigen's measure of a breakdown. A small one that is not that small is still information: near
+    // convergence `ρ = r̂ᴴ·r` falls faster than `‖r‖`, to a cosine of about 4·10⁻¹⁴ on a Helmholtz
+    // problem that the method then solves in one more step. A recurrence that has lost its accuracy
+    // is not taken for converged all the same, since every verdict is made on the residual formed
+    // afresh.
     let negligible = (T::Real::EPSILON * T::Real::EPSILON).to_f64();
     // The shadow residual, kept at the residual the recurrence started from.
     let mut shadow = r.clone();

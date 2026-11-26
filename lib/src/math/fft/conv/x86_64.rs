@@ -84,6 +84,8 @@ mod sse32 {
 
     fir_real!(fir, f32, 4, 4, 2, [0, 1, 2, 3]);
     fir_complex!(firc, f32, 4, 4, [(0, 0, 1), (1, 2, 3)]);
+    fir_real_few!(fir_few, f32, 4);
+    fir_complex_few!(firc_few, f32, 4);
 
     /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
     ///
@@ -158,6 +160,8 @@ mod sse64 {
 
     fir_real!(fir, f64, 2, 4, 2, [0, 1]);
     fir_complex!(firc, f64, 2, 4, [(0, 0, 1)]);
+    fir_real_few!(fir_few, f64, 2);
+    fir_complex_few!(firc_few, f64, 2);
 
     /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
     ///
@@ -246,6 +250,18 @@ mod avx32 {
         8,
         4,
         [(0, 0, 1), (1, 2, 3), (2, 4, 5), (3, 6, 7)]
+    );
+    fir_real_few!(
+        #[target_feature(enable = "avx2,fma")]
+        fir_few,
+        f32,
+        8
+    );
+    fir_complex_few!(
+        #[target_feature(enable = "avx2,fma")]
+        firc_few,
+        f32,
+        8
     );
 
     /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
@@ -343,6 +359,18 @@ mod avx64 {
         4,
         [(0, 0, 1), (1, 2, 3)]
     );
+    fir_real_few!(
+        #[target_feature(enable = "avx2,fma")]
+        fir_few,
+        f64,
+        4
+    );
+    fir_complex_few!(
+        #[target_feature(enable = "avx2,fma")]
+        firc_few,
+        f64,
+        4
+    );
 
     /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
     ///
@@ -379,7 +407,9 @@ mod avx64 {
 /// Whether the CPU has AVX2 and FMA.
 #[inline]
 fn avx2() -> bool {
-    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    !cfg!(a_baseline)
+        && std::is_x86_feature_detected!("avx2")
+        && std::is_x86_feature_detected!("fma")
 }
 
 macro_rules! dispatch {
@@ -403,5 +433,9 @@ dispatch!(fir_f32, sse32::fir, avx32::fir, (x: *const f32, t: *const f32, nt: us
 dispatch!(fir_f64, sse64::fir, avx64::fir, (x: *const f64, t: *const f64, nt: usize, y: *mut f64, ny: usize));
 dispatch!(firc_f32, sse32::firc, avx32::firc, (x: *const f32, t: *const f32, nt: usize, y: *mut f32, ny: usize));
 dispatch!(firc_f64, sse64::firc, avx64::firc, (x: *const f64, t: *const f64, nt: usize, y: *mut f64, ny: usize));
+dispatch!(fir_few_f32, sse32::fir_few, avx32::fir_few, (x: *const f32, t: *const f32, nt: usize, y: *mut f32, ny: usize));
+dispatch!(fir_few_f64, sse64::fir_few, avx64::fir_few, (x: *const f64, t: *const f64, nt: usize, y: *mut f64, ny: usize));
+dispatch!(firc_few_f32, sse32::firc_few, avx32::firc_few, (x: *const f32, t: *const f32, nt: usize, y: *mut f32, ny: usize));
+dispatch!(firc_few_f64, sse64::firc_few, avx64::firc_few, (x: *const f64, t: *const f64, nt: usize, y: *mut f64, ny: usize));
 dispatch!(cmul_f32, sse32::cmul, avx32::cmul, (x: *mut f32, y: *const f32, s: f32, n: usize));
 dispatch!(cmul_f64, sse64::cmul, avx64::cmul, (x: *mut f64, y: *const f64, s: f64, n: usize));

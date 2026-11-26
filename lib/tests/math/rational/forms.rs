@@ -418,11 +418,153 @@ fn hashes_agree_with_the_parts_and_rationals_are_send_and_sync() {
     let mut state = 0x5151_5151_7777_0001u64;
     for _ in 0..size(500, 20) {
         let x = rational(&mut state, 16);
+        // Equal values hash alike, whatever byte order and whatever made them: the same value from
+        // its parts in the other byte order, and through numbers and back.
+        let other = match x.byte_order() {
+            ByteOrder::LittleEndian => ByteOrder::BigEndian,
+            ByteOrder::BigEndian => ByteOrder::LittleEndian,
+        };
+        let flip = |n: &Number| {
+            let mut v = n.value.clone();
+            v.reverse();
+            Number::new_signed(v, n.is_negative(), other)
+        };
+        let y = Rational::new(flip(x.numer()), flip(x.denom()));
+        assert_eq!(x, y);
+        assert_eq!(hash_of(&x), hash_of(&y), "{x}");
+        let z = (&x + &Rational::from(1)) - Rational::from(1);
+        assert_eq!(hash_of(&x), hash_of(&z), "{x}");
         // A value hashes as its two parts do, whatever its form and byte order.
         let mut h = DefaultHasher::new();
         x.numer().hash(&mut h);
         x.denom().hash(&mut h);
         assert_eq!(hash_of(&x), h.finish(), "{x}");
+    }
+}
+
+/// A hasher that keeps every call made to it, the method and its bytes, so that two hashings
+/// compare call by call, as any hasher may tell them apart.
+#[derive(Default, PartialEq, Debug)]
+struct Calls(Vec<(&'static str, Vec<u8>)>);
+
+impl Hasher for Calls {
+    fn finish(&self) -> u64 {
+        0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.push(("write", bytes.to_vec()));
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.0.push(("u8", vec![i]));
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.0.push(("u16", i.to_le_bytes().to_vec()));
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0.push(("u32", i.to_le_bytes().to_vec()));
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0.push(("u64", i.to_le_bytes().to_vec()));
+    }
+    fn write_u128(&mut self, i: u128) {
+        self.0.push(("u128", i.to_le_bytes().to_vec()));
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.0.push(("usize", i.to_le_bytes().to_vec()));
+    }
+    fn write_i8(&mut self, i: i8) {
+        self.0.push(("i8", i.to_le_bytes().to_vec()));
+    }
+    fn write_i16(&mut self, i: i16) {
+        self.0.push(("i16", i.to_le_bytes().to_vec()));
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.0.push(("i32", i.to_le_bytes().to_vec()));
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.0.push(("i64", i.to_le_bytes().to_vec()));
+    }
+    fn write_i128(&mut self, i: i128) {
+        self.0.push(("i128", i.to_le_bytes().to_vec()));
+    }
+    fn write_isize(&mut self, i: isize) {
+        self.0.push(("isize", i.to_le_bytes().to_vec()));
+    }
+}
+
+#[test]
+fn a_rational_hashes_as_its_parts_call_for_call() {
+    // RATIONAL-2 of the v0.2 speed pass's audit: `hash(r)` is the hash of `(numer, denom)` as
+    // `Number` hashes them, with any hasher, so the very calls made to it are the same, for
+    // rationals in words (both parts below 2^64) and in numbers, of either sign and byte order,
+    // at 0, 1, 2^63, 2^64 and their neighbours, and at random.
+    let edges: Vec<Number> = [
+        0u128,
+        1,
+        2,
+        255,
+        256,
+        (1 << 63) - 1,
+        1 << 63,
+        (1 << 63) + 1,
+        u64::MAX as u128 - 1,
+        u64::MAX as u128,
+        1 << 64,
+        (1 << 64) + 1,
+        u128::MAX,
+    ]
+    .iter()
+    .map(|&m| Number::from(m))
+    .chain([Number::from(1u8) << 200usize])
+    .collect();
+    let mut values = Vec::new();
+    for n in &edges {
+        for d in edges.iter().filter(|d| !d.is_zero()) {
+            for negative in [false, true] {
+                let n = if negative { -n.clone() } else { n.clone() };
+                values.push(Rational::new(n, d.clone()));
+            }
+        }
+    }
+    let mut state = 0x4A54_4841_5348_0001u64;
+    for _ in 0..size(2000, 40) {
+        values.push(rational(&mut state, 24));
+    }
+    let (mut words, mut longs) = (0, 0);
+    for x in &values {
+        for o in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            let flip = |p: &Number| {
+                let mut v = p.value.clone();
+                if p.byte_order() != o {
+                    v.reverse();
+                }
+                Number::new_signed(v, p.is_negative(), o)
+            };
+            let y = Rational::new(flip(x.numer()), flip(x.denom()));
+            let (mut ours, mut parts) = (Calls::default(), Calls::default());
+            y.hash(&mut ours);
+            (y.numer(), y.denom()).hash(&mut parts);
+            assert_eq!(ours, parts, "{y}");
+            let mut h = DefaultHasher::new();
+            y.numer().hash(&mut h);
+            y.denom().hash(&mut h);
+            assert_eq!(hash_of(&y), h.finish(), "{y}");
+            if y.numer().bits() <= 64 && y.denom().bits() <= 64 {
+                words += 1;
+            } else {
+                longs += 1;
+            }
+        }
+    }
+    assert!(words > 100 && longs > 100, "{words} {longs}");
+    // And the sign is not a bit of the numerator: -k and 2^63 + k hash apart.
+    for k in [0u64, 1, 5, (1 << 63) - 1] {
+        let a = Rational::from(-Number::from(k));
+        let b = Rational::from(Number::from(k | 1 << 63));
+        let (mut ha, mut hb) = (Calls::default(), Calls::default());
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_ne!(ha, hb, "{a} {b}");
     }
 }
 

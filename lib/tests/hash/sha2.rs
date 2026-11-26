@@ -1,5 +1,12 @@
 //! SHA-224, SHA-256, SHA-384 and SHA-512: FIPS 180-4's examples, NIST CAVP's short, long and
-//! Monte Carlo vectors, every length to 300 bytes against OpenSSL, and streaming in pieces.
+//! Monte Carlo vectors, every length to 300 bytes against OpenSSL, whole digests of every length
+//! and of random messages in random pieces against Python's hashlib, and streaming in pieces.
+//!
+//! The compression functions a run takes are those of the machine: the SHA instructions where the
+//! CPU has them (Apple's aarch64, x86_64 with the SHA extensions), the portable functions under
+//! `RUSTFLAGS="--cfg a_baseline"` (where every run-time CPU check reports absent) and under Miri.
+//! Run both ways, the same tests compare the instructions and the portable functions with the
+//! same answers, and so with each other.
 
 use super::common::{by_name, hex, lines, size, unhex};
 use a::hash::{Digest, Sha224, Sha256, Sha384, Sha512, sha224, sha256, sha384, sha512};
@@ -263,6 +270,128 @@ fn every_length_up_to_300_bytes_matches_openssl() {
         seen += 1;
     }
     assert_eq!(seen, if cfg!(miri) { 9 } else { 301 });
+}
+
+/// The SHA-256 of each set of messages' digests by each hash, concatenated, by Python's hashlib
+/// (see `data/gen_sha_whole.py`).
+const WHOLE: &str = include_str!("data/sha_whole.txt");
+
+/// The answer of `WHOLE` for the set `set` of `count` messages under the hash `name`.
+fn whole(set: &str, count: usize, name: &str) -> &'static str {
+    lines(WHOLE)
+        .map(|l| l.split(' ').collect::<Vec<_>>())
+        .find(|f| f[0] == set && f[1] == count.to_string() && f[2] == name)
+        .unwrap_or_else(|| panic!("no answer for {set} {count} {name}"))[3]
+}
+
+/// The SHA-256 of the digests of `msgs` by `H`, each computed by `digest`, concatenated.
+fn digests_hashed<H: Digest>(
+    msgs: &[Vec<u8>],
+    mut digest: impl FnMut(&[u8]) -> H::Output,
+) -> String {
+    let mut all = Sha256::new();
+    for m in msgs {
+        all.update(digest(m).as_ref());
+    }
+    hex(&all.finalize())
+}
+
+#[test]
+fn every_length_up_to_300_bytes_gives_the_whole_digests_of_hashlib() {
+    // One shot (every whole block in one call of the compression function) and in pieces of 7
+    // bytes (a block at a time from the partial block).
+    let count = size(301, 71);
+    let msg = pattern(count);
+    let msgs: Vec<Vec<u8>> = (0..count).map(|n| msg[..n].to_vec()).collect();
+    fn check<H: Digest>(msgs: &[Vec<u8>], name: &str) {
+        let want = whole("lengths", msgs.len(), name);
+        assert_eq!(
+            digests_hashed::<H>(msgs, |m| H::digest(m)),
+            want,
+            "{name}, one shot"
+        );
+        assert_eq!(
+            digests_hashed::<H>(msgs, |m| in_pieces::<H>(m, 7)),
+            want,
+            "{name}, pieces"
+        );
+    }
+    check::<Sha224>(&msgs, "SHA224");
+    check::<Sha256>(&msgs, "SHA256");
+    check::<Sha384>(&msgs, "SHA384");
+    check::<Sha512>(&msgs, "SHA512");
+}
+
+/// SplitMix64 (Steele, Lea and Flood, OOPSLA 2014), as `data/gen_sha_whole.py` draws its
+/// messages.
+struct SplitMix(u64);
+
+impl SplitMix {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+}
+
+/// The `count` messages of `data/gen_sha_whole.py`, of 0 to 2,048 bytes.
+fn random_messages(count: usize) -> Vec<Vec<u8>> {
+    let mut rng = SplitMix(0x5348_4132);
+    (0..count)
+        .map(|_| {
+            let len = (rng.next() % 2049) as usize;
+            let mut m = Vec::with_capacity(len + 8);
+            while m.len() < len {
+                m.extend_from_slice(&rng.next().to_le_bytes());
+            }
+            m.truncate(len);
+            m
+        })
+        .collect()
+}
+
+/// Feeds `msg` to `H` in random pieces of 0 to 699 bytes: within a block, across one, and runs
+/// of whole blocks, from any offset.
+fn in_random_pieces<H: Digest>(msg: &[u8], rng: &mut SplitMix) -> H::Output {
+    let mut h = H::new();
+    let mut at = 0;
+    while at < msg.len() {
+        let r = rng.next();
+        let piece = if r.is_multiple_of(5) {
+            0
+        } else {
+            (r >> 8) as usize % 700
+        };
+        let end = (at + piece).min(msg.len());
+        h.update(&msg[at..end]);
+        at = end;
+    }
+    h.finalize()
+}
+
+#[test]
+fn random_messages_in_random_pieces_give_the_whole_digests_of_hashlib() {
+    let msgs = random_messages(size(64, 4));
+    fn check<H: Digest>(msgs: &[Vec<u8>], name: &str, splits: u64) {
+        let want = whole("random", msgs.len(), name);
+        assert_eq!(
+            digests_hashed::<H>(msgs, |m| H::digest(m)),
+            want,
+            "{name}, one shot"
+        );
+        for seed in 0..splits {
+            let mut rng = SplitMix(seed);
+            let got = digests_hashed::<H>(msgs, |m| in_random_pieces::<H>(m, &mut rng));
+            assert_eq!(got, want, "{name}, pieces of seed {seed}");
+        }
+    }
+    let splits = size(8, 1) as u64;
+    check::<Sha224>(&msgs, "SHA224", splits);
+    check::<Sha256>(&msgs, "SHA256", splits);
+    check::<Sha384>(&msgs, "SHA384", splits);
+    check::<Sha512>(&msgs, "SHA512", splits);
 }
 
 /// Feeds `msg` to `H` in pieces of `piece` bytes, after an empty piece.

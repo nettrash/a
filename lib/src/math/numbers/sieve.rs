@@ -350,7 +350,10 @@ const SMALL: u64 = 1 << 16;
 
 /// Returns `π(x)`, the number of primes up to `x`, exactly for every `u64`.
 ///
-/// Below `2^16` from a table computed at compile time, and above by Deléglise and Rivat's method
+/// Below `2^16` from a table computed at compile time; from `2^16` to `2^20` from tables of the
+/// primes and of `π` (400 KB) built from the sieve once 128 calls have asked there, and kept for
+/// the process; and above
+/// by Deléglise and Rivat's method
 /// (1996) as Oliveira e Silva (2006) and Walisch's primecount carry it out, its special leaves
 /// sorted as Gourdon's (2001), so that only those that need it are counted by the sieve, in
 /// `O(x^(2/3) / log² x)` time and `O(x^(1/3) log³ x)` space: on an Apple M4 Max, `π(10^6)` takes
@@ -371,7 +374,8 @@ pub fn prime_pi(x: u64) -> u64 {
 /// Returns the `n`-th prime, `nth_prime(1) = 2`, for `n` up to `π(2^64 - 1)`,
 /// 425,656,284,035,217,743, whose prime is `2^64 - 59`.
 ///
-/// From a table up to `π(2^16)`; above, from `x = R⁻¹(n)`, Riemann's `R` inverted by Newton's
+/// From a table up to `π(2^16)`, and up to `π(2^20)` from the table of the primes that [`prime_pi`]
+/// builds (once it is there); above, from `x = R⁻¹(n)`, Riemann's `R` inverted by Newton's
 /// steps, within a few times `√x / ln x` primes of it, [`prime_pi`] of `x`, and the sieve from `x`
 /// to the prime, as primecount does; near the top, down from `2^64 - 1`, whose `π` is known.
 ///

@@ -51,6 +51,39 @@ pub(super) fn certain(c: &[u64], hi: u64, prec: u64) -> bool {
     !carry || c[1..k].iter().any(|&v| v != u64::MAX) || c[k] & mask != mask
 }
 
+/// [`certain`] for a bound `hi` of up to 128 bits (the powers by exponents of two limbs).
+#[inline]
+pub(super) fn certain_wide(c: &[u64], hi: u128, prec: u64) -> bool {
+    let h1 = (hi >> 64) as u64;
+    if h1 == 0 {
+        return certain(c, hi as u64, prec);
+    }
+    let bits = limbs::bit_len(c);
+    if bits < prec + 2 {
+        return false;
+    }
+    // The bits below the round bit, `r ≥ 65` of them for a bound of `2^64` or more to fit.
+    let r = bits - prec - 1;
+    if r <= 64 {
+        return false;
+    }
+    let (k, rb) = ((r / 64) as usize, (r % 64) as u32);
+    let mask = (1u64 << rb) - 1;
+    let below = c[..k].iter().any(|&v| v != 0) || c[k] & mask != 0;
+    if !below {
+        return false;
+    }
+    let (_, c0) = c[0].overflowing_add(hi as u64);
+    if k == 1 {
+        // The bits below the round bit are `c[0]` and the `rb` low bits of `c[1]`.
+        return u128::from(c[1] & mask) + u128::from(h1) + u128::from(c0) <= u128::from(mask);
+    }
+    let (s1, c1) = c[1].overflowing_add(h1);
+    let (_, c2) = s1.overflowing_add(u64::from(c0));
+    let carry = c1 | c2;
+    !carry || c[2..k].iter().any(|&v| v != u64::MAX) || c[k] & mask != mask
+}
+
 /// The most limbs of the fixed-width path: results of up to about 480 bits.
 pub(super) const MAX_W: usize = 8;
 
@@ -132,7 +165,7 @@ fn pow_w<const W: usize, const D: usize>(
     x: Op<'_>,
     negative: bool,
     n_negative: bool,
-    n: u64,
+    n: u128,
     prec: u64,
     round: Round,
 ) -> Option<(Kind, Ordering)> {
@@ -173,14 +206,14 @@ fn pow_w<const W: usize, const D: usize>(
     debug_assert!(base[W - 1] >> 63 == 1);
     let mut acc = base;
     let mut e = eb;
-    for i in (0..63 - n.leading_zeros()).rev() {
+    for i in (0..127 - n.leading_zeros()).rev() {
         (acc, e) = top::<W, D>(&sqr::<W, D>(&acc), 2 * e);
         if n >> i & 1 == 1 {
             (acc, e) = top::<W, D>(&mul::<W, D>(&acc, &base), e + eb);
         }
     }
-    let k = (kb + 2).checked_mul(n)?.checked_mul(4)?;
-    if !certain(&acc, k, prec) {
+    let k = u128::from(kb + 2).checked_mul(n)?.checked_mul(4)?;
+    if !certain_wide(&acc, k, prec) {
         return None;
     }
     Some(round_into(
@@ -198,9 +231,9 @@ fn pow_w<const W: usize, const D: usize>(
 /// with a bound `kb ≤ 1` of the base: enough for the round bit, the `log2(4k)` bits of the error
 /// and 12 more, so that the bound rarely leaves the rounding undecided; `None` beyond [`MAX_W`].
 #[inline]
-pub(super) fn width(prec: u64, n: u64) -> Option<usize> {
+pub(super) fn width(prec: u64, n: u128) -> Option<usize> {
     // `4k ≤ 12n < 2^(bits(n) + 4)`.
-    let err = u64::from(64 - n.leading_zeros()) + 4;
+    let err = u64::from(128 - n.leading_zeros()) + 4;
     let w = (prec + 1 + err + 12).div_ceil(64) as usize;
     (w <= MAX_W).then_some(w.max(2))
 }
@@ -212,7 +245,7 @@ pub(super) fn pow(
     x: Op<'_>,
     negative: bool,
     n_negative: bool,
-    n: u64,
+    n: u128,
     prec: u64,
     round: Round,
 ) -> Option<(Kind, Ordering)> {
@@ -315,12 +348,17 @@ pub(super) fn pow_vec(
             e = e + eb - i128::from(align(t, acc, wl));
         }
     }
-    // The error, `4(kb + 2)·n` units exactly for a short `n`, below `2^(bits + 4)` otherwise.
+    // The error, `4(kb + 2)·n` units exactly for a short `n`, below `2^(bits + 4)` otherwise: on
+    // the limbs from `d`, the fewest dropped that leave it at most `2^60` of their units, below
+    // `2^s` units for `s = max(bits + 4 - 64d, 0)` (below one unit when `bits + 4 < 64d`, for
+    // exponents of 57 to 59 bits past a multiple of 64, such as 59 and 121 to 123), and the cut's
+    // fraction one more.
     let (d, hi) = match *n {
         [v] if bits <= 58 => (0, 4 * (kb + 2) * v),
         _ => {
-            let d = (bits + 4 - 60).div_ceil(64) as usize;
-            (d, (1u64 << (bits + 4 - 64 * d as u64)) + 1)
+            let d = (bits + 4 - 60).div_ceil(64);
+            let s = (bits + 4).saturating_sub(64 * d);
+            (d as usize, (1u64 << s) + 1)
         }
     };
     if d + 2 > wl || !certain(&acc[d..], hi, prec) {

@@ -370,10 +370,15 @@ fn replayed(a: &Matrix<BigFloat>, prec: u64) -> Option<(Vec<Rational>, Vec<usize
 #[test]
 fn factorisations_are_their_rounded_steps_exactly() {
     // The determinant and the solution of every matrix are its factorisation's steps, each
-    // correctly rounded: in registers (parts to 128 bits) and on limbs (beyond) alike.
+    // correctly rounded: in registers (parts to 128 bits) and on limbs (beyond) alike; one in fifty
+    // of order 18 to 25 (up to 300 bits), whose longer dot products leave the stack.
     let mut s = 0x5EED_3A7E_0000_0010u64;
     for i in 0..size(400, 6) {
-        let n = 1 + below(&mut s, if cfg!(miri) { 3 } else { 6 }) as usize;
+        let n = if i % 50 == 0 && !cfg!(miri) {
+            18 + below(&mut s, 8) as usize
+        } else {
+            1 + below(&mut s, if cfg!(miri) { 3 } else { 6 }) as usize
+        };
         let max = match i % 10 {
             0 => 300,
             1 | 2 => 64,

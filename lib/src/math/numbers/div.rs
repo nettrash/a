@@ -85,9 +85,8 @@ mod newton;
 mod rem1;
 
 pub(crate) use limbs::{div_2by1 as divide_2by1, invert_limb as reciprocal};
-pub(super) use rem1::{
-    Powers, REM_1_BYTES, REM_1_BYTES_WIDE, REM_1_MAX, REM_1_PREPARED, limb_of, rem_1,
-};
+pub(super) use rem1::limb_of;
+pub(crate) use rem1::{Powers, REM_1_BYTES, REM_1_BYTES_WIDE, REM_1_MAX, REM_1_PREPARED, rem_1};
 
 use super::add::{SMALL, read, read_small, small, write_small};
 use super::mul::limbs::{add_1, sub_n};

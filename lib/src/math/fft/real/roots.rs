@@ -266,3 +266,42 @@ pub(in crate::math::fft) fn affine<T: Float>(
 pub(in crate::math::fft) fn table<T: Float>(n: usize, len: usize) -> Vec<Complex<T>> {
     affine(n, 0, 1, len)
 }
+
+/// Any root `e^(−2πi·k/n)`, `k < n`, for the `f32` tables of the complex passes: the product of
+/// a coarse table (exponents `2^b` apart) and a fine one (exponents below `2^b`) of roots rounded
+/// to `f64`, rounded to `f32` as [`Roots::table`] rounds an `f32` table (the nearest `f32` but
+/// for ties closer than about 2⁻⁵²). A root costs two loads from tables of about `√n` values
+/// and a complex product, where a table of `n/8` roots to fold into would be megabytes.
+pub(in crate::math::fft) struct Grid {
+    bits: u32,
+    fine: Vec<(f64, f64)>,
+    coarse: Vec<(f64, f64)>,
+}
+
+impl Grid {
+    /// The tables for `n ≥ 1`.
+    pub(in crate::math::fft) fn new(n: usize) -> Grid {
+        let bits = (usize::BITS - n.saturating_sub(1).leading_zeros()).div_ceil(2);
+        let b = 1usize << bits;
+        let n64 = n as u64;
+        let one = Cd {
+            re: Dd(1.0, 0.0),
+            im: Dd(0.0, 0.0),
+        };
+        let fine = powers(one, cis(1, n64), b);
+        let coarse = powers(one, cis(b as u64 % n64, n64), n.div_ceil(b));
+        Grid {
+            bits,
+            fine: fine.iter().map(|c| c.round()).collect(),
+            coarse: coarse.iter().map(|c| c.round()).collect(),
+        }
+    }
+
+    /// `e^(−2πi·k/n)` in `f32`, for `k < n`.
+    #[inline(always)]
+    pub(in crate::math::fft) fn get(&self, k: usize) -> Complex<f32> {
+        let (cr, ci) = self.coarse[k >> self.bits];
+        let (fr, fi) = self.fine[k & ((1 << self.bits) - 1)];
+        Complex::new((cr * fr - ci * fi) as f32, (cr * fi + ci * fr) as f32)
+    }
+}

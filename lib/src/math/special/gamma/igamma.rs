@@ -827,6 +827,25 @@ fn first_guess(a: f64, t: f64, upper: bool, lg1: f64, lt: f64) -> f64 {
     if !upper && (a < 1.0 || lt < -12.0 - 0.5 * a) {
         return p_tail();
     }
+    // The switch to the tail of Q for 1 ≤ a ≤ 50 and −ln q > 3a. Measured on an Apple M4 Max
+    // (a from 1 to 100, −ln q from a to 8a and to 690, Halley's steps counted): from 3a on its
+    // start takes no more steps than Temme's and is cheaper (0.90–0.96 of the time), below 2.5a
+    // it took up to 12 steps from a = 15 on; above a = 50 it lost at 3a (1.44× at a = 70) and
+    // at a = 100 Temme's start needs one step to its two; below a = 1 it cost 1.01–1.04×, so it
+    // is left out there. The roots stay within 0.51 ulp (40,000 cases, 6 of whose roots moved:
+    // mpmath on those and 1,000 more).
+    if upper && (1.0..=50.0).contains(&a) && -lt > 3.0 * a {
+        // The tail of Q: x = −ln t − ln Γ(a) + (a − 1) ln x + ln(1 + (a − 1)/x + (a − 1)(a − 2)/x²),
+        // by its fixed point from x = −ln t − ln Γ(a).
+        let lg = lg1 - ln(a);
+        let am = a - 1.0;
+        let mut x = (-lt - lg).max(1.0);
+        for _ in 0..4 {
+            let c = 1.0 + am / x * (1.0 + (a - 2.0) / x);
+            x = (-lt - lg + am * ln(x) + ln(c.max(1e-3))).max(1.0);
+        }
+        return x;
+    }
     if a >= 1.0 {
         let z = normal_quantile_lower(t);
         let e0 = if upper { -z } else { z } / a.sqrt();

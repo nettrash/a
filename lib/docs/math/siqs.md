@@ -56,46 +56,27 @@ The parameters by size (the primes of the base, the interval, the large-prime bo
 
 ## Measured
 
-Measured on an Apple M4 Max, single-threaded, in CPU seconds, on balanced semiprimes (two random primes of half the digits each, from PARI's `nextprime`), on 2026-11-11 on the quiet machine: no other measurement running, the load average 1.3 to 5.5 on its 16 cores from the system's own background services (11.8 during the run at 90 digits, below), one thread, every process with `MallocNanoZone` unset; `siqs` and the previous version in cargo's release profile with `debug = 1` (no fat LTO, the default 16 codegen units), FLINT's harness by `clang -O2`. msieve's own start, 2.4 to 2.7 ms, makes its times below 36 digits rough.
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harness in the repository's `bench/nt` (its method in `bench/README.md`), on one thread: `siqs` as a user builds it, by rustc 1.100 stable in cargo's release profile (no LTO, 16 codegen units, no `target-cpu`), against PARI 2.19.1's MPQS (`factorint(n, 14)`, which leaves out its other methods) and FLINT 3.6.0's `qsieve_factor` with one thread, as Homebrew builds them, called through shims compiled with `-O3 -mcpu=native`, and msieve 1.53 (`msieve -q -t 1`), a process a number. The numbers are balanced semiprimes, two random primes of half the digits each, a set of each size factored whole in every sample, its mean time a number given; each figure is the median of 15 samples (10 at 50 digits, then 5, 3, 3 and 2), `siqs` and the references alternating sample by sample, after a check that every factor found divides the number. A ratio is the time of `siqs` over the reference's: below 1, `siqs` is faster.
 
-From 26 to 60 digits (load 2.1 to 4.1), `siqs` and the version before this one (0.2.32, as `previous`) were run in turn on the same numbers, in rounds of fresh ones, the order alternating, the median of the rounds' means: 72 of each size up to 40 digits, 48 at 44, 24 at 45 and 12, 8 and 6 at 50, 55 and 60 digits; then, on the same numbers, PARI/GP 2.19's MPQS (`factorint(n, 14)`, which leaves out the other methods, `nbthreads` 1), msieve 1.53 (`msieve -q -t 1`, the time of the process less that of a run on a small prime) and FLINT 3.6's `qsieve_factor` (one thread), the last two on 24 of them up to 40 digits and on 16, 12, 6, 4 and 3 beyond. In parentheses, each one's time over that of `siqs`:
+| Digits | numbers | `siqs` | PARI | ratio | FLINT | ratio | msieve | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 26 | 16 | 215 µs | 431 µs | 0.499 | 2.27 ms | 0.0946 | 10.1 ms | 0.0213 |
+| 28 | 16 | 330 µs | 562 µs | 0.587 | 2.16 ms | 0.152 | 13.9 ms | 0.0237 |
+| 30 | 16 | 450 µs | 885 µs | 0.508 | 2.71 ms | 0.166 | 16.0 ms | 0.0282 |
+| 32 | 16 | 692 µs | 1.30 ms | 0.534 | 3.66 ms | 0.189 | 20.9 ms | 0.0331 |
+| 36 | 12 | 1.49 ms | 3.20 ms | 0.465 | 7.58 ms | 0.197 | 25.8 ms | 0.0577 |
+| 40 | 8 | 3.28 ms | 8.96 ms | 0.366 | 14.9 ms | 0.221 | 39.8 ms | 0.0826 |
+| 44 | 6 | 7.36 ms | 19.8 ms | 0.371 | 42.3 ms | 0.174 | 53.1 ms | 0.139 |
+| 45 | 4 | 10.3 ms | 27.1 ms | 0.380 | 45.0 ms | 0.229 | 66.4 ms | 0.155 |
+| 50 | 3 | 30.6 ms | 79.3 ms | 0.386 | 206 ms | 0.148 | 151 ms | 0.202 |
+| 55 | 2 | 85.6 ms | 255 ms | 0.336 | 538 ms | 0.159 | 427 ms | 0.200 |
+| 60 | 1 | 323 ms | 901 ms | 0.359 | 1.95 s | 0.166 | 1.11 s | 0.292 |
+| 65 | 1 | 1.21 s | 3.87 s | 0.314 | 5.12 s | 0.237 | 6.61 s | 0.183 |
+| 70 | 1 | 3.83 s | 13.6 s | 0.282 | 17.3 s | 0.221 | 15.8 s | 0.243 |
 
-| Digits | `siqs` | previous | PARI 2.19 | msieve 1.53 | FLINT 3.6 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 26 | 0.26 ms | 1.11 ms (4.3×) | 0.47 ms (1.8×) | 7.66 ms (30×) | 1.92 ms (7.5×) |
-| 28 | 0.35 ms | 1.09 ms (3.1×) | 0.64 ms (1.8×) | 12.4 ms (35×) | 2.16 ms (6.1×) |
-| 30 | 0.49 ms | 1.21 ms (2.5×) | 0.92 ms (1.9×) | 15.2 ms (31×) | 2.95 ms (6.0×) |
-| 32 | 0.75 ms | 1.67 ms (2.2×) | 1.38 ms (1.8×) | 20 ms (27×) | 4.02 ms (5.4×) |
-| 36 | 1.46 ms | 3.35 ms (2.3×) | 3.17 ms (2.2×) | 25 ms (17×) | 7.85 ms (5.4×) |
-| 40 | 3.45 ms | 6.81 ms (2.0×) | 8.51 ms (2.5×) | 38 ms (11×) | 16.1 ms (4.7×) |
-| 44 | 7.79 ms | 14.1 ms (1.8×) | 22 ms (2.8×) | 55 ms (7.1×) | 33 ms (4.3×) |
-| 45 | 9.84 ms | 17.5 ms (1.8×) | 27 ms (2.8×) | 62 ms (6.3×) | 44 ms (4.5×) |
-| 50 | 29 ms | 50 ms (1.7×) | 80 ms (2.7×) | 0.14 s (4.8×) | 0.18 s (6.0×) |
-| 55 | 0.095 s | 0.15 s (1.6×) | 0.25 s (2.6×) | 0.36 s (3.8×) | 0.48 s (5.0×) |
-| 60 | 0.31 s | 0.46 s (1.5×) | 0.941 s (3.1×) | 1.39 s (4.6×) | 2.04 s (6.7×) |
-
-From 40 to 100 digits, on the numbers of the earlier measurements (the first and second of each size, the first only from 85 digits), `siqs` and the previous version were run one after the other, the order alternating, the medians of 5 runs up to 60 digits, of 3 at 65 and 70 and one run beyond (load 1.3 to 2.2 up to 80 digits, rising to 4 to 5.5 from PARI's run on the second number of 80 digits to the end of the 85-digit row), and from 90 digits `siqs` once (the load 5.5 to 11.8 during the run at 90 digits, 3.7 to 4.7 at 95 and 100), against the previous version's times of 2026-11-07 there, measured with other work running (8 to 16 runnable processes). The contenders on the same numbers: from 40 to 80 digits measured now, one after the other (msieve's user and system time, PARI's `getabstime` around `factorint(n, 14)`, FLINT's `clock()` around `qsieve_factor`); at 85 and 90 digits, and msieve's at 95 and 100, their times of 2026-11-07, measured with other work running (PARI and FLINT were not run beyond 90 digits; PARI took 27 minutes at 90 digits and FLINT 46); and yafu 3.1.9's published single-thread times on an AMD Ryzen 9 5900X with AVX2 (its own benchmark numbers, `qs_time`, from its wiki: another processor and other numbers, so only a guide). In parentheses, their times over that of `siqs`:
-
-| Digits | `siqs` | `siqs`/previous | msieve 1.53 | PARI 2.19 | FLINT 3.6 | yafu 3.1.9 (5900X, published) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 40 | 3.3 ms | 0.48 | 30 ms (9.0×) | 8.5 ms (2.5×) | 16 ms (4.9×) | – |
-| 50 | 34 ms | 0.58 | 0.15 s (4.5×) | 83 ms (2.4×) | 0.18 s (5.3×) | 0.12 s (3.5×) |
-| 60 | 0.33 s | 0.68 | 1.50 s (4.5×) | 0.99 s (3.0×) | 2.24 s (6.8×) | 1.18 s (3.6×) |
-| 65 | 1.07 s | 0.68 | 5.57 s (5.2×) | 3.35 s (3.1×) | 4.65 s (4.4×) | 3.84 s (3.6×) |
-| 70 | 3.4 s | 0.73 | 13.5 s (4.0×) | 13.1 s (3.9×) | 15.9 s (4.7×) | 7.08 s (2.1×) |
-| 75 | 9.1 s | 0.74 | 29.0 s (3.2×) | 31.2 s (3.4×) | 45.1 s (5.0×) | 23.78 s (2.6×) |
-| 80 | 26.0 s | 0.72 | 93.2 s (3.6×) | 106 s (4.1×) | 142 s (5.5×) | 46.99 s (1.8×) |
-| 85 | 91 s | 0.72 | 319 s (3.5×) | 344 s (3.8×) | 540 s (5.9×) | 139.87 s (1.5×) |
-| 90 | 277 s | 0.66 | 909 s (3.3×) | 1,643 s (5.9×) | 2,786 s (10×) | – |
-| 95 | 707 s | 0.659 | 2,014 s (2.8×) | – | – | – |
-| 100 | 2,340 s | 0.658 | 7,430 s (3.2×) | – | – | – |
-
-- `siqs` is the fastest of the four measured at every size: 1.8 to 1.9 times as fast as PARI's MPQS from 26 to 32 digits (PARI is the strongest of the three on small numbers), 2.2 to 3.1 times from 36 to 65, and 3.2 to 10 times as fast as msieve, PARI and FLINT from 70 to 90 digits, where the double large-prime variation and the large factor bases pay.
-- Against the previous version: 2.2 to 4.3 times as fast up to 36 digits (the smaller excess of relations, the elimination by the four Russians, the vector kernels of the trial division and of the scan, and the parameters retuned), 1.5 to 2 times from 40 to 60, and 1.36 to 1.38 times from 70 to 85 digits (the two thresholds, the kernels of the medium primes and of the buckets); from 90 to 100 digits 1.5 times, against the previous version's times of the earlier, loaded runs, so less sure.
-- Against yafu's published times on a Ryzen 9 5900X, about 1.5 to 3.6 times as fast: 3.5 to 3.6 from 50 to 65 digits, 1.5 to 2.6 from 70 to 85. The M4 Max runs single-threaded code faster than a Ryzen 9 5900X, so these margins overstate the difference between the programs; the smaller one, from 70 digits, may be little more than the machines'.
-- Memory, the most resident at once (the process's maximum resident set size): from 40 to 80 digits about as before (4 to 82 MB against 4 to 79; the most different 19 and 20 MB against 24 and 27 at 65 digits), at 85 digits 142 MB against 118; most of it the relations (257 MB at 90 digits and 522 MB at 100).
-
-Where the time goes, at 70 digits (3.4 s on a quiet machine): the medium primes 35 %, moving the large primes' roots and filling their buckets 27 %, the trial division of 444,000 candidates 18 % (Pollard's rho on the cofactors of two large primes 3 %), the buckets' logarithms 9 %, the scan with the tiny primes' shares 5 %, the polynomials' set-up 4 %.
+- `siqs` is the fastest at every size measured: 0.282 to 0.587 of the time of PARI's MPQS, the fastest of the references on these numbers, the most from 60 digits, where the double large-prime variation and the larger factor bases pay; and 0.0946 to 0.237 of FLINT's.
+- msieve runs as a process for each number, and its start, 1.9 ms, is in its times, which it dominates below 40 digits: msieve does more there, so its column is shown and not counted. From 50 digits, where the start is a small part of its time, `siqs` takes 0.183 to 0.292 of it.
+- Numbers of 75 to 100 digits, minutes to hours each, were not part of this run, nor yafu, which is not installed here.
 
 ## Examples
 
@@ -128,6 +109,6 @@ fn main() {
 
 ## Efficiency
 
-- Time complexity: `L(N)^(1 + o(1))` with `L(N) = exp(sqrt(ln N · ln ln N))`, heuristically, as for every quadratic sieve; in practice the times above, about three times as long for every 5 digits more
+- Time complexity: `L(N)^(1 + o(1))` with `L(N) = exp(sqrt(ln N · ln ln N))`, heuristically, as for every quadratic sieve; in practice the times above, about three to four times as long for every 5 digits more
 - Space complexity: the factor base and the roots, some 40 bytes a prime; a block of 64 KiB; the buckets, 8 bytes a large prime and block, and 8 more for the steps past the interval; the relations, about 100 bytes each (their primes as indices into the factor base); and the matrix; in all, the most resident at once some 80 MB at 80 digits and 520 MB at 100
 - Soundness: every factor returned divides `|n|`, as `gcd(X − Y, N)` does whatever the relations. The `unsafe` code is the medium sieve's addition to a byte of the block without a check of its bounds (each position below its prime, which Miri checks with the tests) and, on aarch64 only, the NEON kernels (the trial division's comparisons with the roots, the tiny primes' shares, the scan, the medium primes of one to three hits, the bucket entries) with their writes without checks; elsewhere and under Miri the same steps run in plain Rust, with the same results

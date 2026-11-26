@@ -51,28 +51,114 @@ pub(super) fn error_norm<T: Real>(err: &[T], y: &[T], y_new: &[T], rtol: T, atol
 
 /// `out[r] = y[r] + h · Σⱼ w[j] · k[j][r]`: the argument of a stage, or the end of a step. The sum
 /// runs over the stages in their order and skips the zeros of the tableau.
+#[inline(always)]
 pub(super) fn combine<T: Real>(out: &mut [T], y: &[T], h: T, w: &[f64], k: &[Matrix<T>]) {
-    for (r, (o, &yr)) in out.iter_mut().zip(y).enumerate() {
-        let mut sum = T::ZERO;
-        for (&wj, kj) in w.iter().zip(k) {
-            if wj != 0.0 {
-                sum += T::from_f64(wj) * kj.as_slice()[r];
-            }
-        }
-        *o = yr + h * sum;
-    }
+    sum_stages(out, w, k, Some((y, h)));
 }
 
 /// `out[r] = Σⱼ w[j] · k[j][r]`, in the same order and with the same zeros skipped.
+#[inline(always)]
 pub(super) fn weighted<T: Real>(out: &mut [T], w: &[f64], k: &[Matrix<T>]) {
-    for (r, o) in out.iter_mut().enumerate() {
+    sum_stages(out, w, k, None);
+}
+
+/// The width of a block of components in [`sum_stages`].
+// Measured on an Apple M4 Max on cheap right-hand sides, in `f64` and `f32`: blocks of 8 make
+// `DormandPrince5` and `DormandPrince853` 0.79 to 0.93 of their time from 16 components (`Rk4`
+// 0.96 to 1.01), but up to 1.4 times it at 4 to 7 components, summed then one at a time, and up
+// to 1.26 times at 12, whose tail of 4 is (sweep 2 to 1000 components).
+const BLOCK: usize = 4;
+
+/// `out[r] = y[r] + h·s` (or `s` without `y`) for `s = Σⱼ w[j] · k[j][r]`, the sum over the stages
+/// with a nonzero weight in their order, from zero. [`BLOCK`] components at a time, the stages in
+/// the inner loop: each component's terms are added in the order of the stages, as a sum of one
+/// component at a time adds them, so the result is that one to the last bit; but the sums of a
+/// block run side by side in vector registers, and a weight is converted and tested once for the
+/// whole block. A state shorter than a block is summed one component at a time. Always inlined:
+/// out of line it costs a small state (n = 4) a fifth of its step.
+#[inline(always)]
+fn sum_stages<T: Real>(out: &mut [T], w: &[f64], k: &[Matrix<T>], y: Option<(&[T], T)>) {
+    let n = out.len();
+    if n < BLOCK {
+        sum_each(out, 0, w, k, y);
+        return;
+    }
+    // A row of one nonzero weight (most of the first rows of a tableau): one pass over the
+    // components, the sum `0 + w·k` formed as the general case forms it.
+    let mut nonzero = w.iter().zip(k).filter(|(wj, _)| **wj != 0.0);
+    if let (Some((&wj, kj)), None) = (nonzero.next(), nonzero.next()) {
+        let wj = T::from_f64(wj);
+        let kj = kj.as_slice();
+        match y {
+            Some((y, h)) => {
+                for ((o, &yr), &x) in out.iter_mut().zip(y).zip(kj) {
+                    *o = yr + h * (T::ZERO + wj * x);
+                }
+            }
+            None => {
+                for (o, &x) in out.iter_mut().zip(kj) {
+                    *o = T::ZERO + wj * x;
+                }
+            }
+        }
+        return;
+    }
+    let full = n - n % BLOCK;
+    for (c, block) in out[..full]
+        .as_chunks_mut::<BLOCK>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        let r = c * BLOCK;
+        let mut sums = [T::ZERO; BLOCK];
+        for (&wj, kj) in w.iter().zip(k) {
+            if wj != 0.0 {
+                let wj = T::from_f64(wj);
+                let kj: &[T; BLOCK] = kj.as_slice()[r..r + BLOCK]
+                    .try_into()
+                    .expect("a block of the stage");
+                for (s, &x) in sums.iter_mut().zip(kj) {
+                    *s += wj * x;
+                }
+            }
+        }
+        match y {
+            Some((y, h)) => {
+                let yb: &[T; BLOCK] = y[r..r + BLOCK].try_into().expect("a block of the state");
+                for ((o, &yr), s) in block.iter_mut().zip(yb).zip(sums) {
+                    *o = yr + h * s;
+                }
+            }
+            None => block.copy_from_slice(&sums),
+        }
+    }
+    sum_each(out, full, w, k, y);
+}
+
+/// The sums of [`sum_stages`] one component at a time, for the components from `from` on.
+#[inline(always)]
+fn sum_each<T: Real>(out: &mut [T], from: usize, w: &[f64], k: &[Matrix<T>], y: Option<(&[T], T)>) {
+    let sum = |r: usize| {
         let mut sum = T::ZERO;
         for (&wj, kj) in w.iter().zip(k) {
             if wj != 0.0 {
                 sum += T::from_f64(wj) * kj.as_slice()[r];
             }
         }
-        *o = sum;
+        sum
+    };
+    match y {
+        Some((y, h)) => {
+            for (r, (o, &yr)) in out.iter_mut().zip(y).enumerate().skip(from) {
+                *o = yr + h * sum(r);
+            }
+        }
+        None => {
+            for (r, o) in out.iter_mut().enumerate().skip(from) {
+                *o = sum(r);
+            }
+        }
     }
 }
 

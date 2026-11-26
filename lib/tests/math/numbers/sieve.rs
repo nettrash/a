@@ -516,6 +516,10 @@ fn nth_prime_of_small_indices_is_the_sieve_s() {
     }
 }
 
+// `prime_pi` and `nth_prime` from `2^16` to `2^20`, by the method and by the tables that replace
+// it after the first calls, are tested in `tests/pi_tables`, a process of their own: which of the
+// two answers a call depends on the calls made in the process before it, here those of every test.
+
 #[test]
 fn nth_prime_matches_known_values() {
     let k = if cfg!(miri) { 4 } else { 12 };

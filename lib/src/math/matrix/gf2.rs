@@ -10,7 +10,7 @@
 //!   multiplication of dense matrices over GF(2)", ACM TOMS 37, 2010): the `2^k` sums of `k` rows
 //!   of the right operand in a table built in Gray-code order, one addition each, and each row of
 //!   the product the sum of one entry of each table, about `n³ / (64·k)` word operations for
-//!   `k = ⌊log₂ n⌋ − 1`, at most 8. From 3072 rows and columns, Strassen's method in Winograd's form sits on top,
+//!   `k = ⌊log₂ n⌋ − 1`, at most 8. From 8192 rows and columns, Strassen's method in Winograd's form sits on top,
 //!   seven products of halves and fifteen sums, as M4RI's `mzd_mul` does.
 //! - Echelon forms, ranks, inverses, solutions and null spaces are by M4RI, Bard's method of the
 //!   Four Russians for elimination ("Accelerating cryptanalysis with the Method of Four
@@ -454,7 +454,7 @@ impl BitMatrix {
     /// fifteen sums, recursing while all three dimensions are at least `cutoff`, and by M4RM
     /// below: M4RI's `mzd_mul`, whose last argument is the same cutoff. A `cutoff` below 128
     /// counts as 128, so that every half has whole words. `&a * &b` is this with the cutoff
-    /// 3072, so that no half is below 1536 rows or columns; a smaller one can pay where the
+    /// 8192, so that no half is below 4096 rows or columns; a smaller one can pay where the
     /// caches are smaller.
     ///
     /// # Panics

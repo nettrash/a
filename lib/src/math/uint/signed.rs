@@ -1496,7 +1496,9 @@ impl<const N: usize> Int<N> {
     /// ```
     #[inline]
     pub const fn wrapping_pow(self, exp: u32) -> Self {
-        self.overflowing_pow(exp).0
+        Int {
+            bits: self.bits.wrapping_pow(exp),
+        }
     }
 
     /// `self^exp`, held to `[MIN, MAX]`: `MIN` when the true power is negative.
@@ -1535,10 +1537,14 @@ impl<const N: usize> Int<N> {
     #[inline]
     #[track_caller]
     pub const fn pow(self, exp: u32) -> Self {
-        debug_checked!(
-            self.overflowing_pow(exp),
-            "attempt to exponentiate with overflow"
-        )
+        if cfg!(debug_assertions) {
+            debug_checked!(
+                self.overflowing_pow(exp),
+                "attempt to exponentiate with overflow"
+            )
+        } else {
+            self.wrapping_pow(exp)
+        }
     }
 
     /// The square root rounded down, or `None` for a negative number.

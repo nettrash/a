@@ -600,6 +600,457 @@ fn large_systems() {
     assert_eq!(&d * &x, one);
 }
 
+/// The determinant of the square matrix of integers `a` by a fraction-free elimination written
+/// here on `Number`s, independent of the crate's eliminations: Bareiss's steps with the pivot of
+/// the least magnitude in its column (the crate's take the first that is not zero), each exact
+/// division by the previous pivot `Number::div_rem`'s, its remainder asserted to be zero.
+fn bareiss(a: &Matrix<Number>) -> Number {
+    let n = a.rows();
+    if n == 0 {
+        return Number::from(1);
+    }
+    let mut m: Vec<Vec<Number>> = (0..n)
+        .map(|i| (0..n).map(|j| a[(i, j)].clone()).collect())
+        .collect();
+    let mut previous = Number::from(1);
+    let mut negative = false;
+    for k in 0..n {
+        let Some(p) = (k..n)
+            .filter(|&i| !m[i][k].is_zero())
+            .min_by(|&i, &j| m[i][k].abs().cmp(&m[j][k].abs()))
+        else {
+            return Number::from(0);
+        };
+        if p != k {
+            m.swap(p, k);
+            negative = !negative;
+        }
+        for i in k + 1..n {
+            for j in k + 1..n {
+                let t = &(&m[i][j] * &m[k][k]) - &(&m[i][k] * &m[k][j]);
+                let (q, rest) = t.div_rem(&previous);
+                assert!(rest.is_zero(), "the oracle's division is not exact");
+                m[i][j] = q;
+            }
+        }
+        previous = m[k][k].clone();
+    }
+    let d = m[n - 1][n - 1].clone();
+    if negative { -d } else { d }
+}
+
+/// The limbs that Hadamard's bound gives the minors of the matrix of integers `a`, as the
+/// elimination on the stack reckons them (the bits of each row's largest element, then
+/// `⌈n·L/2⌉ + 1` more for `L` the bits of `n`), repeated here to tell which of its widths a case
+/// reaches: the elimination on the stack takes orders 5 to 16 with an element of at least 64
+/// bits and a bound of at most 16 limbs, in arrays of 2, 4, 8 or 16 limbs.
+fn stack_width(a: &Matrix<Number>) -> Option<usize> {
+    let n = a.rows();
+    if !(5..=16).contains(&n) || a.as_slice().iter().all(|x| x.bits() < 64) {
+        return None;
+    }
+    let rows: u64 = (0..n)
+        .map(|i| (0..n).map(|j| a[(i, j)].bits()).max().unwrap_or(0))
+        .sum();
+    let lg = u64::from(usize::BITS - n.leading_zeros());
+    let w = (rows + (n as u64 * lg).div_ceil(2) + 1).div_ceil(64);
+    [2, 4, 8, 16].into_iter().find(|&k| w <= k as u64)
+}
+
+/// Asserts the determinant of the matrix of integers `a` as `Matrix<Number>` and as
+/// `Matrix<Rational>` of the same integers: `want`, in the byte order of the top left element,
+/// a zero never negative.
+#[track_caller]
+fn integer_det_is(a: &Matrix<Number>, want: &Number, what: &str) {
+    let o = a[(0, 0)].byte_order();
+    let d = a.det();
+    assert_eq!(&d, want, "Matrix<Number>: {what}");
+    assert_eq!(d.byte_order(), o, "{what}");
+    assert!(!(d.is_zero() && d.is_negative()), "a negative zero: {what}");
+    let q = a.map(|x| Rational::from_integer(x.clone())).det();
+    check(&q, o);
+    assert_eq!(
+        q,
+        Rational::from_integer(want.clone()),
+        "Matrix<Rational>: {what}"
+    );
+}
+
+/// `L·D·U` for the diagonal `d` and unit triangles `L` and `U` whose elements below and above
+/// the diagonal `entry` gives, then its rows permuted at random when `permute` is set: the matrix
+/// and the sign of the permutation (`true` for odd). Unpermuted, its leading minors are the
+/// products of the first elements of `d`, and while they are not zero so are the pivots of an
+/// elimination that takes the first element not zero in each column.
+fn ldu(
+    r: &mut Rng,
+    d: &[Number],
+    o: ByteOrder,
+    permute: bool,
+    mut entry: impl FnMut(&mut Rng) -> Number,
+) -> (Matrix<Number>, bool) {
+    let n = d.len();
+    let zero = Number::new_from_i64(0, o);
+    let l = Matrix::from_fn(n, n, |i, j| match i.cmp(&j) {
+        core::cmp::Ordering::Greater => entry(r),
+        core::cmp::Ordering::Equal => Number::new_from_i64(1, o),
+        core::cmp::Ordering::Less => zero.clone(),
+    });
+    let u = Matrix::from_fn(n, n, |i, j| match i.cmp(&j) {
+        core::cmp::Ordering::Less => entry(r),
+        core::cmp::Ordering::Equal => d[i].clone(),
+        core::cmp::Ordering::Greater => zero.clone(),
+    });
+    let a = &l * &u;
+    let mut rows: Vec<usize> = (0..n).collect();
+    let mut negative = false;
+    for i in (1..n).rev().filter(|_| permute) {
+        let j = (r.next() % (i as u64 + 1)) as usize;
+        if j != i {
+            rows.swap(i, j);
+            negative = !negative;
+        }
+    }
+    // The top left element in the byte order `o`, the others in either.
+    let a = Matrix::from_fn(n, n, |i, j| {
+        let oe = if i == 0 && j == 0 { o } else { order(r.next()) };
+        in_byte_order(&a[(rows[i], j)], oe)
+    });
+    (a, negative)
+}
+
+/// `x` in the byte order `o`.
+fn in_byte_order(x: &Number, o: ByteOrder) -> Number {
+    let mut v = x.value.clone();
+    if x.byte_order() != o {
+        v.reverse();
+    }
+    Number::new_signed(v, x.is_negative(), o)
+}
+
+#[test]
+fn determinants_with_a_previous_pivot_of_minus_one() {
+    // RATIONAL-1 of the v0.2 speed pass's audit: the elimination on the stack (orders 5 to 16 with
+    // an element of 64 bits or more) once divided by a previous pivot of -1 as by 1, and gave the
+    // determinant's negation. `diag(-1, 1, …, 1, 2^63)`, -1 at each place of the diagonal with a
+    // long element at each other, and a dense example, against the products of the diagonals and
+    // SymPy's `Matrix.det()`, in both byte orders, as integers and as rationals.
+    let longs = [
+        Number::from(1u64 << 63),
+        Number::from(u64::MAX),
+        Number::from(1u128 << 64),
+        Number::from((1u128 << 64) + 1),
+        Number::from(u128::MAX),
+    ];
+    let orders: Vec<usize> = if cfg!(miri) {
+        vec![5]
+    } else {
+        (5..=16).collect()
+    };
+    for o in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+        let num = |x: &Number| in_byte_order(x, o);
+        for &n in &orders {
+            // The auditor's reproducer: diag(-1, 1, …, 1, 2^63) is -2^63.
+            let a = Matrix::from_fn(n, n, |i, j| {
+                num(&if i != j {
+                    Number::from(0)
+                } else if i == 0 {
+                    Number::from(-1)
+                } else if i == n - 1 {
+                    Number::from(1u64 << 63)
+                } else {
+                    Number::from(1)
+                })
+            });
+            integer_det_is(
+                &a,
+                &-Number::from(1u64 << 63),
+                &format!("diag(-1, 1, …, 2^63), {n}"),
+            );
+            for minus in 0..n {
+                for long in 0..n {
+                    if long == minus || (cfg!(miri) && long != n - 1) {
+                        continue;
+                    }
+                    for (k, big) in longs.iter().enumerate() {
+                        let negative_big = (minus + long + k) % 2 == 1;
+                        let diagonal = |i: usize| {
+                            if i == minus {
+                                Number::from(-1)
+                            } else if i == long {
+                                if negative_big {
+                                    -big.clone()
+                                } else {
+                                    big.clone()
+                                }
+                            } else {
+                                Number::from(1)
+                            }
+                        };
+                        let a = Matrix::from_fn(n, n, |i, j| {
+                            num(&if i == j { diagonal(i) } else { Number::from(0) })
+                        });
+                        let want = (0..n).fold(Number::from(1), |p, i| &p * &diagonal(i));
+                        integer_det_is(&a, &want, &format!("{n}: -1 at {minus}, {big} at {long}"));
+                    }
+                }
+            }
+        }
+        // A dense one, of SymPy's determinant.
+        let rows: [[i128; 5]; 5] = [
+            [-1, 2, 3, 4, 5],
+            [6, -7, 8, 9, 10],
+            [11, 12, 13, 14, 1 << 70],
+            [16, 3, 18, -19, 20],
+            [21, 22, 5, 24, 26],
+        ];
+        let a = Matrix::from_fn(5, 5, |i, j| Number::new_from_i128(rows[i][j], o));
+        let want: Number = "75453971663291191222786356".parse().unwrap();
+        integer_det_is(&a, &want, "the dense 5 × 5");
+        assert_eq!(bareiss(&a), want);
+    }
+}
+
+#[test]
+fn determinants_of_signs_with_one_long_element() {
+    // Orders 5 to 16 of elements in {-1, 0, 1} with one of about `2^63` or `2^64`, of either sign,
+    // at a random place: the class in which RATIONAL-1 gave about two in five determinants
+    // negated. The integers and the rationals against the fraction-free elimination of this file
+    // on numbers, which is checked against Leibniz's formula first; and fractions of such
+    // numerators over denominators of 1 to 3, against the elimination of their rows cleared here.
+    let mut r = Rng(0x5EED_1612);
+    for _ in 0..size(40, 2) {
+        let n = 1 + (r.next() % 5) as usize;
+        let a = Matrix::from_fn(n, n, |_, _| Number::from((r.next() % 3) as i64 - 1));
+        let q = a.map(|x| Rational::from_integer(x.clone()));
+        assert_eq!(Rational::from_integer(bareiss(&a)), leibniz(&q));
+    }
+    let orders: Vec<usize> = if cfg!(miri) {
+        vec![5]
+    } else {
+        (5..=16).collect()
+    };
+    let (mut cases, mut nonsingular) = (0, 0);
+    for &n in &orders {
+        for t in 0..size(60, 2) {
+            let o = order(r.next());
+            let long = |r: &mut Rng| {
+                let x = match r.next() % 4 {
+                    0 => (1u128 << 63) + u128::from(r.next() % 1000),
+                    1 => (1u128 << 63) - 1 - u128::from(r.next() % 1000),
+                    2 => (1u128 << 64) - 1 - u128::from(r.next() % 1000),
+                    _ => (1u128 << 64) + u128::from(r.next() % 1000),
+                };
+                let x = Number::new_from_u128(x, o);
+                if r.next() & 1 == 1 { -x } else { x }
+            };
+            let at = (r.next() % (n * n) as u64) as usize;
+            // Half of them with a top left element of ±1, a first pivot of ±1.
+            let corner = t % 2 == 0;
+            let mut a = Matrix::from_fn(n, n, |i, j| {
+                if i * n + j == at && (at != 0 || !corner) {
+                    long(&mut r)
+                } else if i == 0 && j == 0 && corner {
+                    Number::new_from_i64(if r.next() & 1 == 1 { -1 } else { 1 }, o)
+                } else {
+                    Number::new_from_i64((r.next() % 3) as i64 - 1, o)
+                }
+            });
+            while a.as_slice().iter().all(|x| x.bits() < 64) {
+                a[(n - 1, n - 1)] = long(&mut r);
+            }
+            assert!(stack_width(&a).is_some());
+            let want = bareiss(&a);
+            cases += 1;
+            nonsingular += usize::from(!want.is_zero());
+            integer_det_is(&a, &want, &format!("{n}, case {t}"));
+            if n <= 8 || t % 4 == 0 {
+                // Fractions: each element over 1, 2 or 3, against the rows cleared by the
+                // products of their denominators.
+                let den: Vec<u64> = (0..n * n).map(|_| 1 + r.next() % 3).collect();
+                let f = Matrix::from_fn(n, n, |i, j| {
+                    Rational::new(a[(i, j)].clone(), Number::new_from_u64(den[i * n + j], o))
+                });
+                let scale: Vec<Number> = (0..n)
+                    .map(|i| Number::from(den[i * n..(i + 1) * n].iter().product::<u64>()))
+                    .collect();
+                let cleared = Matrix::from_fn(n, n, |i, j| {
+                    let x = &f[(i, j)] * &Rational::from_integer(scale[i].clone());
+                    assert!(x.is_integer());
+                    x.numer().clone()
+                });
+                let total = scale.iter().fold(Number::from(1), |p, s| &p * s);
+                let d = f.det();
+                check(&d, o);
+                assert_eq!(
+                    d,
+                    Rational::new(bareiss(&cleared), total),
+                    "fractions, {n}, {t}"
+                );
+            }
+        }
+    }
+    // Most of them are not singular, so that the sign is tested.
+    assert!(
+        cfg!(miri) || 2 * nonsingular > cases,
+        "{nonsingular} of {cases}"
+    );
+}
+
+#[test]
+fn determinants_on_the_stack_by_their_divisors() {
+    // The paths of the elimination on the stack's divisions, each previous pivot a leading minor
+    // of `L·D·U`, the product of the first elements of `D`, or permuted: pivots of ±1 (the
+    // quotient the dividend), powers of two of fewer than 64 bits and of whole limbs (only a
+    // shift), odd ones of one and two limbs and beyond (Hensel's division with and without the
+    // shift), with `L` and `U` of elements in {-1, 0, 1}, whose cancellations make zeros and
+    // zero quotients, or of random integers; a zero in `D` makes the matrix singular. Against
+    // the product of `D` with the permutation's sign and the elimination of this file on
+    // numbers; each width of the stack's elements, 2, 4, 8 and 16 limbs, and past them, reached.
+    let mut r = Rng(0x5EED_1613);
+    let divisors: Vec<Number> = [
+        1u128,
+        2,
+        3,
+        1 << 32,
+        (1 << 63) - 1,
+        1 << 63,
+        (1 << 63) + 1,
+        u64::MAX as u128,
+        1 << 64,
+        (1 << 64) + 1,
+        1 << 65,
+        3 << 64,
+        u128::MAX,
+    ]
+    .iter()
+    .map(|&x| Number::from(x))
+    .chain([Number::from(1u8) << 128, (Number::from(1u8) << 192) + 1u8])
+    .collect();
+    let orders: Vec<usize> = if cfg!(miri) {
+        vec![5]
+    } else {
+        (5..=16).collect()
+    };
+    let mut widths = [0usize; 5];
+    for &n in &orders {
+        for t in 0..size(40, 3) {
+            let o = order(r.next());
+            // Mostly ±1 on the diagonal, with one long element at least.
+            let mut d: Vec<Number> = (0..n)
+                .map(|_| {
+                    let x = if r.next().is_multiple_of(3) {
+                        divisors[(r.next() % divisors.len() as u64) as usize].clone()
+                    } else {
+                        Number::from(1)
+                    };
+                    if r.next() & 1 == 1 { -x } else { x }
+                })
+                .collect();
+            let at = (r.next() % n as u64) as usize;
+            if d.iter().all(|x| x.bits() < 64) {
+                d[at] = divisors[5 + (r.next() % (divisors.len() as u64 - 5)) as usize].clone();
+            }
+            if t % 7 == 3 {
+                d[(at + 1) % n] = Number::from(0);
+            }
+            let small = t % 3 != 2;
+            let (a, negative) = ldu(&mut r, &d, o, t % 2 == 0, |r| {
+                if small {
+                    Number::from((r.next() % 3) as i64 - 1)
+                } else {
+                    Number::from(r.next() as i64 >> (r.next() % 64))
+                }
+            });
+            let product = d.iter().fold(Number::from(1), |p, x| &p * x);
+            let want = if negative { -product } else { product };
+            assert_eq!(bareiss(&a), want, "the oracle, {n}, case {t}");
+            let k = match stack_width(&a) {
+                Some(2) => 0,
+                Some(4) => 1,
+                Some(8) => 2,
+                Some(16) => 3,
+                _ => 4,
+            };
+            widths[k] += 1;
+            integer_det_is(&a, &want, &format!("{n}, case {t}, D = {d:?}"));
+        }
+    }
+    if !cfg!(miri) {
+        assert!(widths.iter().all(|&k| k > 0), "{widths:?}");
+    }
+}
+
+#[test]
+fn determinants_on_the_stack() {
+    // Orders 5 to 16 of integers of 1 to 40 bytes, whose minors fit in 2 to 16 limbs and past:
+    // `P·L·D·U` with unit triangles of random integers, `D` diagonal, a third of its elements -1
+    // and a sixth 1, and `P` a permutation, against the product of `D` and the permutation's sign;
+    // and random integers against the fraction-free elimination of this file on numbers, which
+    // shares no code with the crate's eliminations.
+    let mut r = Rng(0x5EED_1611);
+    let orders: &[usize] = if cfg!(miri) {
+        &[5]
+    } else {
+        &[5, 6, 7, 8, 11, 16]
+    };
+    for &n in orders {
+        for bytes in [1usize, 4, 8, 9, 16, 24, 40] {
+            if cfg!(miri) && bytes > 9 {
+                continue;
+            }
+            let o = order(r.next());
+            let small = |r: &mut Rng| match r.next() % 6 {
+                0 | 1 => Number::new_from_i64(-1, o),
+                2 => Number::new_from_i64(1, o),
+                _ => {
+                    let x = integer(r, bytes.min(3), o);
+                    if x.is_zero() {
+                        Number::new_from_i64(-1, o)
+                    } else {
+                        x
+                    }
+                }
+            };
+            let l = Matrix::from_fn(n, n, |i, j| match i.cmp(&j) {
+                core::cmp::Ordering::Greater => integer(&mut r, bytes / 2 + 1, o),
+                core::cmp::Ordering::Equal => Number::new_from_i64(1, o),
+                core::cmp::Ordering::Less => Number::new_from_i64(0, o),
+            });
+            let d: Vec<Number> = (0..n).map(|_| small(&mut r)).collect();
+            let u = Matrix::from_fn(n, n, |i, j| match i.cmp(&j) {
+                core::cmp::Ordering::Less => integer(&mut r, bytes / 2 + 1, o),
+                core::cmp::Ordering::Equal => d[i].clone(),
+                core::cmp::Ordering::Greater => Number::new_from_i64(0, o),
+            });
+            let mut a = &l * &u;
+            // A permutation of the rows, and its sign.
+            let mut negative = false;
+            for i in (1..n).rev() {
+                let j = (r.next() % (i as u64 + 1)) as usize;
+                if j != i {
+                    a = Matrix::from_fn(n, n, |x, y| {
+                        let x = if x == i {
+                            j
+                        } else if x == j {
+                            i
+                        } else {
+                            x
+                        };
+                        a[(x, y)].clone()
+                    });
+                    negative = !negative;
+                }
+            }
+            let product = d.iter().fold(Number::new_from_i64(1, o), |p, x| &p * x);
+            let want = if negative { -product } else { product };
+            integer_det_is(&a, &want, &format!("{n} {bytes}"));
+            // And with random integers, against the elimination of this file on numbers.
+            let b = Matrix::from_fn(n, n, |_, _| integer(&mut r, bytes, o));
+            integer_det_is(&b, &bareiss(&b), &format!("{n} {bytes} random"));
+        }
+    }
+}
+
 #[test]
 fn large_determinants() {
     // From 22 to 28 rows the determinant is Dixon's divisor times residues: against products, the

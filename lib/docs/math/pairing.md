@@ -10,8 +10,8 @@
 - `G1` and `G2` are points of the curve and of the twist, which borrow their curve. Every way to get one checks that it is on the curve, and all but `new_on_curve` that it is in the subgroup of order `r`. They add with `+`, negate and subtract with `-`, double with `double()`, and multiply by a `Number` of any sign and length with `*`, owned or borrowed, with the assignments; `==` compares them in whatever projective form they are held. `coordinates()` gives the affine `(x, y)` or `None` at infinity.
 - `is_in_subgroup()` tests membership by endomorphisms. `clear_cofactor()` maps any point of the curve into the subgroup: by RFC 9380's maps on BLS12-381, by Fuentes-Castañeda, Knapp and Rodríguez-Henríquez's map on BN254's `G2` (RFC 9380 has no BN254 suite), and as the identity on BN254's `G1`, whose cofactor is 1. `mul_by_cofactor()` multiplies by the whole cofactor, and `G2::psi()` is the endomorphism `ψ`.
 - Bytes: ZCash's encodings of BLS12-381 (`to_zcash_compressed`, `to_zcash_uncompressed`, `G1::from_zcash`, `G2::from_zcash`) and Ethereum's of BN254 (`to_ethereum`, `from_ethereum`), each decoding checked, with a `PointError` that says what is wrong; and Ethereum's precompiles for BN254 on bytes, `ethereum::{ec_add, ec_mul, ec_pairing}`.
-- `Gt` is written multiplicatively: `*`, `/`, `pow(&k)` (reduced modulo `r`), `square()`, `inverse()` (the conjugate), `is_identity()`, `==`; `Gt::from_fp12` accepts an element of `F_p¹²` of order dividing `r`, and `value()` gives it back.
-- `a::math::pairing::hash` hashes byte strings to `G1` and `G2`: RFC 9380's four suites for BLS12-381, and gnark-crypto's two for BN254's `G1`, as RFC 9380 has none for BN254; see [Hashing to G1 and G2](#hashing-to-g1-and-g2), the last section.
+- `Gt` is written multiplicatively: `*`, `/`, `pow(&k)` (reduced modulo `r`), `square()`, `inverse()` (the conjugate), `is_identity()`, `==`; `Gt::from_fp12` accepts an element of `F_p¹²` of order dividing `r`, and `value()` gives it back. Powers go by the decomposition of the exponent along the Frobenius map (`f^p = f^x` on BLS12-381: four digits of 64 bits; `f^p = f^(6x²)` on BN254: four of about 64 bits, from an LLL-reduced basis of the lattice of the relations and Babai's rounding), raised together by cyclotomic squares; `from_fp12` tests the cyclotomic subgroup, then `f^p = f^x` (Scott, ePrint 2021/1130) or `f^p = f^(6x²)`, which decide membership because `gcd(Φ₁₂(p), p − x) = r` and `p − 6x² = r`.
+- `a::math::pairing::hash` hashes byte strings to `G1` and `G2`: RFC 9380's four suites for BLS12-381, and gnark-crypto's two for BN254's `G1`, as RFC 9380 has none for BN254; see [Hashing to G1 and G2](#hashing-to-g1-and-g2), the section after the limits; the [measurements](#measured) close the page.
 
 ## Example
 
@@ -78,8 +78,9 @@ The security levels are those of Barbulescu and Duquesne (*Updating key size est
 - **Miller's loop** keeps `T` in homogeneous projective coordinates on the twist and evaluates each line at `P` without leaving `F_p²`. Doubling: the formulas of Costello, Lange and Naehrig (*Faster pairing computations on curves with high-degree twists*, PKC 2010) in the form of Aranha, Barreto, Longa and Ricardini (*The realm of the pairings*, SAC 2013): `A = XY/2, B = Y², C = Z², E = 3b'C, F = 3E, G = (B + F)/2, H = (Y + Z)² − B − C, I = E − B, J = X²`, then `2T = (A(B − F) : G² − 3E² : BH)` and the line `I + 3J·x_P − H·y_P`, four products and six squares of `F_p²`. Addition of the affine `Q`: the mixed addition "madd-1998-cmo" of the Explicit-Formulas Database and the line `(v·y_Q − u·x_Q) + u·x_P − v·y_P` with `u = y_Q Z − Y`, `v = x_Q Z − X`, eleven products and two squares. Untwisted, the line of a D-type twist sits at the coefficients `1, w, w³` of `F_p¹²` and is multiplied in by `Fp12::mul_by_034`; that of an M-type twist, multiplied by `w³`, at `1, w², w³` (`Fp12::mul_by_014`): 13 products of `F_p²` each. Every line is a multiple of the true one by a factor of `F_p²`, which the final exponentiation removes. Each step squares `f` (12 products of `F_p²`).
   - BN254: the non-adjacent form of `6x + 2`, 65 doublings and 21 additions (the binary form would need 36), then the lines through `ψ(Q)` and `−ψ²(Q)`.
   - BLS12-381: the binary form of `|x|`, 63 doublings and 5 additions (its non-adjacent form would add a doubling), then `f` conjugated, as `x < 0` (the inverse and the conjugate agree after the final exponentiation).
+  - The points are made affine together, with one inversion of `F_p` for all of them (Montgomery's trick, the twist's `Z` through its norm). While `f` is 1, the first step neither squares it nor multiplies: `f` becomes the first line.
   - `multi_pairing` runs one loop for all pairs: one square of `f` per step, a line per pair. A pair with a point at infinity contributes 1. The loop handles the degenerate steps (a vertical line, `T` at infinity) that only points outside `G2` reach, so that it never divides by zero.
-- **The final exponentiation**: the easy part `f^((p⁶ − 1)(p² + 1))` is a conjugation, one inversion of `F_p¹²` (one of `F_p`), a Frobenius map and two products; it leaves an element of the cyclotomic subgroup, where squares are Granger and Scott's and inverses conjugates. The hard part raises it to `c·(p⁴ − p² + 1)/r` by powers by `x` and Frobenius maps:
+- **The final exponentiation**: the easy part `f^((p⁶ − 1)(p² + 1))` is a conjugation, one inversion of `F_p¹²` (one of `F_p`), a Frobenius map and two products; it leaves an element of the cyclotomic subgroup, where squares are Granger and Scott's, runs of nine squares or more Karabina's compressed ones (*Squaring in cyclotomic subgroups*, Math. Comp. 82, 2013: six squares of `F_p²` instead of nine, then one inversion to decompress), and inverses conjugates. The hard part raises it to `c·(p⁴ − p² + 1)/r` by powers by `x` and Frobenius maps:
   - BLS12-381: `c = 3`, as `3(p⁴ − p² + 1)/r = (x − 1)²(x + p)(x² + p² − 1) + 3` (Hayashida, Hayasaka and Teruya, *Efficient final exponentiation via cyclotomic structure for pairings over families of elliptic curves*, ePrint 2020/875): five powers by `|x|` (63 cyclotomic squares and 5 products each, over its binary form), two Frobenius maps, one cyclotomic square and seven products.
   - BN254: `c = 2x(6x² + 3x + 1)`, by the chain of Fuentes-Castañeda, Knapp and Rodríguez-Henríquez (*Faster hashing to G2*, SAC 2011): `λ₀ + λ₁p + λ₂p² + λ₃p³` with `λ₀ = 12x³ + 12x² + 6x + 1`, `λ₁ = 12x³ + 6x² + 4x`, `λ₂ = 12x³ + 6x² + 6x`, `λ₃ = 12x³ + 6x² + 4x − 1`: three powers by `x` (62 cyclotomic squares and 23 products each, over its non-adjacent form), three more squares, three Frobenius maps, ten products.
 
@@ -95,7 +96,7 @@ The security levels are those of Barbulescu and Duquesne (*Updating key size est
 | `G1::new(c, x, y)`, `G2::new(c, x, y)` | the point, `Err(NotOnCurve)` off the curve, `Err(NotInSubgroup)` outside the subgroup; coordinates of another field or tower panic |
 | `G1::new_on_curve`, `G2::new_on_curve` | any point of the curve, as hashing to the curve needs before clearing the cofactor |
 | `c.g1_generator()`, `c.g2_generator()`, `c.g1_identity()`, `c.g2_identity()` | |
-| `+`, `-`, `-p`, `*` by a `Number` on either side, `+=`, `-=`, `*=`, `double()` | Jacobian coordinates, "dbl-2009-l" and "add-2007-bl" of the Explicit-Formulas Database; products by the width-4 non-adjacent form of the scalar, about `bits` doublings and `bits/5` additions; a scalar is not reduced modulo `r`, so that it acts on points outside the subgroup too |
+| `+`, `-`, `-p`, `*` by a `Number` on either side, `+=`, `-=`, `*=`, `double()` | Jacobian coordinates, "dbl-2009-l" and "add-2007-bl" of the Explicit-Formulas Database, on the pairing's own arithmetic. Products by the endomorphisms on points known to be in the subgroup (from the generator, a checked constructor or decoding, a hash or a cleared cofactor, and their sums and multiples), the scalar reduced modulo `r`: on `G1` the GLV method with `φ(x, y) = (βx, y)` — on BLS12-381 `k = a + b·x²` with `a`, `b` below `2¹²⁸` and `[k]P = [a]P − [b]φ(P)`, on BN254 two halves from the reduced basis of the lattice of `λ`; on `G2` the GLS method with `ψ` — on BLS12-381 the four digits of `k` in base `|x|` on `Q`, `−ψ(Q)`, `ψ²(Q)`, `−ψ³(Q)`, on BN254 four signed digits of about 64 bits from an LLL-reduced basis of the lattice of the relations `Σ vᵢ(6x²)ⁱ ≡ 0 (mod r)` and Babai's rounding, on `Q`, `ψ(Q)`, `ψ²(Q)`, `ψ³(Q)` (Galbraith and Scott, Pairing 2008); the digits' products share their doublings (Straus's method, width-4 or width-5 non-adjacent forms). Other points of the curve or the twist take the whole scalar, not reduced, by the width-4 or width-5 non-adjacent form, so that it acts on points outside the subgroups too |
 | `is_in_subgroup()` | `G1` of BN254: always (its `E(F_p)` has prime order). `G1` of BLS12-381: by the GLV endomorphism `φ(x, y) = (βx, y)`, `β` a cube root of unity, `φ(P) = [−x²]P` (Scott, *A note on group membership tests for G1, G2 and GT on BLS pairing-friendly curves*, ePrint 2021/1130; proved in general by El Housni, Guillevic and Piellard, ePrint 2022/352): two products by the 64-bit `x`. `G2`: `ψ(Q) = [6x²]Q` (BN254) and `ψ(Q) = [x]Q` (BLS12-381) of the same papers: a product by 128 or 64 bits, against 255 for the product by `r` |
 | `clear_cofactor()` | `G1` of BLS12-381: `[1 − x]P`, RFC 9380's `h_eff` (§8.8.1), since `E(F_p) ≅ Z/(\|x − 1\|r) × Z/(\|x − 1\|/3)`; `G2` of BLS12-381: Budroni and Pintore's `[x² − x − 1]Q + [x − 1]ψ(Q) + ψ²(2Q)` (*Efficient hash maps to G2 on BLS curves*, ePrint 2017/419), the product by RFC 9380's `h_eff` (§8.8.2, appendix G.3) on every point of the twist; `G2` of BN254: Fuentes-Castañeda, Knapp and Rodríguez-Henríquez's `[x]Q + ψ([3x]Q) + ψ²([x]Q) + ψ³(Q)` (*Faster hashing to G2*, §6.1), which is the product by `x + 3xp + xp² + p³ mod r` on `G2`; `G1` of BN254: the point itself |
 | `mul_by_cofactor()` | the product by the whole cofactor, which arkworks' default clearing computes (and its clearing of BN254's `G2`) |
@@ -129,12 +130,12 @@ To run the tests: `cargo test --test math -- pairing:: field::tower`, and `cargo
 ## Limits
 
 - Not constant-time, and no protocol layer: BLS signatures, their aggregation and proof-of-possession, and key generation are not here.
-- Hashing to `G1` and `G2` is in the [last section](#hashing-to-g1-and-g2), with its own limits; BN254's `G2` has no hashing.
+- Hashing to `G1` and `G2` is in [its own section](#hashing-to-g1-and-g2), with its own limits; BN254's `G2` has no hashing.
 - Only the two curves; there is no constructor for other BN or BLS12 curves.
 - The pairing is arkworks' `f^(c(p¹² − 1)/r)`. The IETF draft's values are its powers by `1/3` on BLS12-381; py_ecc's are its powers by `1/c` on BN254 and by `−1/3` on BLS12-381. Pairing checks agree with all of them.
 - The clearing of BN254's `G2` is Fuentes-Castañeda et al.'s map, not arkworks' product by the cofactor (`mul_by_cofactor` gives that); on `G2` the two differ by a factor.
 - No compressed encoding of BN254 (Ethereum has none), no EIP-2537 encoding of BLS12-381, no encoding of `GT`.
-- Not tuned: the speed is that of `Fp`; there are no precomputed lines for a fixed `G2` point, no GLV or GLS decompositions of scalars, no Karabina compressed squares in the final exponentiation, and the subgroup checks use plain products by `x`.
+- There are no precomputed lines for a fixed `G2` point.
 
 ## Hashing to G1 and G2
 
@@ -197,7 +198,7 @@ assert!(b.encode_to_curve(b"abc", b"MY-DST").is_in_subgroup());
 - **The isogenies** are evaluated by Horner's rule with one inversion for both denominators, and give the point at infinity where one of them is 0, as section 6.6.3 requires. On `G1` that case is reached: `x_den` of the 11-isogeny is the square of a polynomial of degree 5 with five roots in `F_p`, `g′` is a square at each, so the kernel's points of order 11 are on `E′(F_p)`, and the simplified SWU map reaches those over two of the roots from 16 elements `u`, which go to the identity. On `G2` it is not: `x_den = (x − x₀)²` with `g′(x₀)` not a square of `F_p²`.
 - **Clearing the cofactor.** `G1`: `[1 − x]·P`, RFC 9380's `h_eff` (`G1::clear_cofactor`). `G2`: the steps of appendix G.3, `t₁ = x·Q`, `t₂ = ψ(Q)`, `t₃ = ψ²(2Q) − t₂`, `t₂ = x·(t₁ + t₂)`, `t₃ + t₂ − t₁ − Q`, which is `[x² − x − 1]Q + [x − 1]ψ(Q) + ψ²(2Q)` (Budroni and Pintore, *Efficient hash maps to G2 on BLS curves*, ePrint 2017/419) and the product by `h_eff` on every point of the twist (`G2::clear_cofactor`, with the pairing's `ψ`). BN254's `G1` has cofactor 1.
 - **BN254's `G1`** takes the Shallue–van de Woestijne map of section 6.6.1 (`ShallueVanDeWoestijne` of [elliptic curves](ec.md#hashing-to-curves)) to `y² = x³ + 3`, whose `A = 0` the simplified SWU map cannot take, with the `Z = 1` that appendix H.1's search gives, `L = 48` and SHA-256, as gnark-crypto defines `BN254G1_XMD:SHA-256_SVDW_RO_` and `_NU_`. RFC 9380 defines no suite for BN254; these follow its naming (section 8.10) and its construction.
-- **Cost.** A map to `G2` takes an inversion and one or two square roots of `F_p²` (each two of `F_p` and an inversion), the 3-isogeny an inversion and four polynomials of degree 2 and 3, and the clearing two products by the 64-bit `x`, three maps `ψ` and a few additions; a map to `G1` an inversion and one or two square roots of `F_p`, and the 11-isogeny four polynomials of degree 10 to 15, and the clearing a product by the 64-bit `1 − x`. The arithmetic is that of the towers and of `PrimeField`.
+- **Cost.** A map to `G2` takes an inversion and one or two square roots of `F_p²` (each one to three exponentiations of `F_p` and, for a square, an inversion; see below), the 3-isogeny an inversion and four polynomials of degree 2 and 3, and the clearing two products by the 64-bit `x`, three maps `ψ` and a few additions; a map to `G1` an inversion and one or two square roots of `F_p`, and the 11-isogeny four polynomials of degree 10 to 15, and the clearing a product by the 64-bit `1 − x`. The arithmetic is the pairing's own (fixed limbs, inversion by Lehmer's algorithm on them); a square root of `F_p²` by the complex method takes exponentiations of `F_p` of 381 bits: for `a₁ ≠ 0`, one for `n = √(a₀² + a₁²)`, which ends it for a non-square (whose norm is no square), and for a square one more for `√((a₀ + n)/2)`, a third for `√((a₀ − n)/2)` when `(a₀ + n)/2` is not a square (exactly one of the two is, their product `−a₁²/4` being no square; so for about half of the squares), and an inversion for `x₁ = a₁/(2x₀)`; for `a₁ = 0`, one for `√a₀` and a second for `√(−a₀)` when `a₀` is not a square. A map to `G2` so takes two or three exponentiations when `g(x₁)` is a square, and three or four when it is not (one for `g(x₁)`, two or three for `g(x₂)`). A straight-line `sqrt_ratio` of `F_p²` (appendix F.2.1.1 or the `q ≡ 9 (mod 16)` root of appendix I.3) would be one exponentiation of 758 bits in `F_p²`, as many products of `F_p` as about four of `F_p`.
 
 ### Verified
 
@@ -217,6 +218,97 @@ To run the tests: `cargo test --test math -- pairing::hash`. The data files are 
 ### Limits
 
 - **Not constant-time**: the maps branch on whether an element is a square. For public messages, as in verifying signatures, not for hashing secrets.
-- The maps are the plain ones of section 6, not the straight-line forms of appendices F and G; the isogeny is applied to each of the two points and not once to their sum. Nothing is timed yet.
+- `G1`'s simplified SWU map on BLS12-381 is the straight-line form of appendix F.2 (with `sqrt_ratio` for `p ≡ 3 (mod 4)`), its point a fraction that the isogeny takes homogeneously, and `hash_to_curve` applies the isogeny once to the sum of the two points; the map over `F_p²` and BN254's Shallue–van de Woestijne map are the plain forms of section 6, which cost less here than the straight-line ones (see the cost above).
 - BN254's `G1` follows gnark-crypto, the one reference: it is not an RFC suite, and other hashings to BN254 (the "try and increment" of some Ethereum contracts, or other choices of `Z`) give other points. BN254's `G2` has no hashing here.
 - The suites are made for the two curves only; `hash_to_field_fp2`, `SimplifiedSwuFp2` and `IsogenyMapFp2` are public for other uses, but there is no constructor of a suite.
+
+## Measured
+
+Measured on an Apple M4 Max on 2026-11-26, between 06:22 and 06:23, with nothing else running on the machine, by the harness in the repository's `bench/curves` (its method in `bench/README.md` there). This crate is built as a user gets it, in the default release profile (opt-level 3, no LTO, no `target-cpu`) of rustc 1.100.0, and so are the Rust references in the same probe crate: arkworks 0.5 (`ark-bn254`, `ark-bls12-381`), blst 0.3.17 (its own assembly), the `bls12_381` crate 0.8 and substrate-bn 0.6; mcl 4.44.0 is herumi/mcl at commit `a1c4e29e` in its 384-bit build, for both curves. One thread. Every output is compared with this crate's before the clock starts (Miller loops through the pairing, as their outputs differ by factors the final exponentiation removes); then the sides alternate sample by sample in one process, on inputs cycled from pools of 16 to 64 seeded values, and a figure is the median of 21 samples of at least 1 ms each. A cell gives this crate's time and, in parentheses, that time over the time of the fastest reference that does the same work, with its name (`ark` arkworks, `blst`, `bls12_381`, `mcl`, `substrate-bn`): below 1, this crate is faster. Not counted, as they promise more: blst's `blst_p1_mult` and `blst_p2_mult` and the `bls12_381` crate's products and powers, which are constant-time (blst's variable-time `blst_p1_unchecked_mult` and `blst_p2_unchecked_mult` are counted).
+
+### The pairing and the groups
+
+Products by scalars below `r`, on points from affine inputs; sums and doublings of projective points; the subgroup tests of points of the groups, the clearings of points outside them; `Gt::pow` by an exponent below `r`:
+
+| Operation | BLS12-381 | BN254 |
+| --- | ---: | ---: |
+| `pairing` | 306 µs (1.09× mcl) | 216 µs (1.14× mcl) |
+| `miller_loop` | 146 µs (1.19× mcl) | 101 µs (1.19× mcl) |
+| `final_exponentiation` | 161 µs (1.01× mcl) | 113 µs (1.09× mcl) |
+| `multi_pairing`, 2 pairs | 403 µs (1.10× mcl) | 288 µs (1.14× mcl) |
+| `multi_pairing`, 4 pairs | 586 µs (1.10× mcl) | 430 µs (1.15× mcl) |
+| `multi_pairing`, 8 pairs | 955 µs (1.10× mcl) | 708 µs (1.15× mcl) |
+| `multi_pairing`, 16 pairs | 1.69 ms (1.10× mcl) | 1.27 ms (1.16× mcl) |
+| `G1 * k`, `k < r` | 35.3 µs (1.08× mcl) | 20.6 µs (1.06× mcl) |
+| `G2 * k`, `k < r` | 71.7 µs (1.28× mcl) | 41.9 µs (1.34× mcl) |
+| `G1 + G1` | 293 ns (1.02× mcl) | 175 ns (1.06× mcl) |
+| `G1::double` | 139 ns (0.905× blst) | 78.5 ns (0.896× ark) |
+| `G2 + G2` | 850 ns (1.10× mcl) | 475 ns (1.18× mcl) |
+| `G2::double` | 352 ns (1.07× mcl) | 202 ns (1.09× mcl) |
+| `G1::coordinates` | 964 ns (0.731× mcl) | 578 ns (0.710× mcl) |
+| `G2::coordinates` | 1.17 µs (0.772× mcl) | 717 ns (0.757× mcl) |
+| `G1::is_in_subgroup` | 20.6 µs (0.898× blst) | 2.89 ns (3.92× ark) |
+| `G2::is_in_subgroup` | 26.0 µs (1.03× mcl) | 41.6 µs (0.665× ark) |
+| `G1::clear_cofactor` | 10.5 µs (0.705× ark) | 9.93 ns |
+| `G2::clear_cofactor` | 55.1 µs (0.678× ark) | 25.9 µs |
+| `G1::mul_by_cofactor` | 25.9 µs (0.727× ark) |  |
+| `G2::mul_by_cofactor` | 235 µs (0.488× ark) | 67.6 µs (0.511× ark) |
+| `G2::psi` | 120 ns | 68.3 ns |
+| `G1::new`, checked | 20.9 µs (0.822× ark) |  |
+| `G2::new`, checked | 26.3 µs (0.786× ark) |  |
+| `Gt::pow`, `e < r` | 110 µs (1.13× mcl) | 68.0 µs (1.13× mcl) |
+| `Gt * Gt` | 1.24 µs (1.31× mcl) | 742 ns (1.30× mcl) |
+| `Gt::square` | 464 ns (1.02× blst) | 308 ns (0.885× ark) |
+| `Gt::inverse` | 15.6 ns (0.795× mcl) | 12.4 ns (0.701× mcl) |
+| `Gt::from_fp12` | 31.7 µs (0.891× blst) | 64.3 µs (0.485× mcl) |
+
+Against blst the pairing of BLS12-381 takes 0.972 of its time, the Miller loop 1.10 and the multi-pairings 1.04 to 1.09; against arkworks, the pairings and multi-pairings take 0.510 to 0.540 of its time on both curves, and against substrate-bn 0.231 to 0.263. Affine coordinates take 0.710 to 0.772 of mcl's time, the clearings and the products by the cofactors 0.488 to 0.727 of arkworks's.
+
+With precomputed lines for a fixed `Q`, which this crate does not keep (the limits above), blst's Miller loop takes 96.1 µs on BLS12-381, where this crate's plain loop takes 147 µs; arkworks's and the `bls12_381` crate's loops on prepared points take 185 and 167 µs there, and arkworks's 137 µs on BN254, against 101 µs. This is other work, not counted.
+
+### Encodings and the precompiles
+
+ZCash's encodings from projective points and their checked decodings (BLS12-381), Ethereum's (BN254), and its precompiles on bytes, against the steps the references' users take (the decodings with their curve and subgroup checks):
+
+| Operation | Time |
+| --- | ---: |
+| `to_zcash_compressed`, `G1` | 1.00 µs (0.722× mcl) |
+| `to_zcash_uncompressed`, `G1` | 1.05 µs (0.626× blst) |
+| `to_zcash_compressed`, `G2` | 1.25 µs (0.786× mcl) |
+| `to_zcash_uncompressed`, `G2` | 1.36 µs (0.704× blst) |
+| `G1::from_zcash`, compressed | 29.6 µs (0.989× blst) |
+| `G1::from_zcash`, uncompressed | 20.3 µs (0.896× blst) |
+| `G2::from_zcash`, compressed | 51.5 µs (1.26× blst) |
+| `G2::from_zcash`, uncompressed | 26.5 µs (1.01× blst) |
+| `to_ethereum`, `G1` | 650 ns (0.464× ark) |
+| `to_ethereum`, `G2` | 844 ns (0.523× ark) |
+| `G1::from_ethereum` | 60.0 ns (1.04× ark) |
+| `G2::from_ethereum` | 41.7 µs (0.618× ark) |
+| `ethereum::ec_add` | 984 ns (0.595× ark) |
+| `ethereum::ec_mul` | 21.2 µs (0.449× ark) |
+| `ethereum::ec_pairing`, 1 pair | 260 µs (0.510× ark) |
+| `ethereum::ec_pairing`, 2 pairs | 367 µs (0.522× ark) |
+| `ethereum::ec_pairing`, 4 pairs | 597 µs (0.535× ark) |
+
+### Hashing to G1 and G2
+
+On a message of 32 bytes and a tag of 50 bytes (47 for BN254), against blst (`blst_hash_to_g1`, `blst_encode_to_g1`, `blst_map_to_g1` and their `G2` forms), arkworks's `MapToCurveBasedHasher` with its `WBMap`, the `bls12_381` crate's `experimental` hashing and mcl's `hashAndMapToWithDst`, the fastest of them in each cell; arkworks's and the `bls12_381` crate's SHA-256 are portable code. BN254's suite has no reference here (gnark-crypto's is in Go):
+
+| Suite | `hash_to_curve` | `encode_to_curve` | `hash_to_field`, 2 elements | `map_to_curve` | `map_to_curve` and `clear_cofactor` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| BLS12-381, `G1` | 32.9 µs (1.09× blst) | 22.2 µs (1.05× blst) | 414 ns (0.289× bls12_381) | 11.6 µs (0.677× bls12_381) | 22.1 µs (1.04× blst) |
+| BLS12-381, `G2` | 119 µs (1.33× blst) | 90.1 µs (1.23× blst) | 784 ns (0.312× bls12_381) | 32.3 µs (0.487× bls12_381) | 92.0 µs (1.26× blst) |
+| BN254, `G1` | 15.6 µs | 6.36 µs | 312 ns | 7.66 µs |  |
+
+The clearing of `G2`'s cofactor, alone, takes 55.3 µs of the 119 µs of `hash_to_curve` on `G2`.
+
+### Where the references are faster
+
+Every case above 1.05 times the fastest reference that does the same work, by cause:
+
+- **The pairing and its parts, against mcl** (`pairing` 1.09 and 1.14, `miller_loop` 1.19 on both curves, `final_exponentiation` 1.09 on BN254, `multi_pairing` 1.10 and 1.14 to 1.16; `Gt * Gt` 1.31 and 1.30, `Gt::pow` 1.13): the operation counts of every phase are those of the literature, as in mcl; what is left is moving the elements of `F_p¹²`, 576 bytes each, and the additions between the products, and the spills around the assembly kernels of `F_p` and `F_p²`, which take their operands through memory, where mcl's code is assembly generated from its LLVM IR.
+- **Sums, doublings and products by scalars on the curves, against mcl** (`G2 + G2` 1.10 and 1.18, `G2::double` 1.07 and 1.09, `G1 + G1` 1.06 on BN254; `G1 * k` 1.08 and 1.06, `G2 * k` 1.28 and 1.34): the same data movement and spills in the formulas, with endomorphisms, as mcl's (GLV on `G1`, GLS on `G2`); on `G2` the rest of the gap is not established.
+- **BN254's `G1::is_in_subgroup`** (3.92 times arkworks's: 2.89 ns against 0.74 ns): the test is always true (BN254's `E(F_p)` has prime order), but the point is first converted to the pairing's own limbs.
+- **`G2::from_zcash` of the compressed form** (1.26 times blst's): the square root in `F_p²`, by the complex method (two or three exponentiations of `F_p`; see the cost under [Hashing to G1 and G2](#hashing-to-g1-and-g2)), where the uncompressed decoding takes 1.01 of blst's time.
+- **Hashing to BLS12-381's `G2`, against blst** (`hash_to_curve` 1.33, `encode_to_curve` 1.23, `map_to_curve` with the clearing 1.26): the clearing of the cofactor, 55.3 µs of the 119 µs of `hash_to_curve`, is two products by the 64-bit `x` on the twist at the cost of its sums and doublings (above), and the map's square roots of `F_p²` take two to four exponentiations of `F_p`; blst's arithmetic is hand-written assembly.
+- **`hash_to_curve` on BLS12-381's `G1`** (1.09 times blst's): its two maps, at 1.04 of blst's time for a map and the clearing, on blst's hand-written assembly; the hashing to the field takes 414 ns of the 32.9 µs.

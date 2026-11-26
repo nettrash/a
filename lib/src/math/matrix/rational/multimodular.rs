@@ -16,9 +16,9 @@
 //! for all the primes rather than `L·c`. The whole is then about `n³·M(L)·log L + n⁴·L/3`,
 //! against Bareiss's `n³/3` products of numbers as long as the minors, up to `n·L` limbs.
 
-use super::super::modp::{Field, det_in_place};
+use super::super::modp::{Field, TopPrimes, det_in_place};
 use super::{B, Int, S};
-use crate::math::numbers::{ByteOrder, Number, from_limbs, is_prime_u64, limbs_of};
+use crate::math::numbers::{ByteOrder, Number, from_limbs, limbs_of};
 
 /// The primes are those below this, from the top: each is above `2^61`.
 const TOP: u64 = 1 << 62;
@@ -162,13 +162,14 @@ pub(super) fn hadamard_bits(m: &[Int], n: usize, stride: usize) -> Option<u64> {
     Some(bits.div_ceil(2))
 }
 
-/// The primes below [`TOP`], from the top down: each above `2^61`.
-pub(super) struct Primes(u64);
+/// The primes below [`TOP`], from the top down: each above `2^61`, from the table every residue
+/// method shares ([`TopPrimes`]).
+pub(super) struct Primes(TopPrimes);
 
 impl Primes {
     /// The primes from the largest below [`TOP`].
     pub(super) fn new() -> Primes {
-        Primes(TOP - 1)
+        Primes(TopPrimes::default())
     }
 }
 
@@ -176,11 +177,8 @@ impl Iterator for Primes {
     type Item = u64;
 
     fn next(&mut self) -> Option<u64> {
-        while !is_prime_u64(self.0) {
-            self.0 -= 2;
-        }
-        let p = self.0;
-        self.0 -= 2;
+        let p = self.0.next()?;
+        debug_assert!(p < TOP && p > TOP / 2);
         Some(p)
     }
 }

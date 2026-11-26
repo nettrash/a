@@ -161,3 +161,26 @@ pub(super) fn same(got: &(BigFloat, Ordering), want: &(BigFloat, Ordering), what
         got.0, got.1, want.0, want.1
     );
 }
+
+/// `x mod 2^k` for `x ≥ 0`.
+pub(super) fn low_bits(x: &Number, k: u64) -> Number {
+    x - &(&(x >> k as usize) << k as usize)
+}
+
+/// An odd square root of `t ≡ 1 (mod 8)` modulo `2^k`: Newton's iteration `s ← s(3 - t·s²)/2`
+/// for `t^(-1/2)`, which takes `t·s² ≡ 1` from modulo `2^i` to modulo `2^(2i-2)`, from `s = 1`
+/// (`i = 3`), then `r = t·s`.
+pub(super) fn sqrt_mod_pow2(t: &Number, k: u64) -> Number {
+    let w = k + 2;
+    let m = &one() << w as usize;
+    let mut s = one();
+    let mut i = 3;
+    while i < w {
+        let e = (&Number::from(3) - &(&(t * &s) * &s)).rem_euclid(&m);
+        s = low_bits(&(&low_bits(&(&s * &e), w) >> 1usize), w);
+        i = 2 * i - 2;
+    }
+    let r = low_bits(&(t * &s), k);
+    assert_eq!(low_bits(&(&r * &r), k), low_bits(t, k));
+    r
+}

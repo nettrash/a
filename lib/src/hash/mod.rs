@@ -14,7 +14,9 @@
 //!   [`a::math::pairing::hash`](crate::math::pairing::hash) hash to fields, to curves and to the
 //!   groups of pairings with it.
 //!
-//! The compression functions are those of FIPS 180-4, section 6, in portable Rust.
+//! The compression functions are those of FIPS 180-4, section 6: on the SHA instructions of
+//! ARMv8 (SHA-256 and SHA-512) and of x86_64 (SHA-256) where the CPU has them, detected at run
+//! time unless the target has them already, and in portable Rust elsewhere and under Miri.
 //!
 //! **Nothing here is constant-time**, like the rest of the library: the hashers branch on the
 //! lengths of what they are given, and no care is taken against timing or cache attacks. They are
@@ -40,9 +42,13 @@
 //! assert_eq!(u[..4], [0x68, 0xa9, 0x85, 0xb8]);
 //! ```
 
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+mod aarch64;
 mod block;
 mod sha256;
 mod sha512;
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+mod x86_64;
 mod xmd;
 
 pub use sha256::{Sha224, Sha256, sha224, sha256};
@@ -100,5 +106,34 @@ pub trait Digest: Clone + Default {
         let mut h = Self::new();
         h.update(data);
         h.finalize()
+    }
+
+    /// A hasher that has taken one block of zeros, [`BLOCK_BYTES`](Digest::BLOCK_BYTES) of them:
+    /// the `Z_pad` with which [`expand_message_xmd`] starts. The default feeds the zeros to
+    /// [`new`](Digest::new)'s hasher; the four hashers of this module start from their state
+    /// after that block, computed when the crate is built.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::hash::{Digest, Sha256};
+    ///
+    /// let mut h = Sha256::after_zero_block();
+    /// h.update(b"abc");
+    /// let mut msg = vec![0u8; 64];
+    /// msg.extend_from_slice(b"abc");
+    /// assert_eq!(h.finalize(), Sha256::digest(&msg));
+    /// ```
+    #[must_use]
+    fn after_zero_block() -> Self {
+        let mut h = Self::new();
+        let zeros = [0u8; 128];
+        let mut pad = Self::BLOCK_BYTES;
+        while pad > 0 {
+            let n = pad.min(zeros.len());
+            h.update(&zeros[..n]);
+            pad -= n;
+        }
+        h
     }
 }

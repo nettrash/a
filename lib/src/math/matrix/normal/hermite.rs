@@ -17,8 +17,10 @@
 //!
 //! For a matrix `A` of rank `r` with the column rank profile `J` and the independent rows `R`
 //! (see [`super::profile`]), `M = A[R, J]` and `D = |det M|`: the columns `J` of the form are the
-//! Hermite form of the rows of `A[:, J]`, a lattice of rank `r` whose determinant divides `D`;
-//! the other columns follow from them as `H[:, K] = H[:, J]·X`, `X = M⁻¹·A[R, K]`, since a vector
+//! Hermite form of the rows of `A[:, J]`, a lattice of rank `r` whose determinant divides `D`,
+//! from order [`pernet::FROM`] that of `M` by Pernet and Stein's method ([`super::pernet`]) with
+//! the other rows added to it, below that (or when that method does not apply) the form modulo
+//! `D` above (in words when `D` is below `2^63`, [`super::word`]); the other columns follow from them as `H[:, K] = H[:, J]·X`, `X = M⁻¹·A[R, K]`, since a vector
 //! of the row space is fixed by its elements in `J`. The transformation is that of the square
 //! matrix `B = [A[:, J] | E_S]` of the same determinant, `E_S` the columns of the identity for
 //! the rows `S` outside `R`: `U = H_B·B⁻¹`, whose columns `S` are those of `H_B` and whose columns
@@ -29,8 +31,10 @@
 //! columns and the few pivots above 1 of its kernel part, in time linear in `m`.
 
 use super::super::Matrix;
+use super::inverse::times_inverse;
 use super::profile::{Basis, rationals, select};
 use super::transform::{Transform, transform};
+use super::{pernet, word};
 use crate::math::numbers::{Divisor, Number};
 use crate::math::rational::Rational;
 
@@ -216,11 +220,35 @@ fn assemble(a: &Matrix<Number>, b: &Basis, hj: &Matrix<Number>) -> Matrix<Number
     h
 }
 
-/// The Hermite form of the rows of `A[:, J]`, modulo `|det M|`.
+/// The Hermite form of the rows of `A[:, J]`: for a minor of order [`pernet::FROM`] or more, the
+/// form of `M` by [`pernet::square`] (which gives `|det M|`, the product of its pivots, too) and
+/// the other rows added to it; otherwise, or when that method does not apply, modulo
+/// `|det M|`.
 fn form_of_profile(a: &Matrix<Number>, b: &Basis) -> Matrix<Number> {
+    if let Some(h) = b.hj.get() {
+        return h.clone();
+    }
     let r = b.rank;
+    if r >= pernet::FROM.max(3)
+        && let Some(mut h) = pernet::square(&b.minor)
+    {
+        let det: Number = (0..r).map(|i| h[i][i].clone()).product();
+        let _ = b.det.set(det);
+        for &i in &b.others {
+            pernet::add_row(&mut h, b.cols.iter().map(|&c| a[(i, c)].clone()).collect());
+        }
+        if !b.others.is_empty() {
+            pernet::reduce_above(&mut h);
+        }
+        return matrix_of(&h, r, r);
+    }
+    let det = b.det();
+    if det.bits() < 63 {
+        // In words, the residues read from `a` in place.
+        return matrix_of(&word::hermite_mod_cols(a, &b.cols, det), r, r);
+    }
     let aj = select(a, &(0..a.rows()).collect::<Vec<_>>(), &b.cols);
-    matrix_of(&hermite_mod(rows_of(&aj), r, &b.det), r, r)
+    matrix_of(&pernet::hermite_mod_any(rows_of(&aj), r, det), r, r)
 }
 
 /// The Hermite normal form of `a`, its rank profiles `b` proved.
@@ -239,17 +267,21 @@ pub(super) fn form_and_transform(a: &Matrix<Number>, b: &Basis) -> (Matrix<Numbe
 }
 
 /// The Hermite normal form `H` of the square nonsingular `a`, of determinant `±det`, and the
-/// transformation `P = H·a⁻¹`, unimodular.
+/// transformation `P = H·a⁻¹`, unimodular: `H` by Pernet and Stein's method from order
+/// [`pernet::FROM`] (modulo `det` below it, or when it does not apply), `P` from its residues
+/// modulo primes.
 pub(super) fn square_and_transform(
     a: &Matrix<Number>,
     det: &Number,
 ) -> (Matrix<Number>, Matrix<Number>) {
     let n = a.rows();
-    let h = matrix_of(&hermite_mod(rows_of(a), n, det), n, n);
-    let p = a
-        .transpose()
-        .solve(&h.transpose())
-        .expect("a nonsingular matrix")
-        .transpose();
-    (h, integers(p))
+    let rows = if n >= pernet::FROM.max(3) {
+        pernet::square(a)
+    } else {
+        None
+    };
+    let rows = rows.unwrap_or_else(|| pernet::hermite_mod_any(rows_of(a), n, det));
+    let h = matrix_of(&rows, n, n);
+    let p = times_inverse(&h, a, &det.abs(), &Number::from(1u8));
+    (h, p)
 }

@@ -262,13 +262,13 @@ fn small_exponents(
 /// The largest `K` with `x = c^K`, `x >= 2` given by its limbs, and the root `c`, or `None` when
 /// `K` is 1; with `odd`, the largest odd `K`. `K` is at most `u32::MAX`: for numbers of more than
 /// `2^32` bits, the product of the primes found while it fits.
-pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u32)> {
+pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool, first: bool) -> Option<(Vec<u64>, u32)> {
     let mut y = x;
     trim(&mut y);
     debug_assert!(y.len() > 1 || y[0] >= 2);
     if y.len() <= 2 {
         let v = u128::from(y[0]) | (u128::from(y.get(1).copied().unwrap_or(0)) << 64);
-        return perfect_power_u128(v, odd).map(|(b, k)| {
+        return perfect_power_u128(v, odd, first).map(|(b, k)| {
             let mut b = vec![b as u64, (b >> 64) as u64];
             trim(&mut b);
             (b, k)
@@ -335,9 +335,13 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
                     break;
                 };
                 y = root;
+                k *= p;
+                if first {
+                    // A power: the caller asks only whether, not for the largest exponent.
+                    return Some((Vec::new(), k as u32));
+                }
                 ylog = log2_limbs(&y);
                 res = Residues::limbs(&y).with_small();
-                k *= p;
                 if g != 0 {
                     g /= p;
                     if g % p != 0 {
@@ -363,9 +367,9 @@ pub(super) fn perfect_power_limbs(x: Vec<u64>, odd: bool) -> Option<(Vec<u64>, u
 }
 
 /// [`perfect_power_limbs`] for `2 <= x < 2^128`, in registers.
-pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
+pub(super) fn perfect_power_u128(x: u128, odd: bool, first: bool) -> Option<(u128, u32)> {
     if x >> 64 == 0 {
-        return perfect_power_u64(x as u64, odd).map(|(b, k)| (u128::from(b), k));
+        return perfect_power_u64(x as u64, odd, first).map(|(b, k)| (u128::from(b), k));
     }
     let z = u64::from(x.trailing_zeros());
     let mut y = x >> z;
@@ -408,8 +412,11 @@ pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
                     break;
                 }
                 y = r;
-                res = Residues::u128(y).with_small();
                 k *= p;
+                if first {
+                    return Some((0, k as u32));
+                }
+                res = Residues::u128(y).with_small();
                 if g != 0 {
                     g /= p;
                     if g % p != 0 {
@@ -432,7 +439,7 @@ pub(super) fn perfect_power_u128(x: u128, odd: bool) -> Option<(u128, u32)> {
 
 /// [`perfect_power_u128`] for `2 <= x < 2^64`: the remainders by constant divisors, the roots in
 /// floating point, checked exactly.
-fn perfect_power_u64(x: u64, odd: bool) -> Option<(u64, u32)> {
+fn perfect_power_u64(x: u64, odd: bool, first: bool) -> Option<(u64, u32)> {
     let z = u64::from(x.trailing_zeros());
     let mut y = x >> z;
     if y == 1 {
@@ -474,8 +481,11 @@ fn perfect_power_u64(x: u64, odd: bool) -> Option<(u64, u32)> {
                     break;
                 };
                 y = r;
-                res = Residues::from(y % SQUARES, y % HIGH).with_small();
                 k *= p;
+                if first {
+                    return Some((0, k as u32));
+                }
+                res = Residues::from(y % SQUARES, y % HIGH).with_small();
                 if g != 0 {
                     g /= p;
                     if g % p != 0 {

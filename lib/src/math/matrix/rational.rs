@@ -30,7 +30,9 @@
 
 use super::Matrix;
 
+mod cofactor;
 mod dixon;
+mod fixed;
 mod multimodular;
 mod registers;
 use crate::math::numbers::{ByteOrder, Magnitude, Number, fraction, nat};
@@ -980,9 +982,11 @@ fn clear_words_into<'a, I: Iterator<Item = &'a Rational>>(
 /// those integers, then one reduction of each element by `l_i·r_j`: `m·k·n` products of integers
 /// and `m·n` greatest common divisors, against `m·k·n` products and sums of rationals, each with
 /// its own. When every element is in words and the cleared integers fit in them, all of it runs
-/// on the stack ([`registers::product`]). Otherwise the sums of products are in 64-bit registers
-/// when the elements' lengths and `k` make it safe, in 128 bits when that does, and checked
-/// beyond; products of two terms, and of four with a denominator beyond 32 bits, are the sums of
+/// on the stack ([`registers::product`]). Otherwise, from an inner dimension of
+/// [`NUMBERS_PRODUCT`], the product of the integers is that of matrices of numbers (its word and
+/// multimodular kernels), and below the sums of products are in 64-bit registers when the
+/// elements' lengths and `k` make it safe, in 128 bits when that does, and checked beyond;
+/// products of two terms, and of four with a denominator beyond 32 bits, are the sums of
 /// products of rationals, which the rationals' register paths make faster there.
 pub(super) fn product(
     c: &mut [Rational],
@@ -1065,6 +1069,24 @@ pub(super) fn product(
                 }
             }
         }
+        _ if NUMBERS_PRODUCT.is_some_and(|t| k >= t) => {
+            // The product of the integers as that of matrices of numbers, whose kernels take long
+            // elements at these sizes.
+            let mut an = vec![Number::default(); m * k];
+            for (i, row) in ai.chunks_exact(k).enumerate() {
+                for (p, x) in row.iter().enumerate() {
+                    an[i + p * m] = x.number(order);
+                }
+            }
+            let bn: Vec<Number> = bi.iter().map(|x| x.number(order)).collect();
+            let mut cn = vec![Number::default(); m * n];
+            super::strassen::numbers(&mut cn, &an, &bn, m, k, n);
+            for j in 0..n {
+                for i in 0..m {
+                    put(i, j, Int::of(&cn[i + j * m]));
+                }
+            }
+        }
         _ => {
             let mut w = Work::default();
             for (j, bj) in bi.chunks_exact(k).enumerate() {
@@ -1079,6 +1101,17 @@ pub(super) fn product(
         }
     }
 }
+
+/// The inner dimension from which the product of cleared integers beyond the registers is that
+/// of matrices of numbers ([`strassen::numbers`](super::strassen::numbers)), if any; below it,
+/// or with none, the sums of products on limbs here.
+// Measured on an Apple M4 Max (sweep 8..=64, each way forced, fractions of two-digit and of 64-bit
+// parts): the square products took 0.74 to 0.96 of the sums' time as numbers from 27 for
+// two-digit parts, but 1.06 to 1.17 for 64-bit ones from 26 to 31 and 0.61 to 0.90 from 32, so
+// that no other value leaves both within 2 %. The numbers' products also want a large result:
+// with 4 or 8 rows and columns they took 1.2 to 1.9 times as long from 20 to 64, with 16 rows and
+// columns 1.03 to 1.13 times at 32, and with 64 they were faster from 28.
+const NUMBERS_PRODUCT: Option<usize> = Some(32);
 
 /// The values of integers all in registers.
 fn words(v: &[Int]) -> Vec<i64> {
@@ -1126,7 +1159,8 @@ fn solve_rows(
 ) -> Option<Matrix<Rational>> {
     let cols = n + k;
     if dixon_pays(&m, n, DIXON_SOLVE) {
-        if k <= n / 8 {
+        let many = n >= DIXON_RHS_ORDER && 4 * k <= n && m.iter().all(|x| matches!(x, S(_)));
+        if k <= n / 8 || many {
             match dixon::solve(&m, n, k) {
                 dixon::Solved::Solution(y) => {
                     let mut x = Vec::with_capacity(n * k);
@@ -1172,6 +1206,24 @@ fn solve_rows(
 /// the residues of the quotient by the divisor it finds ([`dixon::det`]), which also proves a
 /// singular matrix singular (and, should its reconstruction fail, the residues).
 fn det_rows(m: &mut [Int], n: usize) -> Int {
+    // In registers Bareiss's elimination is the faster: its steps are products in `i128`s.
+    if (n == 3 || n == 4) && m.iter().any(|x| matches!(x, B(_))) {
+        return det_laplace(m, n);
+    }
+    // Elements beyond the registers from the start, minors of up to 16 limbs: the elimination on
+    // the stack. With every element in a register the elimination's steps in `i128`s are faster
+    // while they last (measured 3.1 times at 16 rows of integers in `-99..=99`).
+    if (5..=fixed::MAX_ORDER).contains(&n)
+        && m.iter().any(|x| matches!(x, B(_)))
+        && let Some(w) = fixed::limbs(m, n, FIXED_LIMBS)
+    {
+        return match w {
+            0..=2 => fixed::det::<2>(m, n),
+            3..=4 => fixed::det::<4>(m, n),
+            5..=8 => fixed::det::<8>(m, n),
+            _ => fixed::det::<16>(m, n),
+        };
+    }
     let (residues, divisor) = det_band(m);
     if n >= divisor {
         return dixon::det(m, n, n).unwrap_or_else(|| multimodular::det(m, n));
@@ -1185,6 +1237,143 @@ fn det_rows(m: &mut [Int], n: usize) -> Int {
     let d = m[n * n - 1].clone();
     if e.swaps % 2 == 1 { d.neg() } else { d }
 }
+
+/// The most limbs that Hadamard's bound may give the minors of a determinant of order 5 to
+/// [`fixed::MAX_ORDER`] taken by the elimination on the stack ([`fixed`]).
+// Measured on an Apple M4 Max (orders 5 to 16, bounds of 2 to 16 limbs, each way forced; rows
+// alike of 64 to 200 bits, or one long row and the others shorter): the stack took 0.78 to 0.98
+// of the time of the vectors to bounds of 8 limbs (but for a few of 2 or 3 limbs from order 10),
+// and from 9 limbs 0.93 to 1.08 of it to order 8 and 1.00 to 1.18 from order 10. Against 16, 14
+// took 1.01 to 1.03 of the time at orders 5 to 8 with bounds of 15 and 16 limbs (0.85 to 0.99
+// from order 9), and 12 up to 1.08 of it at orders 5 to 8, alternated on two sets of matrices:
+// no other value, nor a narrower range of orders, leaves every order within 2 %. Elements in
+// {-1, 0, 1} with one to three long ones mostly took 1.1 to 2.1 times as long on the stack,
+// whose elements are all as long as the bound, where the vectors keep the short ones in
+// registers.
+const FIXED_LIMBS: usize = 16;
+
+/// Two columns.
+type Pair = (usize, usize);
+
+/// The column pairs of the minors of order 2 of the first two rows of a `4 × 4` matrix, those of
+/// the complementary minors of the last two, and the sign of their product in Laplace's
+/// expansion by the first two rows.
+const LAPLACE_4: [(Pair, Pair, bool); 6] = [
+    ((0, 1), (2, 3), true),
+    ((0, 2), (1, 3), false),
+    ((0, 3), (1, 2), true),
+    ((1, 2), (0, 3), true),
+    ((1, 3), (0, 2), false),
+    ((2, 3), (0, 1), true),
+];
+
+/// The determinant of the `n × n` matrix of integers `m`, row after row, `n` 3 or 4, by Laplace's
+/// expansion on limbs: at order 3 by the first row, the minors of order 2 of the last two rows
+/// times its elements; at order 4 by the first two rows, the six products of their minors of
+/// order 2 by the complementary ones of the last two. 9 and 30 products and no division,
+/// against the 10 and 28 products and the exact divisions of Bareiss's elimination, whose
+/// quotients are the longest products' length: measured on an Apple M4 Max, a `4 × 4` matrix of
+/// fractions of 64-bit parts, whose rows cleared of their denominators take five limbs an
+/// element, 2.4 µs by the elimination.
+fn det_laplace(m: &[Int], n: usize) -> Int {
+    debug_assert!(n == 3 || n == 4);
+    let a = |i: usize, j: usize| &m[i * n + j];
+    let mut w = Work::default();
+    let (mut top, mut minor, mut acc) = (Signed::default(), Signed::default(), Signed::default());
+    let mut p = Vec::new();
+    if n == 3 {
+        for (j, (k, l), plus) in [(0, (1, 2), true), (1, (0, 2), false), (2, (0, 1), true)] {
+            if a(0, j).is_zero() {
+                continue;
+            }
+            minor.set_minor(a(1, k), a(1, l), a(2, k), a(2, l), &mut w);
+            if minor.d.is_empty() {
+                continue;
+            }
+            let mut buf = [0];
+            let (neg, x) = a(0, j).mag(&mut buf);
+            nat::mul_into(&mut p, x, &minor.d, &mut w.s);
+            trim(&mut p);
+            acc.add((neg != minor.neg) != !plus, &p);
+        }
+    } else {
+        for ((j, k), (l, o), plus) in LAPLACE_4 {
+            top.set_minor(a(0, j), a(0, k), a(1, j), a(1, k), &mut w);
+            if top.d.is_empty() {
+                continue;
+            }
+            minor.set_minor(a(2, l), a(2, o), a(3, l), a(3, o), &mut w);
+            if minor.d.is_empty() {
+                continue;
+            }
+            nat::mul_into(&mut p, &top.d, &minor.d, &mut w.s);
+            trim(&mut p);
+            acc.add((top.neg != minor.neg) != !plus, &p);
+        }
+    }
+    Int::of_limbs(acc.neg, acc.d)
+}
+
+/// A signed integer of [`det_laplace`]: the sign and the trimmed magnitude, empty for zero.
+#[derive(Default)]
+struct Signed {
+    neg: bool,
+    d: Vec<u64>,
+}
+
+impl Signed {
+    /// `self ← x·t - y·z`, with the vectors of `w` as working memory.
+    fn set_minor(&mut self, x: &Int, y: &Int, z: &Int, t: &Int, w: &mut Work) {
+        self.d.clear();
+        self.neg = false;
+        if !x.is_zero() && !t.is_zero() {
+            self.neg = product_into(&mut self.d, x, t, &mut w.s);
+        }
+        if !y.is_zero() && !z.is_zero() {
+            let nv = product_into(&mut w.v, y, z, &mut w.s);
+            if self.d.is_empty() {
+                self.d.extend_from_slice(&w.v);
+                self.neg = !nv;
+            } else {
+                self.neg = combine(&mut self.d, self.neg, &w.v, nv);
+            }
+        }
+        if self.d.is_empty() {
+            self.neg = false;
+        }
+    }
+
+    /// `self ← self + (±p)` for the trimmed magnitude `p` and its sign `neg`.
+    fn add(&mut self, neg: bool, p: &[u64]) {
+        if p.is_empty() {
+            return;
+        }
+        if self.d.is_empty() {
+            self.d.extend_from_slice(p);
+            self.neg = neg;
+            return;
+        }
+        self.neg = combine(&mut self.d, self.neg, p, !neg);
+        if self.d.is_empty() {
+            self.neg = false;
+        }
+    }
+}
+
+/// From this order, a system of integers in registers with up to a quarter as many right-hand
+/// sides is solved by Dixon's lifting too: measured at 64 rows of integers below 100 with 16
+/// right-hand sides, 0.82 of the time of the elimination. Longer integers and more right-hand
+/// sides (the inverse among them) measured slower by the lifting (1.15 to 1.18 times at 32 to 48
+/// rows for 8-byte integers, 1.04 to 1.6 times with as many right-hand sides as rows to 64).
+// Measured on an Apple M4 Max (orders 32 to 128, n/8 + 1 to n right-hand sides, integers of 1, 2,
+// 4 and 8 bytes, each way forced): with a quarter as many right-hand sides as rows the lifting
+// took 0.48 to 0.99 of the elimination's time for integers of 1 to 4 bytes from 32 rows, but
+// 1.15 to 1.18 times as long for 8-byte ones at 32 and 48 rows (1.06 at 64, 0.78 to 0.90 from
+// 96); with half as many it was faster only for 2-byte integers from 96 rows and 4-byte ones
+// from 64. Alternated against 64, 32 and 48 took 0.60 to 0.98 of the time for 1- and 4-byte
+// integers at 32 to 56 rows, but up to 1.33 times as long for 8-byte ones: no other value leaves
+// every length within 2 %.
+const DIXON_RHS_ORDER: usize = 64;
 
 /// The orders from which a system with at most an eighth as many right-hand sides is solved by
 /// Dixon's p-adic lifting ([`dixon`]) rather than Bareiss's elimination: when every integer is
@@ -1550,10 +1739,27 @@ pub(super) fn det_of_integers(a: &Matrix<Number>) -> Number {
     if n == 0 {
         return Number::new_from_u8(1, order);
     }
+    // Beyond the registers, orders 2 to 4 of elements of up to 64 bits by cofactors.
+    let cofactors = || {
+        (2..=4)
+            .contains(&n)
+            .then(|| cofactor::det(a, n, order))
+            .flatten()
+    };
     let mut m = match registers::run(Source::Numbers(&[a]), Op::DetInteger, order) {
         Outcome::Done(Out::Number(d)) => return d,
-        Outcome::Ints(m, _) => m,
-        _ => integers(&[a]),
+        Outcome::Ints(m, _) => {
+            if let Some(d) = cofactors() {
+                return d;
+            }
+            m
+        }
+        _ => {
+            if let Some(d) = cofactors() {
+                return d;
+            }
+            integers(&[a])
+        }
     };
     det_rows(&mut m, n).number(order)
 }
@@ -1680,7 +1886,15 @@ impl Matrix<Number> {
                 return x.map(|x| Matrix::from_column_major(n, b.cols(), x));
             }
             Outcome::Ints(m, _) => m,
-            _ => integers(&[self, b]),
+            _ => {
+                // Order 2 beyond the registers' 63 bits: Cramer's rule in 128 bits.
+                if n == 2
+                    && let Some(x) = cofactor::solve(self, b, order)
+                {
+                    return x.map(|x| Matrix::from_column_major(n, b.cols(), x));
+                }
+                integers(&[self, b])
+            }
         };
         solve_rows(m, n, b.cols(), None, order)
     }
@@ -1712,6 +1926,11 @@ impl Matrix<Number> {
         let order = order_of(self, Number::byte_order);
         if n == 0 {
             return Some(Matrix::zeros(0, 0));
+        }
+        if n == 2
+            && let Some(x) = cofactor::inverse(self, order)
+        {
+            return x.map(|x| Matrix::from_column_major(n, n, x));
         }
         let m = match registers::run(Source::Numbers(&[self]), Op::Inverse, order) {
             Outcome::Done(Out::Rationals(x)) => {

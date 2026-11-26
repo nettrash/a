@@ -6,7 +6,10 @@
 
 use super::dd::{Dd, two_prod, two_sum};
 use super::general::{debye_parts, jy, k as k_general, ln_gamma_large, ratio_j};
-use super::kernels::{exp_parts, ldexp, ln_dd, mla, pow2i, rem_pio2, sin_cos_quadrant_dd};
+use super::kernels::{
+    add_c, coef, exp_parts, ldexp, ln_dd, mla, mul_c, pow2i, rec_pos, rec_step, recip_dd, rem_pio2,
+    sin_cos_quadrant_dd,
+};
 use core::f64::consts::FRAC_PI_2;
 
 const EPS: f64 = 1.0 / (1u64 << 55) as f64;
@@ -57,16 +60,21 @@ fn hankel_pq(n: u32, x: f64) -> (Dd, Dd) {
 /// `x^n/(2n + 1)!!` as `m·2^e`.
 fn series_prefactor(n: u32, x: f64) -> (Dd, i32) {
     if n <= 40 {
-        let mut m = Dd::new(1.0);
+        // Π x/(2k + 1), compensated (the running product with its error to first order, each
+        // factor a double-double from one division and its remainder).
+        let (mut m, mut em) = (1.0f64, 0.0f64);
         let mut e = 0i32;
         for k in 1..=n {
-            m = m.mul_f64(x).div(Dd::new((2 * k + 1) as f64));
-            if m.hi.abs() < pow2i(-BIG) {
-                m = m.mul_f64(pow2i(BIG));
+            let (ch, cl) = quot(x, 0.0, (2 * k + 1) as f64);
+            (m, em) = mul_c(m, em, ch, cl);
+            if m.abs() < pow2i(-BIG) {
+                m *= pow2i(BIG);
+                em *= pow2i(BIG);
                 e -= BIG;
             }
         }
-        return (m, e);
+        let (hi, lo) = two_sum(m, em);
+        return (Dd { hi, lo }, e);
     }
     // (2n + 1)!! = 2^(n+1)·Γ(n + 3/2)/√π.
     let nf = n as f64;
@@ -88,28 +96,41 @@ fn series_prefactor(n: u32, x: f64) -> (Dd, i32) {
     exp_parts(a.hi, a.lo)
 }
 
-/// `Σ (∓x²/2)^k/(k!·(2n + 3)(2n + 5)…(2n + 2k + 1))` (`−` for `j`).
+/// `Σ (∓x²/2)^k/(k!·(2n + 3)(2n + 5)…(2n + 2k + 1))` (`−` for `j`), compensated: each term and
+/// the sum with their errors to first order, the ratio of two terms a double-double from one
+/// division and its remainder, off the chain (the double-double run's accuracy).
 fn series_sum(n: u32, x: f64, minus: bool) -> Dd {
     let (qh, ql) = super::dd::two_prod(x, x);
-    let q = Dd {
-        hi: 0.5 * qh,
-        lo: 0.5 * ql,
+    let (qh, ql) = if minus {
+        (-0.5 * qh, -0.5 * ql)
+    } else {
+        (0.5 * qh, 0.5 * ql)
     };
-    let q = if minus { q.neg() } else { q };
-    let mut term = Dd::new(1.0);
-    let mut sum = Dd::new(1.0);
+    let (mut t, mut et) = (1.0f64, 0.0f64);
+    let (mut s, mut es) = (1.0f64, 0.0f64);
     let mut k = 1.0f64;
     let b = (2 * n + 1) as f64;
     loop {
         // k·(b + 2k) is exact below 2⁵³.
-        term = term.mul(q).div(Dd::new(k * (b + 2.0 * k)));
-        sum = sum.add(term);
-        if term.hi.abs() <= EPS * 0.25 * sum.hi.abs() || k > 400.0 {
+        let (ch, cl) = quot(qh, ql, k * (b + 2.0 * k));
+        (t, et) = mul_c(t, et, ch, cl);
+        (s, es) = add_c(s, es, t, et);
+        if t.abs() <= EPS * 0.25 * s.abs() || k > 400.0 {
             break;
         }
         k += 1.0;
     }
-    sum
+    let (hi, lo) = two_sum(s, es);
+    Dd { hi, lo }
+}
+
+/// `(h + l)/d` of a double-double and an exact `d`, as a double-double: one division and its
+/// remainder.
+#[inline(always)]
+fn quot(h: f64, l: f64, d: f64) -> (f64, f64) {
+    let q = h / d;
+    let (p, pe) = two_prod(q, d);
+    (q, (((h - p) - pe) + l) / d)
 }
 
 fn series(n: u32, x: f64, minus: bool) -> f64 {
@@ -151,41 +172,50 @@ pub(crate) fn sph_j(n: u32, x: f64) -> f64 {
     if x > nf {
         // Up from j₀ = sin x/x and j₁ = (j₀ − cos x)/x, in double-double from the start (an `f64`
         // run, or rounded starts, gathered up to 3.3 ulps of M by n = 12).
+        // The run is compensated: each value with its error to first order, the coefficients
+        // from 1/x as a double-double, as accurate as the double-double run it replaces.
         let (s, c) = sin_cos_shift(x, 0);
-        let xd = Dd::new(x);
-        let xi = Dd::new(1.0).div(xd);
+        let xi = recip_dd(x);
         let j0 = s.mul(xi);
-        let (mut a, mut b) = (j0, j0.sub(c).mul(xi));
+        let j1 = j0.sub(c).mul(xi);
+        let (mut a, mut ea, mut b, mut eb) = (j0.hi, j0.lo, j1.hi, j1.lo);
         for m in 1..n {
-            let t = b.mul(xi).mul_f64((2 * m + 1) as f64).sub(a);
-            a = b;
-            b = t;
+            let (ch, cl) = coef((2 * m + 1) as f64, xi);
+            let (t, et) = rec_step(ch, cl, b, eb, -a, -ea);
+            (a, ea) = (b, eb);
+            (b, eb) = (t, et);
         }
-        return b.value();
+        return b + eb;
     }
     // x ≤ n: the ratio jₙ/jₙ₋₁ = J_(n+1/2)/J_(n−1/2) by its continued fraction, then down to j₀
     // or j₁ to normalise. The run down passes the ratio's relative error to jₙ whole, so the
     // fraction is summed from its tail in double-double at every x (near x = n an `f64` sum loses
     // a few ulps, and below x = n/2 Lentz's forward `f64` value is 5 to 11 ulps off).
     let r = ratio_j(nf - 0.5, x, true);
-    // jₙ = r·jₙ₋₁; run down with fₙ = 1·2^e.
+    // jₙ = r·jₙ₋₁; run down with fₙ = 1·2^e, compensated (values with their errors to first
+    // order, the coefficients from 1/x as a double-double).
     let xd = Dd::new(x);
-    let xi = Dd::new(1.0).div(xd);
-    let (mut hi, mut lo) = (Dd::new(1.0), Dd::new(1.0).div(r)); // f_n, f_(n−1)
+    let xi = recip_dd(x);
+    let f1 = Dd::new(1.0).div(r);
+    let (mut h, mut eh, mut l, mut el) = (1.0, 0.0, f1.hi, f1.lo); // f_n, f_(n−1)
     let mut e = 0i32;
     let mut k = n - 1;
     while k >= 1 {
         // f_(k−1) = (2k + 1)/x·f_k − f_(k+1).
-        let t = lo.mul(xi).mul_f64((2 * k + 1) as f64).sub(hi);
-        hi = lo;
-        lo = t;
-        if lo.hi.abs() > pow2i(BIG) {
-            hi = hi.mul_f64(pow2i(-BIG));
-            lo = lo.mul_f64(pow2i(-BIG));
+        let (ch, cl) = coef((2 * k + 1) as f64, xi);
+        let (t, et) = rec_step(ch, cl, l, el, -h, -eh);
+        (h, eh) = (l, el);
+        (l, el) = (t, et);
+        if l.abs() > pow2i(BIG) {
+            let s = pow2i(-BIG);
+            (h, eh, l, el) = (h * s, eh * s, l * s, el * s);
             e += BIG;
         }
         k -= 1;
     }
+    let (hh, hl) = super::dd::fast_two_sum(h, eh);
+    let (lh, ll) = super::dd::fast_two_sum(l, el);
+    let (hi, lo) = (Dd { hi: hh, lo: hl }, Dd { hi: lh, lo: ll });
     // lo = f₀, hi = f₁ (scaled by 2^−e relative to fₙ = 1). Normalise by the larger of them (a
     // small one carries the recurrence's absolute error), with j₀ and j₁ in double-double.
     let (s, c) = sin_cos_shift(x, 0);
@@ -234,25 +264,26 @@ pub(crate) fn sph_y(n: u32, x: f64) -> f64 {
     }
     // Up from y₀ = −cos x/x, y₁ = −(cos x/x + sin x)/x.
     // Up from y₀, y₁ in double-double (an `f64` run gathered 2 ulps of M by n = 4).
-    let xd = Dd::new(x);
-    let xi = Dd::new(1.0).div(xd);
+    // Compensated: each value with its error to first order, the coefficients from 1/x as a
+    // double-double.
+    let xi = recip_dd(x);
     let y0 = c.mul(xi).neg();
     let y1 = c.mul(xi).add(s).mul(xi).neg();
-    let (mut a, mut b) = (y0, y1);
+    let (mut a, mut ea, mut b, mut eb) = (y0.hi, y0.lo, y1.hi, y1.lo);
     let mut e = 0i32;
     for m in 1..n {
+        let (ch, cl) = coef((2 * m + 1) as f64, xi);
         // Rescale before the step that would overflow (x ≥ 2⁻⁵⁰⁰, so (2m + 1)/x is finite).
-        let c = (2 * m + 1) as f64 / x;
-        while b.hi.abs() * c > pow2i(900) {
-            a = a.mul_f64(pow2i(-BIG));
-            b = b.mul_f64(pow2i(-BIG));
+        while b.abs() * ch > pow2i(900) {
+            let s = pow2i(-BIG);
+            (a, ea, b, eb) = (a * s, ea * s, b * s, eb * s);
             e += BIG;
         }
-        let t = b.mul(xi).mul_f64((2 * m + 1) as f64).sub(a);
-        a = b;
-        b = t;
+        let (t, et) = rec_step(ch, cl, b, eb, -a, -ea);
+        (a, ea) = (b, eb);
+        (b, eb) = (t, et);
     }
-    ldexp(b.value(), e)
+    ldexp(b + eb, e)
 }
 
 /// Below this `x` the spherical `yₙ` and `kₙ` are their leading terms (`1/x`, `1/x²` and so on
@@ -307,8 +338,8 @@ pub(crate) fn sph_i(n: u32, x: f64) -> f64 {
     }
     let nf = n as f64;
     let by_series = if n < I_DEBYE_N {
-        // Up to n²/28 (from n = 34 on above 20 + n/2) the closed form below cancels by more than
-        // 2⁴⁰; the series takes 70 terms at most there.
+        // Up to n²/28 (above 20 + n/2 only from n = 34 on, beyond I_DEBYE_N) the closed form below
+        // cancels by more than 2⁴⁰; the series takes 70 terms at most there.
         x <= 20.0 + 0.5 * nf || x * x <= 2.0 * (2.0 * nf + 3.0) || 28.0 * x <= nf * nf
     } else {
         // Its terms grow first by (x²/2)/(2n + 3): no more than 4 times, so that it stays short.
@@ -351,8 +382,14 @@ pub(crate) fn sph_i(n: u32, x: f64) -> f64 {
 }
 
 /// From this order on `iₙ` comes from Debye's expansion of `I_(n+1/2)` between the series and the
-/// closed form (see `general::DEBYE_NU`).
-const I_DEBYE_N: u32 = 50;
+/// closed form (there `x ≥ 30`, `p = ν/√(ν² + x²) ≤ 0.57`, where its first omitted term,
+/// `U₁₃(p)/ν¹³`, is far below the rounding).
+// Measured on an Apple M4 Max (each order from 12 to 100, x over 1–8000, over the band between
+// the series and n(n + 1)/2 and over 1–200): Debye's expansion, 70–100 ns at every order, passes
+// the series and the closed form at n = 20 (0.98–1.0, 1.02–1.06 at 18), and takes 0.64–0.83 of
+// their time over 20–49; within 0.70 ulp there (120,000 cases: mpmath on the 469 whose result
+// changed and 9,000 more).
+const I_DEBYE_N: u32 = 20;
 
 /// `π/2` as a double-double.
 const PIO2_DD: Dd = Dd {
@@ -361,29 +398,37 @@ const PIO2_DD: Dd = Dd {
 };
 
 /// `iₙ(x) = (e^x·Σ(−1)ᵏ aₖ/xᵏ − (−1)ⁿ e^(−x)·Σ aₖ/xᵏ)/(2x)`, `aₖ = (n + k)!/(k!(n − k)!·2ᵏ)`, both
-/// sums and their terms in double-double, for `n < 50` from the end of the series on, where the
-/// terms cancel by `2⁴⁰` at most (the error of a term, about `2⁻⁹⁸` of it, stays below `2⁻⁵⁸` of
-/// the value); both exponentials are kept (`e^(−2x)` is `2⁻⁵⁵` of the value at `n = 49`,
-/// `x = 44.5`).
+/// sums and their terms in double-double, for `n < I_DEBYE_N` from the end of the series on, where
+/// the terms cancel by `2⁴⁰` at most (the error of a term, about `2⁻⁹⁸` of it, stays below `2⁻⁵⁸`
+/// of the value); both exponentials are kept.
 fn i_closed(n: u32, x: f64) -> f64 {
     let nf = n as f64;
-    let mut term = Dd::new(1.0);
-    let mut alt = Dd::new(1.0);
-    let mut pos = Dd::new(1.0);
+    // Compensated: the terms and both sums with their errors to first order (the double-double
+    // run's accuracy); 1/x a double-double once, each ratio (n + k)(n − k + 1)/(2k)·(1/x) formed
+    // off the chain.
+    let xi = recip_dd(x);
+    let (mut t, mut et) = (1.0f64, 0.0f64);
+    let (mut a, mut ea) = (1.0f64, 0.0f64);
+    let (mut p, mut ep) = (1.0f64, 0.0f64);
     for k in 1..=n {
         let kf = k as f64;
-        // (n + k)(n − k + 1) is an exact integer, 2k·x an exact double-double.
-        let (dh, dl) = two_prod(2.0 * kf, x);
-        term = term
-            .mul_f64((nf + kf) * (nf - kf + 1.0))
-            .div(Dd { hi: dh, lo: dl });
-        pos = pos.add(term);
-        alt = if !k.is_multiple_of(2) {
-            alt.sub(term)
+        // (n + k)(n − k + 1) is an exact integer, so is 2k: their quotient a double-double, then
+        // times 1/x.
+        let (qh, ql) = quot((nf + kf) * (nf - kf + 1.0), 0.0, 2.0 * kf);
+        let (ch, ce) = two_prod(qh, xi.hi);
+        let cl = ce + mla(qh, xi.lo, ql * xi.hi);
+        (t, et) = mul_c(t, et, ch, cl);
+        (p, ep) = add_c(p, ep, t, et);
+        (a, ea) = if !k.is_multiple_of(2) {
+            add_c(a, ea, -t, -et)
         } else {
-            alt.add(term)
+            add_c(a, ea, t, et)
         };
     }
+    let (ph, pl) = two_sum(p, ep);
+    let (ah, al) = two_sum(a, ea);
+    let pos = Dd { hi: ph, lo: pl };
+    let alt = Dd { hi: ah, lo: al };
     let (mp, kp) = exp_parts(x, 0.0);
     let (mm, km) = exp_parts(-x, 0.0);
     // e^(−x)·Σ aₖ/xᵏ relative to the scale 2^kp of e^x.
@@ -425,55 +470,33 @@ pub(crate) fn sph_k(n: u32, x: f64) -> f64 {
             None => f64::INFINITY,
         };
     }
-    if n <= 10 && (1.0e-3..=700.0).contains(&x) {
-        // kₙ = (π/(2x))·e^(−x)·Σ aₖ tᵏ, aₖ = (n + k)!/(k!(n − k)!) (exact integers), t = 1/(2x):
-        // Horner's rule in double-double on the positive terms.
-        let nf = n as f64;
-        let mut a = [0.0f64; 21];
-        a[0] = 1.0;
-        for k in 1..=n as usize {
-            let kf = k as f64;
-            a[k] = a[k - 1] * (nf + kf) * (nf - kf + 1.0) / kf;
-        }
-        let th = 0.5 / x;
-        let (p, pe) = two_prod(th, 2.0 * x);
-        let t = Dd {
-            hi: th,
-            lo: th * ((1.0 - p) - pe),
-        };
-        let mut acc = Dd::new(a[n as usize]);
-        for k in (0..n as usize).rev() {
-            acc = acc.mul(t).add_f64(a[k]);
-        }
-        let (em, ek) = exp_parts(-x, 0.0);
-        let v = acc.mul(t).mul(em).mul(Dd {
-            hi: core::f64::consts::PI,
-            lo: 1.224_646_799_147_353_2e-16,
-        });
-        return ldexp(v.value(), ek);
-    }
-    // Sₙ: S₀ = 1/x, S₁ = (1 + 1/x)/x, S_(m+1) = S_(m−1) + (2m + 1)/x·S_m.
-    let xd = Dd::new(x);
-    let s0 = Dd::new(1.0).div(xd);
+    // (Horner's rule on the polynomial Σ aₖ/(2x)ᵏ, which took n ≤ 10 before, gives the same bits
+    // and is slower at every order: measured on an Apple M4 Max, the recurrence takes 0.98 of its
+    // time at n = 0, 0.45 over n = 0–10 and 0.21 at n = 20.)
+    // Sₙ: S₀ = 1/x, S₁ = (1 + 1/x)/x, S_(m+1) = S_(m−1) + (2m + 1)/x·S_m: positive terms, run
+    // compensated (each value with its error to first order, the coefficients from 1/x as a
+    // double-double), which keeps the double-double run's accuracy at the cost of an `f64` one.
+    let xi = recip_dd(x);
     let (m, e) = if n == 0 {
-        (s0, 0)
+        (xi, 0)
     } else {
-        let s1 = s0.add_f64(1.0).div(xd);
-        let (mut a, mut b) = (s0, s1);
+        let s1 = xi.add_f64(1.0).mul(xi);
+        let (mut a, mut ea, mut b, mut eb) = (xi.hi, xi.lo, s1.hi, s1.lo);
         let mut e = 0i32;
         for m in 1..n {
+            let (ch, cl) = coef((2 * m + 1) as f64, xi);
             // Rescale before the step that would overflow (x ≥ 2⁻⁵⁰⁰).
-            let c = (2 * m + 1) as f64 / x;
-            while b.hi * c > pow2i(900) {
-                a = a.mul_f64(pow2i(-BIG));
-                b = b.mul_f64(pow2i(-BIG));
+            while b * ch > pow2i(900) {
+                let s = pow2i(-BIG);
+                (a, ea, b, eb) = (a * s, ea * s, b * s, eb * s);
                 e += BIG;
             }
-            let t = b.mul_f64((2 * m + 1) as f64).div(xd).add(a);
-            a = b;
-            b = t;
+            let (t, et) = rec_pos(ch, cl, b, eb, a, ea);
+            (a, ea) = (b, eb);
+            (b, eb) = (t, et);
         }
-        (b, e)
+        let (hi, lo) = super::dd::fast_two_sum(b, eb);
+        (Dd { hi, lo }, e)
     };
     let (em, ek) = exp_parts(-x.min(1.0e6), 0.0);
     let v = m.mul(em).mul(Dd {

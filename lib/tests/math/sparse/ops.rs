@@ -235,16 +235,25 @@ fn transposed_products_of<T: Num>() {
             random_sparse(&mut r, rows, cols, 2 * (rows + cols))
         };
         let x: Vec<T> = random_vector(&mut r, rows);
-        // The products without a transposed copy add the same terms in the same order as the
-        // product by the transpose that is formed: the same bits.
-        assert_eq!(a.mul_vec_transpose(&x), a.transpose().mul_vec(&x));
-        assert_eq!(a.mul_vec_adjoint(&x), a.conjugate_transpose().mul_vec(&x));
+        // The products without a transposed copy add the same terms as the product by the
+        // transpose that is formed, in another order (that one sums each row in four running
+        // sums): the same to rounding, at the bound the documentation states.
+        let as_column = |v: Vec<T>| Matrix::from_column_major(v.len(), 1, v);
+        let close = |p: Vec<T>, q: Vec<T>| assert_close(&as_column(p), &as_column(q), 16.0);
+        close(a.mul_vec_transpose(&x), a.transpose().mul_vec(&x));
+        close(a.mul_vec_adjoint(&x), a.conjugate_transpose().mul_vec(&x));
         let mut y = vec![T::real(7.0); cols];
         a.mul_vec_transpose_into(&x, &mut y);
-        assert_eq!(y, a.transpose().mul_vec(&x));
+        close(y.clone(), a.transpose().mul_vec(&x));
         y.fill(T::real(-3.0));
         a.mul_vec_adjoint_into(&x, &mut y);
-        assert_eq!(y, a.conjugate_transpose().mul_vec(&x));
+        close(y.clone(), a.conjugate_transpose().mul_vec(&x));
+        // The same input gives the same bits, every time.
+        assert_eq!(a.transpose().mul_vec(&x), a.transpose().mul_vec(&x));
+        // Where no column holds four elements the two orders are one: the same bits.
+        if (0..cols).all(|j| (0..rows).filter(|&i| a.find(i, j).is_some()).count() < 4) {
+            assert_eq!(a.mul_vec_transpose(&x), a.transpose().mul_vec(&x));
+        }
         // And they are the dense products.
         let column = Matrix::from_column_major(rows, 1, x.clone());
         let d = a.to_matrix();

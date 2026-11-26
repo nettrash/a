@@ -2,7 +2,10 @@
 
 use super::common::*;
 use a::math::complex::Complex;
-use a::math::fft::{FftFloat, circular_convolve, circular_correlate, convolve, correlate};
+use a::math::fft::{
+    FftFloat, circular_convolve, circular_correlate, convolve, convolve_into, correlate,
+    correlate_into,
+};
 
 fn direct(a: &[Complex<f64>], b: &[Complex<f64>]) -> Vec<Complex<f64>> {
     if a.is_empty() || b.is_empty() {
@@ -192,6 +195,43 @@ fn circular_lengths_across_the_crossover() {
         );
         assert!(e <= bound::<f64>(n, 10.0), "correlate n={n}: {e:e}");
     }
+}
+
+/// `convolve_into` and `correlate_into` give the bits of `convolve` and `correlate` on every
+/// path (scalar, direct, padded product, overlap-add), into a slice of the exact length.
+fn check_into<T: FftFloat>(rng: &mut Rng) {
+    for (na, nb) in pairs() {
+        let (a, b) = (rng.reals::<T>(na), rng.reals::<T>(nb));
+        let want = convolve(&a, &b);
+        let mut got = vec![T::from_f64(7.0); want.len()];
+        convolve_into(&a, &b, &mut got);
+        assert_eq!(got, want, "convolve_into {na}x{nb}");
+        let want = correlate(&a, &b);
+        correlate_into(&a, &b, &mut got);
+        assert_eq!(got, want, "correlate_into {na}x{nb}");
+        let (a, b) = (rng.complexes::<T>(na), rng.complexes::<T>(nb));
+        let want = convolve(&a, &b);
+        let mut got = vec![Complex::new(T::from_f64(7.0), T::ZERO); want.len()];
+        convolve_into(&a, &b, &mut got);
+        assert_eq!(got, want, "complex convolve_into {na}x{nb}");
+        let want = correlate(&a, &b);
+        correlate_into(&a, &b, &mut got);
+        assert_eq!(got, want, "complex correlate_into {na}x{nb}");
+    }
+}
+
+#[test]
+fn into_slices_agree_with_the_vectors() {
+    let mut rng = Rng(77);
+    check_into::<f64>(&mut rng);
+    check_into::<f32>(&mut rng);
+}
+
+#[test]
+#[should_panic(expected = "len(a) + len(b) − 1 values")]
+fn into_slices_must_have_the_length() {
+    let mut out = [0.0; 4];
+    convolve_into(&[1.0, 2.0], &[1.0, 2.0], &mut out);
 }
 
 #[test]

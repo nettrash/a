@@ -5,7 +5,7 @@
 use super::limbs;
 use super::round::{round_into, round_mag, signed};
 use super::scale::{Dir, int_parts};
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use core::cmp::Ordering;
 
 /// The ways of [`BigFloat::floor`] and the others to choose an integer, for a number of the
@@ -283,7 +283,7 @@ impl BigFloat {
         let (exp, o, out) = if n == mant.len() {
             integer_copy(mant, *exp, dir)
         } else {
-            let mut out = vec![0; n];
+            let mut out = Mant::zeroed(n);
             let (e, o) = integer_fit(mant, *exp, dir, &mut out);
             (e, o, out)
         };
@@ -491,12 +491,12 @@ fn integer_fit(mant: &[u64], exp: i64, dir: Dir, out: &mut [u64]) -> (Option<i64
 
 /// [`integer_fit`] into a copy of the mantissa, decided from the mantissa before the copy is made,
 /// and none made for a zero.
-fn integer_copy(mant: &[u64], exp: i64, dir: Dir) -> (Option<i64>, Ordering, Vec<u64>) {
+fn integer_copy(mant: &[u64], exp: i64, dir: Dir) -> (Option<i64>, Ordering, Mant) {
     let (up, o) = integer_dir(mant, exp, dir);
     if exp <= 0 && !up {
-        return (None, o, Vec::new());
+        return (None, o, Mant::One(0));
     }
-    let mut v = mant.to_vec();
+    let mut v = Mant::from_slice(mant);
     if exp > 0 {
         let k = unit_limb(v.len(), exp);
         zero(&mut v[..k]);

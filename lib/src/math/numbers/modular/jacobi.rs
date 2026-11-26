@@ -1,7 +1,9 @@
 //! The Jacobi symbol of long numbers: by the binary method on all their limbs at once up to six
-//! limbs (in assembly on aarch64, see the kernels), and beyond by Lehmer's method, the symbol
-//! carried through the quotients, after Möller ("Efficient computation of the Jacobi symbol",
-//! 2008), whose algorithm GMP's `mpn_jacobi_n` takes.
+//! limbs (in assembly on aarch64, see the kernels), beyond by Lehmer's method, the symbol carried
+//! through the quotients, after Möller ("Efficient computation of the Jacobi symbol", 2008), whose
+//! algorithm GMP's `mpn_jacobi_n` takes, and from [`STEPS`] limbs through the greatest common
+//! divisor's own reductions ([`euclid_steps`]), its subquadratic half gcd from
+//! `STEPS_DC_THRESHOLD` (in `gcd/euclid.rs`) limbs.
 //!
 //! Euclid's algorithm on the pair `(a, b)`, `b` odd, reduces one number by a multiple of the other
 //! at each step. The symbol `(a / b)` is `(-1)^e (x / y)` for the current pair, `y` the one that
@@ -13,6 +15,8 @@
 //! depends only on the quotient and on both numbers modulo 4, which the state below keeps, so the
 //! symbol follows the quotients that Lehmer's method finds from the top limbs alone, and the whole
 //! numbers are needed only at the end.
+
+use super::super::nat::euclid_steps;
 
 // The kernels under the name `kernels`, chosen as the greatest common divisor's are: assembly on
 // 64-bit little-endian aarch64 where the system allows unaligned accesses, and portable Rust
@@ -351,11 +355,20 @@ pub(in super::super) fn jacobi(mut x: Vec<u64>, mut y: Vec<u64>) -> i32 {
 }
 
 /// The Jacobi symbol `(a / b)` of the limbs `x` and `y` of one length, the least significant first,
-/// for `a < b` and `b` odd, in place: Lehmer's steps while a number has three limbs or more, then
-/// the binary method on two, which measured faster there.
+/// for `a < b` and `b` odd, in place: from [`STEPS`] limbs the greatest common divisor's
+/// reductions, below Lehmer's steps while a number has more than [`BINARY`] limbs, then the binary
+/// method, which measured faster there.
 pub(in super::super) fn jacobi_in(x: &mut [u64], y: &mut [u64]) -> i32 {
     debug_assert!(x.len() == y.len());
     let mut s = init(x.first().copied().unwrap_or(0), y[0]);
+    let n = len(y).max(len(x));
+    if n >= STEPS {
+        // The greatest common divisor's own reductions, every quotient told to the state: hgcd2's
+        // matrices applied by its kernels, and from `STEPS_DC_THRESHOLD` limbs its half gcd. At
+        // the end the numerator is 0 and the denominator the gcd: `(0 / 1) = 1`, else 0.
+        let one = euclid_steps(&x[..n], &y[..n], |a_reduced, q| s = update(s, a_reduced, q));
+        return if one { sign(s) } else { 0 };
+    }
     loop {
         let n = len(y).max(len(x));
         if n <= BINARY {
@@ -462,6 +475,20 @@ fn subdiv(x: &mut [u64], y: &mut [u64], n: usize, s: &mut State) -> bool {
     big[..rl.len()].copy_from_slice(&rl);
     !rl.is_empty()
 }
+
+/// From this many limbs, the symbol takes the greatest common divisor's reductions
+/// ([`euclid_steps`]), the subquadratic half gcd included from
+/// `STEPS_DC_THRESHOLD` (in `gcd/euclid.rs`). Measured on an Apple M4 Max under
+/// load, by the thread's CPU time, on fresh random numbers against Lehmer's steps here: 16 limbs
+/// took 1.08 to 1.10 of their time, 18 limbs 1.04 to 1.06, 22 limbs 1.01, 24 limbs 0.99 to 1.00,
+/// 28 limbs 0.96, 32 limbs 0.93 to 0.95, 64 limbs 0.81, 256 limbs 0.61 to 0.70, 1024 limbs 0.42 to
+/// 0.54 and 2048 limbs 0.32 to 0.42; against GMP 6.3's `mpz_jacobi`, 0.89 of its time at 32 limbs
+/// (Lehmer's steps 1.00), 0.82 at 256 (1.13) and 0.77 at 2048 (2.22).
+// Measured on an Apple M4 Max on 4096 pairs of fresh random numbers (sweep 12..=48 limbs), the
+// reductions took 1.02 of the time of Lehmer's steps at 22 and 23 limbs, 1.00 at 24, 0.98 to 0.99
+// at 25, 0.97 at 26 and 27 and 0.95 to 0.96 at 28 to 30 (on 64 pairs gone over again, whose steps
+// the branch predictor learns, they meet at 18 to 20 limbs).
+const STEPS: usize = 24;
 
 /// Up to this many limbs, the binary method takes the numbers from Lehmer's steps: its steps, on
 /// the numbers' limbs in registers, reduce more bits in a cycle than hgcd2's quotients and their

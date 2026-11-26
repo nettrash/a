@@ -219,9 +219,44 @@ fn dependent_rows_come_out_as_zero_rows_first() {
     }
 }
 
+/// The run in machine words up to the room it has. Its first input entries are the largest it
+/// takes (columns of 30-bit numbers, knapsacks of 29-bit ones: Gram entries just below `2^60`),
+/// and dependent rows of 8 and 29 bits, whose transformations pass `2^63`. Measured on a copy
+/// that counts them, these inputs make row operations whose largest `|y| + |x|·|z|` reaches
+/// 0.997 of `2^63` and that the test of the room admits, and 14 that it refuses, after which the
+/// run goes on in integers of any size; with that test removed, the first input comes out with
+/// `U·B ≠ B'`. The new diagonal entry of the Gram matrix is computed after the test, where it
+/// cannot overflow (a debug build checks every operation).
+#[test]
+fn words_up_to_the_room_they_have() {
+    let mut rng = Rng(30);
+    let mut inputs = Vec::new();
+    for n in [6, 10, 20] {
+        inputs.push(random_basis(&mut rng, n, 1, 30));
+    }
+    for n in [10, 20] {
+        inputs.push(knapsack(&mut rng, n, 29));
+    }
+    for (n, m) in [(12, 7), (16, 6), (20, 10)] {
+        inputs.push(random_basis(&mut rng, n, m, 8));
+    }
+    for n in [5, 8] {
+        inputs.push(random_basis(&mut rng, n, 2, 29));
+    }
+    for b in &inputs {
+        let r = lll_fp(b, &LllOptions::new());
+        check_reduction(b, &r);
+        assert!(is_lll_reduced(r.basis(), 0.99, 0.51));
+        let e = lll(b, &LllOptions::new());
+        check_reduction(b, &e);
+        assert!(is_lll_reduced(e.basis(), 0.99, 0.5));
+    }
+}
+
 #[test]
 fn huge_entries_beyond_the_range_of_f64() {
-    // Gram matrices of entries of 2000 to 10000 bits: the 53-bit floats need their own exponent.
+    // Gram matrices of entries of 2400 to 10000 bits: from 3000 bits the 53-bit floats need
+    // their own exponent; below, the doubles scaled by a power of two run first.
     let mut rng = Rng(43);
     let o = LllOptions::new();
     for b in [
@@ -415,11 +450,13 @@ fn delta_next_to_one_is_reduced_in_floating_point() {
 #[test]
 fn the_proof_of_a_reduced_basis_costs_less_than_the_exact_test() {
     // A reduced basis of 16 rows of 2000 bits: `lll_fp` changes nothing and proves it in interval
-    // arithmetic of 96 bits, while the exact test works on integers of up to 64000 bits, about a
+    // arithmetic of 96 bits, while the exact integral Gram–Schmidt orthogonalisation (which `lll`
+    // computes, and finds nothing to change) works on integers of up to 64000 bits, about a
     // hundred times the work here. A proof that always left the question open would make `lll_fp`
-    // cost the exact test and more. Both are timed in the same test, so the speed of the machine
-    // drops out; the proof, a few milliseconds, is timed five times and the fastest taken, so that
-    // a thread preempted once on a loaded machine (CI runs the tests in parallel) does not fail it.
+    // cost the exact work and more; so would `is_lll_reduced`, which takes the same intervals
+    // first. They are timed in the same test, so the speed of the machine drops out; the proofs, a
+    // few milliseconds, are timed five times and the fastest taken, so that a thread preempted
+    // once on a loaded machine (CI runs the tests in parallel) does not fail it.
     let mut rng = Rng(89);
     let (n, bits) = (16, 2000);
     let base = Number::from(1u8) << bits;
@@ -441,10 +478,24 @@ fn the_proof_of_a_reduced_basis_costs_less_than_the_exact_test() {
         assert_eq!(*r.basis(), b);
         assert_eq!(*r.transform(), Matrix::<Number>::identity(n));
     }
+    let mut tested = std::time::Duration::MAX;
+    for _ in 0..5 {
+        let start = Instant::now();
+        assert!(is_lll_reduced(&b, 0.99, 0.51));
+        tested = tested.min(start.elapsed());
+    }
     let start = Instant::now();
-    assert!(is_lll_reduced(&b, 0.99, 0.51));
+    let r = lll(&b, &o);
     let exact = start.elapsed();
-    assert!(proved * 8 < exact, "proof {proved:?}, exact test {exact:?}");
+    assert_eq!(*r.basis(), b);
+    assert!(
+        proved * 8 < exact,
+        "proof {proved:?}, exact reduction {exact:?}"
+    );
+    assert!(
+        tested * 8 < exact,
+        "test {tested:?}, exact reduction {exact:?}"
+    );
 }
 
 #[test]

@@ -1,127 +1,12 @@
 //! The optimal ate pairing: Miller's loop on the twist in homogeneous projective coordinates, and
 //! the final exponentiation.
 
-use super::curve::{Family, PairingCurve, Twist};
+use super::curve::PairingCurve;
+use super::fast::{self, Engine, with_engine};
 use super::g1::G1;
 use super::g2::G2;
 use super::gt::Gt;
-use crate::math::field::{Fp, Fp2, Fp12};
-
-/// A point `(X : Y : Z)` of the twist, `x = X/Z`, `y = Y/Z`, the point at infinity for `Z = 0`.
-struct Proj<'c> {
-    x: Fp2<'c>,
-    y: Fp2<'c>,
-    z: Fp2<'c>,
-}
-
-/// A line of the Miller loop, scaled by a factor in `F_p²` (which the final exponentiation
-/// removes): its value at `P = (x_P, y_P)` is `a + b x_P + c y_P` at the positions of the twist.
-struct Line<'c> {
-    a: Fp2<'c>,
-    b: Fp2<'c>,
-    c: Fp2<'c>,
-}
-
-impl<'c> Proj<'c> {
-    /// `2T` and the tangent at `T`, by the formulas of Costello, Lange and Naehrig (*Faster pairing
-    /// computations on curves with high-degree twists*, PKC 2010, §5) for `y² = x³ + b'`, in the
-    /// form of Aranha, Barreto, Longa and Ricardini (*The realm of the pairings*, SAC 2013, §4):
-    /// `A = XY/2, B = Y², C = Z², E = 3b'C, F = 3E, G = (B + F)/2, H = (Y + Z)² − B − C,
-    /// I = E − B, J = X²`, then `2T = (A(B − F) : G² − 3E² : BH)` and the line
-    /// `I + 3J x_P − H y_P`, which is `−2YZ` times the tangent. `None` when the tangent is vertical
-    /// or `T` is at infinity: its value is then in `F_p⁶` and the final exponentiation kills it.
-    fn double(&mut self, curve: &PairingCurve) -> Option<Line<'c>> {
-        if self.z.is_zero() {
-            return None;
-        }
-        if self.y.is_zero() {
-            self.set_infinity();
-            return None;
-        }
-        let (x, y, z) = (&self.x, &self.y, &self.z);
-        let a = (x * y).mul_by_base(&curve.half);
-        let b = y.square();
-        let c = z.square();
-        let e = &c * &curve.b3_twist;
-        let f = &e.double() + &e;
-        let g = (&b + &f).mul_by_base(&curve.half);
-        let h = (y + z).square() - &b - &c;
-        let i = &e - &b;
-        let j = x.square();
-        let e2 = e.square();
-        let x3 = &a * &(&b - &f);
-        let y3 = g.square() - (&e2.double() + &e2);
-        let z3 = &b * &h;
-        self.x = x3;
-        self.y = y3;
-        self.z = z3;
-        Some(Line {
-            a: i,
-            b: &j.double() + &j,
-            c: -h,
-        })
-    }
-
-    /// `T + Q` for an affine `Q` and the line through them, by the mixed addition "madd-1998-cmo"
-    /// of the Explicit-Formulas Database: `u = y_Q Z − Y`, `v = x_Q Z − X`, the line is
-    /// `(v y_Q − u x_Q) + u x_P − v y_P`, which is `−v` times the line through `T` and `Q`.
-    /// `None` when it is vertical (`T = −Q`) or when `T` was at infinity.
-    fn add(&mut self, q: &(Fp2<'c>, Fp2<'c>), curve: &PairingCurve) -> Option<Line<'c>> {
-        let (xq, yq) = q;
-        if self.z.is_zero() {
-            self.x = xq.clone();
-            self.y = yq.clone();
-            self.z = Fp2::one(xq.tower());
-            return None;
-        }
-        let u = &(yq * &self.z) - &self.y;
-        let v = &(xq * &self.z) - &self.x;
-        if v.is_zero() {
-            if u.is_zero() {
-                return self.double(curve);
-            }
-            self.set_infinity();
-            return None;
-        }
-        let line = Line {
-            a: &(&v * yq) - &(&u * xq),
-            b: u.clone(),
-            c: -&v,
-        };
-        let uu = u.square();
-        let vv = v.square();
-        let vvv = &v * &vv;
-        let r = &vv * &self.x;
-        let a = &(&(&uu * &self.z) - &vvv) - &r.double();
-        let x3 = &v * &a;
-        let y3 = &(&u * &(&r - &a)) - &(&vvv * &self.y);
-        let z3 = &vvv * &self.z;
-        self.x = x3;
-        self.y = y3;
-        self.z = z3;
-        Some(line)
-    }
-
-    /// Sets the point at infinity, `(0 : 1 : 0)`.
-    fn set_infinity(&mut self) {
-        let t = self.x.tower();
-        self.x = Fp2::zero(t);
-        self.y = Fp2::one(t);
-        self.z = Fp2::zero(t);
-    }
-}
-
-/// `f` times the value of `line` at `p`: a sparse product, at the positions `0, 3, 4` of a D-type
-/// twist (`(x w², y w³)` makes the line `c y_P + b x_P w + a w³`) or `0, 1, 4` of an M-type twist
-/// (times `w³`, the line through `(x/w², y/w³)` is `a + b x_P v + c y_P v w`).
-fn evaluate<'c>(f: &Fp12<'c>, line: &Line<'c>, p: &(Fp<'c>, Fp<'c>), twist: Twist) -> Fp12<'c> {
-    let bx = line.b.mul_by_base(&p.0);
-    let cy = line.c.mul_by_base(&p.1);
-    match twist {
-        Twist::D => f.mul_by_034(&cy, &bx, &line.a),
-        Twist::M => f.mul_by_014(&line.a, &bx, &cy),
-    }
-}
+use crate::math::field::Fp12;
 
 impl PairingCurve {
     /// The product of the Miller functions of the optimal ate pairing for the pairs, before the
@@ -145,67 +30,7 @@ impl PairingCurve {
     #[track_caller]
     #[must_use]
     pub fn miller_loop<'c>(&'c self, pairs: &[(&G1<'c>, &G2<'c>)]) -> Fp12<'c> {
-        let mut ps = Vec::with_capacity(pairs.len());
-        let mut qs = Vec::with_capacity(pairs.len());
-        for (p, q) in pairs {
-            self.check(p.curve);
-            self.check(q.curve);
-            if let (Some(pa), Some(qa)) = (p.coordinates(), q.coordinates()) {
-                ps.push(pa);
-                qs.push(qa);
-            }
-        }
-        let mut f = Fp12::one(self.tower);
-        if ps.is_empty() {
-            return f;
-        }
-        let mut ts: Vec<Proj<'c>> = qs
-            .iter()
-            .map(|(x, y)| Proj {
-                x: x.clone(),
-                y: y.clone(),
-                z: Fp2::one(self.tower),
-            })
-            .collect();
-        let minus: Vec<(Fp2<'c>, Fp2<'c>)> = qs.iter().map(|(x, y)| (x.clone(), -y)).collect();
-        let digits = &self.loop_digits;
-        for i in (0..digits.len() - 1).rev() {
-            f = f.square();
-            for (t, p) in ts.iter_mut().zip(&ps) {
-                if let Some(l) = t.double(self) {
-                    f = evaluate(&f, &l, p, self.twist);
-                }
-            }
-            if digits[i] != 0 {
-                let add = if digits[i] > 0 { &qs } else { &minus };
-                for ((t, p), q) in ts.iter_mut().zip(&ps).zip(add) {
-                    if let Some(l) = t.add(q, self) {
-                        f = evaluate(&f, &l, p, self.twist);
-                    }
-                }
-            }
-        }
-        if self.loop_scalar.is_negative() {
-            f = f.conjugate();
-            for t in &mut ts {
-                t.y = -&t.y;
-            }
-        }
-        if self.family == Family::Bn {
-            let [gx, gy] = &self.psi;
-            let [nx, ny] = &self.psi2;
-            for ((t, p), (x, y)) in ts.iter_mut().zip(&ps).zip(&qs) {
-                let q1 = (&x.conjugate() * gx, &y.conjugate() * gy);
-                let q2 = (x.mul_by_base(nx), -y.mul_by_base(ny));
-                if let Some(l) = t.add(&q1, self) {
-                    f = evaluate(&f, &l, p, self.twist);
-                }
-                if let Some(l) = t.add(&q2, self) {
-                    f = evaluate(&f, &l, p, self.twist);
-                }
-            }
-        }
-        f
+        with_engine!(self, E, N => fast::miller_loop::<E, N>(&self.fast_pairs::<E, N>(pairs)).to_public())
     }
 
     /// `f^(c (p¹² − 1)/r)`, the final exponentiation, as an element of `GT`.
@@ -243,35 +68,10 @@ impl PairingCurve {
             f.tower().xi() == self.tower.xi(),
             "elements of different towers"
         );
-        let inv = f.inverse().expect("the value of a Miller loop is not 0");
-        let f1 = &f.conjugate() * &inv;
-        let f = &f1.frobenius(2) * &f1;
-        let x = &self.x;
-        let ex = |g: &Fp12<'c>| g.cyclotomic_pow(x);
-        let r = match self.family {
-            Family::Bls12 => {
-                let a = &ex(&f) * &f.conjugate();
-                let b = &ex(&a) * &a.conjugate();
-                let c = &ex(&b) * &b.frobenius(1);
-                let d = &(&ex(&ex(&c)) * &c.frobenius(2)) * &c.conjugate();
-                &(&d * &f.cyclotomic_square()) * &f
-            }
-            Family::Bn => {
-                let fx = ex(&f);
-                let f2x = fx.cyclotomic_square();
-                let f4x = f2x.cyclotomic_square();
-                let f6x = &f4x * &f2x;
-                let f6x2 = ex(&f6x);
-                let f12x2 = f6x2.cyclotomic_square();
-                let f12x3 = ex(&f12x2);
-                let a = &(&f12x3 * &f6x2) * &f6x;
-                let b = &a * &f2x.conjugate();
-                let l0 = &(&a * &f6x2) * &f;
-                let l3 = (&b * &f.conjugate()).frobenius(3);
-                &(&(&l0 * &b.frobenius(1)) * &a.frobenius(2)) * &l3
-            }
-        };
-        Gt::from_fp12_unchecked(self, r)
+        with_engine!(self, E, N => {
+            let f = fast::Fp12::<E, N>::from_public(f);
+            Gt::from_fast::<E, N>(self, &fast::final_exponentiation(&f))
+        })
     }
 
     /// The optimal ate pairing `e(P, Q)`: [`miller_loop`](PairingCurve::miller_loop) then
@@ -301,7 +101,7 @@ impl PairingCurve {
     #[track_caller]
     #[must_use]
     pub fn pairing<'c>(&'c self, p: &G1<'c>, q: &G2<'c>) -> Gt<'c> {
-        self.final_exponentiation(&self.miller_loop(&[(p, q)]))
+        self.multi_pairing(&[(p, q)])
     }
 
     /// The product `∏ e(Pᵢ, Qᵢ)` with one Miller loop and one final exponentiation, as the checks of
@@ -328,6 +128,63 @@ impl PairingCurve {
     #[track_caller]
     #[must_use]
     pub fn multi_pairing<'c>(&'c self, pairs: &[(&G1<'c>, &G2<'c>)]) -> Gt<'c> {
-        self.final_exponentiation(&self.miller_loop(pairs))
+        with_engine!(self, E, N => {
+            let f = fast::miller_loop::<E, N>(&self.fast_pairs::<E, N>(pairs));
+            Gt::from_fast::<E, N>(self, &fast::final_exponentiation(&f))
+        })
     }
 }
+
+impl PairingCurve {
+    /// The affine coordinates of the pairs in the engine's arithmetic, the pairs with a point at
+    /// infinity left out.
+    #[track_caller]
+    fn fast_pairs<'c, E: Engine<N>, const N: usize>(
+        &'c self,
+        pairs: &[(&G1<'c>, &G2<'c>)],
+    ) -> FastPairs<E, N> {
+        // The points' Jacobian forms, pairs with a point at infinity left out.
+        let mut jac = Vec::with_capacity(pairs.len());
+        for (p, q) in pairs {
+            self.check(p.curve);
+            self.check(q.curve);
+            let (a, b) = (p.jac::<E, N>(), q.jac::<E, N>());
+            if !a.is_identity() && !b.is_identity() {
+                jac.push((a, b));
+            }
+        }
+        // Their affine forms with one inversion of F_p for all, by Montgomery's trick: Z of a point
+        // of G1, and the norm Z·Z̄ of a point of G2, whose inverse gives 1/Z = Z̄/(Z·Z̄).
+        let d: Vec<fast::Fp<E, N>> = jac.iter().flat_map(|(a, b)| [a.z, b.z.norm()]).collect();
+        let mut prefix = Vec::with_capacity(d.len());
+        let mut acc = fast::Fp::<E, N>::one();
+        for x in &d {
+            prefix.push(acc);
+            acc = acc.mul(x);
+        }
+        let Some(mut inv) = acc.inverse() else {
+            unreachable!("Z of a point not at infinity is not zero")
+        };
+        let mut inverses = vec![fast::Fp::<E, N>::zero(); d.len()];
+        for i in (0..d.len()).rev() {
+            inverses[i] = inv.mul(&prefix[i]);
+            inv = inv.mul(&d[i]);
+        }
+        jac.iter()
+            .enumerate()
+            .map(|(i, (a, b))| {
+                let zi = inverses[2 * i];
+                let zi2 = zi.square();
+                let wi = b.z.conjugate().mul_by_fp(&inverses[2 * i + 1]);
+                let wi2 = wi.square();
+                (
+                    (a.x.mul(&zi2), a.y.mul(&zi2.mul(&zi))),
+                    (b.x.mul(&wi2), b.y.mul(&wi2.mul(&wi))),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Pairs of affine points of the curve and of the twist.
+type FastPairs<E, const N: usize> = Vec<fast::pairing::Pair<E, N>>;

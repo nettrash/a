@@ -152,6 +152,66 @@ pub(crate) fn mul_to(r: &mut [u64], x: &[u64], y: &[u64], scratch: &mut Vec<u64>
     }
 }
 
+/// The high half of `x·y` for `x` and `y` of `n >= 1` limbs each, short by less than `n` units of
+/// its last limb, into `r` of `2n` limbs, with the working memory in `scratch`, which grows as it
+/// needs: about half of a schoolbook product below 74 limbs, and by Mulders' method beyond
+/// (see [`mulhigh`](super::mul::short) for the contract). Precisely: with `SP` the sum of the
+/// products `x_i·y_j·B^(i+j)` with `i + j >= n - 1`, `r[n - 1..2n]` is `⌊P / B^(n-1)⌋` for some
+/// `P` with `SP <= P <= x·y`; so `x·y - (n - 1)·B^n < r[n - 1..2n]·B^(n-1) <= x·y`, and the high
+/// half `H = ⌊x·y / B^n⌋` lies in `[A, A + n - 1]` for `A = r[n..2n]`. The limbs `r[..n - 1]` are
+/// clobbered.
+///
+/// # Panics
+///
+/// Panics if `x` is empty, `y` not as long as `x` or `r` not twice as long.
+#[inline]
+pub(crate) fn mulhigh_to(r: &mut [u64], x: &[u64], y: &[u64], scratch: &mut Vec<u64>) {
+    let n = x.len();
+    assert!(n >= 1 && y.len() == n && r.len() == 2 * n);
+    let itch = super::mul::short::mulhigh_itch(n);
+    if scratch.len() < itch {
+        scratch.resize(itch, 0);
+    }
+    // SAFETY: `n >= 1` limbs at `x` and `y`, `2n` at `r`, a unique borrow apart from both, and the
+    // plan's scratch.
+    unsafe {
+        super::mul::short::mulhigh(
+            r.as_mut_ptr(),
+            x.as_ptr(),
+            y.as_ptr(),
+            n,
+            Scratch::new(scratch.as_mut_ptr(), itch),
+        );
+    }
+}
+
+/// The high half of `x²` for `x` of `n >= 1` limbs, as [`mulhigh_to`] states it for `x·x` (the
+/// same bound): about a quarter of a schoolbook square below 12 limbs, and by Mulders' method
+/// beyond.
+///
+/// # Panics
+///
+/// Panics if `x` is empty or `r` not twice as long.
+#[inline]
+pub(crate) fn sqrhigh_to(r: &mut [u64], x: &[u64], scratch: &mut Vec<u64>) {
+    let n = x.len();
+    assert!(n >= 1 && r.len() == 2 * n);
+    let itch = super::mul::short::sqrhigh_itch(n);
+    if scratch.len() < itch {
+        scratch.resize(itch, 0);
+    }
+    // SAFETY: `n >= 1` limbs at `x`, `2n` at `r`, a unique borrow apart from it, and the plan's
+    // scratch.
+    unsafe {
+        super::mul::short::sqrhigh(
+            r.as_mut_ptr(),
+            x.as_ptr(),
+            n,
+            Scratch::new(scratch.as_mut_ptr(), itch),
+        );
+    }
+}
+
 /// `r += x·y` for `x` as long as `r`: the limb that carries out.
 ///
 /// # Panics
@@ -162,6 +222,45 @@ pub(crate) fn addmul_1(r: &mut [u64], x: &[u64], y: u64) -> u64 {
     assert!(!x.is_empty() && x.len() == r.len());
     // SAFETY: `n >= 1` limbs of each, `r` a unique borrow apart from `x`.
     unsafe { basecase::addmul_1(r.as_mut_ptr(), x.as_ptr(), x.len(), y) }
+}
+
+/// The remainder of a long magnitude by one limb, eight limbs a step with the powers of `B`
+/// modulo the divisor ([`Powers`]`::of(d)` for `d >= 2`, then [`rem_1`]`(x, &powers)`), read from
+/// the bytes of an [`Operand`] in its own byte order; it pays from [`REM_1_BYTES`] bytes of
+/// dividend for `d <= `[`REM_1_MAX`], from [`REM_1_BYTES_WIDE`] above, and from
+/// [`REM_1_PREPARED`] when the powers are kept for many dividends.
+pub(crate) use super::div::{
+    Powers, REM_1_BYTES, REM_1_BYTES_WIDE, REM_1_MAX, REM_1_PREPARED, rem_1,
+};
+/// A magnitude read in place from the bytes of a number: `Operand::of(&n)`, or its fields set from
+/// a pointer, a length, the byte order and the significant length (the bytes up to the most
+/// significant non-zero one).
+pub(crate) use super::mul::Operand;
+
+/// Sets the `n` little-endian limbs at `r` to those at `x` times `y`, at any addresses (the bytes
+/// of numbers), and returns the limb above them; `r` may be `x`.
+///
+/// # Safety
+///
+/// `n >= 1`; the `8 n` bytes at `x` must be valid for reads and those at `r` for writes, and `r`
+/// must be `x` or apart from it.
+#[inline(always)]
+pub(crate) unsafe fn mul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    // SAFETY: as the caller guarantees.
+    unsafe { super::mul::mul_1_bytes(r, x, n, y) }
+}
+
+/// Adds the `n` little-endian limbs at `x` times `y` to those at `r`, at any addresses (the bytes
+/// of numbers), and returns the limb that carries out of them.
+///
+/// # Safety
+///
+/// `n >= 1`; the `8 n` bytes at `x` must be valid for reads and those at `r` for reads and writes,
+/// and apart from them.
+#[inline(always)]
+pub(crate) unsafe fn addmul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    // SAFETY: as the caller guarantees.
+    unsafe { super::mul::addmul_1_bytes(r, x, n, y) }
 }
 
 /// `r += a` for `a` no longer than `r`: the carry out of `r`.
@@ -632,16 +731,22 @@ pub(crate) fn sqrt_into(s: &mut Vec<u64>, a: &[u64], scratch: &mut Vec<u64>) {
 /// multiplication: the plan of a product ([`word_poly_plan`]`(la, lb, bits)`, `lb = 0` for a
 /// square, `None` past [`WORD_POLY_MAX`] coefficients) and the product by it
 /// ([`word_poly_mul`]`(r, a, b, n, plan)`, `b` empty for a square), and the products modulo
-/// `x^(2^k) - 1` ([`word_poly_plan_cyclic`]`(m, k, bits)`, [`word_poly_mul_cyclic`]), and
+/// `x^(2^k) - 1` ([`word_poly_plan_cyclic`]`(m, k, bits)`, [`word_poly_mul_cyclic_range`]), the
+/// coefficients `lo..lo + r.len()` of a product by the shortest wrapping transform that keeps them
+/// exact, the middle product of Newton's division ([`word_poly_mul_middle`]`(r, a, b, n, lo)`), and
 /// products of polynomials of small integer coefficients ([`int_poly_plan`], [`int_poly_mul`]),
 /// and of coefficients of several limbs cut into pieces ([`limb_poly_plan`], [`limb_poly_mul`]).
 pub(crate) use super::mul::fft::poly::{
     MAX_LEN as WORD_POLY_MAX, SplitTransform as LimbPolyTransform, mul as word_poly_mul,
-    mul_cyclic as word_poly_mul_cyclic, mul_cyclic_range as word_poly_mul_cyclic_range,
-    mul_int as int_poly_mul, mul_split as limb_poly_mul, mul_split_ready as limb_poly_mul_ready,
-    plan as word_poly_plan, plan_cyclic as word_poly_plan_cyclic, plan_int as int_poly_plan,
-    plan_split as limb_poly_plan, split_transform as limb_poly_transform,
+    mul_cyclic_range as word_poly_mul_cyclic_range, mul_int as int_poly_mul,
+    mul_split as limb_poly_mul, mul_split_ready as limb_poly_mul_ready, plan as word_poly_plan,
+    plan_cyclic as word_poly_plan_cyclic, plan_int as int_poly_plan, plan_split as limb_poly_plan,
+    split_transform as limb_poly_transform,
 };
+
+/// The coefficients `lo..lo + r.len()` of a product of polynomials modulo a word, by the shortest
+/// wrapping transform that keeps them exact (see above).
+pub(crate) use super::mul::fft::poly::mul_middle as word_poly_mul_middle;
 
 /// Montgomery's products modulo an odd `m` of `N` limbs, `R = B^N`, the residues fully reduced
 /// (below `m`): the kernels of `pow::montgomery` (inline assembly on aarch64 in registers up to
@@ -685,6 +790,11 @@ impl<const N: usize> Mont<N> {
         self.r.mul(a, b)
     }
 }
+
+/// Euclid's algorithm on two numbers of limbs with every step told to a closure, for the Jacobi
+/// symbol: [`euclid_steps`]`(x, y, |a_reduced, q0| …)` returns whether the gcd is 1, and from
+/// `STEPS_DC_THRESHOLD` (in `gcd/euclid.rs`) limbs takes the subquadratic half gcd.
+pub(crate) use super::gcd::euclid_steps;
 
 /// The inverse of `a` modulo the word `m >= 1`, below `m`, or `None` when they have a common
 /// factor, by Euclid's algorithm on words (the quotients of 1 to 3 by subtractions).

@@ -1,12 +1,14 @@
 //! `G2`: points of the sextic twist `E'(F_p²)`, `y² = x³ + b'`.
 
-use super::curve::{Family, PairingCurve};
+use super::curve::PairingCurve;
 use super::encoding::{
-    COMPRESSED, INFINITY, SORT, field_bytes, fp2_from_bytes, fp2_is_largest, fp2_to_bytes,
+    COMPRESSED, INFINITY, SORT, fast_fp2_from_be, fast_fp2_is_largest, fast_fp2_to_be, field_bytes,
     require_ethereum, require_zcash, zcash_flags,
 };
 use super::error::PointError;
-use super::point::{Jacobian, group_ops, on_curve};
+use super::fast::group::Jac;
+use super::fast::{self, Engine, ops, with_engine};
+use super::point::group_ops;
 use crate::math::field::Fp2;
 use crate::math::numbers::Number;
 
@@ -42,14 +44,75 @@ use crate::math::numbers::Number;
 pub struct G2<'c> {
     /// The curve.
     pub(super) curve: &'c PairingCurve,
-    /// The point.
-    pub(super) p: Jacobian<Fp2<'c>>,
+    /// The point: Jacobian `X`, `Y`, `Z`, each two elements of `F_p` in the engine's Montgomery
+    /// limbs.
+    pub(super) p: [[u64; 6]; 6],
+    /// Whether the point is known to be in `G2`, which lets products use the endomorphism.
+    pub(super) sub: bool,
 }
 
 impl<'c> G2<'c> {
-    /// The point of `curve` held as `p`.
-    pub(super) fn from_jacobian(curve: &'c PairingCurve, p: Jacobian<Fp2<'c>>) -> G2<'c> {
-        G2 { curve, p }
+    /// The point of `curve` held as the engine's `j`, known to be in `G2` if `sub`.
+    pub(super) fn from_jac<E: Engine<N>, const N: usize>(
+        curve: &'c PairingCurve,
+        j: &Jac<fast::Fp2<E, N>>,
+        sub: bool,
+    ) -> G2<'c> {
+        let mut p = [[0u64; 6]; 6];
+        j.store(&mut p);
+        G2 { curve, p, sub }
+    }
+
+    /// The point in the engine's arithmetic.
+    pub(super) fn jac<E: Engine<N>, const N: usize>(&self) -> Jac<fast::Fp2<E, N>> {
+        Jac::load(&self.p)
+    }
+
+    /// The point at infinity.
+    pub(super) fn identity(curve: &'c PairingCurve) -> G2<'c> {
+        with_engine!(curve, E, N => G2::from_jac::<E, N>(curve, &Jac::identity(), true))
+    }
+
+    /// The affine point `(x, y)` of the public tower, not checked.
+    pub(super) fn from_affine_unchecked(
+        curve: &'c PairingCurve,
+        x: &Fp2<'_>,
+        y: &Fp2<'_>,
+        sub: bool,
+    ) -> G2<'c> {
+        with_engine!(curve, E, N => {
+            let j = Jac::from_affine(fast::Fp2::<E, N>::from_public(x), fast::Fp2::from_public(y));
+            G2::from_jac::<E, N>(curve, &j, sub)
+        })
+    }
+
+    /// `self + o`.
+    #[track_caller]
+    pub(super) fn sum(&self, o: &G2<'c>) -> G2<'c> {
+        self.curve.check(o.curve);
+        let c = self.curve;
+        with_engine!(c, E, N => G2::from_jac::<E, N>(c, &self.jac::<E, N>().add(&o.jac::<E, N>()), self.sub && o.sub))
+    }
+
+    /// `−self`.
+    pub(super) fn negated(&self) -> G2<'c> {
+        let c = self.curve;
+        with_engine!(c, E, N => G2::from_jac::<E, N>(c, &self.jac::<E, N>().neg(), self.sub))
+    }
+
+    /// `[k] self`.
+    pub(super) fn times(&self, k: &Number) -> G2<'c> {
+        let c = self.curve;
+        with_engine!(c, E, N => {
+            G2::from_jac::<E, N>(c, &ops::g2_mul(&self.jac::<E, N>(), k, self.sub), self.sub)
+        })
+    }
+
+    /// Whether the points are equal.
+    #[track_caller]
+    pub(super) fn same_point(&self, o: &G2<'c>) -> bool {
+        self.curve.check(o.curve);
+        with_engine!(self.curve, E, N => self.jac::<E, N>().equals(&o.jac::<E, N>()))
     }
 
     /// The point `(x, y)` of `G2`.
@@ -66,7 +129,7 @@ impl<'c> G2<'c> {
     pub fn new(curve: &'c PairingCurve, x: Fp2<'c>, y: Fp2<'c>) -> Result<G2<'c>, PointError> {
         let q = G2::new_on_curve(curve, x, y)?;
         if q.is_in_subgroup() {
-            Ok(q)
+            Ok(G2 { sub: true, ..q })
         } else {
             Err(PointError::NotInSubgroup)
         }
@@ -116,10 +179,13 @@ impl<'c> G2<'c> {
                 && y.tower().xi() == t.xi(),
             "elements of different towers"
         );
-        if !on_curve(&x, &y, &curve.b_twist) {
-            return Err(PointError::NotOnCurve);
-        }
-        Ok(G2::from_jacobian(curve, Jacobian::from_affine(x, y)))
+        with_engine!(curve, E, N => {
+            let (x, y) = (fast::Fp2::<E, N>::from_public(&x), fast::Fp2::from_public(&y));
+            if !Jac::on_curve(&x, &y, &E::tables().b_twist) {
+                return Err(PointError::NotOnCurve);
+            }
+            Ok(G2::from_jac::<E, N>(curve, &Jac::from_affine(x, y), false))
+        })
     }
 
     /// The curve.
@@ -131,19 +197,23 @@ impl<'c> G2<'c> {
     /// Whether this is the point at infinity, the neutral element.
     #[must_use]
     pub fn is_identity(&self) -> bool {
-        self.p.is_identity()
+        with_engine!(self.curve, E, N => self.jac::<E, N>().is_identity())
     }
 
     /// The affine coordinates `(x, y)`, or `None` for the point at infinity: one inversion.
     #[must_use]
     pub fn coordinates(&self) -> Option<(Fp2<'c>, Fp2<'c>)> {
-        self.p.to_affine()
+        with_engine!(self.curve, E, N => {
+            let (x, y) = self.jac::<E, N>().to_affine()?;
+            Some((x.to_public(), y.to_public()))
+        })
     }
 
     /// `2Q`.
     #[must_use]
     pub fn double(&self) -> G2<'c> {
-        G2::from_jacobian(self.curve, self.p.double())
+        let c = self.curve;
+        with_engine!(c, E, N => G2::from_jac::<E, N>(c, &self.jac::<E, N>().double(), self.sub))
     }
 
     /// The endomorphism `ψ` of the twist: untwist to `E(F_p¹²)`, apply the Frobenius map
@@ -152,28 +222,8 @@ impl<'c> G2<'c> {
     /// one: two products of `F_p²` and no inversion. On `G2` it is the product by `p`.
     #[must_use]
     pub fn psi(&self) -> G2<'c> {
-        let [gx, gy] = &self.curve.psi;
-        G2::from_jacobian(
-            self.curve,
-            Jacobian {
-                x: &self.p.x.conjugate() * gx,
-                y: &self.p.y.conjugate() * gy,
-                z: self.p.z.conjugate(),
-            },
-        )
-    }
-
-    /// `ψ²`, with coefficients in `F_p`: `ψ²(x, y) = (x N(γₓ), y N(γᵧ))`.
-    pub(super) fn psi2(&self) -> G2<'c> {
-        let [gx, gy] = &self.curve.psi2;
-        G2::from_jacobian(
-            self.curve,
-            Jacobian {
-                x: self.p.x.mul_by_base(gx),
-                y: self.p.y.mul_by_base(gy),
-                z: self.p.z.clone(),
-            },
-        )
+        let c = self.curve;
+        with_engine!(c, E, N => G2::from_jac::<E, N>(c, &ops::psi(&self.jac::<E, N>()), self.sub))
     }
 
     /// Whether the point lies in `G2`, the subgroup of order `r`: by the endomorphism, `ψ(Q) = [p]Q`
@@ -183,7 +233,7 @@ impl<'c> G2<'c> {
     /// A product by a scalar of 64 or 128 bits instead of the 255-bit `r`.
     #[must_use]
     pub fn is_in_subgroup(&self) -> bool {
-        self.psi().p.equals(&self.p.mul(&self.curve.g2_test))
+        with_engine!(self.curve, E, N => ops::g2_in_subgroup(&self.jac::<E, N>()))
     }
 
     /// A point of `G2` from any point of the twist, by an endomorphism that kills the part outside
@@ -197,24 +247,8 @@ impl<'c> G2<'c> {
     ///   on `G2` is the product by `x + 3xp + xp² + p³` modulo `r`.
     #[must_use]
     pub fn clear_cofactor(&self) -> G2<'c> {
-        let x = &self.curve.x;
-        match self.curve.family {
-            Family::Bls12 => {
-                let t1 = self * x;
-                let t2 = self.psi();
-                let t3 = self.double().psi2();
-                let t3 = &t3 - &t2;
-                let t2 = &(&t1 + &t2) * x;
-                &(&(&t3 + &t2) - &t1) - self
-            }
-            Family::Bn => {
-                let xq = self * x;
-                let a = (&xq * &Number::from(3u8)).psi();
-                let b = xq.psi2();
-                let c = self.psi2().psi();
-                &(&(&xq + &a) + &b) + &c
-            }
-        }
+        let c = self.curve;
+        with_engine!(c, E, N => G2::from_jac::<E, N>(c, &ops::g2_clear(&self.jac::<E, N>()), true))
     }
 
     /// `[h] P` for the cofactor `h` of `G2` ([`PairingCurve::g2_cofactor`]): a point of
@@ -222,7 +256,14 @@ impl<'c> G2<'c> {
     /// clearing computes it (and its clearing of BN254's `G2`).
     #[must_use]
     pub fn mul_by_cofactor(&self) -> G2<'c> {
-        G2::from_jacobian(self.curve, self.p.mul(&self.curve.h2))
+        let c = self.curve;
+        with_engine!(c, E, N => {
+            let h = &E::groups().h2;
+            // Width 5: measured on an Apple M4 Max (widths 3 to 7 alternated), widths 4 and 6 take
+            // 1.02 and 1.01 times its time for BLS12-381's 507-bit cofactor, and 0.99 and 1.04 for
+            // BN254's 254 bits.
+            G2::from_jac::<E, N>(c, &ops::mul_wnaf(&self.jac::<E, N>(), h, 5), true)
+        })
     }
 
     /// The compressed ZCash encoding of BLS12-381, 96 bytes: `x₁ ‖ x₀` of `x = x₀ + x₁u` in
@@ -248,21 +289,22 @@ impl<'c> G2<'c> {
     #[must_use]
     pub fn to_zcash_compressed(&self) -> Vec<u8> {
         require_zcash(self.curve);
-        match self.coordinates() {
+        let n = field_bytes(self.curve.base_field());
+        with_engine!(self.curve, E, N => match self.jac::<E, N>().to_affine() {
             None => {
-                let mut b = vec![0u8; 2 * field_bytes(self.curve.base_field())];
+                let mut b = vec![0u8; 2 * n];
                 b[0] = COMPRESSED | INFINITY;
                 b
             }
             Some((x, y)) => {
-                let mut b = fp2_to_bytes(&x);
+                let mut b = fast_fp2_to_be(&x, n);
                 b[0] |= COMPRESSED;
-                if fp2_is_largest(&y) {
+                if fast_fp2_is_largest(&y) {
                     b[0] |= SORT;
                 }
                 b
             }
-        }
+        })
     }
 
     /// The uncompressed ZCash encoding of BLS12-381, 192 bytes: `x₁ ‖ x₀ ‖ y₁ ‖ y₀`, `0x40` and
@@ -275,18 +317,19 @@ impl<'c> G2<'c> {
     #[must_use]
     pub fn to_zcash_uncompressed(&self) -> Vec<u8> {
         require_zcash(self.curve);
-        match self.coordinates() {
+        let n = field_bytes(self.curve.base_field());
+        with_engine!(self.curve, E, N => match self.jac::<E, N>().to_affine() {
             None => {
-                let mut b = vec![0u8; 4 * field_bytes(self.curve.base_field())];
+                let mut b = vec![0u8; 4 * n];
                 b[0] = INFINITY;
                 b
             }
             Some((x, y)) => {
-                let mut b = fp2_to_bytes(&x);
-                b.extend(fp2_to_bytes(&y));
+                let mut b = fast_fp2_to_be(&x, n);
+                b.extend(fast_fp2_to_be(&y, n));
                 b
             }
-        }
+        })
     }
 
     /// The point of a ZCash encoding of BLS12-381, compressed (96 bytes) or uncompressed (192),
@@ -318,19 +361,28 @@ impl<'c> G2<'c> {
             }
             return Ok(curve.g2_identity());
         }
-        let x = fp2_from_bytes(curve, &b[..n])?;
-        let y = if compressed {
-            let y = (&(&x.square() * &x) + &curve.b_twist)
-                .sqrt()
-                .ok_or(PointError::NotOnCurve)?;
-            if fp2_is_largest(&y) == sort { y } else { -y }
-        } else {
-            if sort {
-                return Err(PointError::Flags);
+        with_engine!(curve, E, N => {
+            let x = fast_fp2_from_be::<E, N>(&b[..n])?;
+            let bt = &E::tables().b_twist;
+            let y = if compressed {
+                let y = x.square().mul(&x).add(bt).sqrt().ok_or(PointError::NotOnCurve)?;
+                if fast_fp2_is_largest(&y) == sort { y } else { y.neg() }
+            } else {
+                if sort {
+                    return Err(PointError::Flags);
+                }
+                let y = fast_fp2_from_be::<E, N>(&b[n..])?;
+                if !Jac::on_curve(&x, &y, bt) {
+                    return Err(PointError::NotOnCurve);
+                }
+                y
+            };
+            let j = Jac::from_affine(x, y);
+            if !ops::g2_in_subgroup(&j) {
+                return Err(PointError::NotInSubgroup);
             }
-            fp2_from_bytes(curve, &b[n..])?
-        };
-        G2::new(curve, x, y)
+            Ok(G2::from_jac::<E, N>(curve, &j, true))
+        })
     }
 
     /// The encoding of Ethereum's EIP-197 for BN254, 128 bytes: `x₁ ‖ x₀ ‖ y₁ ‖ y₀` of
@@ -344,14 +396,15 @@ impl<'c> G2<'c> {
     #[must_use]
     pub fn to_ethereum(&self) -> Vec<u8> {
         require_ethereum(self.curve);
-        match self.coordinates() {
-            None => vec![0u8; 4 * field_bytes(self.curve.base_field())],
+        let n = field_bytes(self.curve.base_field());
+        with_engine!(self.curve, E, N => match self.jac::<E, N>().to_affine() {
+            None => vec![0u8; 4 * n],
             Some((x, y)) => {
-                let mut b = fp2_to_bytes(&x);
-                b.extend(fp2_to_bytes(&y));
+                let mut b = fast_fp2_to_be(&x, n);
+                b.extend(fast_fp2_to_be(&y, n));
                 b
             }
-        }
+        })
     }
 
     /// The point of an EIP-197 encoding of BN254: 128 bytes, four coefficients below `p`, all zero
@@ -383,12 +436,21 @@ impl<'c> G2<'c> {
         if bytes.len() != 2 * n {
             return Err(PointError::Length);
         }
-        let x = fp2_from_bytes(curve, &bytes[..n])?;
-        let y = fp2_from_bytes(curve, &bytes[n..])?;
-        if x.is_zero() && y.is_zero() {
-            return Ok(curve.g2_identity());
-        }
-        G2::new(curve, x, y)
+        with_engine!(curve, E, N => {
+            let x = fast_fp2_from_be::<E, N>(&bytes[..n])?;
+            let y = fast_fp2_from_be::<E, N>(&bytes[n..])?;
+            if x.is_zero() && y.is_zero() {
+                return Ok(curve.g2_identity());
+            }
+            if !Jac::on_curve(&x, &y, &E::tables().b_twist) {
+                return Err(PointError::NotOnCurve);
+            }
+            let j = Jac::from_affine(x, y);
+            if !ops::g2_in_subgroup(&j) {
+                return Err(PointError::NotInSubgroup);
+            }
+            Ok(G2::from_jac::<E, N>(curve, &j, true))
+        })
     }
 }
 

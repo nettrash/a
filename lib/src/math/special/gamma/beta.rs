@@ -307,6 +307,7 @@ pub(super) fn lbeta_f64(a: f64, b: f64) -> f64 {
 }
 
 /// `x! = Γ(x + 1)` of an `f64` (NaN at the negative integers).
+#[inline]
 pub(super) fn factorial_f64(x: f64) -> f64 {
     if (0.0..=170.0).contains(&x) && is_int(x) {
         return FACT_HI[x as usize];
@@ -352,7 +353,25 @@ fn factorial_dd(m: u32) -> Dd {
 }
 
 /// `C(n, k)` of `f64`s.
+#[inline]
 pub(super) fn binomial_f64(n: f64, k: f64) -> f64 {
+    // Integers 0 ≤ k ≤ n ≤ 170 from the tables, inlined; the rest out of line.
+    if (0.0..=170.0).contains(&n) && is_int(n) && is_int(k) && (0.0..=n).contains(&k) {
+        let k = k.min(n - k);
+        if n <= 60.0 {
+            // Correctly rounded, row n from ⌈n/2⌉·(⌊n/2⌋ + 1) (k ≤ n/2).
+            let i = n as usize;
+            return BINOM60[i.div_ceil(2) * (i / 2 + 1) + k as usize];
+        }
+        // n!/(k!(n − k)!) from the table, in double-double.
+        return fact_dd(n).div(fact_dd(k).mul(fact_dd(n - k))).value();
+    }
+    binomial_rest(n, k)
+}
+
+/// `binomial_f64` but for the integers in the table.
+#[inline(never)]
+fn binomial_rest(n: f64, k: f64) -> f64 {
     if n.is_nan() || k.is_nan() {
         return n + k;
     }

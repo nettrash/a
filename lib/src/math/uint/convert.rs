@@ -227,8 +227,21 @@ impl<const N: usize> Uint<N> {
     #[inline]
     const fn top_bits(self, bits: u32) -> (u64, u32) {
         let shift = bits - 64;
-        let top = self.unbounded_shr(shift).as_limbs()[0];
-        let sticky = self.trailing_zeros() < shift;
+        // The 64 bits from `shift` up straddle limbs i and i + 1 (which exists for s > 0, as the
+        // top bit is at 64i + s + 63); the sticky bit is any set bit below them.
+        let (i, s) = ((shift / 64) as usize, shift % 64);
+        let l = self.as_limbs();
+        let top = if s == 0 {
+            l[i]
+        } else {
+            (l[i] >> s) | (l[i + 1] << (64 - s))
+        };
+        let mut sticky = s != 0 && l[i] & ((1u64 << s) - 1) != 0;
+        let mut j = 0;
+        while !sticky && j < i {
+            sticky = l[j] != 0;
+            j += 1;
+        }
         (top | sticky as u64, shift)
     }
 

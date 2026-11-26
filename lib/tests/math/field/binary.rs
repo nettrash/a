@@ -174,15 +174,16 @@ fn naive_clmul(a: u64, b: u64) -> u128 {
 
 #[test]
 fn the_cpus_instruction_is_detected() {
+    // Under `--cfg a_baseline` every run-time check reports the instruction absent.
     #[cfg(all(target_arch = "x86_64", not(miri)))]
     assert_eq!(
         Clmul::detect() == Clmul::Pclmulqdq,
-        std::arch::is_x86_feature_detected!("pclmulqdq")
+        !cfg!(a_baseline) && std::arch::is_x86_feature_detected!("pclmulqdq")
     );
     #[cfg(all(target_arch = "aarch64", not(miri)))]
     assert_eq!(
         Clmul::detect() == Clmul::Pmull,
-        std::arch::is_aarch64_feature_detected!("aes")
+        !cfg!(a_baseline) && std::arch::is_aarch64_feature_detected!("aes")
     );
     #[cfg(miri)]
     assert_eq!(Clmul::detect(), Clmul::Portable);
@@ -612,6 +613,74 @@ fn a_kernel_the_cpu_lacks_is_refused() {
             let r = std::panic::catch_unwind(|| BinaryField::with_clmul(&[8, 4, 3, 1, 0], k));
             assert!(r.is_err());
             assert!(std::panic::catch_unwind(|| k.mul(1, 1)).is_err());
+        }
+    }
+}
+
+#[test]
+fn inverses_by_division_steps_on_every_kernel() {
+    // The degrees at and around the word boundaries, one word to ten; 24 and 31, where the portable
+    // kernel takes the steps (one batch); the first moduli of the steps' buffers of 64 and 128 words
+    // (41 and 65 words), the longest the steps take under PMULL (128 words) and one beyond it (the
+    // extended Euclid); and GF(2) by x + 1 and by x (no constant term: the extended Euclid).
+    let moduli: [&[u32]; 19] = [
+        &[1, 0],
+        &[1],
+        &[2, 1, 0],
+        &[8, 4, 3, 1, 0],
+        &[24, 4, 3, 1, 0],
+        &[31, 3, 0],
+        &[63, 1, 0],
+        &[64, 4, 3, 1, 0],
+        &[65, 18, 0],
+        &[113, 9, 0],
+        &[127, 1, 0],
+        &[128, 7, 2, 1, 0],
+        &[163, 7, 6, 3, 0],
+        &[233, 74, 0],
+        &[571, 10, 5, 2, 0],
+        &[2560, 9, 3, 1, 0],
+        &[4096, 27, 15, 1, 0],
+        &[8191, 15, 7, 1, 0],
+        &[8192, 9, 5, 2, 0],
+    ];
+    let mut s = 5u64;
+    let mut next = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
+    };
+    for e in moduli.into_iter().filter(|e| !cfg!(miri) || e[0] <= 640) {
+        let m = e[0] as usize;
+        let w = m.div_ceil(64);
+        for kind in [Clmul::detect(), Clmul::Portable] {
+            let f = BinaryField::with_clmul(e, kind);
+            let per = if cfg!(miri) {
+                3
+            } else if m > 2000 {
+                6
+            } else {
+                40
+            };
+            for i in 0..per + 2 {
+                let mut x: Vec<u64> = match i {
+                    0 => vec![1],
+                    1 => vec![u64::MAX; w],
+                    _ if i % 3 == 0 => (0..w).map(|_| next() & next()).collect(),
+                    _ => (0..w).map(|_| next()).collect(),
+                };
+                x.resize(w, 0);
+                if !m.is_multiple_of(64) {
+                    x[w - 1] &= (1u64 << (m % 64)) - 1;
+                }
+                let a = f.element(&x);
+                match a.inverse() {
+                    Some(r) => assert_eq!(&a * &r, f.one(), "{e:?} {kind:?} {x:x?}"),
+                    None => assert!(a.is_zero(), "{e:?} {kind:?}"),
+                }
+            }
+            assert!(f.zero().inverse().is_none());
         }
     }
 }

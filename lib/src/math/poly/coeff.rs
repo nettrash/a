@@ -30,6 +30,12 @@ pub(crate) mod sealed {
         fn mul(a: &Self, b: &Self) -> Self;
         /// `-a`.
         fn neg(a: &Self) -> Self;
+        /// `0 - a`: the coefficient of a difference past the end of the minuend. [`neg`](Self::neg)
+        /// for the exact types; for the floats the IEEE difference, `0 - (+0) = +0` where
+        /// `-(+0) = -0`.
+        fn zero_sub(a: &Self) -> Self {
+            Self::neg(a)
+        }
         /// `*a += b`.
         fn add_assign(a: &mut Self, b: &Self);
         /// `*a -= b`.
@@ -47,6 +53,20 @@ pub(crate) mod sealed {
             if !a.is_zero() && !b.is_zero() {
                 Self::sub_assign(c, &Self::mul(a, b));
             }
+        }
+        /// The composition `p(g)` by the coefficients' own method, `None` for the generic one.
+        fn poly_compose(p: &[Self], g: &[Self]) -> Option<Vec<Self>> {
+            let _ = (p, g);
+            None
+        }
+        /// The coefficients of the derivative of the polynomial of the coefficients `c`, not
+        /// trimmed.
+        fn poly_derivative(c: &[Self]) -> Vec<Self> {
+            c.iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, x)| Self::mul(x, &Self::from_u64(i as u64)))
+                .collect()
         }
         /// The product of the polynomials of the coefficients `a` and `b`, the constant first, both
         /// not empty: `a.len() + b.len() - 1` coefficients, the top one possibly 0 (for a ring
@@ -272,6 +292,14 @@ impl sealed::Coefficient for Number {
     fn poly_from_roots(r: &[Self]) -> Vec<Self> {
         crate::math::poly::eval::number_from_roots(r)
     }
+    fn poly_derivative(c: &[Self]) -> Vec<Self> {
+        // The product by a word into a new vector, without a number made of the index.
+        c.iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, x)| x * (i as u64))
+            .collect()
+    }
     fn poly_mul(a: &[Self], b: &[Self]) -> Vec<Self> {
         super::arith::zmul::mul(a, b)
     }
@@ -303,6 +331,9 @@ impl sealed::Coefficient for Rational {
     }
     fn poly_from_roots(r: &[Self]) -> Vec<Self> {
         crate::math::poly::eval::rational_from_roots(r)
+    }
+    fn poly_compose(p: &[Self], g: &[Self]) -> Option<Vec<Self>> {
+        super::arith::field::rat_compose(p, g)
     }
     fn poly_mul(a: &[Self], b: &[Self]) -> Vec<Self> {
         super::arith::field::rat_mul(a, b)
@@ -397,6 +428,10 @@ impl sealed::Coefficient for f64 {
     #[inline]
     fn neg(a: &Self) -> Self {
         -a
+    }
+    #[inline]
+    fn zero_sub(a: &Self) -> Self {
+        0.0 - a
     }
     #[inline]
     fn add_assign(a: &mut Self, b: &Self) {
@@ -497,6 +532,10 @@ impl sealed::Coefficient for Complex<f64> {
     #[inline]
     fn neg(a: &Self) -> Self {
         -*a
+    }
+    #[inline]
+    fn zero_sub(a: &Self) -> Self {
+        Complex::new(0.0, 0.0) - *a
     }
     #[inline]
     fn add_assign(a: &mut Self, b: &Self) {

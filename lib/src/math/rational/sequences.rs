@@ -7,7 +7,7 @@
 //! modulo primes by Harvey's method instead, which leaves the formula fewer bits and far fewer
 //! primes ([`bernoulli`], [`modp`]). The table of them all runs the formula from the top index
 //! down, each power of the zeta function's sum from the last by a product with a limb, after the
-//! tangent numbers for short tables. Harmonic numbers are sums over the odd numbers by binary
+//! tables to `B_200`. Harmonic numbers are sums over the odd numbers by binary
 //! splitting, reduced without a greatest common divisor of the long parts ([`harmonic`]).
 
 mod bernoulli;
@@ -27,7 +27,7 @@ impl Rational {
     /// Mathematica. The other convention, `B_1 = +1/2` (of `x / (1 - e^-x)`), differs only there:
     /// it is `-Rational::bernoulli(1, o)`, or `(-1)^n B_n` for any `n`.
     ///
-    /// Up to `B_100` from tables (`B_58` the last numerator below `2^127`, then 75 limbs); those
+    /// Up to `B_200` from tables (`B_58` the last numerator below `2^127`, then 492 limbs); those
     /// whose parts fit in 64 bits (to `B_34`, and `B_38`) are written as words in the caller,
     /// with nothing allocated, 10 cycles measured on an Apple M4 Max against 17 for FLINT 3.6.
     /// Beyond, the denominator by von Staudt and Clausen's theorem, the product of the primes `p`
@@ -72,10 +72,8 @@ impl Rational {
     /// Returns the Bernoulli numbers `B_0, B_1, ..., B_n` (`n + 1` of them), each in lowest terms
     /// in the byte order `byte_order`, as [`bernoulli`](Self::bernoulli) gives them one by one.
     ///
-    /// Up to `B_100` from the tables, the short ones as words; up to `n = 150`, from the tangent
-    /// numbers by Brent and Harvey's recurrence (2011), `m^2 / 2` steps on integers for
-    /// `m = n / 2`, and `|B_2k| = 2k T_k / (4^k (4^k - 1))`; beyond, by the zeta function from the
-    /// top index down, as FLINT's `bernoulli_fmpq_vec_no_cache` does: `G_k = 2 k! / (2π)^k` from
+    /// Up to `B_200` from the tables, the short ones as words; beyond, by the zeta function from
+    /// the top index down, as FLINT's `bernoulli_fmpq_vec_no_cache` does: `G_k = 2 k! / (2π)^k` from
     /// `G_(k+2)` by a product with `(2π)^2` and a division by `(k + 2)(k + 1)`, and `ζ(k)` from the
     /// odd powers `j^-k` in fixed point, each from `j^-(k+2)` by a product with the limb `j^2`, the
     /// precisions falling with `k` and the errors bounded as they go. Taking them one by one would

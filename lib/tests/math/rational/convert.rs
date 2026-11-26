@@ -421,6 +421,25 @@ fn rationals_to_integers() {
     assert_eq!(u128::try_from(&Rational::from(u128::MAX)), Ok(u128::MAX));
     assert!(u128::try_from(&(Rational::from(u128::MAX) + 1u32)).is_err());
     assert_eq!(usize::try_from(&Rational::from(0)), Ok(0));
+    // The edges of the 128-bit types, of integers in numbers read in registers, in both byte
+    // orders.
+    for o in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+        let uint = |v: u128| Rational::from_integer(number(&v.to_le_bytes(), false, o));
+        let int =
+            |v: i128| Rational::from_integer(number(&v.unsigned_abs().to_le_bytes(), v < 0, o));
+        assert_eq!(i128::try_from(&int(i128::MAX)), Ok(i128::MAX));
+        assert_eq!(i128::try_from(&int(i128::MIN)), Ok(i128::MIN));
+        assert_eq!(i128::try_from(&int(i128::MIN + 1)), Ok(i128::MIN + 1));
+        assert!(i128::try_from(&uint(1 << 127)).is_err());
+        assert!(i128::try_from(&(int(i128::MIN) - 1u8)).is_err());
+        assert_eq!(u128::try_from(&uint(u128::MAX)), Ok(u128::MAX));
+        assert_eq!(u128::try_from(&uint(1 << 64)), Ok(1 << 64));
+        assert!(u128::try_from(&-uint(1 << 64)).is_err());
+        assert_eq!(i128::try_from(&-uint(1 << 64)), Ok(-(1 << 64)));
+        assert!(u128::try_from(&(uint(u128::MAX) + 1u8)).is_err());
+        assert!(i64::try_from(&uint(1 << 64)).is_err());
+        assert!(u64::try_from(&uint(1 << 64)).is_err());
+    }
     let mut state = 77u64;
     for _ in 0..size(500, 20) {
         let n = integer(&mut state, 20);
@@ -428,6 +447,9 @@ fn rationals_to_integers() {
         assert_eq!(Number::try_from(&r), Ok(n.clone()));
         assert_eq!(i64::try_from(&r).ok(), i64::try_from(&n).ok());
         assert_eq!(u32::try_from(&r).ok(), u32::try_from(&n).ok());
+        assert_eq!(i128::try_from(&r).ok(), i128::try_from(&n).ok());
+        assert_eq!(u128::try_from(&r).ok(), u128::try_from(&n).ok());
+        assert_eq!(isize::try_from(&r).ok(), isize::try_from(&n).ok());
         let r = rational(&mut state, 20);
         if !r.is_integer() {
             assert!(Number::try_from(&r).is_err());

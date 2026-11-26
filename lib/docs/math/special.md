@@ -89,11 +89,12 @@ One limit is stated rather than met: the complex `gamma` for `|z| ≥ 10¹⁴`. 
 - **`ln |Γ(x)|`.** The result below 8 comes from its own minimax pieces: `ln Γ(1 + t) = t·H(t)` on `−1/2 ≤ t < 1/2` (five pieces, the zero at 1 a factor), `ln Γ(2 + t) = t(1 + t)·F(t)` on `−1/2 ≤ t < 1` (three pieces, the zeros at 1 and 2 exact factors), `ln Γ` on the units of `[3, 8)`, each `Y + c₁s + s²R(s)` with the first two terms without error (on the units also `c₂s²`, with the rounding of `s²`); below ½, `ln Γ(1 + x) − ln x`. The other functions use a version in double-double to about 2⁻⁶⁰: below 1.5 `ln Γ(x) = ln Γ(x + 1) − ln x` (and `− ln(x(1 + x))` below ½, one logarithm of the double-double `x + x²`), between 3 and 8 the product of the exact factors and one logarithm, Stirling's series from 8 on (one double-double `ln` and the sums in double-double), `x(ln x − 1) − (ln x)/2` rounded once beyond 2⁵², and the reflection formula below −½ — where its terms cancel (beside the zeros on the negative axis), with `ln Γ(−x)` from the exact product and `ln Γ(2 + t)`, whose absolute error is the smaller.
 - **Complex `Γ` and `ln Γ`.** Complex double-double: Stirling's series for `|z| ≥ 10` with `Re z ≥ 0` (its main terms `(z − ½) ln z − z` in double-double, which multiply the errors of `ln |z|` and `arg z` by `|z|`: so `arg z` to about 2⁻¹⁰⁰ from the octant, a table of `atan(j/64)` and the series of `atan u` of the remainder `u = (n − (j/64)d)/(d + (j/64)n)`, `|u| ≤ 1/128`, in double-double, and `ln |z|` from `|z| = 2¹²` on by the second logarithm above), the shift `ln Γ(z) = ln Γ(z + n) − ln Π(z + k)` below it with the product in double-double and the branch kept by counting its crossings of the negative axis (Hare's method, as in SciPy), Taylor series at the zeros 1 and 2, and for `Re z < 0` `ln Γ(z) = ln 2π − iπ/2 + iπz − ln(1 − e^{2πiz}) − ln Γ(1 − z)` for `Im z > 0`, the branch that is analytic in the upper half-plane (the lower by conjugation). `Γ(z) = e^{ln Γ(z)}` from the double-double logarithm: its exponential, and the sine and cosine of its imaginary part `θ` as `sin(πq)` and `cos(πq)` of the double-double `q = θ/π` with both of its parts reduced exactly (`θ` is of the size of `|z| ln |z|`), so the error stays near ε while `|ln Γ|` grows to about 10¹⁵. Beyond `|z| = 10¹⁴` the double-double `ln Γ(z)` itself, `|z| ln |z|` in size, carries an absolute error of about `|z| ln |z| · 2⁻¹⁰⁵`, which is the relative error of `Γ(z)` (there the condition number `|zψ(z)|` of `Γ` is past `1/ε`).
 - **`ψ`.** `ln x + (its low part − 1/(2x) − u·T(u))`, rounded once, from 8 on (`T` minimax in `u = 1/x²`); eight minimax pieces `Y + c₁s + s²R(s)` on `[2, 8)`; `(x − x₀)·Q(x)` in four pieces on `[1, 2]` with the positive zero `x₀ = 1.4616321449683622…` in double-double; `ψ(1 + x) − 1/x` below 1; and `ψ(−u) = ψ(u) + 1/u + π cot(πu)` with `ψ(u) + 1/u = ψ(1 + u)` for `u < 1`, `cot` from one reduction for both the sine and the cosine in double-double and one division; below `2⁻⁶⁰` (where `sin(πu)` would be subnormal) `ψ(−u) = 1/u − γ`, rounded once.
-- **`ψ⁽ⁿ⁾`.** `ψ′` by its own method: `1/x + (its rounding error + 1/(2x²) + T(u)/x³)`, rounded once, from 10 on, ten minimax pieces `Y + c₁s + R(s)` on `[2, 10)` with `c₁s` without error, and `Σ 1/(x + j)² + ψ′(x + m)` below 2. Otherwise `(−1)ⁿ⁺¹ n! ζ(n + 1, x)`, the Hurwitz zeta function by its terms up to where its Euler–Maclaurin tail converges to 2⁻⁶⁰ (from `y ≥ 0.38(n + 21) + 0.5`, with up to 40 Bernoulli terms, the first three in double-double), or until the rest is negligible; for `x < 0` the sum of all the terms `(x + j)^(−n−1)` as `(−1)^(n+1)[ζ(n + 1, r) − ζ(n + 1, 1 − x)] + ζ(n + 1, p)` of the exact distances `r` and `p` of `x` to the integers beside it. Large orders and arguments carry their values as `v·e^l`, so nothing overflows before the last product.
+- **The `f32` form of `ψ`** on `1 ≤ x < 8`: fourteen polynomials of degree 15 on the halves of `[1, 8)` (Chebyshev interpolants, mpmath at 40 digits; on `[1, 2)` of `ψ(x)/(x − x₀)` about the zero, times `x − x₀` from the double-double `x₀`), picked by an index, good to `2⁻⁵¹` in `f64` and rounded once to the `f32` (checked against the `f64` path at every `f32` of `[0.9, 8.1]`); elsewhere the `f64` path.
+- **`ψ⁽ⁿ⁾`.** `ψ′` by its own method: `1/x + (its rounding error + 1/(2x²) + T(u)/x³)`, rounded once, from 10 on, sixteen pieces `Y + c₁s + R(s)` of width 1/2 on `[2, 10)` (the piece of `x` by an index, without a branch) with `c₁s` without error, and `Σ 1/(x + j)² + ψ′(x + m)` below 2, the piece of `x + m` evaluated at `s = x − (c − m)`, so that `x + m` is never rounded (its rounding error, below `x = 1/8`, through `c₁`). Otherwise `(−1)ⁿ⁺¹ n! ζ(n + 1, x)`, the Hurwitz zeta function by its terms up to where its Euler–Maclaurin tail converges to 2⁻⁶⁰ (from `y ≥ 0.38(n + 21) + 0.5`, with up to 40 Bernoulli terms, the first three in double-double), or until the rest is negligible; for `x < 0` the sum of all the terms `(x + j)^(−n−1)` as `(−1)^(n+1)[ζ(n + 1, r) − ζ(n + 1, 1 − x)] + ζ(n + 1, p)` of the exact distances `r` and `p` of `x` to the integers beside it. Large orders and arguments carry their values as `v·e^l`, so nothing overflows before the last product.
 - **`B` and `ln B`.** For `a, b > 0`: below 8, `B = R(a + b)/(R(a)R(b))` with `R = 1/Γ` in double-double (the low part of `a + b` through `ψ`) and `ln B` its logarithm (above 10⁻¹⁰⁰; `ln Γ(a) + ln Γ(b) − ln Γ(a + b)` in double-double below that); `ln Γ(a) + [ln Γ(b) − ln Γ(a + b)]` by the Stirling difference when only the larger is, and for both from 8 on `ln √(2π) + (a − ½) ln(a/c) + (b − ½) ln(b/c) − ½ ln c + S(a) + S(b) − S(c)` with `ln(b/c) = −ln(1 + a/b)` computed directly (an `atanh` series for small ratios), so no term cancels another (at half scale where `a + b` overflows); `B` is its double-double exponential. The Stirling difference `ln Γ(a) − ln Γ(a + b) = −(a − ½)L₁ − b(ln a + L₁) + b + S(a) − S(a + b)` takes `L₁ = ln(1 + b/a)` from `b/a` itself (by the `atanh` series) for `a ≥ 2⁴⁰`, so a ratio beyond `2⁵³` keeps its digits (below `2⁴⁰` from the double-double `1 + b/a`, whose absolute error `2⁻¹⁰⁶` times `a` stays below `2⁻⁶⁶`). Other arguments go through the reflection formula as identities between beta functions of positive arguments and sines of the exact arguments: `B(a, b) = π sin(πc)/(sin(πa) sin(πb)) / ((1 − c) B(1 − a, 1 − b))` for `a, b < 0`, `(sin(πc)/sin(πa)) B(b, 1 − c)` for `a < 0 < b` with `c = a + b < 0`, `π/(sin(πa) · b · B(c, 1 − a))` for `c > 0`; `c` is the exact sum as a double-double, so a sum beside a pole keeps its distance to it, and the gamma functions of large arguments appear only in Stirling differences of the double-doubles, never as differences of their logarithms.
-- **`binomial`, `pochhammer`.** The table of `n!` in double-double for integers to 170; compensated products for an integer `k` or `n` up to 32 (every factor `n − i` or `x + i` exact as a double-double, its low part and each product's rounding error carried); else `1/((n + 1) B(n − k + 1, k + 1))` with every argument an exact double-double (the beta function as above), and `(x)ₙ` by the Stirling difference, or for a negative `x` or `x + n` by `(x)ₙ = (sin(πx)/sin(πc)) Γ(1 − x)/Γ(1 − c)` and its companions (`c = x + n`).
+- **`binomial`, `pochhammer`.** For integers `0 ≤ k ≤ n ≤ 60` a table of the correctly rounded `C(n, k)` (`k ≤ n/2`, 961 values, rounded from the exact integers); the table of `n!` in double-double for integers to 170; compensated products for an integer `k` or `n` up to 32 (every factor `n − i` or `x + i` exact as a double-double, its low part and each product's rounding error carried); else `1/((n + 1) B(n − k + 1, k + 1))` with every argument an exact double-double (the beta function as above), and `(x)ₙ` by the Stirling difference, or for a negative `x` or `x + n` by `(x)ₙ = (sin(πx)/sin(πc)) Γ(1 − x)/Γ(1 − c)` and its companions (`c = x + n`).
 - **`P` and `Q`.** The structure of DiDonato and Morris (1986) and Boost: the smaller of `P` and `Q`, and the other as its double-double complement. The prefix `x^a e^(−x)/Γ(a + 1)` in double-double, `e^(a ln(x/a) + a − x − S(a))/√(2πa)` from `a = 8`. The series of `P` below about `x = a`, Legendre's continued fraction for `Q` above (evaluated from the bottom as one composed map per four steps, so one division per four steps, its length set in advance, the last steps in double-double), finite sums for integer and half-integer `a` below 20 when `x ≥ a` (`(n − 1)!` from the table, `erfcx` for the half-integers, `a/x` in double-double), the small-`a` form `Q = (Γ(1 + a) − 1 − (x^a − 1))/…` without cancellation for `x < 1.1` (and `x < 2` for `a < ½`; further out `Q` is a small difference of its terms, and the fraction takes over), `x^a − 1` from the double-double exponential, and for `a ≥ 20` with `|x − a|/a` below about ½ Temme's uniform expansion with 13 coefficients `c_k(z)` derived by series arithmetic after Temme (1979) and fitted minimax, and the area's double-double `erfcx` (eight pieces below 4, then `(1/t)·g(1/t²)`; `beta_inc`'s BASYM uses the same).
-- **Their inverses.** A first guess (`(pΓ(a + 1))^(1/a)` for small `x`; for `a ≥ 1` Temme's expansion inverted to first order, as DiDonato and Morris, with Acklam's normal quantile; an iteration on the tail for large `x`), then Halley's method on the logarithm of the smaller tail in `ln x` with the slope from `ln Γ(a)` computed once, kept in a bracket: about two evaluations of `P` or `Q` a call. The iteration goes on into the subnormals and stops when a step no longer moves `x` (the nearest float to Newton's root).
+- **Their inverses.** A first guess (`(pΓ(a + 1))^(1/a)` for small `x`; for `a ≥ 1` Temme's expansion inverted to first order, as DiDonato and Morris, with Acklam's normal quantile; an iteration on the tail for large `x`, and for `Q` with `1 ≤ a ≤ 50` in its tail (`−ln q > 3a`) the fixed point of its asymptotic form `x = −ln q − ln Γ(a) + (a − 1) ln x + ln(1 + (a − 1)/x + (a − 1)(a − 2)/x²)`, four steps from `−ln q − ln Γ(a)`), then Halley's method on the logarithm of the smaller tail in `ln x` with the slope from `ln Γ(a)` computed once, kept in a bracket: about two evaluations of `P` or `Q` a call. The iteration goes on into the subnormals and stops when a step no longer moves `x` (the nearest float to Newton's root).
 - **`I_x(a, b)`.** TOMS 708 (DiDonato and Morris 1992) as structured in Boost's `ibeta_imp`, the side computed always the one that does not cancel (for both parameters above 1 by the sign of `λ = a − (a + b)x`, in double-double where its `f64` value is within its error): the power series (three terms in double-double), the continued fraction in its division-free form (its depth by a forward recurrence of the convergents with rescaling, then a projective backward pass, two steps and the coefficients in double-double, one division at the end), the `a`-step with BGRAT for a small `b` beside a large `a`, and BASYM for both above 100 near the mean (its leading term `erfcx(z₀)` with `z₀ = √f` of the double-double exponent `f`, the error of the rounded root entering to first order: at the rounded root alone, its rounding and that of `f` reached the result in full, up to 1.67 ulps beside the mean of parameters from 10⁵ on). The power terms `x^a y^b/B(a, b)` in double-double with `x` and `y = 1 − x` exact: below 8 with `1/B = R(a)R(b)/R(c)`, else as `√(ab/(2π(a + b)))·e^(aφ(r) + bφ(s) + S(c) − S(a) − S(b))` with `φ(r) = ln(1 + r) − r` and `ar + bs = 0`, so the exponent never cancels; `d = xc − a = b − yc` is formed from the smaller of `x` and `y` (from the larger, beside a huge `c`, its error `2⁻¹⁰⁶c` reaches the exponent in full), from `c = 2⁴⁰` on with every partial product exact (rounded, it would keep `2⁻¹⁰⁶` of `a`: beside the mean of two parameters beyond 10³⁰ more than its own ulp), and `1 + r = xc/a` and `1 + s = yc/b` from `x` and `y` themselves away from the mean (from `r` they would keep only its absolute precision, none where `x` or `y` is tiny), `ln(xc/a)` as `ln x + ln(c/a)` for a subnormal `x` (its products would lose their error terms in the subnormals). From a first parameter of `2⁴⁰` on, the continued fraction's coefficients are scaled by powers of two (exactly: they grow like `a⁴` a step and overflowed from about `2⁷⁰`), and BGRAT takes `ln x` as `ln1p(x − 1)` of the exact `x − 1` (its error is multiplied by `a`). For `max(a, b) ≥ 2⁹⁹⁶`, the incomplete gamma limit `I_x(a, b) → P(a, bx)` with the product `bx` exact (a double-double, its low part through the density), or a point mass at the mean beside a parameter from `2⁶⁰⁰` on.
 - **Their inverses.** A first guess from the normal approximation with the Cornish–Fisher skewness term where it is small (for `a, b ≥ 2`), the leading tail term or the mean, then Halley's method on the logarithm of the smaller of `T` and `1 − T` (`T` the tail sought; where `T` passes ½, `ln(1 − T)`, steep where `ln T` is flat: from there Newton's step on `ln T` overshot into the far tail) in the log of the smaller of `x` and `y` (the step through `expm1`; the iterate changes sides where it passes ½, since the larger of the two lies on a coarser grid), with a bisection bracket: 2–3 evaluations a call. It stops where a step no longer moves the iterate, or where Halley's step is so small that the next would not (judged from the last two steps: the next error is about `C·dw³` with `C = dw/dw_last³`, which must be below half an ulp), and only with `|ln T − ln t| ≤ 2¹⁰`: further out a vanishing step means a slope without digits (`e` to a difference of two exponents of the size of `|ln T|`), and where `|ln T|` passes `2⁴⁰` the step is a bisection. The iteration goes on into the subnormals (the bracket is split geometrically) and stops when no float is left inside the bracket; after 200 steps without either, the result is NaN (no such case is known). For both parameters from `2⁸⁶` on, the root is `m + σz` (`m` the mean in double-double, `σ` the width, `z` the normal quantile): there the distribution is normal to far below an ulp (its width at most `2¹⁰` ulps of the smaller of `x` and `y`, its skewness at most `2⁻⁴²`, so the formula is within `10⁻⁴` ulp); the iteration is no more accurate there, and from about `2¹⁰⁶` on, where the width falls below an ulp, it cannot resolve the root (a float beside it lies many widths away, where its slopes carry no digits). For `min(a, b) ≥ 2⁶⁰⁰` (or `a + b` overflowing), whatever `max(a, b)`, the mean, rounded once from double-double (the width is below `2⁻³⁰⁰` of it); else for `max(a, b) ≥ 2⁹⁹⁶` the incomplete gamma limit (`x = u/b` with `P(a, u) = p` for a huge `b`, `x = 1 − u/a` with `Q(b, u) = p` for a huge `a`).
 
@@ -119,145 +120,132 @@ The bounds above are enforced by `cargo test --test math -- special::gamma` on t
 
 ### Measured
 
-Measured on an Apple M4 Max on one thread with fat LTO, in ns a call, the median of the three quiet rounds of the campaign (the machine idle before it, the load average below 3.5 throughout), against libm 0.2, statrs 0.18, special 0.11, puruspe 0.4, GSL 2.8, Boost.Math 1.92 (without promotion to `long double`) and Cephes in the same run. "–" is a reference without the function. The x86_64 paths were tested under emulation only, never timed. The times are those of the code before the November 2026 fixes; the fixes changed them where noted below the tables.
+Measured on an Apple M4 Max (macOS 27.2.1) on 2026-11-26 from 06:23, in the final run of the release's speed pass, which timed every area of the crate in turn with nothing else running: one thread on every side, by the harness `bench/special` of the repository (its method is in `bench/README.md`). `a` is built as a user builds it, by rustc 1.100 stable with the default release profile (no LTO, no `target-cpu`), and so are statrs 0.18.0, special 0.11.4, puruspe 0.4.4, libm 0.2.16 and lambert_w 1.2.34; Apple's libm, Boost.Math 1.92.0 (no promotion of `double` to `long double`; `float` promoted to `double`, as Boost does by default and as `a` computes its `f32` forms) and GSL 2.8 (Homebrew's, its error handler off) are called from drivers built with `-O3 -mcpu=native`; SciPy 1.18.0 (NumPy 2.3.3) is timed through its ufuncs on arrays, NumPy's loop included, alternated in the same Python process with `a` called through a C interface of the crate, so its rows carry their own time of `a` and the ratio is that row's. A case is one function over one region of arguments: 16,384 random arguments (a fixed seed a case), every implementation over the same ones in a throughput loop, alternated sample by sample, 21 samples of at least 1 ms after a warm-up, the median in ns a call. Before timing, every reference's results are compared with `a`'s on those arguments: the largest difference in ulps of `a`'s value (for the oscillatory functions in ulps of `max(|v|, median |v|)`, for complex values in units of `ε·|w|`), which, `a`'s own error being within its bound, is about the reference's error. The x86_64 paths were not timed for these tables.
 
-| function | region | a | libm | statrs | special | puruspe | gsl | boost | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| gamma | [0.5,1.5] | 4.36 | 33.36 | 8.39 | 33.17 | 3.61 | 27.48 | 16.88 | 11.31 |
-| gamma | [1.5,8] | 5.71 | 30.99 | 8.39 | 31.05 | 4.23 | 22.46 | 13.53 | 10.87 |
-| gamma | [8,20] | 10.67 | 30.15 | 8.4 | 30.02 | 6.39 | 16.55 | 13.44 | 16.84 |
-| gamma | [20,170] | 10.72 | 30.15 | 8.38 | 29.9 | 70.04 | 12.52 | 17.5 | 12.51 |
-| gamma | [-8,-0.1] | 6.98 | 39.94 | 12.06 | 39.75 | - | 34.73 | 15.68 | 12.45 |
-| gamma | [-170,-8] | 24.01 | 36.85 | 12.14 | 36.35 | - | 23.24 | 25.48 | 17.29 |
-| lgamma | [0.01,0.5] | 8.16 | 7.57 | 12.49 | 7.15 | 6.32 | 19 | 5.79 | 8.19 |
-| lgamma | [0.5,1.5] | 4.12 | 5.96 | 7.4 | 5.68 | 6.31 | 9.05 | 6.54 | 13.26 |
-| lgamma | [1.5,3] | 4.44 | 4.5 | 6.53 | 4.27 | 6.32 | 8.96 | 6.17 | 10.49 |
-| lgamma | [3,8] | 3.31 | 9.11 | 6.45 | 9.06 | 6.33 | 9.08 | 11.61 | 13.59 |
-| lgamma | [8,100] | 5.67 | 5.74 | 6.52 | 5.72 | 8.58 | 14.62 | 18.93 | 7.07 |
-| lgamma | [100,1000000] | 5.59 | 5.83 | 6.49 | 5.74 | 6.6 | 9.01 | 9.41 | 5.54 |
-| lgamma | [-10,-0.6] | 22.15 | 18.2 | - | 18.15 | - | 30.04 | 16.01 | 14.81 |
-| digamma | [0.01,1] | 5.13 | - | 7.12 | 9.71 | - | 20.29 | 3.59 | 7.77 |
-| digamma | [1,8] | 3.83 | - | 6.48 | 7.14 | - | 16.44 | 4.74 | 7.31 |
-| digamma | [8,1000] | 4.4 | - | 4.18 | 3.64 | - | 15.08 | 4.09 | 4.65 |
-| digamma | [-10,-0.1] | 14.22 | - | 9.25 | 21.47 | - | 22.91 | 7.18 | 9.26 |
-| trigamma | [0.1,8] | 6.88 | - | - | 4.79 | - | 84 | 3.63 | - |
-| trigamma | [8,1000] | 3.43 | - | - | 2.29 | - | 82.7 | 3.04 | - |
-| polygamma n=3 | [0.1,20] | 63.98 | - | - | - | - | 95.92 | 109.61 | - |
-| polygamma n=30 | [0.5,20] | 238.4 | - | - | - | - | 96.21 | 644.63 | - |
-| polygamma n=3 | [-5,-0.1] | 351.08 | - | - | - | - | 3.29 | 162.18 | - |
-| beta | small | 29.87 | - | 28.16 | 25.69 | 24.11 | 72.84 | 27.58 | 34.39 |
-| lbeta | small | 40.57 | - | 21.59 | 23.05 | - | 48.4 | - | 37.25 |
-| beta | large | 77.91 | - | 24.55 | 22.44 | 25.42 | 56.6 | 29.38 | 26.9 |
-| lbeta | large | 68.51 | - | 19.64 | 18.68 | - | 45.27 | - | 24.62 |
-| beta | mixed | 60.63 | - | 28.77 | 23.8 | 25.59 | 67.6 | 29.85 | 33.9 |
-| lbeta | mixed | 50.29 | - | 24.96 | 20.28 | - | 56.71 | - | 29.68 |
-| factorial | integers [0,170] | 1.03 | - | 1 | - | 39.17 | 2.76 | 0.78 | - |
-| factorial | reals [-0.9,170] | 17.27 | 30.64 | - | - | - | 14.67 | 17.7 | - |
-| binomial | integers n<=60 | 4.91 | - | 9.74 | - | - | 3.4 | 2.82 | - |
-| binomial | integers n in [1e3,1e6] | 82.42 | - | 21.66 | - | - | 33.93 | 26.98 | - |
-| pochhammer | integer n<=30 | 11.88 | - | - | - | - | 63.04 | 11.47 | - |
-| pochhammer | real n | 44.98 | - | - | - | - | 63.66 | 23.09 | - |
-| lgamma complex | \|z\|<40 | 132.56 | - | - | - | - | 40.82 | - | - |
-| gamma complex | \|z\|<40 | 177.03 | - | - | - | - | - | - | - |
+The same work includes the accuracy: a reference counts only where its largest difference from `a` is at most twice `a`'s bound for the function (the largest of its regions' bounds above, in the bound's units; 0.501 ulps of `f32` for the `f32` forms), so that both can be within that bound, and where it gives no NaN or infinity for a finite value of `a` or the reverse. A reference that computes more than the function (SciPy's Airy functions, all four at once; its Jacobi functions, with the amplitude; puruspe's Bessel functions of real order, which compute `J` and `Y`, or `I` and `K`, together; SciPy's complex Lambert W) or goes through a Python wrapper (SciPy's `polygamma`) is not counted either. Of the 318 cases, 126 have a reference within the bound: 59 losses (a ratio `a/x` above 1.05 against the fastest of them, `a`'s time over the reference's), 6 ties within 5 % and 61 cases below 0.95, the median ratio about 0.99. The others have none; the last column gives, where one is faster than any within the bound, the fastest reference beyond it, with its largest difference from `a`, marked † and not counted.
 
-| function | region | a | statrs | special | puruspe | gsl | boost | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| gamma_p | a<1,x<2 | 92.8 | 119.3 | 61.1 | 94.9 | 47.9 | 167.8 | 79.5 |
-| gamma_q | a<1,x<2 | 88.6 | 118.3 | - | 98.2 | 782.4 | 163.5 | 78 |
-| gamma_p | 1<a<20,x~a | 87.7 | 48.1 | 33.3 | 47 | 82.9 | 73.1 | 35.4 |
-| gamma_q | 1<a<20,x~a | 86.8 | 49.2 | - | 47.4 | 210.6 | 74.7 | 33.3 |
-| gamma_p | 20<a<200,\|x-a\|<3sqrt(a) | 48.8 | 105.1 | 76.1 | 130 | 268.1 | 45.4 | 82.6 |
-| gamma_q | 20<a<200,\|x-a\|<3sqrt(a) | 48.9 | 104.1 | - | 130.9 | 269.7 | 46.2 | 79.4 |
-| gamma_p | 200<a<1e4,x~a | 47.8 | 263.4 | 203.1 | 145.4 | 633.6 | 213.4 | 219.8 |
-| gamma_q | 200<a<1e4,x~a | 48 | 263.5 | - | 145.4 | 632 | 213.5 | 217.8 |
-| gamma_p | 1e4<a<1e6,x~a | 48 | 1396.1 | 1236 | 145.9 | 2091.1 | 1434.8 | 1296.2 |
-| gamma_q | 1e4<a<1e6,x~a | 47.9 | 1344.3 | - | 145.5 | 2017 | 1429.9 | 1278.2 |
-| gamma_p | a in 1..20 integer,x~a | 41.6 | 35.5 | 27.6 | 41.5 | 83.7 | 26.9 | 28.3 |
-| gamma_q | a in 1..20 integer,x~a | 41.9 | 36.2 | - | 41.4 | 100.9 | 27.9 | 26.1 |
-| gamma_p | a in 0.5..19.5 half-int,x~a | 54.9 | 48.2 | 33 | 46.1 | 80.2 | 36.9 | 36.1 |
-| gamma_q | a in 0.5..19.5 half-int,x~a | 53.9 | 49.7 | - | 47.5 | 276.6 | 37.3 | 34 |
-| gamma_p | dev prefix a<8 | 36.9 | 32.2 | 25.1 | 27.8 | 34.8 | 38.8 | 24.3 |
-| gamma_q | dev prefix a<8 | 36.8 | 34 | - | 28.5 | 36.4 | 47.3 | 24.3 |
-| gamma_p | dev prefix a>8 | 40.1 | 23.8 | 24.1 | 27.5 | 30.4 | 33 | 25.1 |
-| gamma_q | dev prefix a>8 | 40.2 | 25.7 | - | 27.9 | 30.8 | 32.4 | 25.1 |
-| gamma_p | dev series a<8 x~a | 55.1 | 47.4 | 40.8 | 45.1 | 61.4 | 63 | 39.7 |
-| gamma_q | dev series a<8 x~a | 55.1 | 52.2 | - | 47.3 | 303.3 | 70.2 | 38.2 |
-| gamma_p | dev series a>8 x~a | 83.1 | 68.7 | 55.6 | 65.6 | 90.4 | 78.8 | 64.2 |
-| gamma_q | dev series a>8 x~a | 82.3 | 70.1 | - | 67.7 | 188.5 | 84.5 | 60.9 |
-| gamma_p | dev frac a<20 x=1.2a | 108.9 | 66.7 | 38.4 | 77.3 | 105.1 | 92 | 38.9 |
-| gamma_q | dev frac a<20 x=1.2a | 108.5 | 59.3 | - | 72.3 | 187 | 90.5 | 36.1 |
-| gamma_p | dev frac a<20 x=2a | 98.7 | 58 | 32.5 | 64.6 | 104 | 75.7 | 35.9 |
-| gamma_q | dev frac a<20 x=2a | 99.4 | 54.3 | - | 63.3 | 142.4 | 74.5 | 32.6 |
-| gamma_p | 1<a<100,x=a(0.1..0.5\|2..5) | 71.9 | 32.2 | 23.1 | 27.8 | 70.8 | 50 | 33 |
-| gamma_q | 1<a<100,x=a(0.1..0.5\|2..5) | 71.7 | 32.4 | - | 27.9 | 73.5 | 39.5 | 28.5 |
-| P at the root | a<1 | 58.3 | - | - | - | - | 72.6 | - |
-| lgamma(a+1) | a<1 | 10.7 | - | - | - | - | - | - |
-| gamma_p_inv | a<1 | 383.3 | - | - | 297.2 | 1922.3 | 241.1 | - |
-| gamma_q_inv | a<1 | 372.8 | - | - | - | 2312.1 | 248.9 | 676.1 |
-| P at the root | 1<a<20 | 85.3 | - | - | - | - | 66.2 | - |
-| lgamma(a+1) | 1<a<20 | 11.2 | - | - | - | - | - | - |
-| gamma_p_inv | 1<a<20 | 327 | - | - | 483 | 761.7 | 197.2 | - |
-| gamma_q_inv | 1<a<20 | 334.5 | - | - | - | 802.5 | 198.3 | 388.4 |
-| P at the root | 20<a<1e4 | 47.9 | - | - | - | - | 183 | - |
-| lgamma(a+1) | 20<a<1e4 | 11.8 | - | - | - | - | - | - |
-| gamma_p_inv | 20<a<1e4 | 184.7 | - | - | - | 2488.3 | 240.5 | - |
-| gamma_q_inv | 20<a<1e4 | 185.4 | - | - | - | 2323.1 | 239.9 | 1997.1 |
-| P at the root | 1<a<20,tiny p | 30.9 | - | - | - | - | 27 | - |
-| lgamma(a+1) | 1<a<20,tiny p | 11.2 | - | - | - | - | - | - |
-| gamma_p_inv | 1<a<20,tiny p | 196.6 | - | - | - | 515.5 | 173.3 | - |
-| gamma_q_inv | 1<a<20,tiny p | 391.8 | - | - | - | 2122.8 | 121.3 | 2385.1 |
-| beta_inc | a,b in [0.1,1], x uniform | 136.9 | 100 | 119.3 | 137.3 | 145.6 | 85.7 | 136.6 |
-| beta_inc | a,b in [1,10], x uniform | 158.3 | 93.6 | 88.1 | 74.6 | 134.1 | 137.8 | 73.4 |
-| beta_inc | a,b in [10,100], x mean ±3σ | 219 | 156.1 | 120.6 | 151.9 | 192.9 | 169.8 | 162.9 |
-| beta_inc | a,b in [100,1e4], x mean ±3σ | 369.2 | 379 | 675.8 | 500.6 | 434 | 223.8 | 320.9 |
-| beta_inc | a,b in [1e5,1e7], x mean ±3σ | 208.2 | 939.8 | 19484.7 | 127.5 | 1954.4 | 874.3 | 1320.8 |
-| beta_inc | a in [20,1e3], b in [0.1,1], x mean ±3σ | 225.8 | 107.6 | 11438 | 25541.1 | 179.1 | 163.1 | 266.8 |
-| beta_inc_inv | a,b in [0.1,1], x uniform | 626.5 | 708 | 735.6 | 1385.1 | - | 510 | 1765 |
-| beta_inc_inv | a,b in [1,10], x uniform | 633.7 | 512.8 | 476.3 | 537.4 | - | 715.2 | 852.3 |
-| beta_inc_inv | a,b in [10,100], x mean ±3σ | 790.9 | 495 | 380.4 | 1297.1 | - | 506.2 | 684.3 |
-| beta_inc_inv | a,b in [100,1e4], x mean ±3σ | 1066 | 877.2 | 1441.4 | 5241.9 | - | 492.8 | 1456.8 |
-| beta_inc_inv | a,b in [1e5,1e7], x mean ±3σ | 776.4 | 2175.2 | 35927.3 | 16964.6 | - | 3266.5 | 17636.2 |
-| beta_inc_inv | a in [20,1e3], b in [0.1,1], x mean ±3σ | 1031.2 | 1253.4 | 40504.7 | 21094.7 | - | 585.8 | 4212.7 |
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `gamma` | x in [0.5,1.5] | 4.16 ns | 0.657 Apple libm |  |
+| `gamma` | x in [1.5,8] | 7.51 ns | 0.723 Apple libm | 1.27 puruspe† (2.2 ulps) |
+| `gamma` | x in [8,20] | 10.4 ns | 0.684 Apple libm | 1.29 statrs† (940 ulps) |
+| `gamma` | x in [20,170] | 10.3 ns | 0.689 Apple libm | 1.28 statrs† (NaN or ∞ on 29 of 16384) |
+| `gamma` | x in [-8,-0.1] | 8.38 ns | – | 0.970 SciPy† (2.9 ulps) |
+| `gamma` | x in [-170,-8] | 26.2 ns | – | 1.85 statrs† (4.5·10¹⁵ ulps) |
+| `lgamma` | x in [0.01,0.5] | 7.52 ns | 1.53 Boost |  |
+| `lgamma` | x in [0.5,1.5] | 4.05 ns | – | 0.664 puruspe† (2·10⁹ ulps) |
+| `lgamma` | x in [1.5,3] | 4.22 ns | 0.801 Boost | 0.966 Apple libm† (1.6 ulps) |
+| `lgamma` | x in [3,8] | 3.64 ns | 0.424 libm | 0.651 Apple libm† (1.7 ulps) |
+| `lgamma` | x in [8,100] | 5.22 ns | – | 1.000 Apple libm† (2 ulps) |
+| `lgamma` | x in [100,1e6] | 5.24 ns | 1.06 Apple libm | 1.20 SciPy† (1.9 ulps) |
+| `lgamma` | x in [-10,-0.6] | 28.2 ns | – | 1.73 SciPy† (980 ulps) |
+| `lgamma_sign` | x in [0.5,8] | 5.17 ns | – | 0.760 Apple libm† (2.6 ulps) |
+| `lgamma_sign` | x in [-10,-0.6] | 29.7 ns | – | 1.52 special† (2.6·10³ ulps) |
+| `digamma` | x in [0.01,1] | 4.98 ns | – | 1.74 Boost† (2.5 ulps) |
+| `digamma` | x in [1,8] | 5.26 ns | – | 0.912 Boost† (1.7 ulps) |
+| `digamma` | x in [8,1000] | 4.11 ns | 1.21 Boost |  |
+| `digamma` | x in [-10,-0.1] | 14.4 ns | – | 1.75 Boost† (5·10³ ulps) |
+| `polygamma` | n=1, x in [0.1,8] | 6.09 ns | 2.33 Boost |  |
+| `polygamma` | n=1, x in [8,1000] | 2.73 ns | 1.27 Boost |  |
+| `polygamma` | n=1, x in [-5,-0.1] | 20.2 ns | – | 1.93 Boost† (2.9 ulps) |
+| `polygamma` | n=3, x in [0.1,20] | 68.2 ns | – | 0.752 GSL† (4.9 ulps) |
+| `polygamma` | n=30, x in [0.5,20] | 220 ns | – | 2.41 GSL† (32.9 ulps) |
+| `polygamma` | n=3, x in [-5,-0.1] | 313 ns | – | 2.00 Boost† (10.3 ulps) |
+| `beta` | a,b in [0.1,10] | 47.1 ns | – | 1.98 puruspe† (1.3·10⁵ ulps) |
+| `lbeta` | a,b in [0.1,10] | 48.9 ns | – | 2.22 statrs† (1.3·10⁵ ulps) |
+| `beta` | a,b in [10,1e4] log-uniform | 79.9 ns | – | 2.96 SciPy† (1.6·10⁵ ulps) |
+| `lbeta` | a,b in [10,1e4] log-uniform | 63.5 ns | – | 3.93 special† (1.5·10³ ulps) |
+| `beta` | a in [0.1,10], b in [10,1e4] | 61.0 ns | – | 2.58 puruspe† (2.3·10⁵ ulps) |
+| `lbeta` | a in [0.1,10], b in [10,1e4] | 52.7 ns | – | 2.59 special† (3.8·10⁶ ulps) |
+| `beta` | a in [-10,-0.1], b in [0.1,10] | 90.1 ns | – | 2.75 SciPy† (1.9·10⁴ ulps) |
+| `lbeta` | a in [-10,-0.1], b in [0.1,10] | 82.9 ns | – | 2.20 SciPy† (5.5·10⁴ ulps) |
+| `factorial` | x integer in [0,170] | 0.510 ns | 0.990 Boost |  |
+| `factorial` | x real in [-0.9,170] | 15.9 ns | – | 1.19 GSL† (310 ulps) |
+| `binomial` | n,k integers, 0<=k<=n<=60 | 1.22 ns | 0.356 GSL | 0.567 Boost† (2.1 ulps) |
+| `binomial` | n integer in [1e3,1e6] log-uniform, k integer in [0,n] | 69.9 ns | – | 3.48 SciPy† (1.4·10⁶ ulps) |
+| `binomial` | n,k real in [0,60] | 94.0 ns | – | 1.73 SciPy† (2.2·10⁴ ulps) |
+| `pochhammer` | x in [0.1,20], n integer in [0,30] | 11.9 ns | – | 0.826 Boost† (38.3 ulps) |
+| `pochhammer` | x in [0.1,20], n real in [-0.9,30] | 37.6 ns | – | 1.73 Boost† (34.7 ulps) |
+| `pochhammer` | x in [-20,0], n integer in [0,30] | 11.8 ns | – | 0.719 SciPy† (5.8 ulps) |
+| `lgamma`, complex | \|z\| < 40 (re,im uniform in the disc) | 139 ns | – | 3.18 SciPy† (48.7 ulps) |
+| `gamma`, complex | \|z\| < 40 (re,im uniform in the disc) | 201 ns | – | 3.28 SciPy† (300 ulps) |
+| `lgamma`, complex | \|z\| in [1e3,1e4] | 142 ns | 3.98 SciPy |  |
+| `gamma`, `f32` | x in [0.5,1.5] | 4.27 ns | 0.597 Apple libm |  |
+| `gamma`, `f32` | x in [1.5,8] | 7.05 ns | 0.646 Apple libm |  |
+| `gamma`, `f32` | x in [-8,-0.1] | 8.71 ns | 0.453 Apple libm |  |
+| `lgamma`, `f32` | x in [0.5,8] | 4.61 ns | 0.611 Apple libm | 0.721 libm† (1.2 ulps) |
+| `lgamma`, `f32` | x in [8,1e6] | 5.41 ns | 1.03 Apple libm | 1.23 libm† (1.2 ulps) |
+| `lgamma`, `f32` | x in [-10,-0.6] | 29.1 ns | 1.33 Apple libm | 1.86 libm† (6.4·10³ ulps) |
+| `digamma`, `f32` | x in [1,8] | 3.45 ns | 1.10 Boost |  |
 
-Since then (measured with the code before and after linked into one binary and their rounds interleaved, the minimum of 31–41 rounds of 4,000–20,000 calls, on the same machine under load, ratios only; the first fixes measured again by their second review, with fat LTO and without): `binomial` of real arguments 24–27 % slower on `[0, 60]²` (the cases with `n − k + 1 < 0`) and 33 % for `n` in `[−30, 0]`, `beta` and `lbeta` with a negative argument 21–30 % (the reflection identities: three sines and a beta function of positive arguments, where the logarithms of the gamma functions were subtracted), `pochhammer` with `x` in `[−20, 0]` 12–20 %; `lgamma` 33–37 % on `[3, 8)` and 12–31 % on `[0.5, 1.5]` (the pieces' linear and quadratic terms without error), 3–8 % for `x < 0` (recomputed beside its zeros); `P` and `Q` for `a < 1`, `x < 2` 7–10 %, and `gamma_q` for `a < 1`, `1.1 ≤ x < 3` 7–14 % (the fraction for `x ≥ 2`, or `a ≥ ½`); the complex `ln Γ` and `Γ` 11–14 % for `|z| < 40` and 15–22 % for `|z|` in the thousands (the argument and the logarithm to 2⁻¹⁰⁰, the phase reduced exactly); `I` beside the mean of parameters from 10⁵ on 2–7 % (BASYM's root in double-double); faster: `gamma` on `[−8, −0.1]` by up to 20 %, `digamma` on `[1, 8]` and `ψ′` on `[2, 10]` by 8 %, `binomial` of large integers by 9 %, the beta inverses with both parameters from `2⁸⁶` on by a factor of about 1,000 (the root in closed form, where the iteration ran long and was often wrong); everything else, `I` and the inverses included, within ±5 %. (Tiny functions move by up to 20 % with their place in the binary alone: `digamma` on `[1, 8]` measured 0.92 against an identical copy of itself, so its 8 % is within that.)
+The incomplete gamma and beta functions and their inverses:
 
-The fastest reference is often far less accurate (the next table); Boost's column is there for comparison.
-
-#### Accuracy of the references
-
-Max/rms ulps on the area's data files before the regression cases of the November 2026 audit were added (the normal range; the references' own failures in brackets):
-
-| Function | `a` | Boost | GSL | Cephes | libm | statrs | special | puruspe |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `gamma` (648) | 0.50 / 0.28 | 6.6 / 1.5 | 83 / 5.1 (9 wrong) | 3.1 / 1.0 | 5.8 / 1.3 | 4.6e15 (18 wrong) | 5.8 / 1.3 | 7.8 / 1.8 (`x > 0`) |
-| `lgamma` (618) | 0.54 / 0.27 | 1.7 / 0.50 | 1.8e3 / 87 | 1.3e16 | 1.8 / 0.43 | 5.5e16 (`x > 0`) | 1.8 / 0.43 | 4.2e20 (72 wrong) |
-| `digamma` (368) | 0.57 / 0.28 | 7.8 / 0.92 | 2.0e15 | 2.9e16 | | 1.1e17 | 1.7e16 | |
-| `polygamma` (352) | 0.50 / 0.27 | 2.4e5 (`n ≤ 100`, 9 wrong) | 7.4e15 (4 wrong) | | | | 4.2 (`n = 1`) | |
-| `beta` (222) | 0.53 / 0.29 | 386 / 33 | 2.2e3 / 158 | 5.6e5 (1 wrong) | | 1.2e6 (1 wrong) | 5.6e5 (`exp ln_beta`) | 1.4e6 (31 wrong) |
-| `lbeta` (275) | 0.50 / 0.29 | | 886 / 54 | 2.1e16 | | 8.9e15 | 8.9e15 | |
-| `factorial` (240) | 0.50 / 0.29 | 17 / 2.7 (`tgamma(x + 1)`) | 423 / 28 | | 19 / 2.8 | | | |
-| `binomial`, integers (80) | 0.50 / 0.26 | 483 / 123 | 6.0e3 / 1.5e3 | | | 1.0e4 / 2.6e3 | | |
-| `pochhammer` (190) | 0.49 / 0.27 | 3.7e5 / 2.9e4 | 4.6e5 / 4.9e4 | | | | | |
-| `gamma_p` (439) | 0.65 / 0.27 | 3.5e4 / 1.6e3 | 1.6e5 / 7.7e3 | 1.3e7 | | 8.1e15 | 8.7e15 | 9.0e15 (63 wrong) |
-| `gamma_q` (439) | 0.87 / 0.27 | 2.6e5 / 1.2e4 | 8.0e4 / 3.9e3 | 2.5e284 | | 8.6e15 | | 1.0e298 (63 wrong) |
-| `gamma_p_inv` (125) | 0.54 / 0.21 | 22 / 3.8 | 6.5e15 (2 wrong) | | | | | 3.6e23 (16 wrong) |
-| `gamma_q_inv` (134) | 0.51 / 0.22 | 149 / 14 | 1.1e60 | 1.2e35 | | | | |
-| `beta_inc` (494) | 0.82 (median 0.22) | 2.0e8 (median 1.2, 157 above 4) | 1.8e13 (median 7.5) | 7.7e14 (median 5.7) | | 2.3e18 (median 209) | 1.5e11 (median 21) | 4.0e118 |
-| `lgamma`, `Complex<f64>` (266) | 0.96 ε | | 1.4e12 ε (`Im` mod 2π) | | | | | |
-
-Max / rms ulps on the repository's data (`n` cases, the normal range only); "wrong" counts NaN or infinite results where the value is finite, or the reverse. The references' large errors are mostly beside zeros of the functions (ln Γ near 1 and 2, ψ near its zeros, ln B near 0), at tiny or huge arguments, on the negative axis and in the far tails of `P`, `Q` and `I`, which the data cover on purpose; Boost's `beta_inc_inv` and `beta_inc_c_inv` reach 5.2·10⁴ and 4.9·10³ (in units of the condition number), and statrs's `inv_beta_reg` and special's `inv_inc_beta` take minutes on the inverses' data.
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `gamma_p` | a in [0.01,1], x in [0,2] | 95.8 ns | – | 2.11 GSL† (14 ulps) |
+| `gamma_q` | a in [0.01,1], x in [0,2] | 96.0 ns | – | 0.988 puruspe† (3.3·10⁷ ulps) |
+| `gamma_p` | a in [1,20], x in a*[0.5,1.5] | 87.1 ns | – | 1.71 special† (99.2 ulps) |
+| `gamma_q` | a in [1,20], x in a*[0.5,1.5] | 87.4 ns | – | 1.45 SciPy† (70.1 ulps) |
+| `gamma_p` | a in [20,200], x in a+-3sqrt(a) | 43.1 ns | – | 0.785 Boost† (80.7 ulps) |
+| `gamma_q` | a in [20,200], x in a+-3sqrt(a) | 43.9 ns | – | 0.806 Boost† (23.7 ulps) |
+| `gamma_p` | a in [200,1e4] log-uniform, x in a+-3sqrt(a) | 43.6 ns | – | 0.560 SciPy† (22.9 ulps) |
+| `gamma_q` | a in [200,1e4] log-uniform, x in a+-3sqrt(a) | 43.7 ns | – | 0.561 SciPy† (20.3 ulps) |
+| `gamma_p` | a in [1e4,1e6] log-uniform, x in a+-3sqrt(a) | 43.5 ns | – | 0.743 SciPy† (16.6 ulps) |
+| `gamma_q` | a in [1e4,1e6] log-uniform, x in a+-3sqrt(a) | 44.1 ns | – | 0.770 SciPy† (17 ulps) |
+| `gamma_p` | a integer in [1,20], x in a*[0.5,1.5] | 48.1 ns | – | 1.49 Boost† (12.9 ulps) |
+| `gamma_q` | a integer in [1,20], x in a*[0.5,1.5] | 47.7 ns | – | 1.42 Boost† (6.6 ulps) |
+| `gamma_p` | a half-integer in [0.5,19.5], x in a*[0.5,1.5] | 60.7 ns | – | 1.39 Boost† (11.9 ulps) |
+| `gamma_q` | a half-integer in [0.5,19.5], x in a*[0.5,1.5] | 58.8 ns | – | 1.31 Boost† (7.4 ulps) |
+| `gamma_p` | a in [1,100], x in a*([0.1,0.5] or [2,5]) | 71.2 ns | – | 1.74 special† (4.5·10¹⁵ ulps) |
+| `gamma_q` | a in [1,100], x in a*([0.1,0.5] or [2,5]) | 71.6 ns | – | 1.51 SciPy† (640 ulps) |
+| `gamma_p` | a in [0.01,1], x in [2,30] | 83.8 ns | 1.53 SciPy | 1.86 special† (13.5 ulps) |
+| `gamma_q` | a in [0.01,1], x in [2,30] | 83.9 ns | – | 1.56 SciPy† (21.8 ulps) |
+| `gamma_p_inv` | a in [0.01,1], p in (0,1) | 373 ns | – | 1.64 Boost† (250 ulps) |
+| `gamma_q_inv` | a in [0.01,1], q in (0,1) | 372 ns | – | 1.55 Boost† (410 ulps) |
+| `gamma_p_inv` | a in [1,20], p in (0,1) | 307 ns | – | 1.56 Boost† (5.4 ulps) |
+| `gamma_q_inv` | a in [1,20], q in (0,1) | 307 ns | – | 1.51 Boost† (15.7 ulps) |
+| `gamma_p_inv` | a in [20,1e4] log-uniform, p in (0,1) | 169 ns | – | 0.707 Boost† (9.2 ulps) |
+| `gamma_q_inv` | a in [20,1e4] log-uniform, q in (0,1) | 169 ns | – | 0.698 Boost† (7 ulps) |
+| `gamma_p_inv` | a in [1,20], p in [1e-300,1e-10] log-uniform | 206 ns | – | 1.27 Boost† (4.6 ulps) |
+| `gamma_q_inv` | a in [1,20], q in [1e-300,1e-10] log-uniform | 237 ns | 1.98 Boost |  |
+| `gamma_p_inv` | a in [0.01,1], p in [1e-300,1e-10] log-uniform | 178 ns | – | 6.34 puruspe† (5.3·10¹⁷ ulps) |
+| `gamma_q_inv` | a in [0.01,1], q in [1e-300,1e-10] log-uniform | 346 ns | 3.10 Boost |  |
+| `beta_inc` | a,b in [0.1,1], x in (0,1) | 135 ns | – | 1.39 Boost† (21.7 ulps) |
+| `beta_inc_c` | a,b in [0.1,1], x in (0,1) | 134 ns | – | 1.40 Boost† (22.6 ulps) |
+| `beta_inc_inv` | a,b in [0.1,1], p = I_x(a,b), x in (0,1) | 616 ns | – | 1.22 SciPy† (26.8 ulps) |
+| `beta_inc_c_inv` | a,b in [0.1,1], q = 1-I_x(a,b), x in (0,1) | 605 ns | – | 1.21 SciPy† (32.8 ulps) |
+| `beta_inc` | a,b in [1,10], x in (0,1) | 182 ns | – | 1.85 puruspe† (8.6·10⁵ ulps) |
+| `beta_inc_c` | a,b in [1,10], x in (0,1) | 176 ns | – | 1.00 Boost† (14.6 ulps) |
+| `beta_inc_inv` | a,b in [1,10], p = I_x(a,b), x in (0,1) | 667 ns | – | 1.58 special† (960 ulps) |
+| `beta_inc_c_inv` | a,b in [1,10], q = 1-I_x(a,b), x in (0,1) | 666 ns | – | 0.934 Boost† (29.6 ulps) |
+| `beta_inc` | a,b in [10,100], x mean+-3sd | 205 ns | – | 1.37 Boost† (130 ulps) |
+| `beta_inc_c` | a,b in [10,100], x mean+-3sd | 207 ns | – | 1.39 Boost† (120 ulps) |
+| `beta_inc_inv` | a,b in [10,100], p = I_x(a,b), x mean+-3sd | 731 ns | – | 1.95 Boost† (120 ulps) |
+| `beta_inc_c_inv` | a,b in [10,100], q = 1-I_x(a,b), x mean+-3sd | 732 ns | – | 1.98 Boost† (130 ulps) |
+| `beta_inc` | a,b in [100,1e4] log-uniform, x mean+-3sd | 327 ns | – | 1.56 Boost† (3.6·10³ ulps) |
+| `beta_inc_c` | a,b in [100,1e4] log-uniform, x mean+-3sd | 324 ns | – | 1.56 SciPy† (3.8·10³ ulps) |
+| `beta_inc_inv` | a,b in [100,1e4] log-uniform, p = I_x(a,b), x mean+-3sd | 980 ns | – | 2.21 Boost† (370 ulps) |
+| `beta_inc_c_inv` | a,b in [100,1e4] log-uniform, q = 1-I_x(a,b), x mean+-3sd | 971 ns | – | 2.22 Boost† (300 ulps) |
+| `beta_inc` | a,b in [1e5,1e7] log-uniform, x mean+-3sd | 178 ns | – | 1.46 puruspe† (4.5·10¹⁵ ulps) |
+| `beta_inc_c` | a,b in [1e5,1e7] log-uniform, x mean+-3sd | 181 ns | – | 0.221 SciPy† (3.3·10⁶ ulps) |
+| `beta_inc_inv` | a,b in [1e5,1e7] log-uniform, p = I_x(a,b), x mean+-3sd | 690 ns | – | 0.349 statrs† (1.4·10¹¹ ulps) |
+| `beta_inc_c_inv` | a,b in [1e5,1e7] log-uniform, q = 1-I_x(a,b), x mean+-3sd | 684 ns | – | 0.243 Boost† (1.1·10⁴ ulps) |
+| `beta_inc` | a in [20,1e3], b in [0.1,1], x mean+-3sd | 272 ns | – | 1.31 statrs† (1.7·10⁵ ulps) |
+| `beta_inc_c` | a in [20,1e3], b in [0.1,1], x mean+-3sd | 276 ns | – | 1.24 Boost† (5.6 ulps) |
+| `beta_inc_inv` | a in [20,1e3], b in [0.1,1], p = I_x(a,b), x mean+-3sd | 1.34 µs | 1.53 Boost | 1.85 statrs† (4.5·10⁴ ulps) |
+| `beta_inc_c_inv` | a in [20,1e3], b in [0.1,1], q = 1-I_x(a,b), x mean+-3sd | 1.32 µs | 1.51 SciPy |  |
+| `gamma_p`, `f32` | a in [1,20], x in a*[0.5,1.5] | 87.2 ns | 1.09 Boost |  |
 
 ### Where the references are faster
 
-Against the fastest reasonably accurate reference (Boost, or libm for `ln Γ`) in the same run (the ratios of the tables above, from before the fixes):
+Every loss of the family against a reference within the bound:
 
-- **`ψ`** on `(0, 1)` (1.45× Boost) and for `x < 0` (1.95×: the reflection's double-double cotangent and `ψ(u) + 1/u`); **`ψ′`** on `[0.1, 8)` (1.9×: below 2 the reciprocal squares carry their errors); **`polygamma`** of orders above 1 for `x < 0` (2.1×: three Hurwitz zeta functions) and `n = 30` (GSL 2.4× faster, and 10⁷ ulps off).
-- **`B` and `ln B`** of large arguments (2.5× Boost, which is 386 ulps off; special and statrs up to 10⁶): three double-double logarithms and the Stirling corrections.
-- **`binomial`** of large integers (2.9× Boost, which is 483 ulps off), **`pochhammer`** of real `n` (1.9×): `ln B` and the Stirling difference.
-- **`gamma` below −8** (1.4× Cephes, 1.0× Boost): Stirling, the exponential and the sine in double-double. **`ln Γ`** for `x < 0` (1.3× Boost), below ½ (1.4×).
-- **`P`, `Q`** for integer and half-integer `a` below 20 (1.5× Boost: the double-double prefix); `x` far from `a` (1.4–1.7×). **`gamma_q_inv`** at tiny `q` (3.2×: the tail guesses need a second evaluation).
-- **`beta_inc`** for `a, b ∈ [100, 10⁴]` near the mean (1.7×: about 40 fraction steps, or BASYM's recursion), small `a, b` (1.6×), BGRAT (1.4×); **its inverses** there (1.5–2.2×: the power terms are recomputed for the derivative).
-- **Complex `ln Γ`** (3.1× GSL, which is reduced modulo 2π and 10¹² ε off): complex double-double throughout.
+- **`ψ′`** on `[0.1, 8]` and `[8, 1000]` (2.33 and 1.27 against Boost, which is within 1.2 ulps of `a`), **`ψ`** on `[8, 1000]` (1.21, Boost), **`ln Γ`** on `[0.01, 0.5]` (1.53, Boost) and `[100, 10⁶]` (1.06, Apple's libm): the double-double pieces that hold `ψ′` and `ψ` to 0.75 ulp and `ln Γ` to 0.6 (the exact linear term, the low parts carried), against plain `f64` rationals within about one ulp.
+- **Complex `ln Γ`** for `|z|` in `[10³, 10⁴]` (3.98 against SciPy, within 2.0 ε of `a`): complex double-double throughout, the argument and the logarithm to 2⁻¹⁰⁰ for the componentwise bound.
+- **`gamma_q_inv` at tiny `q`** (`q` in `[10⁻³⁰⁰, 10⁻¹⁰]`: 3.10 for `a` in `[0.01, 1]`, 1.98 for `a` in `[1, 20]`, against Boost): the guesses in the far tail need a second evaluation of `Q`, and each evaluation carries the double-double prefix.
+- **`gamma_p`** for `a` in `[0.01, 1]`, `x` in `[2, 30]` (1.53 against SciPy): Legendre's continued fraction with its last steps and the prefix in double-double.
+- **The beta inverses beside a large `a` and a small `b`** (`a` in `[20, 10³]`, `b` in `[0.1, 1]`: 1.53 against Boost, 1.51 against SciPy): BGRAT's power terms computed again for the derivative at each step.
+- **The `f32` forms**: `lgamma` on `[−10, −0.6]` (1.33 against Apple's `lgammaf`), `digamma` on `[1, 8]` (1.10) and `gamma_p` (1.09, against Boost in `double`): an `f32` argument runs the `f64` kernels, double-double steps and all, and is rounded once.
 
 ## The error functions
 
@@ -352,6 +340,7 @@ Only the error relative to `|w|` (or to the scale above) is bounded in general, 
 ### Method
 
 * **`exp_dd`.** `e^a` of a double-double `a` to about 2⁻⁶⁰ (for `|a|` to 2839): `a = k·ln 2/64 + r` with `ln 2/64` in two parts (the first of 35 bits, so that `k·L₁` is exact), `e^r − 1` by its Taylor series to `r⁶` (`|r| ≤ ln 2/128`), and a table of the 64 values `2^(j/64)` as double-doubles; the result is a double-double and a power of 2 kept apart, so that nothing over- or underflows before the final rounding, which is the only one (and once also for a subnormal result).
+* **The `f32` form of `erf`** on `1/2 ≤ |x| < 4`: seven polynomials of degree 12 in `|x| − c` on the halves of `[1/2, 4)` (Chebyshev interpolants, mpmath at 40 digits), picked by an index, good to `2⁻⁵⁰` in `f64` and rounded once to the `f32` (checked against the `f64` path at every `f32` of `[−4.5, 4.5]`); elsewhere the `f64` path.
 * **`erf`, `erfc` for `|x| < 1/2`.** `erf(x) = x + x·q(x²)`, `q` a polynomial of degree 9 (a minimax fit to 2⁻⁵⁷·⁴, 2⁻⁵⁵·⁷ with its coefficients as doubles, relative to `erf(x)/x`), rounded once by a fused multiply-add; `erfc(x) = (1 − x) − x·q(x²)` with `1 − x` exact as two doubles.
 * **`erfcx` for `x ≥ 1/2`.** For `1/2 ≤ x < 8`, 32 minimax polynomials of degree 10 in `x − c`, one per eighth of a binade, picked from the bits of `x` (no division, no branch), each with its constant term as a double-double (2⁻⁵⁶·⁸ after the rounding of the coefficients); for `x ≥ 8`, `x·erfcx(x)` as a polynomial of degree 9 in `1/x²` (2⁻⁶⁰), times `1/x` as a double-double; from 2⁹⁶⁰, `1/(√π x)` with `1/x` of `x·2⁻⁵¹²` as a double-double and the result scaled back with one rounding, as beyond 2¹⁰¹⁵ the low words of the plain form would be subnormal. For `|x| < 1/2`, 8 polynomials of degree 11 on eighths of `[−1/2, 1/2)`; for `x ≤ −1/2`, `2e^(x²) − erfcx(−x)` with `e^(x²)` from `exp_dd`.
 * **`erfc`, `erf` for `|x| ≥ 1/2`.** `erfc(x) = e^(−x²)·erfcx(x)`, `x²` exact as two doubles, `e^(−x²)` by `exp_dd` and the product as a double-double; `erf = 1 − erfc` and `erfc(−x) = 2 − erfc(x)` add the double-double to 1 or 2 exactly before the one rounding.
@@ -362,60 +351,62 @@ Only the error relative to `|w|` (or to the scale above) is bounded in general, 
 
 The coefficients are this module's own minimax fits (a discrete Remez exchange in mpmath at 160 bits, `tables.rs` made by `gen_tables.py`); the sine and cosine kernels are fdlibm's, and the bits of `2/π` are mpmath's, the same as Arb's.
 
-### Measured
+### Accuracy measured
 
 The largest errors found of *Error bounds* are those of searches against Arb (FLINT 3.6, balls tightened until their radius is below 2⁻⁴⁰ ulp, a part settled on its own where it is measured so; asymptotic series with remainder bounds where Arb's own are not usable) on the aarch64-apple-darwin build: for an audit on 2026-11-20, 33.3 million `f64` arguments of the real functions (a million and more a region, every binade, ±300 ulps around every seam between pieces) and 72,405 more against mpmath, the two references agreeing to 6·10⁻¹⁷ ulp, and 16 million of the complex functions (a million a region); for the review of 2026-11-21, 117 million arguments of the real functions in the windows where the errors peak and local searches around the worst, and 25 million of the complex functions (17 million in local searches, 1.6 million where the exact value overflows, 2.7 million in the strips and bands the review changed); the review of 2026-11-22 ran 13.5 million of the complex functions and over 100 million arguments of the real ones (most of the largest found above are its), and after it 2.1 million of the complex functions beyond the box were measured as stated above, a finite part next to an infinite one against the scale (largest 2.65 ε; relative to themselves such parts of `erf` and `erfc` were up to 1.5·10⁵ ulps off, those below the real axis 1.90). Every complex error found is below the bound at its argument (the largest ratio is 0.73), and every real one below the bound of its region. Their scripts are not part of the repository; the analysis behind the bounds is (`python3 erf_bounds.py`, run from `data/`, prints the largest bound of each region in some minutes). On the code path without a fused multiply-add (wasm32 under Node) the errors are of the same size: before the review (100,000 to 200,000 arguments a region) `erf` 0.776, `erfc` 0.795, `erfcx` 0.664, `erf_inv` 0.821, `erfc_inv` 0.797, `dawson` 0.769, `fresnel` 0.897 and 1.050 ulps, the complex functions up to 4.52 ε of the scale; after it (40,000 to 300,000 arguments a region) `erf` 0.761, `erfc` 0.801, `erfcx` 0.655, `erf_inv` 0.804, `erfc_inv` 0.821, `dawson` 0.776, `fresnel` below 1 0.900 and 0.902 ulps, the complex boxes up to 4.17 ε, the parts of the strips next to the axes as with one, and every part infinite where the exact value overflows. The analysis there would count the unfused polynomial steps twice, and was not made. The tests pass on both paths (the second with the fused multiply-adds of the polynomials switched off in a copy of the crate, as x86_64 runs them without the `fma` feature).
 
 The tests check 12,283 cases of `data/gen_erf.py` (run from that directory: `python3 gen_erf.py`, deterministic, a few minutes): random arguments by region, the worst arguments found with their neighbours, the diagonals and the coordinates beyond `√f64::MAX` of the complex functions, the arguments where `e^(∓z²)` is beyond any double or `|y² − x²|` is from 1400 to 1470, those where `|w|` is just beyond it (a finite part next to an infinite one), the points near their zeros, the strips next to the axes (part by part) and the `Complex<f32>` forms. A complex reference is computed at 128, 256, … more bits until two in a row agree to 110 bits a part; a complex case carries its scale as a third reference (beyond the largest double negated and divided by 2¹⁰²⁴). `cargo test --test math -- special::erf --nocapture` prints the largest error of each file.
 
-Measured on an Apple M4 Max on one thread with fat LTO, in ns a call, the median of the three quiet rounds of the campaign (the machine idle before it, the load average below 3.5 throughout), against libm 0.2, statrs 0.18, special 0.11, puruspe 0.4, GSL 2.8, Boost.Math 1.92 (without promotion to `long double`) and Cephes in the same run. "–" is a reference without the function. The x86_64 paths were tested under emulation only, never timed. The timings are those of the tuning campaign, before the fixes of 2026-11-21 and 22, which changed the code on rare paths but for: `dawson` on `|x| < 1/2`, 0.1 to 0.4 ns more (10 to 20 %) for the sign of −0; `faddeeva` for `6.7 ≤ |x| < 10` next to the real axis, about 20 % more, as it computes the pole correction where `Re w` needs it; the lower half-plane and `erfc` next to the diagonals from `|Re z·Im z| = 2¹⁹`, 5 to 35 % more for Payne and Hanek's reduction; the Fresnel integrals below 1, 1 to 6 % more for `x⁴` from the exact `x²`; and `erfc` where `e^(−z²)` is beyond any double (its result 0 or infinite), 8 % more for the saturating scale. Elsewhere the changes are within the noise of two quick interleaved timings of the reviews on a heavily shared machine (up to 7 %, as much where the code did not change).
+### Measured
 
-| function | domain | a | libm | statrs | special | puruspe | gsl | boost | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| erf | [-0.5,0.5] | 2.03 | 1.64 | 4.91 | 1.65 | 18.17 | 24.2 | 3.63 | 3.55 |
-| erf | [0.5,3] | 4.78 | 8.05 | 7.21 | 8.03 | 18.09 | 23.99 | 11.19 | 15.3 |
-| erf | [-3,3] | 4.4 | 6.9 | 7.32 | 6.88 | 18.1 | 23.81 | 8.38 | 14.22 |
-| erf | [3,6] | 4.75 | 9.71 | 9.23 | 9.69 | 18.12 | 24.16 | 17.4 | 17.12 |
-| erfc | [-0.5,0.5] | 2.38 | 1.69 | 4.83 | 1.69 | 18.05 | 16.45 | 3.35 | 3.8 |
-| erfc | [0.5,3] | 4.67 | 7.58 | 6.96 | 7.58 | 17.94 | 22.57 | 10.86 | 14.68 |
-| erfc | [-3,3] | 4.45 | 7.2 | 7.15 | 7.2 | 18.06 | 22.21 | 8.72 | 14.3 |
-| erfc | [3,8] | 4.66 | 9.53 | 9.23 | 9.52 | 17.81 | 22.55 | 17.63 | 16.29 |
-| erfc | [8,27] | 6.33 | 9.7 | 8.96 | 9.67 | 19.13 | 8.61 | 16.1 | 14.54 |
-| erfcx | [-0.5,0.5] | 2.12 | - | - | - | 2.97 | - | - | - |
-| erfcx | [0.5,8] | 1.8 | - | - | - | 2.37 | - | - | - |
-| erfcx | [8,100] | 3.05 | - | - | - | 2.01 | - | - | - |
-| erfcx | [-5,-0.5] | 4.9 | - | - | - | 4.05 | - | - | - |
-| erf_inv | [-0.5,0.5] | 4.83 | - | 4.4 | 12.86 | 78.87 | - | 4.45 | 4.81 |
-| erf_inv | [-1,1] | 11.24 | - | 6.9 | 15.65 | 78.76 | - | 6.09 | 9.39 |
-| erf_inv | 1-[1e-15,0.5] | 14.38 | - | 9.38 | 30.99 | 79.91 | - | 11.65 | 10.78 |
-| erfc_inv | (0,2) | 11.04 | - | 9.29 | - | 77.97 | - | 6.01 | 9.26 |
-| erfc_inv | [1e-300,0.5] | 17.2 | - | 8.93 | - | 79.29 | - | 13.39 | 10.58 |
-| dawson | [-0.5,0.5] | 1.4 | - | - | - | 7.61 | 13.29 | - | 7.46 |
-| dawson | [0.5,8] | 1.78 | - | - | - | 13.18 | 32.32 | - | 10.01 |
-| dawson | [8,1e4] | 2.48 | - | - | - | 13.19 | 33.8 | - | 4.06 |
-| fresnel | [0,1] | 4.06 | - | - | - | - | - | - | 7.86 |
-| fresnel | [1,8] | 12.22 | - | - | - | - | - | - | 20.58 |
-| fresnel | [8,1e4] | 11.11 | - | - | - | - | - | - | 24.55 |
-| faddeeva | \|z\|<1 UHP | 35.73 | - | - | - | 17.79 | - | - | - |
-| faddeeva | [-4,4]x[0,4] | 35.35 | - | - | - | 18.75 | - | - | - |
-| faddeeva | [-10,10]x[0,10] | 22.64 | - | - | - | 18.01 | - | - | - |
-| faddeeva | [-4,4]x[-4,0] | 42.11 | - | - | - | 23.62 | - | - | - |
-| faddeeva | [10,100]x[0,100] | 10.59 | - | - | - | 9.84 | - | - | - |
-| erf c64 | \|z\|<1 | 10.76 | - | - | - | - | - | - | - |
-| erf c64 | [-4,4]^2 | 40.94 | - | - | - | - | - | - | - |
-| erfc c64 | \|z\|<1 | 42.47 | - | - | - | - | - | - | - |
-| erfc c64 | [-4,4]^2 | 41.77 | - | - | - | - | - | - | - |
-| erfcx c64 | \|z\|<1 | 39.72 | - | - | - | - | - | - | - |
-| erfcx c64 | [-4,4]^2 | 38.71 | - | - | - | - | - | - | - |
+As for [the gamma function](#measured) (the conditions and the same-work rule are there):
 
-The largest errors of the references on the same random sets, in ulps (complex: ε of `|w|`): `erf` libm 0.83, Boost 2.2, Cephes 2.5, GSL 5.5, statrs 4.5·10⁵; `erfc` libm 2.6, Boost 4.0, Cephes 9.4, GSL 502; `erfcx` puruspe 2.1 (489 for `x < −1/2`); `erf_inv` Boost 2.2, statrs 2.6; `erfc_inv` Boost 2.2, statrs 2.8; `dawson` Cephes 4.0, GSL 9.9; `fresnel` Cephes 13 below 8 and about 10¹¹ beyond; `faddeeva` puruspe (Johnson's algorithm) 1.7 for `|z| < 1`, 68 on `[−10, 10]²` and 3,800 for `|z|` from 10 to 10⁶.
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `erf` | x in [-0.5,0.5] | 0.969 ns | 0.334 libm |  |
+| `erf` | x in [0.5,3] | 4.59 ns | 0.703 SciPy |  |
+| `erf` | x in [-3,3] | 4.38 ns | 0.626 SciPy |  |
+| `erf` | x in [3,6] | 4.61 ns | 0.784 SciPy |  |
+| `erfc` | x in [-0.5,0.5] | 1.46 ns | 0.443 libm |  |
+| `erfc` | x in [0.5,3] | 4.34 ns | 0.428 libm | 0.658 SciPy† (7 ulps) |
+| `erfc` | x in [-3,3] | 5.30 ns | 0.580 special | 0.619 SciPy† (6.3 ulps) |
+| `erfc` | x in [3,8] | 4.31 ns | 0.421 libm | 0.787 SciPy† (18.1 ulps) |
+| `erfc` | x in [8,27] | 5.15 ns | 0.493 libm | 1.04 SciPy† (2.3·10¹³ ulps) |
+| `erfcx` | x in [-0.5,0.5] | 1.70 ns | – | 0.323 puruspe† (1.7 ulps) |
+| `erfcx` | x in [0.5,8] | 1.44 ns | 0.451 puruspe |  |
+| `erfcx` | x in [8,100] | 1.78 ns | – | 0.505 puruspe† (1.7 ulps) |
+| `erfcx` | x in [-5,-0.5] | 3.94 ns | – | 0.784 puruspe† (8.8 ulps) |
+| `erf_inv` | x in [-0.5,0.5] | 3.11 ns | 0.934 Boost |  |
+| `erf_inv` | x in (-1,1) | 9.75 ns | 1.31 statrs |  |
+| `erf_inv` | x = 1-t, t in [1e-15,0.5] log-uniform | 13.1 ns | 1.24 statrs |  |
+| `erfc_inv` | x in (0,2) | 7.33 ns | 1.16 Boost |  |
+| `erfc_inv` | x in [1e-300,0.5] log-uniform | 13.5 ns | 1.04 statrs | 1.21 SciPy† (2.3 ulps) |
+| `dawson` | x in [-0.5,0.5] | 0.869 ns | 0.0722 GSL | 0.120 puruspe† (2·10¹⁶ ulps) |
+| `dawson` | x in [0.5,8] | 1.59 ns | – | 0.128 SciPy† (2.7 ulps) |
+| `dawson` | x in [8,1e4] | 1.89 ns | 0.0624 GSL | 1.13 SciPy† (8.4 ulps) |
+| `fresnel` | x in [0,1] | 3.96 ns | 0.763 SciPy |  |
+| `fresnel` | x in [1,8] | 11.1 ns | – | 0.370 SciPy† (3.1 ulps) |
+| `fresnel` | x in [8,1e4] | 9.99 ns | – | 0.162 SciPy† (3.9·10³ ulps) |
+| `faddeeva` | \|z\| < 1, Im z >= 0 | 32.3 ns | 1.57 puruspe |  |
+| `faddeeva` | z in [-4,4]x[0,4] | 32.3 ns | 1.53 puruspe |  |
+| `faddeeva` | z in [-10,10]x[0,10] | 23.9 ns | 1.28 puruspe |  |
+| `faddeeva` | z in [-4,4]x[-4,0] | 42.8 ns | 1.32 puruspe |  |
+| `faddeeva` | z in [10,100]x[0,100] | 9.63 ns | 1.08 puruspe |  |
+| `erf`, complex | \|z\| < 1 | 9.69 ns | – | 0.172 SciPy† (260 ulps) |
+| `erfc`, complex | \|z\| < 1 | 42.0 ns | 0.733 SciPy |  |
+| `erfcx`, complex | \|z\| < 1 | 38.0 ns | 0.727 SciPy |  |
+| `erf`, complex | z in [-4,4]^2 | 44.1 ns | – | 0.584 SciPy† (82.5 ulps) |
+| `erfc`, complex | z in [-4,4]^2 | 44.2 ns | – | 0.574 SciPy† (110 ulps) |
+| `erfcx`, complex | z in [-4,4]^2 | 38.3 ns | – | 0.571 SciPy† (72.7 ulps) |
+| `erf`, `f32` | x in [-3,3] | 1.86 ns | 0.822 Apple libm |  |
+| `erfc`, `f32` | x in [-3,3] | 5.13 ns | 0.679 Apple libm |  |
+| `erfc`, `f32` | x in [3,9] | 5.39 ns | 0.691 Apple libm | 0.732 libm† (1.8 ulps) |
+| `erf_inv`, `f32` | x in (-1,1) | 9.59 ns | 1.01 Boost |  |
 
 ### Where the references are faster
 
-- `erf_inv` and `erfc_inv`: Boost and statrs, 1.5 to 2 times, at 1.6 to 2.8 ulps against 0.86: the first guess takes a logarithm and a square root, and the Halley step evaluates `erfcx` and an exponential.
-- `erfcx` from 8: puruspe, 1.5 times, at 1.9 ulps: a division and a polynomial of degree 9 in `1/x²` against its table.
-- `erf` and `erfc` on `|x| < 1/2`: libm, up to 1.3 and 1.4 times, at 0.83 ulps: a chain of 9 dependent multiply-adds against its rational of two short chains.
-- `faddeeva`: puruspe, 1.1 to 2 times: 27 nodes and the pole correction, against an algorithm 20 to 4,000 times less accurate away from the origin.
+- **`faddeeva`** against puruspe's Johnson algorithm (1.08 to 1.57, within 2.9 to 21 ε of `a` on these regions): 27 nodes of the trapezoidal rule and the pole correction near the real axis, for a bound of 4.3 to 19.6 ε that holds every argument.
+- **`erf_inv`** on `(−1, 1)` and near 1 (1.31 and 1.24 against statrs) and **`erfc_inv`** on `(0, 2)` (1.16 against Boost), within 1.5 to 1.9 ulps of `a`: the first guess and one Halley step through `erfcx` and an exponential, which holds the 0.98-ulp bound.
 
 ## The Bessel and Airy functions
 
@@ -426,7 +417,7 @@ The largest errors of the references on the same random sets, in ulps (complex: 
 - **Negative arguments** for the integer orders only: `J_n(−x) = (−1)ⁿ·J_n(x)`, `I_n(−x) = (−1)ⁿ·I_n(x)` (and `e^(−|x|)·I_n(x)` likewise); a negative `x` with a non-integer order, or for `Y` and `K`, is NaN.
 - **Special values.** `J₀(0) = I₀(0) = 1`; `J_ν(0) = I_ν(0) = 0` for `ν > 0` and `±∞` for a negative non-integer `ν` (the sign of `1/Γ(1 + ν)`); `Y_ν(0) = −∞` (for `ν ≥ 0`), `K_ν(0) = +∞`; `J`, `Y`, `K` → 0 and `I` → `∞` as `x → ∞`, the scaled forms → 0. NaN in gives NaN, and so does an infinite order.
 - **Spherical functions** of an order `n: u32`: `sph_bessel_j(n, x) = jₙ(x) = √(π/(2x))·J_(n+1/2)(x)`, `sph_bessel_y` (`yₙ`), `sph_bessel_i` (`iₙ`, of `I_(n+1/2)`) and `sph_bessel_k` (`kₙ = √(π/(2x))·K_(n+1/2)(x)`, SciPy's `spherical_kn`). `jₙ`, `yₙ` and `iₙ` are defined for negative `x` by their parities (`jₙ(−x) = (−1)ⁿ jₙ(x)`, `yₙ(−x) = (−1)ⁿ⁺¹ yₙ(x)`, `iₙ(−x) = (−1)ⁿ iₙ(x)`); `kₙ` of a negative `x` is NaN. `j₀(0) = i₀(0) = 1`, `jₙ(0) = iₙ(0) = 0` for `n ≥ 1`, `yₙ(0) = −∞`, `kₙ(0) = ∞`, and `yₙ` and `kₙ` are `∓∞` where they overflow at tiny `x`.
-- **Large orders.** From `ν = 50` `I_ν` and `K_ν` (plain and scaled) come from Debye's uniform expansions, in constant time and to their bound at every order (`I` from its power series where `x² ≤ 16(ν + 1)` or `x < 30`, `K` from its leading term below `x = 10⁻¹⁵⁰`). `J_ν` and `Y_ν` take time that grows with `ν` where `x` is near or above the order, up to `ν = 10⁷`; above, they come from Olver's uniform expansion (with the module's Airy functions), in constant time, and are 0 and `−∞` where they underflow and overflow (`x` well below `ν`), and 0 from about `x = 6.7·10²⁹⁹` on, where the argument of the Airy functions passes `10²⁰⁰` (their phase is lost long before). The spherical `jₙ`, `yₙ` and `kₙ` of orders above `10⁷` follow `J`, `Y` and `K` of `n + 1/2`, and `iₙ` from `n = 50` on Debye's `I`, in constant time. No valid argument of a Bessel function gives NaN.
+- **Large orders.** From `ν = 50` `I_ν` and `K_ν` (plain and scaled) come from Debye's uniform expansions, in constant time and to their bound at every order (`I` from its power series where `x² ≤ 16(ν + 1)` or `x < 30`, `K` from its leading term below `x = 10⁻¹⁵⁰`). `J_ν` and `Y_ν` take time that grows with `ν` where `x` is near or above the order, up to `ν = 10⁷`; above, they come from Olver's uniform expansion (with the module's Airy functions), in constant time, and are 0 and `−∞` where they underflow and overflow (`x` well below `ν`), and 0 from about `x = 6.7·10²⁹⁹` on, where the argument of the Airy functions passes `10²⁰⁰` (their phase is lost long before). The spherical `jₙ`, `yₙ` and `kₙ` of orders above `10⁷` follow `J`, `Y` and `K` of `n + 1/2`, and `iₙ` from `n = 20` on Debye's `I`, in constant time. No valid argument of a Bessel function gives NaN.
 
 ### Airy functions
 
@@ -479,83 +470,107 @@ Measured: the orders 0 and 1 of `I` and `K` 0.65 ulp at most, `J` and `Y` of tho
 
 ### Methods of the Bessel and Airy functions
 
+- **The `f32` forms of `J₀` and `J₁`** on `|x| < 25`: polynomials of degree 14 in `x − (i + 1/2)` on the unit pieces (Chebyshev interpolants, mpmath at 40 digits), on a piece with a zero `z` of `J(x)/(x − z)` times `x − z` from the double-double `z`, good to `2⁻⁴⁵` in `f64` and rounded once to the `f32` (checked against the `f64` path at every `f32` of `[−25.5, 25.5]`). `Y₀` and `Y₁` on `0 < x < 25` alike, on pieces of width 1/4 on `[1/2, 1)`, 1/2 on `[1, 2)` and 1 from 2 on (the logarithm at 0 needs the shorter ones), good to `2.5·10⁻¹⁵`, and below 1/2 by `(2/π) ln(x) J(x) + P(x²)` (`P(x²)/x` for `Y₁`, `P` entire, of degree 9) with `J` from the pieces of `J₀`, `J₁` (at every `f32` of `[0, 25.5]` 3 results of `Y₀` and 1 of `Y₁` differ from the `f64` path rounded, all ties within `0.5000` ulp of mpmath). The integer orders `2 ≤ n ≤ 400` of `J` for `x > n` and of `Y` for every `x > 0`: the plain forward recurrence in `f64` from those (from 25 on from the modulus-phase forms of the `f64` path), and of `J` for `x² ≤ 4(n + 1)` the power series in plain `f64` (its terms decrease from the first and its sum is at least about `e⁻¹`), a few `n` ulps of `M` (or of the value) in `f64`, far below the rounding to the `f32` (at every `f32` of `[0, 1000]` for the orders 2, 3, 7, 20 and 40, at most 5 results of an order differ from the `f64` path rounded, all within `0.5000` ulp of `max(|v|, M)`).
 - **Orders 0 and 1 of `J` and `Y`.** Below 24, each interval between two extrema in three pieces: about its zero `f(z + d) = d·q(d)` with the zero as a double-double, and about the midpoints of the two outer thirds plain polynomials, Remez fits of degree 12 to 14, their tails from `c₃` by Estrin's scheme and their three outer steps of Horner's rule in double-double with `x − m` exact (at the ends of a piece `c₁u` and `c₂u²` reach half and a quarter of the value, where a step in `f64` cost up to an ulp): the error stays relative through the zeros. `J₀` below 1.5 and `J₁` below the first extremum are polynomials in `x²`; `Y₀` and `Y₁` below half their first zero are `(2/π)·ln x·J + R(x²)`, and about their first two zeros `(2/π)·ln(x/z)·J + (x − z)·g(x)`, whose fit `g` has no logarithmic singularity. From 24 on, the modulus and the phase, `J = M cos θ`, `Y = M sin θ`, `M = √(2/(πx))·(1 + P(1/x²))`, `θ = x − (2n + 1)π/4 + α(1/x)`, Remez fits, with `x` reduced modulo `π/2` to a double-double (Cody and Waite's three-part `π/2` below 10⁶, Payne and Hanek's 1280 bits of `2/π` above) and the sine and cosine of the reduced double-double by FreeBSD msun's kernels.
 - **Orders 0 and 1 of `I` and `K`.** Polynomials in `x²` up to 1 (`K` with its `ln x·I` apart), `I` in nine pieces of `[1, 7.75]` about their midpoints, and `e^(∓x)·√x·(I, K)` in pieces of `1/x`: Remez fits with their first two coefficients in double-double, evaluated by Estrin's scheme; `1/√x` from `√x·(1/x)` with one correction, `e^x` from a table of `2^(j/32)` and a polynomial to 2⁻⁵⁸.
-- **Other orders.** With `ν = n + μ`, `|μ| ≤ 1/2`: `J_μ` and `J_(μ+1)` from their power series summed in double-double (it serves up to 30, where its terms cancel down to `e^(−x)`); `Y_μ` and `Y_(μ+1)` from Temme's series below 2 (Temme 1975; its leading terms are of order 1 and cancel, so its ingredients `μπ/sin μπ`, `Γ₁`, `Γ₂`, `sinh σ/σ`, `cosh σ`, `e^σ` and its first two steps are formed in double-double, the rest in `f64`) and from Steed's continued fraction CF2, `p + iq = (J′ + iY′)/(J + iY)`, summed backwards (`120/x + 8` terms), as `Y_μ = (p·J_μ − J′_μ)/q`; Hankel's expansion from 30 on; then the recurrences in double-double up to `ν` (`Y` always, `J` while `x > ν`). Where `x ≤ ν`, `J_ν` comes from its series or from the Wronskian `J_ν = (2/(πx))/(r·Y_ν − Y_(ν+1))`, `r = J_(ν+1)/J_ν` by CF1 summed from the tail in double-double (near the turning point its partial ratios stay near 1 for about `7ν^(1/3)` terms, through which the rounding errors of an `f64` run pile up), at least so many terms that the zero tail costs below `e^(−48)` (by Debye's exponent of `J_(ν+k)`; Lentz's test stops short there), `r·Y_ν − Y_(ν+1)` in double-double (the terms cancel to about `ν^(−1/3)` of each, and an error of the recurrence that is a multiple of `J` drops out). `I_ν` from its power series (positive terms, double-double) below 30, else Hankel's expansion or the Wronskian with CF1; `K_μ`, `K_(μ+1)` from Temme's series below 1/2 and from the Wronskian `I_μ·K_(μ+1) + I_(μ+1)·K_μ = 1/x` with `K_(μ+1)/K_μ` by CF2 summed backwards (no step of it cancels), then up by the recurrence. Integer orders start from the dedicated `J₀`, `J₁`, `Y₀`, `Y₁`, `I₀`, `I₁`, `K₀`, `K₁` (beyond `x = 700`, where `K₀` and `K₁` leave the normal range, from the scaled ones with `e^(−x)` apart). The scaled forms carry `e^(∓x)` as a separate exponent throughout. From `ν = 50`, `I` and `K` by Debye's expansions `I_ν(x) = e^(νη)/√(2πr)·Σ Uₖ(p)/νᵏ`, `K_ν(x) = √(π/2)·e^(−νη)/√r·Σ (−1)ᵏUₖ(p)/νᵏ`, `r = √(ν² + x²)`, `p = ν/r`, `U₁` to `U₁₂` from their recurrence. The exponent `νη` is the size of the result in `e`-folds, its absolute error the result's relative error: below `ν = 2¹⁶` it is `r + ν·ln(x/(ν + r))` in double-double (for the scaled forms below `x = 2⁴⁵`); beyond, where that form carries `ν` times the error of the logarithm and, for the scaled forms, the cancellation of `r − x`, `νη − x = −p·xν/(r + x) − ν(atanh p − p)` for the scaled forms (terms of one sign, the first as `p` times `xν/(r + x)`, factors that stay normal where `ν²/(r(r + x))` does not, near the top of the range; `atanh p − p` by its series where `p` is small, else from `ln((r + ν)/x)`), and for the plain ones, in range only within about 1300 of `x = z₀ν` (`z₀ = 0.6627…` the root of `η`, Laplace's limit), `νη = D·P(D/ν)` from `D = x − z₀ν` formed exactly with the bits of `z₀` (as Payne and Hanek reduce by `2/π`) and `P` the Taylor series of `η/(z − z₀)` about `z₀`. For the scaled `I` at a negative order, `e^(−x)·K_a = (e^x·K_a)·e^(−2x)` with the scales apart, decided first by its exponent `−aη − x` in `f64` where that is beyond the range; from `a = 2¹⁶` on, where the two factors' exponents are about `0.9a` each, that exponent, `−a(η(z) + z)` with `z = x/a`, comes whole from `D = x − z₁a` (`z₁ = 0.4477…` the root of `η(z) + z`, its bits multiplied out as for `z₀`) and the Taylor series of `(η(z) + z)/(z − z₁)` about `z₁`. Above `ν = 10⁷`, `J` and `Y` by Olver's expansion to its terms `A₀` and `B₀`, `ζ`, `φ` and `B₀` by their series about `x = ν` or their closed forms.
-- **Spherical functions.** `j₀ = sin x/x`, `y₀ = −cos x/x` from the double-double reduction; the power series where `x² ≤ n + 3/2`; the terminating Hankel sums `jₙ = (P sin(x − nπ/2) + Q cos(x − nπ/2))/x` from `x ≥ n(n + 1)/2`; between, `jₙ` up from `j₀`, `j₁` where `x > n` and down from the continued fraction of `jₙ/jₙ₋₁` where `x ≤ n` (that of `J`, summed from its tail in double-double at every `x`, as the run down passes its error to `jₙ` whole; normalised by `j₀` or `j₁`), `yₙ` up from `y₀`, `y₁`, all in double-double from double-double starts; `yₙ` and `kₙ` below `x = 2⁻⁵⁰⁰` from their leading term `(2n − 1)!!/x^(n+1)`. `kₙ = (π/(2x))·e^(−x)·Σ aₖ/(2x)ᵏ` by Horner's rule in double-double up to `n = 10`, beyond by the recurrence of positive terms. `iₙ` from its power series (up to `x = 20 + n/2` and `n²/28` below `n = 50`, `x² ≤ 16(n + 1.5)` or `x < 30` from it on), from the closed form `(e^x·Σ(−1)ᵏaₖ/xᵏ − (−1)ⁿe^(−x)·Σ aₖ/xᵏ)/(2x)` in double-double with both exponentials between there and `x = n(n + 1)/2` below `n = 50` (where its terms cancel by `2⁴⁰` at most), and from Debye's `I_(n+1/2)` there from `n = 50` on; beyond `x = n(n + 1)/2` from the closed form (`∞` beyond 720).
+- **Other orders.** Where `x ≥ 20` and `x ≥ ν²/2`, Hankel's expansion of the order `ν` itself (for `I` and `K` below `ν = 50`). Elsewhere, with `ν = n + μ`, `|μ| ≤ 1/2`: `J_μ` and `J_(μ+1)` from their power series summed in double-double (it serves up to 30, where its terms cancel down to `e^(−x)`); `Y_μ` and `Y_(μ+1)` from Temme's series below 2 (Temme 1975; its leading terms are of order 1 and cancel, so its ingredients `μπ/sin μπ`, `Γ₁`, `Γ₂`, `sinh σ/σ`, `cosh σ`, `e^σ` and its first two steps are formed in double-double, the rest in `f64`) and from Steed's continued fraction CF2, `p + iq = (J′ + iY′)/(J + iY)`, summed backwards (`120/x + 8` terms), as `Y_μ = (p·J_μ − J′_μ)/q`; Hankel's expansion from 30 on; then the recurrences in double-double up to `ν` (`Y` always, `J` while `x > ν`). Where `x ≤ ν`, `J_ν` comes from its series or from the Wronskian `J_ν = (2/(πx))/(r·Y_ν − Y_(ν+1))`, `r = J_(ν+1)/J_ν` by CF1 summed from the tail in double-double (near the turning point its partial ratios stay near 1 for about `7ν^(1/3)` terms, through which the rounding errors of an `f64` run pile up), at least so many terms that the zero tail costs below `e^(−48)` (by Debye's exponent of `J_(ν+k)`; Lentz's test stops short there), `r·Y_ν − Y_(ν+1)` in double-double (the terms cancel to about `ν^(−1/3)` of each, and an error of the recurrence that is a multiple of `J` drops out). `I_ν` from its power series (positive terms, double-double) below 30, else the Wronskian with CF1; `K_μ`, `K_(μ+1)` from Temme's series below 1/2 and from the Wronskian `I_μ·K_(μ+1) + I_(μ+1)·K_μ = 1/x` with `K_(μ+1)/K_μ` by CF2 summed backwards (no step of it cancels), then up by the recurrence. Integer orders start from the dedicated `J₀`, `J₁`, `Y₀`, `Y₁`, `I₀`, `I₁`, `K₀`, `K₁` (beyond `x = 700`, where `K₀` and `K₁` leave the normal range, from the scaled ones with `e^(−x)` apart). The scaled forms carry `e^(∓x)` as a separate exponent throughout. From `ν = 50`, `I` and `K` by Debye's expansions `I_ν(x) = e^(νη)/√(2πr)·Σ Uₖ(p)/νᵏ`, `K_ν(x) = √(π/2)·e^(−νη)/√r·Σ (−1)ᵏUₖ(p)/νᵏ`, `r = √(ν² + x²)`, `p = ν/r`, `U₁` to `U₁₂` from their recurrence. The exponent `νη` is the size of the result in `e`-folds, its absolute error the result's relative error: below `ν = 2¹⁶` it is `r + ν·ln(x/(ν + r))` in double-double (for the scaled forms below `x = 2⁴⁵`); beyond, where that form carries `ν` times the error of the logarithm and, for the scaled forms, the cancellation of `r − x`, `νη − x = −p·xν/(r + x) − ν(atanh p − p)` for the scaled forms (terms of one sign, the first as `p` times `xν/(r + x)`, factors that stay normal where `ν²/(r(r + x))` does not, near the top of the range; `atanh p − p` by its series where `p` is small, else from `ln((r + ν)/x)`), and for the plain ones, in range only within about 1300 of `x = z₀ν` (`z₀ = 0.6627…` the root of `η`, Laplace's limit), `νη = D·P(D/ν)` from `D = x − z₀ν` formed exactly with the bits of `z₀` (as Payne and Hanek reduce by `2/π`) and `P` the Taylor series of `η/(z − z₀)` about `z₀`. For the scaled `I` at a negative order, `e^(−x)·K_a = (e^x·K_a)·e^(−2x)` with the scales apart, decided first by its exponent `−aη − x` in `f64` where that is beyond the range; from `a = 2¹⁶` on, where the two factors' exponents are about `0.9a` each, that exponent, `−a(η(z) + z)` with `z = x/a`, comes whole from `D = x − z₁a` (`z₁ = 0.4477…` the root of `η(z) + z`, its bits multiplied out as for `z₀`) and the Taylor series of `(η(z) + z)/(z − z₁)` about `z₁`. Above `ν = 10⁷`, `J` and `Y` by Olver's expansion to its terms `A₀` and `B₀`, `ζ`, `φ` and `B₀` by their series about `x = ν` or their closed forms.
+- **Spherical functions.** `j₀ = sin x/x`, `y₀ = −cos x/x` from the double-double reduction; the power series where `x² ≤ n + 3/2`; the terminating Hankel sums `jₙ = (P sin(x − nπ/2) + Q cos(x − nπ/2))/x` from `x ≥ n(n + 1)/2`; between, `jₙ` up from `j₀`, `j₁` where `x > n` and down from the continued fraction of `jₙ/jₙ₋₁` where `x ≤ n` (that of `J`, summed from its tail in double-double at every `x`, as the run down passes its error to `jₙ` whole; normalised by `j₀` or `j₁`), `yₙ` up from `y₀`, `y₁`, all in double-double from double-double starts; `yₙ` and `kₙ` below `x = 2⁻⁵⁰⁰` from their leading term `(2n − 1)!!/x^(n+1)`. `kₙ = (π/(2x))·e^(−x)·Σ aₖ/(2x)ᵏ` by the recurrence of its positive terms. `iₙ` from its power series (up to `x = 20 + n/2` below `n = 20`, `x² ≤ 16(n + 1.5)` or `x < 30` from it on), from the closed form `(e^x·Σ(−1)ᵏaₖ/xᵏ − (−1)ⁿe^(−x)·Σ aₖ/xᵏ)/(2x)` in double-double with both exponentials between there and `x = n(n + 1)/2` below `n = 20` (where its terms cancel by `2⁴⁰` at most), and from Debye's `I_(n+1/2)` there from `n = 20` on; beyond `x = n(n + 1)/2` from the closed form (`∞` beyond 720).
 - **Airy functions.** For `x ≥ 4` (`Bi`, `Bi′`: 12), `Ai(x) = e^(−ζ)/(2√π·x^(1/4))·(1 + t·A(t))`, `t = 1/ζ`, and likewise for the others; from 1 up to there Remez fits of `e^(±ζ)·f` in pieces; from the first extremum left of 0 up to 1 Remez fits of `f` itself, in pieces halved until the fit holds `2⁻⁵⁷` with its coefficients rounded to `f64` (at the ends of the widest pieces `c₂u²` and `c₃u³` reach the size of the value); down to about −8.5 one polynomial about each zero (as for `J₀`); these by Horner's rule with the last three steps in double-double. Below, the modulus and the phase, `Ai(−y) = M cos θ`, `Bi(−y) = M sin θ`, `θ = π/4 − ζ + α(1/ζ)` (`Ai′`, `Bi′` with `N` and `φ = 3π/4 − ζ + β`), Remez fits, the phase reduced in double-double, both parts of `ζ` modulo `π/2` (its low part passes `π/4` from about `|x| = 10¹¹`).
-- Nothing allocates. The read-only tables hold about 35 KB of coefficients (`J₀`…`Y₁` 14 KB, `I₀`…`K₁` and `1/Γ(1 + μ)` 6.3 KB, the large orders 2.4 KB, the Airy functions 11.9 KB), `2^(j/32)` 512 bytes and the bits of `2/π` 160 bytes; their generators (`gen01.py`, `gen_ik.py`, `gen_olver.py` and the shared `remez.py` in `bessel/`, `gen_airy.py` and `airy_post.py` in `airy/`, on mpmath) reproduce them exactly. The elementary functions are the module's own (`e^x`, `ln x`, the sine and cosine, `atan`), and the polynomials use `mul_add` where it is one instruction (aarch64, x86_64 with FMA) and plain products elsewhere, while the error terms of the double-double arithmetic are exact everywhere (a fused multiply-add or Dekker's product). All targets of one kind give the same bits; the others (x86_64 without FMA, and Miri) differ in the last bits. They were checked by the same code built with the fused path off on aarch64, where every test passes and the sweeps stay within the bounds (an error term once left to the plain path had cost `Y₁` 1.95 ulps there), and by the tests under Miri on every 37th case of their data, not on x86_64 itself.
+- Nothing allocates. The read-only tables hold about 51 KB of coefficients (`J₀`…`Y₁` 14 KB, the `f32` forms of `J₀`…`Y₁` 15.6 KB, `I₀`…`K₁` and `1/Γ(1 + μ)` 6.3 KB, the large orders 2.4 KB, the Airy functions 11.9 KB), `2^(j/32)` 512 bytes and the bits of `2/π` 160 bytes; their generators (`gen01.py`, `gen_ik.py`, `gen_olver.py`, `gen_f32.py` and the shared `remez.py` in `bessel/`, `gen_airy.py` and `airy_post.py` in `airy/`, on mpmath) reproduce them exactly. The elementary functions are the module's own (`e^x`, `ln x`, the sine and cosine, `atan`), and the polynomials use `mul_add` where it is one instruction (aarch64, x86_64 with FMA) and plain products elsewhere, while the error terms of the double-double arithmetic are exact everywhere (a fused multiply-add or Dekker's product). All targets of one kind give the same bits; the others (x86_64 without FMA, and Miri) differ in the last bits. They were checked by the same code built with the fused path off on aarch64, where every test passes and the sweeps stay within the bounds (an error term once left to the plain path had cost `Y₁` 1.95 ulps there), and by the tests under Miri on every 37th case of their data, not on x86_64 itself.
 
 ### Measured
 
-Measured on an Apple M4 Max on one thread with fat LTO, in ns a call, the median of the three quiet rounds of the campaign (the machine idle before it, the load average below 3.5 throughout), against libm 0.2, statrs 0.18, special 0.11, puruspe 0.4, GSL 2.8, Boost.Math 1.92 (without promotion to `long double`) and Cephes in the same run. "–" is a reference without the function. The x86_64 paths were tested under emulation in that campaign only (after the fixes of 2026-11-21 they were checked by a build without FMA, see the methods), and never timed.
+As for [the gamma function](#measured) (the conditions and the same-work rule are there):
 
-| function | domain | a | libm | puruspe | gsl | boost | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| j0 | [0,25] | 10.22 | 16.36 | 5.77 | 36.41 | 7.56 | 14.82 |
-| j1 | [0,25] | 11.06 | 17.07 | 4.77 | 36.35 | 8.26 | 14.61 |
-| y0 | [0,25] | 19.64 | 17.93 | 7.57 | 40.91 | 11.34 | 15.75 |
-| y1 | [0,25] | 22.42 | 17.69 | 6.04 | 39.67 | 12.8 | 15.47 |
-| j0 | [25,1e4] | 25.06 | 19.1 | 7.55 | 38.58 | 19.43 | 15.34 |
-| j1 | [25,1e4] | 24.85 | 19.63 | 5.94 | 39.22 | 20.19 | 15.56 |
-| y0 | [25,1e4] | 22.74 | 21.25 | 7.6 | 38.95 | 20.77 | 15.41 |
-| y1 | [25,1e4] | 22.19 | 21.54 | 5.46 | 39.99 | 21.45 | 15.24 |
-| i0 | [0,50] | 12.45 | - | 3.26 | 23.51 | 10.33 | 12.69 |
-| i1 | [0,50] | 12.59 | - | 3.36 | 23.52 | 10.4 | 12.58 |
-| k0 | [0.01,50] | 11.11 | - | 3.94 | 17.57 | 7.57 | 12.18 |
-| k1 | [0.01,50] | 11.23 | - | 3.92 | 18.47 | 7.98 | 12.61 |
-| jn | n 2..20, x [0.1,50] | 142.54 | 58.01 | 32.95 | 156.99 | 32.39 | 132.23 |
-| yn | n 2..20, x [0.1,50] | 140.08 | 46.81 | 19.88 | 88.94 | 21.35 | 45.62 |
-| jv | ν [0,10], x [0.1,2] | 93.51 | - | 64.39 | 105.44 | 44.91 | 77.49 |
-| yv | ν [0,10], x [0.1,2] | 131.68 | - | 65.78 | 68.38 | 82.78 | 178.67 |
-| iv | ν [0,10], x [0.1,2] | 83.58 | - | 61.08 | 120.23 | 62.18 | 91.98 |
-| kv | ν [0,10], x [0.1,2] | 246.32 | - | 61.77 | 76.68 | 73.07 | - |
-| kv_scaled | ν [0,10], x [0.1,2] | 243.59 | - | - | 66.98 | - | - |
-| jv | ν [0,10], x [2,30] | 426.68 | - | 196.36 | 150.35 | 107.46 | 86.48 |
-| yv | ν [0,10], x [2,30] | 454.22 | - | 188.76 | 191.56 | 138.44 | 174.42 |
-| iv | ν [0,10], x [2,30] | 230.72 | - | 120.74 | 127.91 | 190.41 | 254.49 |
-| kv | ν [0,10], x [2,30] | 345.43 | - | 120.02 | 75.77 | 121.51 | - |
-| kv_scaled | ν [0,10], x [2,30] | 344.53 | - | - | 71.73 | - | - |
-| jv | ν [0,3], x [30,1e3] | 69.29 | - | 2455.06 | 1735.12 | 26.75 | 12.83 |
-| yv | ν [0,3], x [30,1e3] | 69.65 | - | 2414.67 | 1746 | 26.5 | 30.28 |
-| iv | ν [0,3], x [30,1e3] | 28.29 | - | 406.18 | 128.51 | 7284.32 | 387.51 |
-| kv | ν [0,3], x [30,1e3] | 32.12 | - | 407.37 | 27.03 | 29.02 | - |
-| kv_scaled | ν [0,3], x [30,1e3] | 25.34 | - | - | 18.49 | - | - |
-| jv | ν [10,100], x [1,200] | 651.69 | - | 508.3 | 248.53 | 496.1 | 289.71 |
-| yv | ν [10,100], x [1,200] | 680.04 | - | 509.95 | 294.57 | 653.44 | 832.28 |
-| iv | ν [10,100], x [1,200] | 249.57 | - | 210.23 | 198.4 | 218.09 | 328.27 |
-| kv | ν [10,100], x [1,200] | 201.79 | - | 209.89 | 110.55 | 132.84 | - |
-| kv_scaled | ν [10,100], x [1,200] | 214.5 | - | - | 103.31 | - | - |
-| sph_j | n 0..10, x [0.1,50] | 56.74 | - | - | 109.32 | 66.95 | - |
-| sph_y | n 0..10, x [0.1,50] | 76.29 | - | - | 42.27 | 77.77 | - |
-| sph_k | n 0..10, x [0.1,50] | 36.93 | - | - | 11.82 | - | - |
-| airy_ai | [-10,10] | 15.32 | - | - | 48.93 | 217.9 | 85.56 |
-| airy_bi | [-10,10] | 11.29 | - | - | 46.58 | 340.83 | 85.94 |
-| airy_ai_prime | [-10,10] | 14.66 | - | - | 26.23 | 219.34 | 85.78 |
-| airy_ai | [-1e3,-10] | 36.43 | - | - | 79.15 | 66.89 | 32.33 |
-| airy_bi | [-1e3,-10] | 35.7 | - | - | 80.19 | 66.13 | 31.95 |
-| airy_ai_prime | [-1e3,-10] | 36.39 | - | - | 39.01 | 72.73 | 31.18 |
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `bessel_j`, ν = 0 | x in [0,25] | 12.7 ns | 0.613 Apple libm | 1.50 puruspe† (7.9 ulps) |
+| `bessel_y`, ν = 0 | x in [0.01,25] | 19.6 ns | 1.31 Apple libm | 1.84 puruspe† (54 ulps) |
+| `bessel_j`, ν = 1 | x in [0,25] | 13.0 ns | 0.648 Apple libm | 1.56 puruspe† (8.2 ulps) |
+| `bessel_y`, ν = 1 | x in [0.01,25] | 20.4 ns | 1.34 Apple libm | 2.08 puruspe† (33.7 ulps) |
+| `bessel_j`, ν = 0 | x in [25,1e4] | 26.2 ns | 1.18 Apple libm | 2.40 puruspe† (2.7·10³ ulps) |
+| `bessel_y`, ν = 0 | x in [25,1e4] | 27.4 ns | 1.75 Apple libm | 2.49 puruspe† (2.7·10³ ulps) |
+| `bessel_j`, ν = 1 | x in [25,1e4] | 27.2 ns | 1.26 Apple libm | 2.91 puruspe† (2·10³ ulps) |
+| `bessel_y`, ν = 1 | x in [25,1e4] | 27.0 ns | 1.74 Apple libm | 2.88 puruspe† (2.1·10³ ulps) |
+| `bessel_i`, ν = 0 | x in [0,50] | 12.1 ns | – | 2.20 puruspe† (5.9 ulps) |
+| `bessel_k`, ν = 0 | x in [0.01,50] | 10.4 ns | 2.05 Boost |  |
+| `bessel_i`, ν = 1 | x in [0,50] | 12.1 ns | – | 2.19 puruspe† (5.3 ulps) |
+| `bessel_k`, ν = 1 | x in [0.01,50] | 10.6 ns | 0.592 GSL | 2.00 Boost† (2.1 ulps) |
+| `bessel_j`, integer n | n integer in [2,20], x in [0.1,50] | 96.0 ns | 1.86 Apple libm | 2.86 puruspe† (22.6 ulps) |
+| `bessel_y`, integer n | n integer in [2,20], x in [0.1,50] | 87.1 ns | 2.61 Apple libm | 3.98 Boost† (41 ulps) |
+| `bessel_i`, integer n | n integer in [2,20], x in [0.1,50] | 148 ns | 1.17 puruspe |  |
+| `bessel_k`, integer n | n integer in [2,20], x in [0.1,50] | 59.2 ns | 3.59 puruspe |  |
+| `bessel_j` | nu in [0,10], x in [0.1,2] | 91.8 ns | 2.09 Boost |  |
+| `bessel_y` | nu in [0,10], x in [0.1,2] | 238 ns | 2.64 GSL |  |
+| `bessel_j` | nu in [0,10], x in [2,30] | 187 ns | – | 1.39 Boost† (23.6 ulps) |
+| `bessel_y` | nu in [0,10], x in [2,30] | 229 ns | – | 1.40 Boost† (29.4 ulps) |
+| `bessel_j` | nu in [0,3], x in [30,1e3] | 69.1 ns | 0.401 SciPy | 2.35 Boost† (10.8 ulps) |
+| `bessel_y` | nu in [0,3], x in [30,1e3] | 67.7 ns | 2.39 Boost |  |
+| `bessel_j` | nu in [10,100], x in [1,200] | 295 ns | – | 1.25 GSL† (4.5·10⁵ ulps) |
+| `bessel_y` | nu in [10,100], x in [1,200] | 299 ns | – | 1.08 GSL† (2.2·10³ ulps) |
+| `bessel_j` | nu in [50,300], x in nu*[0.95,1.05] (turning point) | 657 ns | – | 8.44 GSL† (1.7·10³ ulps) |
+| `bessel_y` | nu in [50,300], x in nu*[0.95,1.05] (turning point) | 619 ns | – | 8.44 GSL† (2·10³ ulps) |
+| `bessel_j` | nu in [-30,0] non-integer, x in [0.1,60] | 292 ns | – | 1.26 Boost† (40.6 ulps) |
+| `bessel_y` | nu in [-30,0] non-integer, x in [0.1,60] | 292 ns | – | 1.26 Boost† (30.9 ulps) |
+| `bessel_i` | nu in [0,10], x in [0.1,2] | 72.0 ns | 0.916 Boost |  |
+| `bessel_i` | nu in [0,10], x in [2,30] | 114 ns | 0.634 SciPy | 0.722 GSL† (14.6 ulps) |
+| `bessel_i` | nu in [0,3], x in [30,1e3] | 48.6 ns | – | 0.386 GSL† (1.3·10³ ulps) |
+| `bessel_i` | nu in [10,100], x in [1,200] | 180 ns | – | 1.23 SciPy† (310 ulps) |
+| `bessel_i` | nu in [-30,0] non-integer, x in [0.1,60] | 353 ns | – | 1.79 SciPy† (610 ulps) |
+| `bessel_i` | nu in [50,300], x in nu*[0.5,2] (Debye) | 77.9 ns | – | 1.69 SciPy† (670 ulps) |
+| `bessel_k` | nu in [0,10], x in [0.1,2] | 222 ns | – | 2.37 Boost† (27 ulps) |
+| `bessel_k` | nu in [0,10], x in [2,30] | 175 ns | 1.81 GSL |  |
+| `bessel_k` | nu in [0,3], x in [30,1e3] | 50.3 ns | – | 1.23 Boost† (4.3·10⁵ ulps) |
+| `bessel_k` | nu in [10,100], x in [1,200] | 117 ns | – | 1.19 GSL† (360 ulps) |
+| `bessel_k` | nu in [50,300], x in nu*[0.5,2] (Debye) | 76.9 ns | – | 0.389 GSL† (37.7 ulps) |
+| `bessel_i_scaled` | nu in [0,10], x in [0.1,2] | 74.9 ns | – | 1.04 SciPy† (44.1 ulps) |
+| `bessel_i_scaled` | nu in [0,10], x in [2,30] | 117 ns | – | 0.738 GSL† (15.6 ulps) |
+| `bessel_i_scaled` | nu in [10,100], x in [1,200] | 180 ns | – | 0.819 GSL† (1.7·10⁷ ulps) |
+| `bessel_i_scaled` | nu in [-30,0] non-integer, x in [0.1,60] | 365 ns | – | 0.402 SciPy† (2.9·10⁴ ulps) |
+| `bessel_i_scaled` | nu in [50,1000], x in [1,2000] | 81.0 ns | – | 2.57 GSL† (5.4·10¹³ ulps) |
+| `bessel_k_scaled` | nu in [0,10], x in [0.1,2] | 222 ns | – | 2.47 GSL† (27.5 ulps) |
+| `bessel_k_scaled` | nu in [0,10], x in [2,30] | 171 ns | 1.88 GSL |  |
+| `bessel_k_scaled` | nu in [0,3], x in [30,1e3] | 43.9 ns | 1.60 GSL |  |
+| `bessel_k_scaled` | nu in [10,100], x in [1,200] | 118 ns | – | 1.25 GSL† (240 ulps) |
+| `bessel_k_scaled` | nu in [50,1000], x in [1,2000] | 79.2 ns | – | 0.399 SciPy† (NaN or ∞ on 156 of 65536) |
+| `sph_bessel_j` | n in [0,10], x in [0.1,50] | 33.0 ns | – | 0.918 SciPy† (120 ulps) |
+| `sph_bessel_y` | n in [0,10], x in [0.1,50] | 30.1 ns | – | 1.83 SciPy† (7.9 ulps) |
+| `sph_bessel_j` | n in [0,60], x in [0.1,200] | 94.4 ns | – | 0.498 SciPy† (130 ulps) |
+| `sph_bessel_y` | n in [0,60], x in [0.1,200] | 74.3 ns | – | 0.857 GSL† (1.4·10³ ulps) |
+| `sph_bessel_j` | n in [10,60], x in [0.1,n/2] | 182 ns | – | 2.06 GSL† (13.6 ulps) |
+| `sph_bessel_y` | n in [10,60], x in [0.1,n/2] | 79.6 ns | – | 0.988 GSL† (470 ulps) |
+| `sph_bessel_i` | n in [0,10], x in [0.1,50] | 44.9 ns | 0.347 SciPy | 0.484 GSL† (1.1·10⁴ ulps) |
+| `sph_bessel_k` | n in [0,10], x in [0.1,50] | 14.2 ns | – | 0.826 GSL† (17.1 ulps) |
+| `sph_bessel_i` | n in [0,60], x in [0.1,200] | 71.9 ns | – | 0.412 GSL† (740 ulps) |
+| `sph_bessel_k` | n in [0,60], x in [0.1,200] | 47.8 ns | – | 2.24 GSL† (15.3 ulps) |
+| `airy_ai` | x in [-10,10] | 14.9 ns | – | 0.332 GSL† (83.2 ulps) |
+| `airy_ai_prime` | x in [-10,10] | 14.9 ns | – | 0.546 GSL† (140 ulps) |
+| `airy_bi` | x in [-10,10] | 11.6 ns | – | 0.265 GSL† (16.1 ulps) |
+| `airy_bi_prime` | x in [-10,10] | 12.7 ns | – | 0.446 GSL† (23 ulps) |
+| `airy_ai` | x in [-1e3,-10] | 32.8 ns | – | 0.535 Boost† (1.7·10⁴ ulps) |
+| `airy_ai_prime` | x in [-1e3,-10] | 33.5 ns | – | 0.969 GSL† (3.8·10⁴ ulps) |
+| `airy_bi` | x in [-1e3,-10] | 33.6 ns | – | 0.549 Boost† (1.8·10⁴ ulps) |
+| `airy_bi_prime` | x in [-1e3,-10] | 33.9 ns | – | 0.988 GSL† (4.7·10⁴ ulps) |
+| `airy_ai` | x in [10,100] | 21.0 ns | – | 1.01 GSL† (590 ulps) |
+| `airy_ai_prime` | x in [10,100] | 22.3 ns | – | 1.25 GSL† (580 ulps) |
+| `airy_bi` | x in [10,100] | 18.4 ns | – | 0.995 GSL† (570 ulps) |
+| `airy_bi_prime` | x in [10,100] | 19.2 ns | – | 0.743 GSL† (560 ulps) |
+| `bessel_j`, ν = 0, `f32` | x in [0,25] | 2.40 ns | 0.274 Boost |  |
+| `bessel_y`, ν = 0, `f32` | x in [0.01,25] | 4.32 ns | 0.414 Boost |  |
+| `bessel_j`, ν = 1, `f32` | x in [0,25] | 3.51 ns | 0.387 Boost |  |
+| `bessel_y`, ν = 1, `f32` | x in [0.01,25] | 3.44 ns | 0.318 Boost |  |
+| `bessel_j`, integer n, `f32` | n in [2,20], x in [0.1,50] | 68.1 ns | 1.89 Boost |  |
+| `bessel_y`, integer n, `f32` | n in [2,20], x in [0.1,50] | 50.0 ns | 2.35 Boost |  |
+| `bessel_j`, `f32` | nu in [0,10], x in [2,30] | 191 ns | 1.40 Boost |  |
+| `bessel_k`, `f32` | nu in [0,10], x in [0.1,2] | 221 ns | 2.32 Boost |  |
+| `airy_ai`, `f32` | x in [-10,10] | 15.1 ns | 0.0694 Boost |  |
 
-These timings, and the column `a` of the table below, predate the fixes of the audit of 2026-11-21 (the accuracy after them is in the accuracy section above). A quick timing of the paths the fixes touch, not under the campaign's conditions (best of 15 rounds of 4,000 calls, ns a call, before → after; where marked "interleaved", the least of 15 runs of each build in turn, on a loaded machine): `jv` ν [10,100], x [1,200] 772 → 797 and x [√ν, ν] 1014 → 1165 (CF1 from its tail in double-double where `x ≤ ν`), ν [50,300] at the turning point 2185 → 2538, ν [0,10], x [0.1,2] 116 → 132; `yv` ν [0,10], x [0.1,2] 162 → 299 (Temme's series in double-double; interleaved 155 → 285); Debye's `iv` and `kv` (ν [50,1000], x [1,2000]) 98 → 105 and 94 → 102, the scaled ones 94 → 101 and 90 → 96, and at the orders from 2¹⁶ on where they are in range (interleaved, ν [10⁵,10¹²]) `iv` and `kv` about `x = z₀ν` 84 → 110 and 86 → 110, the scaled ones at `x = ν²/(2t)`, `t` [10⁻³,700], 67 → 105 and 68 → 108 (Debye's exponent from `x − z₀ν` and in the one-signed scaled form, where it was up to 10¹² ulps off); the negative non-integer orders (interleaved, ν [−30,0], x [0.1,60]) of `jv` and `yv` 553 → 599 and 562 → 604 (8%, and 20% in a second such run: Temme's series below x = 2), `iv` and the scaled `iv` 641 → 650 and 648 → 659; `sph_j` 79 → 81, `sph_y` 93 → 60, `sph_i` (n 0..60, x [0.1,200]) 404 → 423; the Airy functions within 10%; `j0` and `y0` within 6%, `j1` within 10% (interleaved 15.0 → 16.4); `jn` (n 2..20, x [0.1,50]) 11 to 17% (interleaved, 400 → 443 on the efficiency cores). After the second review (2026-11-22; both builds on the efficiency cores, the least of 7 interleaved runs, as the loaded machine's runs on the performance cores did not compare): `sph_j` 2% on n 0..10, x [0.1,50] and 1 to 10% where `x < n/2` (its continued fraction from the tail in double-double there too), the scaled `iv` at the orders from −2¹⁶ down about `x = 0.448|ν|` 5%, the rest unchanged.
+### Where the references are faster
 
-The references' accuracy on the same data, max/rms ulps of `max(|value|, M)`:
-
-| function | cases | `a` | libm | puruspe | gsl | boost | cephes |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| J | ν = 0, 1 | 0.50/0.16 | 2.20/0.45 | 2.506e13/1441161177434.60 | 2.506e13/1441161177434.61 | 26.08/1.80 | 2.506e13/1441161177434.57 |
-| Y | ν = 0, 1 | 0.68/0.18 | 2.22/0.49 | 1.517e14/7749379708648.51 | 85.22/8.39 | 3.95/0.71 | 1.517e14/7749379708648.47 |
-| J | ν ≥ 0 other | 2.25/0.25 | - | 2.918e6/317241.63 | 3.159e3/315.83 | 2.775e2/19.55 | 2.751e7/1917018.02 |
-| Y | ν ≥ 0 other | 3.37/0.77 | - | 1.299e6/115066.80 | 1.157e3/145.32 | 72.33/6.78 | 9.542e15/664838879626942.12 |
-| I | ν = 0, 1 | 0.53/0.28 | - | 5.03/1.60 | 1.492e3/163.41 (8 non-finite) | 3.23/0.83 | 4.36/1.16 |
-| I | ν ≥ 0 other | 0.94/0.31 | - | 1.752e4/1766.71 (1 non-finite) | 1.311e3/130.95 | 6.780e2/49.26 (1 non-finite) | 8.696e15/2542791248379523.00 (2 non-finite) |
-| K | ν = 0, 1 | 0.55/0.28 (1 non-finite) | - | 13.53/4.23 (1 non-finite) | 9.60/1.93 (1 non-finite) | 2.13/0.64 (1 non-finite) | 6.95/1.31 (1 non-finite) |
-| K | ν ≥ 0 other | 2.36/0.77 (1 non-finite) | - | 1.716e2/16.78 (1 non-finite) | 1.323e2/13.74 (1 non-finite) | 15.59/3.06 (1 non-finite) | 5.038e263/inf (5 non-finite) |
-| sph j | all x > 0 | 1.13/0.23 | - | - | 3.671e7/3098349.17 | 6.11/1.24 | - |
-| sph y | all x > 0 | 0.59/0.27 | - | - | 7.984e2/72.93 | 15.40/2.04 | - |
-| Ai | x ≥ −10⁶ | 0.69/0.17 | - | - | 4.458e8/39821786.30 | 2.793e8/21281436.76 | 6.483e7/5625636.06 |
-| Ai' | x ≥ −10⁶ | 0.51/0.14 | - | - | 1.360e8/13157984.64 | 1.647e8/13653073.50 | 2.661e8/20808008.42 |
-| Bi | x ≥ −10⁶ | 0.50/0.24 | - | - | 5.274e8/66902473.09 | 9.436e9/711347516.32 | 6.668e240/inf |
-| Bi' | x ≥ −10⁶ | 0.70/0.22 | - | - | 2.135e8/16314096.69 | 2.002e7/2240653.48 | 1.815e280/inf |
+- **`kₙ`, `yₙ`, `jₙ` and `iₙ`, integer orders 2 to 20** (3.59 against puruspe, 2.61 and 1.86 against Apple's libm, 1.17 against puruspe): the starting values and the recurrences with their error terms carried, which hold `K` and `Y` to 6 ulps and `J` to 5, against plain `f64` recurrences (puruspe's `kₙ` within 11.6 ulps of `a`, Apple's `yₙ` and `jₙ` within 6.6 and 6.8).
+- **Real orders at small and moderate `x`**: `Y_ν` and `J_ν` for `ν` in `[0, 10]`, `x` in `[0.1, 2]` (2.64 against GSL, 2.09 against Boost: Temme's series and the power series in double-double), `K_ν` and the scaled `K` for `x` in `[2, 30]` (1.81, 1.88, GSL: the continued fraction CF2 summed backwards in double-double) and the scaled `K` for `x` in `[30, 10³]` (1.60, GSL), `Y_ν` for `x` in `[30, 10³]` (2.39, Boost: the double-double phase of Hankel's expansion).
+- **Orders 0 and 1**: `K₀` (2.05 against Boost, within 2.0 ulps of `a`), `Y₀`, `Y₁` beyond 25 (1.75, 1.74) and below it (1.31, 1.34), `J₀`, `J₁` beyond 25 (1.18, 1.26), against Apple's libm: the double-double outer steps of the pieces and of the reduction of the phase, for bounds of 1.5 ulps of the value and 1 ulp of `M`.
+- **The `f32` forms**: `bessel_y` and `bessel_j` of integer orders (2.35, 1.89), `bessel_k` for `x` in `[0.1, 2]` (2.32) and `bessel_j` for `x` in `[2, 30]` (1.40), against Boost in `double`: the general orders of `f32` run the `f64` paths (Temme's series, the continued fractions), not tables of their own.
 
 ## The zeta function and the others
 
@@ -609,74 +624,71 @@ Two bounds were loosened from those of the first version, each where the method'
 - **Complex `ζ`.** `σ ≥ 56`: `1 + 2⁻ˢ`. Near the pole (`−1/2 ≤ σ ≤ 3/2`, `|s − 1| ≤ 3`): the Taylor series `1/(s − 1) + Σ_{n<30} (−1)ⁿγₙ/n! (s − 1)ⁿ` with `γₙ` the Stieltjes constants, whose terms all fall below the first, the reciprocal as a double-double. Else for `σ ≥ 1/2`: the Euler–Maclaurin formula `Σ_{n<N} n⁻ˢ + N^(1−s)/(s − 1) + N⁻ˢ/2 + Σ_{k≤24} B₂ₖ/(2k)! (s)₂ₖ₋₁ N^(−s−2k+1)` with `N = ⌈(|s| + 40)/2.83⌉` for `t ≤ 10⁴` (`t ≤ 10³` for `σ ≥ 10`); the Dirichlet series itself for `σ ≥ 10` past it (at most 80 terms); and the Riemann–Siegel formula for any `σ` as J. Arias de Reyna gives it (*High precision computation of Riemann's zeta function by the Riemann–Siegel formula, I*, Math. Comp. 80, 2011) for `0 ≤ σ < 10`, `t > 10⁴`: `ζ(s) = R(s) + χ(s) conj R(1 − σ + it)`, `R` the sum to `N = ⌊√(t/2π)⌋` and nine terms of the correction `(−1)^(N−1) U a^(−σ) Σ_k a^(−k) Σ_ℓ d_{k,ℓ}(σ) F^(3k−2ℓ)(p)/(π^(2k−ℓ)(2i)^ℓ)` (its `d` by the recurrence of the paper, `F` the entire `(e^(πi(z²/2+3/8)) − i√2 cos(πz/2))/(2 cos πz)` by its Taylor series), so that the cost grows as `√t`; on the critical line one sum serves both parts, and `χ(s) conj R(1 − σ + it)` is a double-double. Each `n⁻ˢ` has its phase `t ln n/2π` as a double-double reduced exactly (`ln n` to `2⁻¹⁰⁰` past `t = 10⁶`), and its modulus from a double-double `ln n`; in the strip and in the Riemann–Siegel sums each term is itself a double-double, to about `2⁻⁶²` (its sine and cosine from a table of `sin(πj/32)`, `cos(πj/32)` and the series of the rest of the angle); the terms are added from the smallest, in double-double. Left of `σ = 1/2` (but for `0 ≤ σ < 1/2` past `t = 10⁴`): the reflection `ζ(s) = χ(s) ζ(1 − s)`, so that every sum is one of decaying terms (the Euler–Maclaurin formula at `σ` itself adds terms of size `n^(−σ) ≥ 1` and reached 7.5 ε of `|ζ|` for `−0.3 ≤ σ < 0`), with `ζ(1 − s)` at `1 − σ` taken as an exact pair (its rounding, times `ζ′/ζ ≈ ½ ln t`, cost up to 13 ε near `σ = 1/2`). Where `|1 − s| ≥ 13` (`t ≥ 13.5` or `σ ≤ −12`): `ln χ(s)` itself, its modulus and its phase as double-doubles from Stirling's series of `ln Γ(1 − s)` with `ln|1 − s|` and `arg(1 − s)` in double-double, and `ln sin(πs/2) = πt/2 − ln 2 + iπ(1 − σ)/2` (exact but for `e^(−πt)`) or, below `t = 13.5`, without the sine and with the parts of size `1 − σ` of the phase cancelled in closed form (the sine and its product with `ζ(1 − s)` then double-doubles, the sine scaled to about 1), so that the phase, of the order of `t`, keeps its digits for any `t` (at a trivial zero the real part of `ζ` is that phase times the imaginary part); nothing leaves the range before the last product. Else (`−12 < σ < 1/2`, `t < 13.5`) with `Γ(1 − s)` from `gamma_c64`, corrected by `ψ(1 − s)` for the low part of `1 − σ`, and `2(2π)^(s−1)`, `sin(πs/2)` and the products as double-doubles, the large factors multiplied first (so that `sin(πs/2)` near a trivial zero does not underflow). Below `t = 2⁻⁶⁰⁰` the function at `t′ = 2⁻⁶⁰⁰·m` with its imaginary part (and at a zero of `ζ(σ)` its real part, of order `t²`) scaled back, from `σ = −12` within the last products of the logarithmic form, so that `t ζ′(σ)` is not lost to an overflow at `t′` (`|ζ′(−400)| ≈ 10⁵⁴⁹`); on `σ = 1` below `t = 2⁻⁵⁰⁰` the value `γ − i/t`, whose rest `−iγ₁t − γ₂t²/2 + …` is below `2⁻¹⁰⁰⁰` of it (the series about the pole would square `t`).
 - **Hurwitz `ζ`.** The Euler–Maclaurin formula with 24 Bernoulli terms from `A = a + N ≥ 7 + s/2`, or the direct sum alone once its terms fall below `2⁻⁵⁶` of the first and the rest past them (at most `(m + a)^(1−s)/(s − 1) + (m + a)⁻ˢ`) does too; every term positive, added from the smallest in double-double, `n + a` exact, the first term as a double-double. The remainder as `A^(1−s) (1/(s − 1) + (1/2 + Σ…)/A)` with `A` a double-double: one power, which does not leave the range where the result does not.
 - **`Li₂`.** On `−1 ≤ x ≤ 3/4` the series in `y = −ln(1 − x)` (`Li₂ = y − y²/4 + y³ P(y²)`, `P` a minimax fit of degree 8), `y` corrected to a double-double by `(1 − x) eʸ − 1`, `y − y²/4` exact; elsewhere the reflection `π²/6 − ln x ln|1 − x| − Li₂(1 − x)` and the inversions `∓π²/6 − ½ ln²|x| − Li₂(1/x)` with double-double constants, logarithms, products and series, rounded once; about the zero `12.595…` of `Re Li₂` a polynomial in `x − x₀`.
-- **`Li_s`.** `2⁻ˢ|x| < 2⁻⁶⁰`: `x`. `0 < s < 2⁻¹⁰²²`: `x/(1 − x)`, within `40s` of it relative. `|x| ≤ 3/4` (`|x| ≤ 1/2` for `s < 0`, and every `x ≥ −1` for `s ≥ 20`; past `|x| = 1/2` the expansions about `±1` cancelled, by up to 3 and 1.6, and reached 4 and 6.4 ulps): `Σ xᵏ k⁻ˢ`, `p⁻ˢ` of the primes from double-double logarithms and the rest by products, for `s < −1` each term from logarithms. `3/4 < x < 1` (`1/2 < x < 1` for `s < 0`): `Γ(1 − s)(−μ)^(s−1) + Σ ζ(s − k) μᵏ/k!`, `μ = ln x` a double-double (relative to itself near 1), `Γ(1 − s)` with the low part of `1 − s`; for `n = 1` (`n` the integer nearest `s ≥ 1/2`) and near the integers past it the pole of `ζ(s − k)` at `k = n − 1` and that of `Γ(1 − s)` taken together in closed form (through `ln Γ(1 − ε)/ε`, `ln Π(1 + ε/j)/ε` and `expm1` of a double-double); `ζ(s − k)` past `s − k < −1/2` by the reflection as a recurrence in `k`; for `s < −20` the first term alone, `ln Γ` in double-double; `+∞` once that first term leaves the range. `−2 ≤ x < −3/4`: `−Σ η(s − k) μᵏ/k!`. `x < −2`, `s > 0`: integers by the inversion `−(−1)ⁿ Li_n(1/x) − Σ 2η(2j) μⁿ⁻²ʲ/(n − 2j)!`, the sum nested as `(μⁿ/n!)[1 + r₁(2η(2) + r₂(…))]` in double-double so that its cost is linear in `n` and no factorial overflows; the others by the integral of Fermi and Dirac, `Li_s(−eᵘ) = −F(μ)/Γ(s)`, every term positive (on `[0, min(1, μ)]` the Taylor series of the logistic integrated exactly, past it 16-point Gauss–Legendre pieces about exact midpoints), or, where they apply, the divergent series cut at its least term (orders large against `ln|x|`) and Sommerfeld's expansion (`x < −e^37.7`, `μ` a double-double, `1 + s` an exact pair with its low part through `ψ`, past `s = 160` `ln Γ(1 + s)` in double-double); for `s > 21` the powers at the quadrature's nodes from double-double logarithms, and where `t^(s−1)` would leave the range `ln Γ(s)` in double-double. `s < 0`, `x < 0` (an integer order with `x < −1` by `Li_s(x) = (−1)^(s+1) Li_s(1/x)`, `ln(−1/x) = −μ` exactly): the series, each term from logarithms as a double-double, where `|x| ≤ 1/2` and no term is above about 4000 times the first (the largest is at `k ≈ |s|/ln(1/|x|)`), so that the cancellation of its alternating terms costs nothing; else `Li_s(x) = 2 Γ(1 − s)(2π)^(s−1) Re[i^(1−s) ζ(1 − s, 1/2 − iμ/2π)]` with the Hurwitz zeta function of a complex argument by the Euler–Maclaurin formula, each term from `ln|n + a|` and `arg(n + a)` in double-double relative to the first, that first's logarithm joined with `ln(2 Γ(1 − s)(2π)^(s−1))` in one exponent, the direct terms stopped where the rest is negligible, and the remainder past them, its products and `Re[i^(1−s) Z]` complex double-doubles, rounded once in the last product (`σ − 1 = −s` exactly); for `−1/4 < s < 0` the pole of `ζ(σ, a)` at `σ = 1` taken out of the remainder (`(w^(1−σ) − 1)/(σ − 1) = −expm1(s ln w)/s`, by its series or from `e^(s ln w)` in double-double) and its part `−sin(πs/2)/s` added in closed form, so that parts of size `1/|s|` do not cancel to `O(1)`; further left the pair is not needed (in units of `|a|^(−σ)` it is of size `|a|^(1−s)`, against a result of `|a| sin(π|s|)/|s|`). The real part cancels near the real zeros of `Li_s`, by `1/sin(π|s|) ≈ κ/π` as `s → −1`, and also where `|x|` is near `2^(±|s|)`, by about 50 for an integer order whose `κ` is 1 there: the series takes those. Integers `−18 ≤ s ≤ −2`, `0 < x < 1`: `x Aₙ(x)/(1 − x)ⁿ⁺¹` with Eulerian polynomials (their coefficients exact, below `2⁵³`) in double-double, `+∞` past the range.
-- **Lambert W.** Near the branch point both branches are polynomials in `p = √(2(1 + e x))` (`±p`), `1 + e x` without the cancellation (`e` as a double-double), on `|p| ≤ 0.66`; `W₋₁` goes on to `x = −0.2` in `s = √(2(−ln(−x) − 1))`, `s = √(−2 ln(1 − q))` a double-double from the double-double `q`; each a minimax fit of full precision, its first two terms a double-double. `W₀` on `0.66 < p ≤ 4.31` (`−0.29 < x ≤ 3`) is `x e^(−W₀)` with `e^(−W₀)` a polynomial of full precision in `p` on five pieces (`p` a double-double, the product rounded once; its series below `|x| = 2⁻¹⁰`), without iteration. Elsewhere a fitted starting value good to `3·10⁻⁷` (in `ln x`, in `s`, or the asymptotic series) and one step of Halley's iteration with the residual `w eʷ − x` from a double-double `eʷ` (so that its only error is the final rounding), or for `|w| > 40` one step of Fritsch's iteration (of the fourth order).
+- **`Li_s`.** `2⁻ˢ|x| < 2⁻⁶⁰`: `x`. `0 < s < 2⁻¹⁰²²`: `x/(1 − x)`, within `40s` of it relative. `|x| ≤ 3/4` (`|x| ≤ 1/2` for `s < 0`, and every `x ≥ −1` for `s ≥ 20`; past `|x| = 1/2` the expansions about `±1` cancelled, by up to 3 and 1.6, and reached 4 and 6.4 ulps): `Σ xᵏ k⁻ˢ`, `p⁻ˢ` of the primes from double-double logarithms and the rest by products, for `s < −1` each term from logarithms. `3/4 < x < 1` (`1/2 < x < 1` for `s < 0`): `Γ(1 − s)(−μ)^(s−1) + Σ ζ(s − k) μᵏ/k!`, `μ = ln x` a double-double (relative to itself near 1), `Γ(1 − s)` with the low part of `1 − s`; for `n = 1` (`n` the integer nearest `s ≥ 1/2`) and near the integers past it the pole of `ζ(s − k)` at `k = n − 1` and that of `Γ(1 − s)` taken together in closed form (through `ln Γ(1 − ε)/ε`, `ln Π(1 + ε/j)/ε` and `expm1` of a double-double); `ζ(s − k)` past `s − k < −1/2` by the reflection as a recurrence in `k`; for `s < −20` the first term alone, `ln Γ` in double-double; `+∞` once that first term leaves the range. The orders `s = 1/2, 3/2, 5/2` and `3` (the Fermi–Dirac integrals `F₋₁/₂`, `F₁/₂`, `F₃/₂` and `F₂`) on `−7.3·10²⁶ ≤ x < 0`: fits of 10⁻²¹ made for this crate (Chebyshev interpolation of mpmath's values at 45 digits), `x·G(x)` with `G` a polynomial in `x + 3/8` on `[−3/4, 0)`, `−F(μ)` with `F` a polynomial in `μ = ln(−x)` on `[−2, −3/4)`, and `−μˢ R(μ)/Γ(s + 1)` past `−2` with `R` on nine pieces of `ln μ` of width 1/2, `μ`, `ln μ` and the prefactor as double-doubles (each the first two terms of its polynomial as a double-double). `−2 ≤ x < −3/4`: `−Σ η(s − k) μᵏ/k!`. `x < −2`, `s > 0`: integers by the inversion `−(−1)ⁿ Li_n(1/x) − Σ 2η(2j) μⁿ⁻²ʲ/(n − 2j)!`, the sum nested as `(μⁿ/n!)[1 + r₁(2η(2) + r₂(…))]` in double-double so that its cost is linear in `n` and no factorial overflows; the others by the integral of Fermi and Dirac, `Li_s(−eᵘ) = −F(μ)/Γ(s)`, every term positive (on `[0, min(1, μ)]` the Taylor series of the logistic integrated exactly, past it 16-point Gauss–Legendre pieces about exact midpoints), or, where they apply, the divergent series cut at its least term (orders large against `ln|x|`) and Sommerfeld's expansion (`x < −e^37.7`, `μ` a double-double, `1 + s` an exact pair with its low part through `ψ`, past `s = 160` `ln Γ(1 + s)` in double-double); for `s > 21` the powers at the quadrature's nodes from double-double logarithms, and where `t^(s−1)` would leave the range `ln Γ(s)` in double-double. `s < 0`, `x < 0` (an integer order with `x < −1` by `Li_s(x) = (−1)^(s+1) Li_s(1/x)`, `ln(−1/x) = −μ` exactly): the series, each term from logarithms as a double-double, where `|x| ≤ 1/2` and no term is above about 4000 times the first (the largest is at `k ≈ |s|/ln(1/|x|)`), so that the cancellation of its alternating terms costs nothing; else `Li_s(x) = 2 Γ(1 − s)(2π)^(s−1) Re[i^(1−s) ζ(1 − s, 1/2 − iμ/2π)]` with the Hurwitz zeta function of a complex argument by the Euler–Maclaurin formula, each term from `ln|n + a|` and `arg(n + a)` in double-double relative to the first, that first's logarithm joined with `ln(2 Γ(1 − s)(2π)^(s−1))` in one exponent, the direct terms stopped where the rest is negligible, and the remainder past them, its products and `Re[i^(1−s) Z]` complex double-doubles, rounded once in the last product (`σ − 1 = −s` exactly); for `−1/4 < s < 0` the pole of `ζ(σ, a)` at `σ = 1` taken out of the remainder (`(w^(1−σ) − 1)/(σ − 1) = −expm1(s ln w)/s`, by its series or from `e^(s ln w)` in double-double) and its part `−sin(πs/2)/s` added in closed form, so that parts of size `1/|s|` do not cancel to `O(1)`; further left the pair is not needed (in units of `|a|^(−σ)` it is of size `|a|^(1−s)`, against a result of `|a| sin(π|s|)/|s|`). The real part cancels near the real zeros of `Li_s`, by `1/sin(π|s|) ≈ κ/π` as `s → −1`, and also where `|x|` is near `2^(±|s|)`, by about 50 for an integer order whose `κ` is 1 there: the series takes those. Integers `−18 ≤ s ≤ −2`, `0 < x < 1`: `x Aₙ(x)/(1 − x)ⁿ⁺¹` with Eulerian polynomials (their coefficients exact, below `2⁵³`) in double-double, `+∞` past the range.
+- **The `f32` form of `Ei`** on `(0, 6]`: the `f64` method without its double-double steps (its terms have one sign), checked against the `f64` path at every positive `f32` up to 6.5.
+- **Lambert W.** Near the branch point both branches are polynomials in `p = √(2(1 + e x))` (`±p`), `1 + e x` without the cancellation (`e` as a double-double), on `|p| ≤ 0.66`; `W₋₁` goes on to `x = −0.2` in `s = √(2(−ln(−x) − 1))`, `s = √(−2 ln(1 − q))` a double-double from the double-double `q`; each a minimax fit of full precision, its first two terms a double-double. `W₀` on `0.66 < p ≤ 4.31` (`−0.29 < x ≤ 3`) is `x e^(−W₀)` with `e^(−W₀)` a polynomial of full precision in `p` on five pieces (`p` a double-double, the product rounded once; its series below `|x| = 2⁻¹⁰`), without iteration. `W₀` on `3 < x ≤ e⁴⁰`: one of twenty polynomials of degree 7 in `ln x` (Chebyshev interpolants, picked by an index rather than a branch), good to `6.1·10⁻¹⁰`, and one step of Newton's iteration with the residual from a double-double `eʷ`; its `f32` form on `2⁻¹⁰ ≤ |x| ≤ 3` takes `x e^(−W₀)` with `e^(−W₀)` from nine polynomials of degree 13 in `p` of `f32` grade (`2⁻⁴⁹`, in `f64`, then rounded once to the `f32`; checked against the `f64` path at every `f32` of `[−1/e, 3]`). Elsewhere a fitted starting value good to `3·10⁻⁷` (in `s`, or the asymptotic series) and one step of Halley's iteration (in a form with one division) with the residual `w eʷ − x` from a double-double `eʷ` (so that its only error is the final rounding), or for `|w| > 40` one step of Fritsch's iteration (of the fourth order).
 - **`E₁`, `Ei`, `Eₙ`.** `E₁`: `F(x) − ln x` on `(0, 1]` with the entire `F = E₁ + ln x = −γ + x − x²/4 + c₃x³ + x⁴T(x)` a minimax polynomial of degree 14, `ln x`, `x − x²/4` and `c₃x³` in double-double and the sum rounded once (near 1 the result is a quarter of its parts); `e⁻ˣ (H₀ + K(x))/x` on `(1, 2.5]` with `K` a rational fit (6/6) evaluated in `(x − 1)/0.75`, where its denominator's terms are all positive; past it Boost.Math's rational of degree 10/11 in `1/x`; `e⁻ˣ` to about `2⁻⁷⁵` and the product rounded once. `Ei`: `ln(x/x₀) + (x − x₀) R(x)` on `(0, 6]` (`R` entire, four polynomial pieces, `c₀ + c₁t` of each a double-double; `x − x₀` exact with `x₀` a triple-double; `ln(x/x₀)` a double-double, by `ln_1p` and a Newton step near `x₀` and up to 1.5; the sum rounded once); `eˣ (1 + K(x))/x` past 6 with `K` rational fits on four pieces to 48, each evaluated in a variable from the left end of its piece (where the terms of both polynomials are positive: about the middle of the piece they alternate and cancelled by up to 95 at its left end), and polynomials in `1/x` past it. `Eₙ`, `n ≥ 2`: the recurrence `Eₖ₊₁ = (e⁻ˣ − x Eₖ)/k` up from a double-double `E₁` for `x ≤ 2` and `n < 50`, else the continued fraction, its depth from Lentz's test (and a quarter more) and its value from the bottom up in double-double arithmetic; `E₀ = e⁻ˣ/x`.
 
 The fits are minimax (Remez exchange for the polynomials, Lawson's iteration for the rationals, mpmath at 128 bits) made for this crate, but for `E₁` past 2.5, Boost.Math's. The other tables (the Riemann–Siegel function's Taylor coefficients, the Stieltjes constants, `atan(k/8)`, Stirling's coefficients) are printed by `zeta/gen_complex.py`.
 
-### Measured
+### Accuracy measured
 
 The accuracy above was measured by the tests (`cargo test --test math -- special::zeta` prints the largest error of each region on the data of `tests/math/special/data/zeta_*.txt`, regenerated by `data/gen_zeta.py`) and by surveys against Arb outside the repository (16,139 complex points for `ζ` and about 140,000 more by the regions of its bounds, 73,897 real ones, 14,700 for `ζ(s, a)`, 35,470 for `Li₂`, 5,500 random and 12,000 targeted for `Li_s`, about 20,000 a branch of W, 19,344, 24,864 and 9,080 for `E₁`, `Ei`, `Eₙ`, each repeated for `f32`). The release and the debug builds give the same bits on 66,383 of these arguments (the first version gave one polylogarithm 8 ulps apart between them). After the first review of the fixes (2026-11-22) the functions it touched were surveyed again on the final code: the complex function on 66,600 points by the regions of its bounds to `t = 2⁴⁰` (two samples) and as many in `f32`, 14,400 by height near `σ = 1/2`, 11,900 at the switch points of its methods, 22,000 left of the strip below `t = 13.5` and 6,800 at the trivial zeros with a tiny `t` (5,000 of them with each part against mpmath at `120 + log₂(1/t)` bits, since Arb's references are good only relative to `|ζ|`); `Li_s` on about 290,000 (59,400 by region and 48,500 in `f32`, 22,900 past `−2` by path, by order and by binade, 20,900 with `|x|` near `2^(±|s|)`, 6,000 of the Eulerian form, and 130,000 about the switch points `x = ±1/2`, `±3/4` and `−1`); `Ei` on 560,000. The references of its regression rows agree with Arb to `2⁻⁹⁵` or better, every set of them fails on the code before it, and the release and the debug builds gave the same bits on 90,314 arguments. After the second review (2026-11-22): `Li_s` with `s < 0`, `x < 0` on 41,500 points (30,500 with `−1 < s < 0` by decade of `|x|` to `10³⁰⁰` and about the switch at `s = −1/4`, 3,000 each with `s` in `(−3, −1)` and `(−30, −3)`, 5,000 in the regions of the general survey) and 7,500 integer orders with `x < 0`, the general survey again (63,300 points in 37 regions, 58,986 in `f32`) and 2,030 switch-point and edge arguments; `Ei` on 434,800 points of `(6, 717]`; the complex function at 874 edge arguments (switch points, tiny and subnormal parts). The release and the debug builds now give the same bits on 121,893 arguments (90,893 from the data files and the audit's surveys, and the second review's 31,000), three of which (polylogarithms of `−1 < s < 0` far left) had differed in the last bit: the release build merged a sine and a cosine of one argument into one call of the system's `sincos`, whose last bit can differ from theirs; that code is gone (the pole's remainder takes this crate's double-double sine and cosine).
 
-The timings below are those of the campaign of the first version (an Apple M4 Max on one thread with fat LTO, the median of three quiet rounds, against libm 0.2, statrs 0.18, special 0.11, puruspe 0.4, GSL 2.8, Boost.Math 1.92 without promotion to `long double` and Cephes in the same run; "–" is a reference without the function; the x86_64 paths were tested under emulation only, never timed). The fixes of 2026-11-21 were timed only against the first version on a loaded machine without LTO (the minimum of fifteen rounds, ns a call): `expint_e1` on `[0.01, 1]` 5.6 → 12.2, `expint_ei` on `[0.01, 6]` 6.7 → 10.0 (1.6 times when measured again after the second review: 7.8 → 12.7), `lambert_wm1` on `[−0.36, −0.01]` 10.8 → 15.9, `dilog` on `[−1, 1]` 14 → 16.5, `polylog` of `s = 2.5` on `[0, 1]` 151 → 174 and of `s = 3` on `[−1, 1]` 149 → 162, of `s ∈ [−10, −0.1]` on `x ∈ [−2, 0.9]` 272 → 1,198 (the Hurwitz form in double-double), `zeta` on `[−0.5, 0.9]` 4.5 → 5.1; the others (`hurwitz_zeta`, `zeta` left of −1/2, `lambert_w0`, `expint_e1` past 1, `expint_ei` past 6) unchanged within 3 %. The complex function on the table's grids: `s = [0.5, 5] + i[−50, 50]` 563 → 683, `s = [−10, 0.5] + i[−20, 20]` 655 → 747, `s = 1/2 + i[100, 1000]` 5,546 → 6,466 (the reflection for every `σ < 1/2` accounts for 1 to 2 % of it; the rest came with the earlier fixes of the same day, and was not profiled); past `t = 10⁴` it costs `√t` instead of `t`. The changes after the first review of the fixes (2026-11-22) were timed against the code before them and the first version, the minimum of six to ten interleaved runs on a machine loaded to 70–480 whose cores differ (ratios within 1 ± 0.3 are noise there): the complex function's grids within 5 % (its terms in the strip double-doubles), the Riemann–Siegel range half as costly on the critical line (one sum serves both parts: 0.38 ms at `t = 10⁸`, 3.6 ms at `10¹⁰`, twice that off the line), left of the strip below `t = 13.5` three times as fast (the logarithmic form for `σ ≤ −12`); `polylog` of the integer orders `−18 ≤ s ≤ −9` on `(0, 0.9]` a quarter of its cost before (0.24 times, measured again after the second review: the Eulerian form in double-double, 0.14 µs), of the integer orders near `|x| = 2^(−|s|)` half (the series in place of the Hurwitz form), of large orders past `x = −e³⁹` 2.8 times (the integral of Fermi and Dirac with its powers from double-double logarithms: 24 µs for `s ∈ [21, 400]`); the others unchanged. The last two changes of that review, the sine of the logarithmic form as a double-double and the series of `Li_s` to `|x| = 3/4` (timed against the code before them, eight interleaved runs), cost 1.08 to 1.16 times as much left of the strip below `t = 13.5` past `σ = −12` (0.25 to 0.5 µs) and 1.12 to 1.5 times on `s > 0`, `1/2 < |x| ≤ 3/4` (0.29 µs); the table's grids are unchanged within 3 %. Against the first version, whose Eulerian form in double lost up to 39 ulps, the integer orders on `(0, 0.9]` cost (measured again after the second review) 1.1 times as much for `−8 ≤ s ≤ −2` (22 ns) and twice for `−18 ≤ s ≤ −9` (0.14 µs), both by the Eulerian form in double-double, four times for `−30 ≤ s ≤ −19` (0.67 µs) and twice for `−64 ≤ s ≤ −31` (0.9 µs), by the series of terms from logarithms (each a `ln k` in double-double and an exponential) and the expansion about 1. The changes after the second review (eight interleaved runs against the code before them, the minimum, on a machine loaded to 30–60) cost nothing measurable: the Hurwitz form of `Li_s` 0.81 to 1.05 times as much (less for `s ≤ −1/4`, where the plain remainder took the place of the pole pair), `expint_ei` past 6 and the complex function within 3 %. The final code against the first version, measured in the same way: the complex function's grids 1.2 to 1.3 times as much (left of `σ = −12` below `t = 100` 0.1 to 0.35 times), `polylog` of positive orders 0.62 to 1.0 times, of `s ∈ [−10, −0.1]` on `[−2, 0.9]` 3.8 times (1.2 µs), `expint_ei` on `[0.01, 6]` 1.6 times (12.7 ns) and past 6 1.03, `expint_e1` on `[0.01, 1]` 2.0 times (13 ns), `dilog` on `[−1, 1]` 1.2, the real `zeta` and `hurwitz_zeta` 1.03 to 1.12.
+### Measured
 
-| function | domain | a | libm | statrs | special | puruspe | gsl | boost | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| zeta | [1.1,3] | 4.26 | - | - | - | - | 27.89 | 6.88 | 7.53 |
-| zeta | [3,56] | 4.96 | - | - | - | - | 24.36 | 8.02 | 12.59 |
-| zeta | [-0.5,0.9] | 4.26 | - | - | - | - | 27.03 | 14.43 | 13.58 |
-| zeta | [-20,-0.5] | 36.53 | - | - | - | - | 63.73 | 42.2 | 40.38 |
-| zeta c64 | s=[0.5,5]+i[-50,50] | 582.69 | - | - | - | - | - | - | - |
-| zeta c64 | s=[-10,0.5]+i[-20,20] | 623.68 | - | - | - | - | - | - | - |
-| zeta c64 | s=1/2+i[100,1000] | 5181.3 | - | - | - | - | - | - | - |
-| hurwitz_zeta | s=[1.5,10],a=[0.1,10] | 92.72 | - | - | - | - | 73.26 | - | 91.1 |
-| dilog | [-1,1] | 13.07 | - | - | - | - | 33.7 | - | 10.98 |
-| spence | [1,20] | 26.2 | - | - | - | - | 20.68 | - | 675.54 |
-| dilog | [-100,-1] | 21.74 | - | - | - | - | 31.01 | - | 10.79 |
-| polylog | s=3,x=[-1,1] | 148.12 | - | - | - | - | - | - | 1239.22 |
-| polylog | s=2.5,x=[0,1] | 147.22 | - | - | - | - | - | - | - |
-| polylog | s=1.5,x=-e^[0,10] | 1581.53 | - | - | - | - | 18.87 | - | - |
-| lambert_w0 | [-0.36,3] | 6.27 | - | - | 4.41 | 4.39 | 74.18 | 3.91 | - |
-| lambert_w0 | [3,1e10] | 15.11 | - | - | 4.84 | 4.82 | 82.74 | 7.26 | - |
-| lambert_wm1 | [-0.36,-0.01] | 11.6 | - | - | 4.84 | 4.79 | 45.49 | 9.86 | - |
-| lambert_wm1 | -[1e-300,0.01] | 16.82 | - | - | 7.93 | 7.86 | 14.49 | 17.4 | - |
-| expint_e1 | [0.01,1] | 4.07 | - | 21.41 | - | - | 17.61 | 6.12 | 35.86 |
-| expint_e1 | [1,50] | 9.18 | - | 28.36 | - | - | 26.81 | 6.3 | 98.87 |
-| expint_ei | [0.01,6] | 6.83 | - | - | - | - | 23.16 | 7.24 | 8.8 |
-| expint_ei | [6,50] | 8.24 | - | - | - | - | 37.85 | 5.37 | 10.85 |
-| expint_ei | [-50,-0.01] | 10.14 | - | - | - | - | 26.82 | 5.75 | 562.97 |
-| expint_en n=3 | [0.1,2] | 21.61 | - | 148.19 | - | - | 955.31 | 262.67 | 344.96 |
-| expint_en n=3 | [2,20] | 133.82 | - | 45.77 | - | - | 212.2 | 58.96 | 187.05 |
-| expint_en n=20 | [0.1,2] | 75.15 | - | 62.24 | - | - | 367.58 | 81.64 | 197.49 |
-| expint_en n=20 | [2,20] | 129.79 | - | 43.16 | - | - | 207.27 | 58.23 | 178.32 |
+As for [the gamma function](#measured) (the conditions and the same-work rule are there):
 
-#### Accuracy of the references
-
-The campaign's comparison on its own case sets (max / mean ulps). The column "a" is the first version's: its rows for `zeta`, `hurwitz`, `dilog`, `polylog`, `w0`, `wm1`, `e1`, `ei` and `en` predate the fixes of 2026-11-21 (the 3.326e2 of `polylog`, for one, came from its orders near 0 and its negative integers, both rebuilt since); the bounds above are the ones that hold now.
-
-| function | cases | a | libm | statrs | special | puruspe | gsl | boost | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| zeta | 733 | 1.780e0 / 4.691e-1 | – | – | – | – | 2.948e12 / 1.560e11 (42 missed of 733) | 1.463e3 / 1.384e2 (2 missed of 733) | inf / inf (4 missed of 733) |
-| hurwitz | 407 | 1.149e0 / 3.638e-1 | – | – | – | – | 4.979e1 / 2.741e0 (1 missed of 407) | – | 4.258e2 / 2.158e1 (4 missed of 407) |
-| dilog | 417 | 9.326e-1 / 3.194e-1 | – | – | – | – | 7.528e15 / 4.155e14 (27 missed of 417) | – | – |
-| dilog x<=1 | 270 | – | – | – | – | – | – | – | 8.972e15 / 2.516e15 |
-| polylog | 708 | 3.326e2 / 1.357e1 | – | – | – | – | – | – | – |
-| polylog int s>=-1, x>=-1 | 70 | 1.608e0 / 5.337e-1 | – | – | – | – | – | – | 2.300e0 / 5.968e-1 |
-| w0 | 607 | 7.523e-1 / 2.633e-1 | – | – | 3.142e298 / inf (1 missed of 607) | 3.142e298 / inf (1 missed of 607) | 8.954e15 / 3.110e15 | 2.838e7 / 3.792e6 (1 missed of 607) | – |
-| wm1 | 604 | 9.740e-1 / 3.372e-1 | – | – | 9.313e6 / 9.582e5 (1 missed of 604) | 9.313e6 / 9.582e5 (1 missed of 604) | 5.555e11 / 2.270e10 (1 missed of 604) | 1.419e7 / 1.494e6 (17 missed of 604) | – |
-| e1 | 457 | 1.093e0 / 3.174e-1 | – | 2.588e1 / 3.611e0 | – | – | 2.181e0 / 5.303e-1 (1 missed of 457) | 1.965e0 / 5.511e-1 | 1.099e1 / 1.920e0 (1 missed of 457) |
-| ei | 610 | 1.074e0 / 3.176e-1 | – | – | – | – | 3.804e15 / 1.620e14 (6 missed of 610) | 2.880e0 / 5.916e-1 | 9.958e15 / 2.399e15 (3 missed of 610) |
-| en | 503 | 7.576e-1 / 3.046e-1 | – | 2.245e1 / 2.522e0 | – | – | 8.326e15 / 9.549e14 (57 missed of 503) | 6.179e1 / 4.101e0 | 6.500e0 / 1.527e0 (13 missed of 503) |
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `zeta` | s in [1.1,3] | 4.19 ns | 0.711 SciPy |  |
+| `zeta` | s in [3,56] | 4.30 ns | 0.553 Boost |  |
+| `zeta` | s in [-0.5,0.9] | 4.11 ns | 0.330 Boost |  |
+| `zeta` | s in [-20,-0.5] | 27.9 ns | – | 0.677 Boost† (11.9 ulps) |
+| `zeta` | s in [-170,-20] | 29.0 ns | – | 0.982 SciPy† (6.3·10³ ulps) |
+| `zeta`, complex | s in [0.5,5]+i[-50,50] | 687 ns | – | 0.399 SciPy† (1.5·10⁸ ulps) |
+| `zeta`, complex | s in [-10,0.5]+i[-20,20] | 786 ns | – | 0.435 SciPy† (110 ulps) |
+| `zeta`, complex | s = 1/2+i[100,1000] | 5.65 µs | – | 1.54 SciPy† (2.2·10⁶ ulps) |
+| `zeta`, complex | s in [1.1,10]+i[-5,5] | 477 ns | 0.310 SciPy |  |
+| `hurwitz_zeta` | s in [1.5,10], a in [0.1,10] | 91.1 ns | – | 1.10 GSL† (4.4 ulps) |
+| `hurwitz_zeta` | s in [1.5,10], a in [10,1e4] log-uniform | 30.7 ns | – | 0.330 GSL† (4.8 ulps) |
+| `dilog` | x in [-1,1] | 15.6 ns | – | 2.41 SciPy† (13.7 ulps) |
+| `dilog` | x in [-100,-1] | 22.1 ns | – | 2.39 SciPy† (7.8 ulps) |
+| `dilog` | x in [1,20] (real part) | 19.6 ns | – | 0.595 GSL† (9.9·10³ ulps) |
+| `polylog` | s=0.5, x=-e^mu, mu in [0,10] | 28.3 ns | 1.53 GSL |  |
+| `polylog` | s=1.5, x=-e^mu, mu in [0,10] | 29.3 ns | 1.64 GSL |  |
+| `polylog` | s=1.5, x=-e^mu, mu in [-10,0] | 14.5 ns | 0.545 GSL |  |
+| `polylog` | s=2, x=-e^mu, mu in [0,10] | 22.7 ns | 1.26 GSL |  |
+| `polylog` | s=2.5, x=-e^mu, mu in [0,10] | 29.0 ns | 1.73 GSL |  |
+| `polylog` | s=3, x=-e^mu, mu in [-10,0] (x in [-1,0)) | 13.7 ns | 0.542 GSL |  |
+| `polylog` | s=3, x=-e^mu, mu in [0,30] | 28.2 ns | 1.25 GSL |  |
+| `polylog` | s=6, x=-e^mu, mu in [0,30] | 171 ns | – | 2.12 GSL† (23.8 ulps) |
+| `polylog` | s integer in [-8,-2], x=-e^mu, mu in [-5,5] | 820 ns | – | 44.3 GSL† (200 ulps) |
+| `lambert_w0` | x in [-0.36,3] | 7.13 ns | 0.0856 GSL | 2.56 Boost† (8.8 ulps) |
+| `lambert_w0` | x in [3,1e10] log-uniform | 11.1 ns | 1.68 Boost | 2.42 special† (3.6 ulps) |
+| `lambert_wm1` | x in [-0.36,-0.01] | 12.1 ns | – | 2.47 puruspe† (3.8 ulps) |
+| `lambert_wm1` | x in -[1e-300,0.01] log-uniform | 14.1 ns | 0.854 Boost | 1.72 special† (3.9 ulps) |
+| `expint_e1` | x in [0.01,1] | 8.49 ns | 2.03 Boost |  |
+| `expint_e1` | x in [1,50] | 7.91 ns | 1.92 Boost |  |
+| `expint_e1` | x in [50,700] | 7.86 ns | 1.89 Boost |  |
+| `expint_ei` | x in [0.01,6] | 10.3 ns | – | 1.64 Boost† (6.1 ulps) |
+| `expint_ei` | x in [6,50] | 7.85 ns | 0.226 GSL | 1.35 Boost† (3.9 ulps) |
+| `expint_ei` | x in [50,700] | 7.11 ns | 1.55 Boost |  |
+| `expint_ei` | x in [-50,-0.01] | 8.83 ns | 1.92 Boost |  |
+| `expint_en` | n=3, x in [0.1,2] | 17.7 ns | – | 0.111 statrs† (NaN or ∞ on 11 of 16384) |
+| `expint_en` | n=3, x in [2,20] | 137 ns | – | 1.63 Boost† (21.5 ulps) |
+| `expint_en` | n=20, x in [0.1,2] | 67.2 ns | – | 0.794 Boost† (15.3 ulps) |
+| `expint_en` | n=20, x in [2,20] | 126 ns | – | 1.58 Boost† (12.2 ulps) |
+| `expint_en` | n=100, x in [0.1,50] | 72.7 ns | – | 4.62 SciPy† (19 ulps) |
+| `lambert_w0`, `f32` | x in [-0.36,3] | 2.67 ns | – | 1.09 Boost† (15.7 ulps) |
+| `expint_ei`, `f32` | x in [0.01,6] | 8.60 ns | 1.35 Boost |  |
+| `zeta`, `f32` | s in [1.1,3] | 4.11 ns | 0.634 Boost |  |
 
 ### Where the references are faster
 
-From the campaign of the first version:
-
-- **`polylog`** of orders 1.5 to 2 past `x = −2` (up to 84× GSL's `fermi_dirac_int`, which is itself 10² ulps off there): the Gauss–Legendre pieces of the Fermi–Dirac integral cost about 1.5 µs against its coarser symmetrised quadrature. Negative orders with `x < 0` cost 0.3 to 1.6 µs (the Hurwitz form in double-double, or the series of double-double terms), up to 82 times the first version (the integer orders −8 to −2 on `[−2, 0)`: 1.6 µs against 19 ns, where its Eulerian form in double lost up to 11.5 κ; for larger orders it lost every digit).
-- **Lambert W** (2 to 3× special and puruspe, at 3 to 8 ulps against our 1): the branch-point fits and the Halley step of the double-double exponential buy the last ulp.
-- **`hurwitz_zeta`** (1.3× GSL 2.8, at 49 ulps): the 24 Bernoulli terms in double-double.
-- **`expint_e1` and `expint_ei`** above `x = 1` (1.5 to 1.9× Boost at 4 to 5 ulps): the double-double `e^x` and the rational fits; below 1 `expint_e1` now costs about twice Boost's (the double-double logarithm); **`Eₙ`** for large `n` (about 3× statrs at 0.5 ulps against its 40): the continued fraction evaluated from the bottom.
+- **`polylog` past `x = −1`**, `Li_s(−e^μ)` for `μ` in `[0, 10]` at `s` = 0.5, 1.5 and 2.5 (1.53 to 1.73), at `s = 2` (1.26) and for `μ` in `[0, 30]` at `s = 3` (1.25), against GSL's Fermi–Dirac integrals, Chebyshev fits within 2.0 to 5.0 ulps of `a`: `a` takes `μ = ln(−x)` and `ln μ` as double-double logarithms and the prefactor in double-double before its fits, for its bound of 4 ulps.
+- **`expint_e1`** on `[0.01, 1]`, `[1, 50]` and `[50, 700]` (2.03, 1.92, 1.89) and **`expint_ei`** on `[−50, −0.01]` and `[50, 700]` (1.92, 1.55), against Boost (within 2.0 to 3.4 ulps of `a`), and `expint_ei` of `f32` on `[0.01, 6]` (1.35): the double-double logarithm below 1 and the exponential to 2⁻⁷⁵ beyond, for bounds of 1.1 to 1.7 ulps.
+- **`lambert_w0`** on `[3, 10¹⁰]` (1.68 against Boost): the Halley step of the double-double exponential that holds the bound of one ulp.
 
 ### Examples
 
@@ -820,109 +832,84 @@ Limits. Outside the interval the error is relative, but next to the zeros a poly
 
 ### Method
 
-Each polynomial comes from its three-term recurrence (DLMF 18.9.1–2 and the table there) run compensated: the value follows the plain recurrence and a second value carries its error, from the error-free transformations of every step's products and sum, so that the result is rounded about once; the coefficients are exact (Legendre, Hermite, Laguerre, Chebyshev, whose coefficients are integers and `x`), exact for parameters `α`, `β` on the grid `2^−20` (with magnitudes up to `2^28`: their sums with the degree are exact and their products exact double-doubles), or double-doubles. Where the recurrence divides by an integer `c_k` (Legendre, Laguerre, Gegenbauer, associated Legendre and Laguerre) it runs without the divisions, on `Q_k = p_k Π c_j` with the product kept beside it and one division at the end. The values are rescaled by `2^±500` as they grow or shrink, on the size of the value (where the plain recurrence meets an exact zero the value lives in the second word, which is moved into the first), so that only a result beyond the range of `f64` overflows; for `|x| > 2^400`, where a step could overflow, the polynomial is its leading term `cₙxⁿ` to `2^−336`, as a double-double with its exponent apart. `Pₘᵐ = (−1)ᵐ(2m − 1)!!(1 − x²)^(m/2)` is a product of `m` double-double factors with `1 − x²` exact. The Chebyshev polynomials above degree 16 are the binary powers of `T₁ + i sin θ U₀` in double-double, `O(log n)` steps whose errors stay near the double-double precision.
+Each polynomial comes from its three-term recurrence (DLMF 18.9.1–2 and the table there) run compensated: the value follows the plain recurrence and a second value carries its error, from the error-free transformations of every step's products and sum, so that the result is rounded about once; the coefficients are exact (Legendre, Hermite, Laguerre, Chebyshev, whose coefficients are integers and `x`), exact for parameters `α`, `β` on the grid `2^−20` (with magnitudes up to `2^28`: their sums with the degree are exact and their products exact double-doubles), or double-doubles. Where the recurrence divides by an integer `c_k` (Legendre, Laguerre, Gegenbauer, associated Legendre and Laguerre) it runs without the divisions, on `Q_k = p_k Π c_j` with the product kept beside it and one division at the end. The values are rescaled by `2^±500` as they grow or shrink, on the size of the value (where the plain recurrence meets an exact zero the value lives in the second word, which is moved into the first), so that only a result beyond the range of `f64` overflows; for `|x| > 2^400`, where a step could overflow, the polynomial is its leading term `cₙxⁿ` to `2^−336`, as a double-double with its exponent apart. `Pₘᵐ = (−1)ᵐ(2m − 1)!!(1 − x²)^(m/2)` is a product of `m` double-double factors with `1 − x²` exact. The Chebyshev polynomials above degree 47 are the binary powers of `T₁ + i sin θ U₀` in double-double, `O(log n)` steps whose errors stay near the double-double precision; for `|x| ≤ 1`, where the values stay within `n + 1` and two consecutive ones are never both small, the recurrence runs without the rescaling checks.
 
 Where a recurrence coefficient vanishes the recurrence decouples, or divides by zero, and the values next to `±1` (or 0) are small differences of large terms; those parameters go by identities that keep the relative accuracy, as double-doubles rounded once: `Lₙ^(−l)(x) = (−x)^l (n − l)!/n! L_(n−l)^(l)(x)` (Szegő (5.2.1)); `Cₙ^(−l) ≡ 0` above the degree `2l` and `Cₙ^(½−l)(x) = 4^l ((½)_l)² (n − 2l)!/n! (1 − x²)^l C_(n−2l)^(l+½)(x)` for `n ≥ 2l` (the reflection `λ → 1 − λ` of the differential equation); `Pₙ^(−l,β)(x) = [C(n + β, l)/C(n, l)] ((x − 1)/2)^l P_(n−l)^(l,β)(x)` (Szegő (4.22.2)) and `Pₙ^(α,β)(x) = (−1)ⁿ Pₙ^(β,α)(−x)`; and for `α + β` within ½ of `−l` with `5 ≤ l ≤ 30`, within 1/64 of it with `l = 2…4` and from the degree 16 on within 1/16 (and beyond `l = 30` within `2^−40 l`), the explicit sum `Σ d_j ((x − 1)/2)ʲ` of DLMF 18.5.7 in double-double up to the degree `l` and the recurrence from `(P_(l−1), P_l)`. For `|x| > 2^400` with `n < l ≤ 2n`, whose leading coefficient has the factor `δ = α + β + l` (zero, or small), the polynomial is the two largest terms `d_t yᵗ + d_n yⁿ` of that sum, `t = l − n − 1`, `y = (x − 1)/2`, with their exponents apart.
 
 The recurrences take `O(n)` steps for the degree `n`: the asymptotic forms for large degrees (Legendre's by Stieltjes's and Bessel-type expansions, Hermite's by Plancherel–Rotach) are left to the release optimisation pass.
 
-### Measured
+### Accuracy measured
 
 The bounds above were measured against mpmath at 256 bits and more (the reference data, `tests/math/special/data/elliptic_*.txt`, made by `data/gen_elliptic.py`, whose last cases in each file are the arguments of the audit's defects and their neighbours), and on sweeps of the same functions with fresh points (two seeds each): for every function and region, uniform and logarithmic points, the ends of the intervals, the last doubles before the poles and edges, huge and tiny arguments; the references there were cross-checked by a second method (quadrature, theta functions, the AGM, closed forms, exact rational sums of the polynomials). To reproduce the data: `python3 gen_elliptic.py` in `tests/math/special/data`, then `cargo test --test math -- special::elliptic` (which prints the largest error of each function and region).
 
 ## Measured: elliptic functions and orthogonal polynomials
 
-Measured on an Apple M4 Max on one thread with fat LTO, in ns a call, the median of the three quiet rounds of the campaign (the machine idle before it, the load average below 3.5 throughout), against libm 0.2, statrs 0.18, special 0.11, puruspe 0.4, GSL 2.8, Boost.Math 1.92 (without promotion to `long double`) and Cephes in the same run. "–" is a reference without the function. The x86_64 paths were tested under emulation only, never timed. These timings predate the fixes of 2026-11-21, which went on the rare paths but for the logarithmic forms of `K` and `E` and a few double-double steps of the Jacobi reduction and the Carlson scaling, and those of the second review of them, after which the Jacobi functions take about 1.15–1.35 times as long as before it (the double-double Landen ascent) and `ellip_f(φ, 1)` about 1.4 times.
+As for [the gamma function](#measured) (the conditions and the same-work rule are there). The elliptic integrals and functions:
 
-| function | domain | a | boost | gsl | cephes |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| ellip_k | m in [0,0.8) | 2.36 | 4.57 | 33.17 | 11.06 |
-| ellip_e | m in [0,0.8) | 2.4 | 6.86 | 69.84 | 10.31 |
-| ellip_k | m in [0.8,1) | 7.83 | 7.9 | 48.04 | 9.34 |
-| ellip_e | m in [0.8,1) | 7.64 | 7.58 | 89.19 | 7.73 |
-| ellip_k | m in [-10,0) | 10.78 | - | - | - |
-| ellip_e | m in [-10,0) | 7.74 | - | - | - |
-| ellip_pi | n in (-5,0.9), m in [0,0.99) | 76.72 | 90.36 | 117.61 | - |
-| ellip_pi | n in (1.1,10), m in [0,0.99) | 70.07 | 3.6 | - | - |
-| ellip_f | phi in [-pi/2,pi/2], m in [0,0.99) | 31.95 | 38.04 | 33.92 | 36.78 |
-| ellip_e_inc | phi in [-pi/2,pi/2], m in [0,0.99) | 64.64 | 69.87 | 72.13 | 86.02 |
-| ellip_f | phi in [-20,20], m in [0,0.99) | 30.84 | 38.94 | 68.46 | 50.2 |
-| ellip_e_inc | phi in [-20,20], m in [0,0.99) | 61.82 | 69.72 | 145.41 | 87.12 |
-| ellip_pi_inc | n in (-5,0.9), \|phi\| < 1.5, m in [0,0.99) | 79.84 | 123.99 | 96.52 | - |
-| carlson_rf | args in [0.01,10] | 19.84 | 8.49 | 25.97 | - |
-| carlson_rd | args in [0.01,10] | 36.66 | 10.91 | 34.06 | - |
-| carlson_rj | args in [0.01,10] | 56.11 | 31.55 | 56.48 | - |
-| carlson_rc | args in [0.01,10] | 7.28 | 6.78 | 15.22 | - |
-| jacobi_elliptic (sn+cn+dn) | u in [-4,4], m in [0,0.99) | 48.26 | 124.6 | 27.95 | 90.12 |
-| jacobi_elliptic (sn+cn+dn) | u in [-100,100], m in [0,0.99) | 88.12 | 125.4 | 28.43 | 91.52 |
-| legendre_p | n = 4, x in [-1,1] | 8.76 | 3.06 | 3.97 | - |
-| chebyshev_t | n = 4, x in [-1,1] | 4.34 | 1.99 | - | - |
-| chebyshev_u | n = 4, x in [-1,1] | 4.34 | 1.99 | - | - |
-| assoc_legendre_p (m = n/2) | n = 4, x in [-1,1] | 15.1 | 9.75 | 9.03 | - |
-| jacobi_p (a = 0.5, b = 1.5) | n = 4, x in [-1,1] | 26.55 | 5.92 | - | - |
-| gegenbauer_c (a = 1.5) | n = 4, x in [-1,1] | 9.93 | 3.08 | 3.95 | - |
-| hermite_h | n = 4, \|x\| < sqrt(2n+1) | 4.6 | 2 | 4.04 | - |
-| hermite_he | n = 4, \|x\| < sqrt(2n+1) | 4.65 | - | 3.78 | - |
-| laguerre_l | n = 4, x in [0, 4n+2] | 9.85 | 2.37 | 35.91 | - |
-| assoc_laguerre_l (alpha = 2) | n = 4, x in [0, 4n+2] | 11.31 | 2.68 | 38.34 | - |
-| legendre_p | n = 20, x in [-1,1] | 50.93 | 16.98 | 30.33 | - |
-| chebyshev_t | n = 20, x in [-1,1] | 42.66 | 6.55 | - | - |
-| chebyshev_u | n = 20, x in [-1,1] | 47.81 | 6.2 | - | - |
-| assoc_legendre_p (m = n/2) | n = 20, x in [-1,1] | 87.05 | 19.03 | 21.12 | - |
-| jacobi_p (a = 0.5, b = 1.5) | n = 20, x in [-1,1] | 134.91 | 32.56 | - | - |
-| gegenbauer_c (a = 1.5) | n = 20, x in [-1,1] | 53.69 | 17.51 | 21.75 | - |
-| hermite_h | n = 20, \|x\| < sqrt(2n+1) | 29.1 | 6.4 | 17.1 | - |
-| hermite_he | n = 20, \|x\| < sqrt(2n+1) | 29.04 | - | 16.49 | - |
-| laguerre_l | n = 20, x in [0, 4n+2] | 54.81 | 16.03 | 24.84 | - |
-| assoc_laguerre_l (alpha = 2) | n = 20, x in [0, 4n+2] | 58.54 | 18.63 | 25.07 | - |
-| legendre_p | n = 100, x in [-1,1] | 266.2 | 174.98 | 294.38 | - |
-| chebyshev_t | n = 100, x in [-1,1] | 78.85 | 44.52 | - | - |
-| chebyshev_u | n = 100, x in [-1,1] | 83.77 | 44.34 | - | - |
-| assoc_legendre_p (m = n/2) | n = 100, x in [-1,1] | 412.91 | 95.59 | 113.64 | - |
-| jacobi_p (a = 0.5, b = 1.5) | n = 100, x in [-1,1] | 691.26 | 212.91 | - | - |
-| gegenbauer_c (a = 1.5) | n = 100, x in [-1,1] | 274.12 | 93.5 | 185.09 | - |
-| hermite_h | n = 100, \|x\| < sqrt(2n+1) | 157.93 | 48.08 | 106.41 | - |
-| hermite_he | n = 100, \|x\| < sqrt(2n+1) | 156 | - | 90.21 | - |
-| laguerre_l | n = 100, x in [0, 4n+2] | 290.55 | 168.39 | 222.43 | - |
-| assoc_laguerre_l (alpha = 2) | n = 100, x in [0, 4n+2] | 300.19 | 171.13 | 222.47 | - |
-| legendre_p | n = 1000, x in [-1,1] | 2713.55 | 2987.96 | 3706.61 | - |
-| chebyshev_t | n = 1000, x in [-1,1] | 142.52 | 699.09 | - | - |
-| chebyshev_u | n = 1000, x in [-1,1] | 147.12 | 703.45 | - | - |
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `ellip_k` | m in [0,0.8) | 3.63 ns | 0.515 SciPy |  |
+| `ellip_e` | m in [0,0.8) | 2.21 ns | 0.345 SciPy |  |
+| `ellip_k` | m in [0.8,1) | 10.3 ns | 1.89 SciPy |  |
+| `ellip_e` | m in [0.8,1) | 9.20 ns | 1.79 SciPy |  |
+| `ellip_k` | m in [-10,0) | 14.1 ns | – | 2.13 SciPy† (1.9 ulps) |
+| `ellip_e` | m in [-10,0) | 13.0 ns | – | 2.11 SciPy† (1.7 ulps) |
+| `ellip_pi` | n in (-5,0.9), m in [0,0.99) | 77.1 ns | – | 0.938 Boost† (16.2 ulps) |
+| `ellip_f` | phi in [-pi/2,pi/2], m in [0,0.99) | 34.9 ns | 0.496 SciPy | 0.895 Boost† (5.7 ulps) |
+| `ellip_e_inc` | phi in [-pi/2,pi/2], m in [0,0.99) | 69.2 ns | 0.744 SciPy | 1.03 Boost† (53.8 ulps) |
+| `ellip_f` | phi in [-20,20], m in [0,0.99) | 39.0 ns | 0.459 SciPy | 0.716 Boost† (7.2 ulps) |
+| `ellip_e_inc` | phi in [-20,20], m in [0,0.99) | 72.0 ns | 0.745 SciPy | 0.879 Boost† (31.4 ulps) |
+| `ellip_pi_inc` | n in (-5,0.9), \|phi\| < 1.5, m in [0,0.99) | 87.0 ns | 0.800 GSL |  |
+| `carlson_rf` | args in [0.01,10] | 22.5 ns | – | 1.24 Boost† (2.3 ulps) |
+| `carlson_rd` | args in [0.01,10] | 39.7 ns | 0.989 GSL | 1.29 Boost† (14.6 ulps) |
+| `carlson_rj` | args in [0.01,10] | 59.7 ns | 0.868 Boost |  |
+| `carlson_rc` | args in [0.01,10] | 10.8 ns | 0.966 Boost |  |
+| `jacobi_elliptic` | u in [-4,4], m in [0,0.99) | 73.3 ns | 2.33 GSL |  |
+| `jacobi_elliptic` | u in [-100,100], m in [0,0.99) | 129 ns | – | 4.29 GSL† (580 ulps) |
+| `jacobi_elliptic` | u in [-4,4], m in [0.99,1) | 140 ns | 4.24 GSL |  |
+| `ellip_k`, `f32` | m in [0,0.8) | 4.84 ns | 0.481 Boost |  |
 
-The references' accuracy on the same data, max / rms ulps (and the number of cases in the reference's domain; Boost and GSL take the modulus `k = √m`, which loses `m₁` as `m → 1`; Cephes takes `m₁`); the rows with a domain are the references' common one. This is the record of the campaign, on the data as it was then (the first cases of each file) and with the code before the fixes of 2026-11-21: plain ulps of the result for the elliptic functions over every case, so that the largest errors are those next to a pole of `ellip_pi_inc` (where its bound is in units of `1 + κ`), next to a zero of the principal value of `carlson_rj` (whose bound is relative to `R_J(x, y, z, −p)`) and of `dn` as `m → 1`, and the scaled ulps of the bounds above for the polynomials; the bounds table above is the one the code is held to (its `ellip_k`, for instance, is now within 0.58 ulps everywhere).
+The orthogonal polynomials, at the degrees 4, 20, 100 and 1000:
 
-| function | nettrash-a | Boost 1.92 | GSL 2.8 | Cephes |
-|---|---|---|---|---|
-| `ellip_k` | 0.822 / 0.297 (347) | 1.22e13 / 1.15e12 (196) | 1.22e13 / 1.15e12 (196) | 1.125 / 0.436 (196) |
-| `ellip_e` | 0.538 / 0.298 (347) | 7.641 / 1.494 (189) | 6427.948 / 490.309 (189) | 0.957 / 0.405 (189) |
-| `ellip_pi` | 2.268 / 0.645 (350) | 5.42e11 / 4.31e10 (182) (44 wrong NaN/inf) | 5.42e11 / 4.95e10 (138) | - |
-| `ellip_f` | 1.839 / 0.501 (350) | 6.87e10 / 5.26e9 (175) | 6.87e10 / 5.26e9 (175) | 181.461 / 18.77 (175) |
-| `ellip_e_inc` | 2.128 / 0.614 (350) | 9.18e5 / 7.28e4 (175) | 1.11e4 / 885.985 (175) | 6.374 / 1.43 (175) |
-| `ellip_pi_inc` | 742.204 / 39.131 (381) | 7.89e15 / 1.42e15 (187) (36 wrong NaN/inf) | 1.60e11 / 1.65e10 (114) | - |
-| `carlson_rf` | 0.5 / 0.302 (245) | 2.647 / 0.832 (245) | 3.344 / 1.062 (245) | - |
-| `carlson_rd` | 0.498 / 0.28 (234) | 43.659 / 3.185 (234) | 3.297 / 1.168 (234) (16 wrong NaN/inf) | - |
-| `carlson_rj` | 1457.527 / 81.995 (316) | 7.44e15 / 7.62e14 (316) (5 wrong NaN/inf) | 4.658 / 1.152 (237) (39 wrong NaN/inf) | - |
-| `carlson_rc` | 1.524 / 0.468 (237) | 2.37 / 0.62 (237) | 2.889 / 0.724 (237) (40 wrong NaN/inf) | - |
-| `jacobi_elliptic sn` | 3.306 / 0.573 (420) | 9.01e15 / 6.13e14 (216) | 8.95e15 / 2.41e15 (420) | 7.91e15 / 5.38e14 (216) (6 wrong NaN/inf) |
-| `jacobi_elliptic sn (m in [0, 0.99])` | 1.533 / 0.391 (149) | 2.91e11 / 2.39e10 (149) | 8.50e6 / 9.75e5 (149) | 4.49e6 / 4.73e5 (149) |
-| `jacobi_elliptic cn` | 2.877 / 0.672 (420) | 2.65e14 / 1.80e13 (216) | 9.01e15 / 4.75e15 (420) | 2.48e55 / 1.69e54 (216) (6 wrong NaN/inf) |
-| `jacobi_elliptic cn (m in [0, 0.99])` | 1.338 / 0.341 (149) | 5.27e9 / 4.32e8 (149) | 1.55e7 / 1.34e6 (149) | 2.39e6 / 3.15e5 (149) |
-| `jacobi_elliptic dn` | 40.263 / 4.115 (420) | 5.49e15 / 3.76e14 (216) | 8.55e15 / 3.20e15 (420) | 4.96e55 / 3.38e54 (216) (6 wrong NaN/inf) |
-| `jacobi_elliptic dn (m in [0, 0.99])` | 3.678 / 0.968 (149) | 4.80e7 / 3.94e6 (149) | 1.47e6 / 1.25e5 (149) | 2.07e6 / 1.77e5 (149) |
-| `ellip_k (m in [0, 0.99])` | 0.548 / 0.291 (153) | 7.701 / 1.327 (153) | 7.478 / 1.384 (153) | 1.104 / 0.411 (153) |
-| `ellip_e (m in [0, 0.99])` | 0.538 / 0.305 (148) | 1.637 / 0.735 (148) | 6.408 / 1.613 (148) | 0.917 / 0.411 (148) |
-| `ellip_pi (n < 1, m in [0, 0.99])` | 1.261 / 0.474 (54) | 7.427 / 2.036 (54) | 2.23e5 / 3.04e4 (54) | - |
-| `ellip_f (|φ| ≤ π/2, m in [0, 0.99])` | 1.124 / 0.546 (53) | 2.015 / 0.898 (53) | 2606.022 / 417.778 (53) | 2.626 / 1.032 (53) |
-| `ellip_e_inc (|φ| ≤ π/2, m in [0, 0.99])` | 1.274 / 0.558 (53) | 2.715 / 0.877 (53) | 2605.939 / 391.579 (53) | 6.374 / 2.124 (53) |
-| `ellip_pi_inc (n < 1, |φ| ≤ π/2, m in [0, 0.99])` | 1.406 / 0.571 (33) | 1.914 / 0.759 (33) | 11.388 / 3.181 (33) | - |
-| `carlson_rj (p > 0)` | 1.334 / 0.452 (237) | 6.58e15 / 7.36e14 (237) (4 wrong NaN/inf) | 4.658 / 1.152 (237) (39 wrong NaN/inf) | - |
-| `legendre_p` | 0.459 / 0.112 (120) | 1.567 / 0.313 (120) (24 wrong NaN/inf) | 1.567 / 0.35 (96) | - |
-| `assoc_legendre_p` | 0.494 / 0.118 (120) | 13.965 / 3.138 (120) (2 wrong NaN/inf) | 41.37 / 8.965 (99) (1 wrong NaN/inf) | - |
-| `hermite_h` | 0.497 / 0.168 (120) | 10.15 / 1.926 (120) (21 wrong NaN/inf) | 10.15 / 1.926 (120) (21 wrong NaN/inf) | - |
-| `hermite_he` | 0.471 / 0.161 (120) | - | 7.529 / 1.803 (120) (16 wrong NaN/inf) | - |
-| `laguerre_l` | 0.442 / 0.115 (120) | 529.353 / 67.737 (120) (2 wrong NaN/inf) | 978.999 / 119.938 (120) (2 wrong NaN/inf) | - |
-| `assoc_laguerre_l` | 0.5 / 0.117 (120) | 229.164 / 57.305 (16) | 8.01e102 / 7.31e101 (120) (2 wrong NaN/inf) | - |
-| `chebyshev_t` | 0.445 / 0.146 (120) | 325.155 / 31.463 (120) | - | - |
-| `chebyshev_u` | 0.5 / 0.127 (120) | 364.707 / 41.843 (120) | - | - |
-| `jacobi_p` | 0.496 / 0.135 (120) | 861.254 / 115.489 (120) | - | - |
-| `gegenbauer_c` | 0.478 / 0.167 (120) | 96.164 / 10.66 (86) | 57.976 / 9.353 (120) (35 wrong NaN/inf) | - |
+| function | arguments | `a` | within the bound | faster, beyond the bound |
+| --- | --- | ---: | --- | --- |
+| `legendre_p` | n=4, x in [-1,1] | 8.87 ns | – | 4.77 Boost† (4.2 ulps) |
+| `chebyshev_t` | n=4, x in [-1,1] | 2.78 ns | – | 2.89 Boost† (1.4 ulps) |
+| `chebyshev_u` | n=4, x in [-1,1] | 2.87 ns | – | 2.49 Boost† (2.6 ulps) |
+| `assoc_legendre_p`, m = n/2 | n=4, x in [-1,1] | 15.2 ns | – | 1.75 Boost† (2 ulps) |
+| `jacobi_p`, α = 0.5, β = 1.5 | n=4, x in [-1,1] | 26.1 ns | – | 5.01 Boost† (11.5 ulps) |
+| `gegenbauer_c`, α = 1.5 | n=4, x in [-1,1] | 10.2 ns | – | 3.62 Boost† (9.8 ulps) |
+| `hermite_h` | n=4, \|x\| < sqrt(2n+1) | 4.55 ns | – | 4.65 Boost† (3.6 ulps) |
+| `hermite_he` | n=4, \|x\| < sqrt(2n+1) | 4.54 ns | – | 3.16 SciPy† (2.4 ulps) |
+| `laguerre_l` | n=4, x in [0,4n+2] | 10.0 ns | – | 5.25 Boost† (2.7 ulps) |
+| `assoc_laguerre_l`, α = 2 | n=4, x in [0,4n+2] | 11.6 ns | – | 6.21 Boost† (5.8 ulps) |
+| `legendre_p` | n=20, x in [-1,1] | 46.9 ns | – | 3.21 Boost† (87.4 ulps) |
+| `chebyshev_t` | n=20, x in [-1,1] | 17.0 ns | – | 3.45 Boost† (26.9 ulps) |
+| `chebyshev_u` | n=20, x in [-1,1] | 16.8 ns | – | 3.03 Boost† (60.6 ulps) |
+| `assoc_legendre_p`, m = n/2 | n=20, x in [-1,1] | 85.9 ns | – | 5.25 Boost† (9.3 ulps) |
+| `jacobi_p`, α = 0.5, β = 1.5 | n=20, x in [-1,1] | 124 ns | – | 4.24 Boost† (910 ulps) |
+| `gegenbauer_c`, α = 1.5 | n=20, x in [-1,1] | 51.1 ns | – | 3.08 Boost† (560 ulps) |
+| `hermite_h` | n=20, \|x\| < sqrt(2n+1) | 27.8 ns | – | 5.14 Boost† (800 ulps) |
+| `hermite_he` | n=20, \|x\| < sqrt(2n+1) | 27.6 ns | – | 3.07 SciPy† (650 ulps) |
+| `laguerre_l` | n=20, x in [0,4n+2] | 50.9 ns | – | 3.50 Boost† (1·10³ ulps) |
+| `assoc_laguerre_l`, α = 2 | n=20, x in [0,4n+2] | 54.9 ns | – | 3.62 Boost† (450 ulps) |
+| `legendre_p` | n=100, x in [-1,1] | 242 ns | – | 1.90 SciPy† (1.2·10³ ulps) |
+| `chebyshev_t` | n=100, x in [-1,1] | 77.2 ns | – | 1.87 Boost† (66.2 ulps) |
+| `chebyshev_u` | n=100, x in [-1,1] | 81.6 ns | – | 1.96 Boost† (520 ulps) |
+| `assoc_legendre_p`, m = n/2 | n=100, x in [-1,1] | 400 ns | – | 4.35 Boost† (46.8 ulps) |
+| `jacobi_p`, α = 0.5, β = 1.5 | n=100, x in [-1,1] | 621 ns | – | 2.99 Boost† (8.8·10³ ulps) |
+| `gegenbauer_c`, α = 1.5 | n=100, x in [-1,1] | 258 ns | – | 2.85 Boost† (2.8·10³ ulps) |
+| `hermite_h` | n=100, \|x\| < sqrt(2n+1) | 148 ns | – | 3.38 Boost† (3·10⁴ ulps) |
+| `hermite_he` | n=100, \|x\| < sqrt(2n+1) | 147 ns | – | 1.72 GSL† (7.5·10⁴ ulps) |
+| `laguerre_l` | n=100, x in [0,4n+2] | 263 ns | – | 2.27 SciPy† (1·10⁵ ulps) |
+| `assoc_laguerre_l`, α = 2 | n=100, x in [0,4n+2] | 277 ns | – | 2.27 SciPy† (9·10³ ulps) |
+| `legendre_p` | n=1000, x in [-1,1] | 2.51 µs | – | 1.64 SciPy† (3.2·10³ ulps) |
+| `chebyshev_t` | n=1000, x in [-1,1] | 142 ns | – | 0.205 Boost† (270 ulps) |
+| `chebyshev_u` | n=1000, x in [-1,1] | 145 ns | – | 0.209 Boost† (1.4·10³ ulps) |
+
+No reference holds the bound of the orthogonal polynomials, 0.55 ulps of `max(|P|, S)`, on these arguments: at their largest the references are 1.4 to 7·10⁵ ulps of `max(|v|, median |v|)` from `a` (the last column gives the fastest one's); the compensated recurrence that holds the bound costs two to three times a plain one.
+
+### Where the references are faster
+
+- **`jacobi_elliptic`** for `u` in `[−4, 4]` with `m` in `[0, 0.99)` and in `[0.99, 1)` (2.33 and 4.24 against GSL, within 22.2 and 21.2 ulps of `a`): the double-double Landen and AGM reduction, which holds the bounds of 3.5 to 80 ulps as `m → 1`.
+- **`ellip_k` and `ellip_e`** for `m` in `[0.8, 1)` (1.89 and 1.79 against SciPy's Cephes, within 1.1 and 1.0 ulps of `a`): the logarithmic forms near `m = 1` in double-double, for 0.6 ulp.

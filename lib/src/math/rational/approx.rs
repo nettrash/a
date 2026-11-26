@@ -12,12 +12,13 @@
 //! limbs, as the greatest common divisor does. The simplest rational between two follows both
 //! ends' expansions together by hgcd2's matrices.
 
+use super::lehmer;
 use super::sequences::limbs::{Limbs, add, mul, of_number, to_number};
-use super::small::{Small, number};
+use super::small::{self, Small, number};
 use super::{Rational, in_order, is_one, one, trim};
 use crate::math::numbers::nat::addmul_1;
 use crate::math::numbers::{
-    Bound, ByteOrder, Magnitude, Number, common_prefix, partial, quotients,
+    Bound, ByteOrder, Magnitude, Number, common_prefix, partial, quotients, quotients_into,
 };
 use core::cmp::Ordering;
 use std::borrow::Cow;
@@ -162,12 +163,95 @@ fn split_u128(negative: bool, n: u128, d: u128) -> (bool, u128, u128) {
     }
 }
 
-/// Pushes the terms of Euclid's algorithm on `x > y > 0` to `out`.
+/// Where the terms of a continued fraction go: pushed to a new vector ([`Push`]), or written over
+/// the numbers of one that exists ([`Over`]).
+trait Terms {
+    /// The term `±q`.
+    fn put(&mut self, negative: bool, q: u64);
+    /// The term `±q` of up to 128 bits.
+    fn put_wide(&mut self, negative: bool, q: u128);
+}
+
+/// The terms pushed to `out`, each in a new vector.
+struct Push<'a> {
+    out: &'a mut Vec<Number>,
+    order: ByteOrder,
+}
+
+impl Terms for Push<'_> {
+    #[inline(always)]
+    fn put(&mut self, negative: bool, q: u64) {
+        self.out.push(signed_term(self.order, negative, q));
+    }
+
+    #[inline(always)]
+    fn put_wide(&mut self, negative: bool, q: u128) {
+        self.out.push(wide_term(self.order, negative, q));
+    }
+}
+
+/// The terms written over the numbers of `out` from the first, in their vectors, and pushed
+/// past its end; [`finish`](Over::finish) cuts it to them.
+struct Over<'a> {
+    out: &'a mut Vec<Number>,
+    at: usize,
+    order: ByteOrder,
+}
+
+impl Over<'_> {
+    /// Cuts the vector to the terms written.
+    #[inline(always)]
+    fn finish(self) {
+        self.out.truncate(self.at);
+    }
+}
+
+impl Terms for Over<'_> {
+    #[inline(always)]
+    fn put(&mut self, negative: bool, q: u64) {
+        match self.out.get_mut(self.at) {
+            Some(n) => put_term(n, self.order, negative, q),
+            None => self.out.push(signed_term(self.order, negative, q)),
+        }
+        self.at += 1;
+    }
+
+    #[inline(always)]
+    fn put_wide(&mut self, negative: bool, q: u128) {
+        if q >> 64 == 0 {
+            return self.put(negative, q as u64);
+        }
+        match self.out.get_mut(self.at) {
+            Some(n) => small::put(n, self.order, negative, q),
+            None => self.out.push(number(self.order, negative, q)),
+        }
+        self.at += 1;
+    }
+}
+
+/// `±q` written over `n`, as [`signed_term`] makes it, in the vector of `n`: by one store of the
+/// whole limb when it has room for one.
+#[inline(always)]
+fn put_term(n: &mut Number, order: ByteOrder, negative: bool, q: u64) {
+    let len = 8 - (q | 1).leading_zeros() as usize / 8;
+    let bytes = match order {
+        ByteOrder::BigEndian => (q << (64 - 8 * len)).to_be_bytes(),
+        ByteOrder::LittleEndian => q.to_le_bytes(),
+    };
+    let v = &mut n.value;
+    v.clear();
+    v.extend_from_slice(&bytes);
+    v.truncate(len);
+    n.negative = negative && q != 0;
+    n.byte_order = order;
+}
+
+/// The terms of Euclid's algorithm on `x > y > 0`, to `out`.
 #[inline]
-fn push_terms(order: ByteOrder, mut x: u128, mut y: u128, out: &mut Vec<Number>) {
+fn push_terms<T: Terms>(mut x: u128, mut y: u128, out: &mut T) {
     while (x | y) >> 64 != 0 {
         let (q, r) = div_rem_wide(x, y);
-        out.push(wide_term(order, false, q));
+        out.put_wide(false, q);
         if r == 0 {
             return;
         }
@@ -176,7 +260,7 @@ fn push_terms(order: ByteOrder, mut x: u128, mut y: u128, out: &mut Vec<Number>)
     let (mut x, mut y) = (x as u64, y as u64);
     loop {
         let (q, r) = div_rem(x, y);
-        out.push(term(order, q));
+        out.put(false, q);
         if r == 0 {
             return;
         }
@@ -245,17 +329,90 @@ impl Rational {
             let (neg0, a0, r) = split_u128(negative, n, d);
             let mut out = Vec::with_capacity(planned_terms(128 - u64::from(d.leading_zeros())));
             out.push(wide_term(order, neg0, a0));
-            push_terms(order, d, r, &mut out);
+            push_terms(
+                d,
+                r,
+                &mut Push {
+                    out: &mut out,
+                    order,
+                },
+            );
             return out;
         }
-        let a0 = self.numer().div_floor(self.denom());
-        let r = self.numer().rem_euclid(self.denom());
         let mut out = Vec::with_capacity(planned_terms(self.denom().bits()));
-        let mut a0 = in_order(a0, order);
-        trim(&mut a0);
-        out.push(a0);
-        quotients(self.denom(), &r, order, &mut out);
+        self.long_terms(&mut out);
         out
+    }
+
+    /// [`continued_fraction`](Rational::continued_fraction) into `out`, written over the numbers it
+    /// holds, in their vectors, and cut to the terms. Taken again and again into one vector, it
+    /// allocates once for each term past those the vector held before (and for the vector's own
+    /// growth) and once for each number held whose vector has too little room for its term (a term
+    /// of up to 64 bits of parts of up to 128 bits is written by one store of 8 bytes); for parts
+    /// of up to 128 bits nothing else. For longer parts it allocates the first term, the remainder
+    /// that Euclid's algorithm starts from and that algorithm's working memory as well: counted,
+    /// seven allocations a call for parts of 129 bits to 510 limbs, nine from 511 limbs, where the
+    /// divisions start to take working memory, and more from the half gcd's 600 limbs, where each
+    /// of its rounds takes its own (10 a call at 600 limbs, 17 at 1,200, 50 at 3,000).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::rational::Rational;
+    ///
+    /// let mut terms = Vec::new();
+    /// for (r, cf) in [(Rational::from(415) / 93u32, vec![4, 2, 6, 7]), (Rational::from(-7) / 3u32, vec![-3, 1, 2])] {
+    ///     r.continued_fraction_into(&mut terms);
+    ///     assert_eq!(terms, cf);
+    ///     assert_eq!(terms, r.continued_fraction());
+    /// }
+    /// ```
+    pub fn continued_fraction_into(&self, out: &mut Vec<Number>) {
+        let order = self.byte_order();
+        if let Some(w) = self.word() {
+            let mut terms = Over { out, at: 0, order };
+            terms_small(w.negative, w.num, w.den, &mut terms);
+            return terms.finish();
+        }
+        if self.is_integer() {
+            out.truncate(1);
+            match out.first_mut() {
+                Some(n) => n.clone_from(self.numer()),
+                None => out.push(self.numer().clone()),
+            }
+            return;
+        }
+        if let Some((n, d)) = wides(self) {
+            let (neg0, a0, r) = split_u128(self.is_negative(), n, d);
+            let mut terms = Over { out, at: 0, order };
+            terms.put_wide(neg0, a0);
+            push_terms(d, r, &mut terms);
+            return terms.finish();
+        }
+        // Longer parts: the floor first, then the quotients written over the numbers after it.
+        let a0 = self.floor_term();
+        match out.first_mut() {
+            Some(n) => *n = a0,
+            None => out.push(a0),
+        }
+        let r = self.numer().rem_euclid(self.denom());
+        quotients_into(self.denom(), &r, order, out, 1);
+    }
+
+    /// The terms of a rational in numbers, parts past 128 bits, pushed to `out`: the floor, then
+    /// the quotients of Euclid's algorithm on the greatest common divisor's reductions.
+    fn long_terms(&self, out: &mut Vec<Number>) {
+        let order = self.byte_order();
+        out.push(self.floor_term());
+        let r = self.numer().rem_euclid(self.denom());
+        quotients(self.denom(), &r, order, out);
+    }
+
+    /// The first term of a rational in numbers, `⌊x⌋`, in its byte order, in the shortest form.
+    fn floor_term(&self) -> Number {
+        let mut a0 = in_order(self.numer().div_floor(self.denom()), self.byte_order());
+        trim(&mut a0);
+        a0
     }
 
     /// The rational of the continued fraction `[a0; a1, …, an]`: `a0 + 1/(a1 + 1/(… + 1/an))`, in
@@ -587,7 +744,8 @@ impl Rational {
     /// is none, and the one found is not always the one of the smallest denominator.
     ///
     /// The remainders are reduced as the extended greatest common divisor reduces them, in
-    /// registers for a modulus of up to 128 bits, the result in words when it fits, and for long
+    /// registers for a modulus of up to 128 bits, the result in words when it fits, by Lehmer's
+    /// algorithm on four limbs up to 256 bits when both bounds fit in 128, and for long
     /// ones by the half gcd to the length of `n`,
     /// then by hgcd2's matrices and divisions to the exact stop: `O(M(n) log n)` for a modulus of
     /// `n` limbs. `n < 0` or `d < 1` allow no rational, and give `None`.
@@ -651,6 +809,31 @@ impl Rational {
             let dw = wide(d).unwrap_or(u128::MAX);
             return reconstruct_wide(xw, mw, nw, dw, order);
         }
+        if mm.bytes.len() <= 32
+            && let (Some(nw), Some(dw)) = (wide(n), wide(d))
+        {
+            // Up to four limbs: Lehmer's algorithm in registers.
+            let m4 = limbs4(mm);
+            let x4 = if !rm.negative && rm.bytes.len() <= 32 && rm.bytes.len() <= mm.bytes.len() {
+                Some(limbs4(rm))
+            } else {
+                None
+            };
+            let x4 = match x4 {
+                Some(x) if less(&x, &m4) => x,
+                _ => limbs4(Magnitude::of(&r.rem_euclid(m))),
+            };
+            if !less_wide(nw, &x4) {
+                // The first remainder, of cofactor 1.
+                let x = u128::from(x4[0]) | u128::from(x4[1]) << 64;
+                return Some(small_rational(order, false, x, 1));
+            }
+            let (negative, p, q) = lehmer::reconstruct(x4, m4, nw, dw)?;
+            if crate::math::numbers::fraction::gcd_wide(p, q) != 1 {
+                return None;
+            }
+            return Some(small_rational(order, negative, p, q));
+        }
         let x = r.rem_euclid(m);
         if x <= *n {
             // The first remainder, of cofactor 1.
@@ -676,18 +859,37 @@ fn continued_fraction_small(negative: bool, n: u64, d: u64, order: ByteOrder) ->
     if d == 1 {
         return vec![signed_term(order, negative, n)];
     }
+    let mut out = Vec::with_capacity(planned_terms(64 - u64::from(d.leading_zeros())));
+    terms_small(
+        negative,
+        n,
+        d,
+        &mut Push {
+            out: &mut out,
+            order,
+        },
+    );
+    out
+}
+
+/// The terms of `±n/d` for parts of 64 bits, to `out`, as
+/// [`continued_fraction_small`] finds them.
+#[inline(always)]
+fn terms_small<T: Terms>(negative: bool, n: u64, d: u64, out: &mut T) {
+    if d == 1 {
+        return out.put(negative, n);
+    }
     // `n/d` is not an integer, so `0 < r < d`; the floor of a negative one is `-(q + 1)`, which
     // fits as `q < 2^63`.
     let (q, r) = div_rem_any(n, d);
     let (a0, mut y) = if negative { (q + 1, d - r) } else { (q, r) };
-    let mut out = Vec::with_capacity(planned_terms(64 - u64::from(d.leading_zeros())));
-    out.push(signed_term(order, negative, a0));
+    out.put(negative, a0);
     let mut x = d;
     loop {
         let (q, r) = div_rem(x, y);
-        out.push(term(order, q));
+        out.put(false, q);
         if r == 0 {
-            return out;
+            return;
         }
         (x, y) = (y, r);
     }
@@ -1402,6 +1604,38 @@ fn gcd_u128(mut x: u128, mut y: u128) -> u128 {
             return x << shift;
         }
     }
+}
+
+/// The magnitude `m` of up to 32 bytes in four limbs, the least significant first.
+#[inline(always)]
+fn limbs4(m: Magnitude<'_>) -> lehmer::L4 {
+    let mut l = [0u64; 4];
+    if m.big_endian {
+        for (slot, c) in l.iter_mut().zip(m.bytes.rchunks(8)) {
+            let mut w = [0u8; 8];
+            w[8 - c.len()..].copy_from_slice(c);
+            *slot = u64::from_be_bytes(w);
+        }
+    } else {
+        for (slot, c) in l.iter_mut().zip(m.bytes.chunks(8)) {
+            let mut w = [0u8; 8];
+            w[..c.len()].copy_from_slice(c);
+            *slot = u64::from_le_bytes(w);
+        }
+    }
+    l
+}
+
+/// Whether `x < y` for four limbs.
+#[inline(always)]
+fn less(x: &lehmer::L4, y: &lehmer::L4) -> bool {
+    x.iter().rev().cmp(y.iter().rev()) == Ordering::Less
+}
+
+/// Whether `n < x` for four limbs `x`.
+#[inline(always)]
+fn less_wide(n: u128, x: &lehmer::L4) -> bool {
+    x[2] | x[3] != 0 || n < (u128::from(x[0]) | u128::from(x[1]) << 64)
 }
 
 /// [`Rational::reconstruct_with_bounds`] for a modulus of 128 bits, `0 <= r < m`.

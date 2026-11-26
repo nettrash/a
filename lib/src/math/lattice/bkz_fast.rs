@@ -891,6 +891,24 @@ pub(super) fn run(
 ) -> (Vec<Vec<Number>>, Vec<Vec<Number>>, Outcome) {
     let mut wide = Fast::<Xf>::new(b, u, delta, eta);
     let n = wide.b.len();
+    // A basis already reduced ([`bkz`](super::bkz) gives it one) goes to the plain floats at once;
+    // should they fail, to the floats with an exponent of their own.
+    if let Some(s) = wide.plain_scale() {
+        let mut plain = wide.retype::<f64>(s);
+        let outcome = plain.tours(beta, max_tours, tours);
+        if outcome != Outcome::Unsettled {
+            let (b, u) = plain.into_parts();
+            return (b, u, outcome);
+        }
+        let mut wide = plain.retype::<Xf>(0);
+        let outcome = if wide.lll(0, 0, n) {
+            wide.tours(beta, max_tours, tours)
+        } else {
+            Outcome::Unsettled
+        };
+        let (b, u) = wide.into_parts();
+        return (b, u, outcome);
+    }
     if !wide.lll(0, 0, n) {
         let (b, u) = wide.into_parts();
         return (b, u, Outcome::Unsettled);

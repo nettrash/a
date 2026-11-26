@@ -1,0 +1,32 @@
+[package]
+name = "fieldbench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Benchmarks of a::math::field against arkworks, blst, the bls12_381 crate, RustCrypto's ghash and
+# polyval, and (through C shims built by build.rs when the libraries are found) FLINT, NTL, GMP and
+# OpenSSL. The release profile is the default one, as a user of the crate gets it.
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../../lib" }
+ark-ff = "0.5"
+ark-bn254 = "0.5"
+ark-bls12-381 = "0.5"
+blst = "0.3"
+bls12_381 = "0.8"
+ff = "0.13"
+ghash = "0.6"
+polyval = "0.7"
+
+[build-dependencies]
+cc = "1"
+
+# A second figure for ours (and the Rust references) where whole-program optimisation matters:
+# cargo build --profile fat; the rows of the main scoreboard use the default release profile.
+[profile.fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

@@ -129,6 +129,45 @@ fn bernoulli_known_values() {
 }
 
 #[test]
+fn bernoulli_tables_to_200() {
+    // The tables to B_200 against the recurrence that defines the numbers, `Σ C(m+1, k) B_k = 0`,
+    // for every `m` to 205: each `B_m` is fixed by those before it, so every number of the tables
+    // is checked exactly, and past them `B_202` and `B_204` of the zeta formula against the
+    // tables' last. B_102 and B_200 against PARI's `bernfrac`; von Staudt and Clausen for each.
+    let top = if cfg!(miri) { 110 } else { 205 };
+    for o in ORDERS {
+        let one: Vec<Rational> = (0..=top).map(|k| Rational::bernoulli(k, o)).collect();
+        for m in 1..=top {
+            assert!(recurrence_holds(m, &one), "m = {m}");
+        }
+        let table = Rational::bernoulli_numbers(top, o);
+        assert_eq!(table, one);
+        for b in &table {
+            in_order(b, o);
+        }
+        assert_eq!(
+            one[102].to_string(),
+            "3204019410860907078243020782116241775491817197152717450679002501086861530836678158791/4326"
+        );
+        if !cfg!(miri) {
+            assert_eq!(
+                one[200].to_string(),
+                "-498384049428333414764928632140399662108495887457206674968055822617263669621523687568865802302210999132601412697613279391058654527145340515840099290478026350382802884371712359337984274122861159800280019110197888555893671151/1366530"
+            );
+        }
+        for n in (102..=top.min(200)).step_by(2) {
+            let primes = staudt_primes(n);
+            let d = primes.iter().fold(Number::from(1u8), |d, &p| &d * p);
+            assert_eq!(*one[n as usize].denom(), d, "the denominator of B_{n}");
+            let s = primes
+                .iter()
+                .fold(one[n as usize].clone(), |s, &p| s + unit(p));
+            assert!(s.is_integer(), "B_{n} + Σ 1/p");
+        }
+    }
+}
+
+#[test]
 fn bernoulli_odd_indices_are_zero() {
     for o in ORDERS {
         for n in (3..200).step_by(2).chain([1001, 99_999, u64::MAX]) {

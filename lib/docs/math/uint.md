@@ -113,12 +113,12 @@ The sections below give each part's functions, its methods and sources, an examp
 ### Methods
 
 - **Sums and differences** run along the limbs with the carry or the borrow, `O(N)`.
-- **Products** are schoolbook, as in the other fixed-width libraries at these sizes: `widening_mul` and `carrying_mul` take the `N²` limb products of the full `2N`-limb product; `wrapping_mul`, `overflowing_mul` and the operator only the products that land below the width, at most `N(N + 1)/2`, over the significant limbs, and the product overflows exactly when a pair of nonzero limbs or a row's carry lands at or above it.
-- **Quotients** are Knuth's algorithm D (*The Art of Computer Programming*, vol. 2, 3rd ed., 4.3.1): the divisor's `n` significant limbs shifted until its top bit is set and the dividend as far (D1); each quotient limb estimated from the top two limbs of the remainder over the top limb of the divisor, then lowered while the second limb of the divisor shows it too large, or while it is `2⁶⁴` or more (D3), which leaves it at most one too large; the divisor times it subtracted (D4), and added back once when that went below zero (D6, on random operands with a probability of about `2/2⁶⁴`). `O(n·m)` limb products for a quotient of `m` limbs. A divisor of one limb takes the plain loop of two-limb by one-limb divisions from the top, which is also `div_rem_u64`. `Int` divides the absolute values and restores the signs.
-- **Powers** square and multiply from the low bit of the exponent, `O(N² log e)`; the overflow flag is exact, as every partial product of a base of at least 2 divides the power.
-- **Square roots** are Newton's iteration `x ↦ ⌊(x + ⌊a/x⌋)/2⌋` from `2^⌈b/2⌉`, above the root for `a` of `b` bits, which decreases to `⌊√a⌋` (Brent and Zimmermann, *Modern Computer Arithmetic*, 1.5.1): `O(log b)` divisions.
-- **Logarithms**: `ilog2` from the highest set bit; `ilog10` and `ilog` to a base of one limb divide by the largest power of the base that fits in a limb, counting its digits at a time, and take the logarithm of the last limb, `O(N²)` in all; a longer base is divided by itself, at most `BITS/64` times.
-- **Text** in a radix that is a power of two is read off the bits; in another radix the value is divided by the largest power of the radix that fits in a limb, one limb of digits at a time, `O(N²)`, and read back by products with that power. The digits go through `Formatter::pad_integral`, which applies the flags `+`, `#`, `0`, the width, the fill and the alignment as for the primitives: `{:#066x}` of a `Uint<4>` is `0x` and 64 digits. An `Int` is written in decimal and by `to_str_radix` as its sign and the digits of its absolute value, and in hexadecimal, octal and binary as the bits of its two's complement (`{:x}` of −1 is all `f`), as `i64` is. `Debug` writes hexadecimal, `0x` and the significant digits, with a `-` and the absolute value for a negative `Int`: limbs are easier to see that way than in decimal, which is what `Display` gives. It takes the width, fill, alignment and the flags `+` and `0` as `{:#x}` takes them, the zeros after the `0x`: `{:>8?}` of 255 is `    0xff` and `{:08?}` is `0x0000ff`.
+- **Products** are schoolbook, as in the other fixed-width libraries at these sizes: `widening_mul` and `carrying_mul` take the `N²` limb products of the full `2N`-limb product; `wrapping_mul` and the operator only the products that land below the width, at most `N(N + 1)/2`: where the significant limbs of the two operands fit in the width, the full product of them; for operands of the full width (and up to ten limbs, whatever they are) all of them in rows of fixed length, which unroll; otherwise rows over the significant limbs. The flag of `overflowing_mul` (and so `checked_mul` and `saturating_mul`) comes from the lengths of the operands in bits: no overflow where they sum to at most `64·N`, overflow above `64·N + 1`, and at `64·N + 1` the high half of the full product decides (for one and two limbs, `u64`'s and `u128`'s own test). Without debug assertions the operator `*` is `wrapping_mul`.
+- **Quotients** are Knuth's algorithm D (*The Art of Computer Programming*, vol. 2, 3rd ed., 4.3.1): the divisor's `n` significant limbs shifted until its top bit is set and the dividend as far (D1); each quotient limb is the quotient of the top three limbs of the remainder by the top two of the divisor (D3), the true limb or one more, taken without a division by Möller and Granlund's 3-by-2 division with the divisor's reciprocal (*Improved division by invariant integers*, IEEE Transactions on Computers 60(2), 2011), which also gives the top two limbs of the new remainder, so only the divisor's other `n − 2` limbs times it are subtracted (D4); added back once when that went below zero (D6, on random operands with a probability of about `2/2⁶⁴`). Where the remainder's top two limbs equal the divisor's, the limb is `2⁶⁴ − 1` exactly. `O(n·m)` limb products for a quotient of `m` limbs. A divisor of one limb takes the loop of 2-by-1 divisions from the top, each two products by the divisor's reciprocal, which is also `div_rem_u64`; a dividend of one limb, the hardware's division. No limb is divided by a 128-bit division, which on aarch64 is a call into software. The reciprocal of a limb is Möller and Granlund's: an 11-bit start from a table, Newton steps in 64-bit products, and an exact correction. `Int` divides the absolute values and restores the signs.
+- **Powers**: `wrapping_pow` (and without debug assertions `pow`) squares and multiplies from the top bit of the exponent, the squares with each cross product once and doubled, about half the products; a base of one limb is multiplied in as that limb, and its first steps are taken in a `u128` while the power fits; `Uint<2>` is `u128::wrapping_pow`; `overflowing_pow` (and `checked_pow`, `saturating_pow`, and `pow` with debug assertions) from the low bit, with the flag, which is exact, as every partial product of a base of at least 2 divides the power, a square wrapping exactly when the base has more than half the bits. `O(N² log e)`.
+- **Square roots**: Zimmermann's Karatsuba square root (*Karatsuba Square Root*, INRIA RR-3805, 1999). The number is shifted up by an even amount, to an even number `2L` of limbs with one of its top two bits set, and written `H·b² + a₁·b + a₀` with `b = 2^(64·⌊L/2⌋)`; the root `s'` and the remainder `r'` of the top half `H` come from the same method recursively, then `q = ⌊(r'·b + a₁)/(2s')⌋` by algorithm D (on half the dividend, by `s'`, whose top bit is set), `s = s'·b + q` and the remainder `(r'·b + a₁ − 2s'·q)·b + a₀ − q²`. As the top half is normalised, `s'` is at least `b/2` and `s` is the root or one more; a negative remainder brings it down by one. Two limbs are one such step on 32-bit digits, the root of the top 64 bits by `u64::isqrt` and one 64-bit division. The root is shifted back down. About the cost of one division of the number by half its length; up to 64 bits, `u64::isqrt`.
+- **Logarithms**: `ilog2` from the highest set bit; `ilog10` from `t = ⌊(bits − 1)·log₁₀2⌋` (by a product with `⌊2⁶⁴·log₁₀2⌋`), the logarithm being `t` or `t + 1`, and a comparison with `10^(t + 1)` formed by products by `10¹⁹`, `O(N²)` products and no division (`u64::ilog10` up to 64 bits, `u128::ilog10` up to 128); `ilog` to another base of one limb divides by the largest power of the base that fits in a limb, counting its digits at a time, and takes the logarithm of the last limb, `O(N²)` in all; a longer base is divided by itself, at most `BITS/64` times.
+- **Text**: `Display` and the radix traits of a `Uint` of one and two limbs are those of `u64` and `u128`, which write the same digits with the same flags; so are those of an `Int`, `i64` and `i128`, but for `Display` without a width and without `+` (the only flags that change a decimal integer's text), which writes the sign and the digits at once from a buffer on the stack, as `Display` does at every other width without those flags. Otherwise, in a radix that is a power of two it is read off the bits, a limb at a time for radices 2, 4 and 16; in decimal the value is divided by `10¹⁹` (whose reciprocal is a constant), one chunk of 19 digits at a time, `O(N²)`, each chunk written two digits at a time from a table; in another radix it is divided by the largest power of the radix that fits in a limb and written a digit at a time; into a buffer on the stack up to 16 limbs. Text is read back by products with that power. With flags the digits go through `Formatter::pad_integral`, which applies `+`, `#`, `0`, the width, the fill and the alignment as for the primitives: `{:#066x}` of a `Uint<4>` is `0x` and 64 digits. An `Int` is written in decimal and by `to_str_radix` as its sign and the digits of its absolute value, and in hexadecimal, octal and binary as the bits of its two's complement (`{:x}` of −1 is all `f`), as `i64` is. `Debug` writes hexadecimal, `0x` and the significant digits, with a `-` and the absolute value for a negative `Int`: limbs are easier to see that way than in decimal, which is what `Display` gives. It takes the width, fill, alignment and the flags `+` and `0` as `{:#x}` takes them, the zeros after the `0x`: `{:>8?}` of 255 is `    0xff` and `{:08?}` is `0x0000ff`.
 - **Reading** follows the primitives' `from_str_radix` exactly: an optional `+` (and `-` for `Int`), then at least one digit, letters in either case, nothing else; `-` before a `Uint` and a sign alone are invalid digits. Of an overflow and a bad character, the error is the one met first from the left, as the primitives report it: `"340282366920938463463374607431768211456x"` overflows a `Uint<2>`, `"34028236692093846346337460743176821145x6"` has an invalid digit. A radix outside 2 to 36 panics.
 - **To a float**: the top 64 bits, with the lowest of them or'ed with every bit below them, converted by the hardware and scaled by a power of two, which is exact: one rounding, to nearest with ties to even, as `Number::to_f64` and `u128 as f64` round, infinity beyond the largest float. `to_f32` rounds once from the value, not through `f64`. **From a float**, as `as`: truncated toward zero, held to `[MIN, MAX]`, a NaN to 0.
 
@@ -148,7 +148,7 @@ To run the tests: `cargo test --test math -- uint:: --skip uint::mont`, and with
 ### Limits
 
 - Not constant-time: the time of an operation depends on the values (the significant limbs of a product or a quotient, the add-back, the exponent's bits, the text's length). These types are not for secret data.
-- Nothing is tuned yet. Products are schoolbook and quotients Knuth's algorithm D, with no Karatsuba, no reciprocal for the quotient limbs, and the one-limb loop dividing with the two-limb hardware or library division.
+- Products are schoolbook (no Karatsuba) and quotients Knuth's algorithm D, as at these widths in the other fixed-width libraries. The rows of fixed length end at ten limbs, where they no longer unroll, for operands short of the full width: a crossover measured on an Apple M4 Max.
 - `N = 0` is a type with the one value 0: sums, products, shifts, text, `Number` conversions and the bytes work on it, but the constants and methods that need a bit (`ONE`, `Int::MIN` and `Int::MAX`, `pow`, `Product`, …) fail to compile for it, and it is not tested beyond that.
 - `Debug` is hexadecimal, and while it takes the width, fill, alignment, `+` and `0`, it cannot tell `{:x?}` and `{:X?}` from `{:?}` (stable Rust does not let a type ask), so `{:X?}` is lower-case too; the primitives' `Debug` is decimal.
 - The byte arrays need their length named or inferred, `[u8; 32]` for `Uint<4>`: `[u8; 8·N]` cannot be written in code generic over `N` on stable Rust, which uses `write_le_bytes` and `from_le_slice` instead.
@@ -158,32 +158,32 @@ To run the tests: `cargo test --test math -- uint:: --skip uint::mont`, and with
 
 ## Montgomery multiplication and pow_mod
 
-`Montgomery<N>` is the arithmetic modulo an odd `m > 1` of `N` limbs in Montgomery form, with `R = 2^(64·N)`: a number `x` is kept as its form `x·R mod m`, a `Uint<N>` below `m`, and products of forms are reduced by dividing by `R` instead of by `m`. It is computed once for a modulus (it is `Copy`) and then used for as many operations as needed. On top of it, `Uint<N>` has `pow_mod`, `mul_mod`, `add_mod`, `sub_mod` and `mod_inverse` for **any** nonzero modulus, odd or even. The issue's target is 256- to 512-bit moduli (`N` = 4 to 8); every `N ≥ 1` works, and the tests run every width from 1 to 9 limbs and 16, 33 and 129.
+`Montgomery<N>` is the arithmetic modulo an odd `m > 1` of `N` limbs in Montgomery form, with `R = 2^(64·N)`: a number `x` is kept as its form `x·R mod m`, a `Uint<N>` below `m`, and products of forms are reduced by dividing by `R` instead of by `m`. It is computed once for a modulus (it is `Copy`) and then used for as many operations as needed. On top of it, `Uint<N>` has `pow_mod`, `mul_mod`, `add_mod`, `sub_mod` and `mod_inverse` for **any** nonzero modulus, odd or even. The issue's target is 256- to 512-bit moduli (`N` = 4 to 8); every `N ≥ 1` works, and the tests run every width from 1 to 17 limbs and 33 and 129.
 
 Every argument may be any `Uint<N>` and stands for its residue modulo `m` (one at or above `m` is reduced first), and every result is below `m`. Exponents are a `Uint<M>` of any width `M`, the same as `N` or not, or for `pow_limbs` a slice of limbs, the low one first (`&[e]` for a `u64`). `x⁰ = 1` for every `x`, 0 included, and modulo 1 every result is 0, as for `Number::pow_mod`; every number has the inverse 0 modulo 1, as for `Number::mod_inverse` and GMP's `mpz_invert`. A modulus of zero panics with the message of `%`; `Montgomery::new` panics for an even modulus, for 1, and for `N = 0`.
 
 | Function | Gives | Method | Cost |
 | --- | --- | --- | --- |
-| `Montgomery::new(&m)` | the arithmetic modulo the odd `m > 1` | `−m⁻¹ mod 2⁶⁴` by Newton's iteration; `R mod m` and `R² mod m` by Knuth's algorithm D | `O(N²)` |
+| `Montgomery::new(&m)` | the arithmetic modulo the odd `m > 1` | `−m⁻¹ mod 2¹²⁸` by Newton's iteration; `R mod m` and `R² mod m` by Knuth's algorithm D | `O(N²)` |
 | `modulus()`, `one()` | `m`; the form of 1, `R mod m` | | |
 | `to_montgomery(&x)` | the form `x·R mod m` of any `x` | REDC of `x·(R² mod m)` | one product |
 | `from_montgomery(&x)` | the number `x·R⁻¹ mod m` a form stands for | REDC of `x` | one product |
-| `mul(&a, &b)`, `square(&a)` | `a·b·R⁻¹ mod m`, the form of the product | REDC interleaved with the product (CIOS) | `2·N² + N` products of limbs |
+| `mul(&a, &b)`, `square(&a)` | `a·b·R⁻¹ mod m`, the form of the product | REDC interleaved with the product (CIOS); from 11 limbs the product or the square by `Number`'s schoolbook kernels and a separate REDC by its kernel | `2·N² + N` products of limbs; about `1.5·N²` for a square from 11 limbs |
 | `add`, `sub`, `neg` | the forms of `a + b`, `a − b`, `−a` | one conditional subtraction or addition of `m` | `O(N)` |
-| `pow(&x, &e)`, `pow_limbs(&x, &[u64])` | the form of `x^e` | sliding window of 1 to 6 bits, sized to the exponent | about `ℓ` squarings and `ℓ/(w + 1)` products for `ℓ` bits, and `2^(w−1)` for the table when `w ≥ 2` |
-| `inverse(&x)` | the form of `x⁻¹`, or `None` when `gcd(x, m) ≠ 1` | binary inversion, then two products by `R² mod m` | `O(N²)` |
-| `x.pow_mod(&e, &m)` | `x^e mod m` for any nonzero `m` | odd `m`: `Montgomery`; even `m = 2ᵏ·q`: modulo `q` in Montgomery form, modulo `2ᵏ` by wrapping products, put together by the Chinese remainder theorem | `O(N²·ℓ)`; for an even `m` another `O(N²·log N)` for `q⁻¹ mod 2^(64·N)` |
-| `x.mul_mod(&y, &m)` | `x·y mod m` for any nonzero `m` | the double-width product, reduced by algorithm D | `O(N²)` |
+| `pow(&x, &e)`, `pow_limbs(&x, &[u64])` | the form of `x^e` | sliding window of 1 to 6 bits, sized to the exponent; from 11 limbs `Number::pow_mod` of the number the form stands for | about `ℓ` squarings and `ℓ/(w + 1)` products for `ℓ` bits, and `2^(w−1)` for the table when `w ≥ 2` |
+| `inverse(&x)` | the form of `x⁻¹`, or `None` when `gcd(x, m) ≠ 1` | binary GCD in batches of 31 steps (Pornin), then two products by `R² mod m`; from 11 limbs `Number::mod_inverse` | `O(N²)` |
+| `x.pow_mod(&e, &m)` | `x^e mod m` for any nonzero `m` | odd `m`: `Montgomery`; even `m = 2ᵏ·q`: modulo `q` in Montgomery form, modulo `2ᵏ` by wrapping products, put together by the Chinese remainder theorem; from 11 limbs `Number::pow_mod` | `O(N²·ℓ)`; for an even `m` another `O(N²·log N)` for `q⁻¹ mod 2^(64·N)` |
+| `x.mul_mod(&y, &m)` | `x·y mod m` for any nonzero `m` | the double-width product (from 11 limbs by `Number`'s schoolbook kernel), reduced by algorithm D | `O(N²)` |
 | `x.add_mod(&y, &m)`, `x.sub_mod(&y, &m)` | `x ± y mod m` for any nonzero `m` | operands at or above `m` reduced by algorithm D, then one conditional correction | `O(N)` for reduced operands |
-| `x.mod_inverse(&m)` | the `r < m` with `x·r ≡ 1`, or `None` | odd `m`: binary inversion; even `m = 2ᵏ·q`: Newton's iteration modulo `2ᵏ`, binary inversion modulo `q`, the Chinese remainder theorem | `O(N²)`; `O(N²·log N)` for an even `m` |
+| `x.mod_inverse(&m)` | the `r < m` with `x·r ≡ 1`, or `None` | odd `m`: binary GCD in batches of 31 steps; even `m = 2ᵏ·q`: Newton's iteration modulo `2ᵏ`, the binary GCD modulo `q`, the Chinese remainder theorem; one limb, any `m`: the extended Euclidean algorithm; from 11 limbs `Number::mod_inverse` | `O(N²)`; `O(N²·log N)` for an even `m` |
 
 ### Methods
 
-- **REDC, CIOS.** Montgomery's reduction (P. L. Montgomery, *Modular multiplication without trial division*, Math. Comp. 44, 1985) adds to `t` the multiple `q·m` with `q = t₀·(−m⁻¹) mod 2⁶⁴`, which clears the low limb, and shifts the limb out; after `N` limbs `t ≡ a·b·R⁻¹ (mod m)`. The product and the reduction are interleaved a limb of `b` at a time, the method CIOS of Koç, Acar and Kaliski (*Analyzing and comparing Montgomery multiplication algorithms*, IEEE Micro 16(3), 1996): a row `t += a·bᵢ`, a row `t = (t + q·m)/2⁶⁴`, `2·N² + N` products of limbs in all. Between the rows `t < a + m < 2·R`, so `t` is kept in `N` limbs and a carry; that carry is what makes a modulus near `R` (its top limb `u64::MAX`, up to `R − 1` itself) come out right. When `a·b < m·R`, which holds as soon as one factor is below `m`, the end result is below `2·m`, and one conditional subtraction leaves it below `m`. `square` is `mul` of a number by itself for now.
-- **The constants.** `−m⁻¹ mod 2⁶⁴` by Newton's iteration `y ← y·(2 − m·y)` from `y = m`, which is right to 3 bits and doubles them each step: five steps. `R mod m` and `R² mod m` are the remainders of `2^(64·N)` and `2^(128·N)` by Knuth's algorithm D (*The Art of Computer Programming*, vol. 2, 4.3.1), normalised so that the divisor's top bit is set, and taken one quotient limb at a time from the top of the dividend, so that the dividend needs no room: the quotient limb is estimated from the top two limbs and the divisor's top limb, corrected by the next limbs of each (step D3), and is then right or one too large (Theorem B), which the add-back of step D6 corrects. The same division reduces the double-width products of `mul_mod` and the operands of `add_mod`, `sub_mod`, `mod_inverse`. These divisions are private to the module; they may later give way to the division of `Uint`.
+- **REDC, CIOS.** Montgomery's reduction (P. L. Montgomery, *Modular multiplication without trial division*, Math. Comp. 44, 1985) adds to `t` the multiple `q·m` with `q = t₀·(−m⁻¹) mod 2⁶⁴`, which clears the low limb, and shifts the limb out; after `N` limbs `t ≡ a·b·R⁻¹ (mod m)`. The product and the reduction are interleaved a limb of `b` at a time, the method CIOS of Koç, Acar and Kaliski (*Analyzing and comparing Montgomery multiplication algorithms*, IEEE Micro 16(3), 1996): a row `t += a·bᵢ`, a row `t = (t + q·m)/2⁶⁴`, `2·N² + N` products of limbs in all. Between the rows `t < a + m < 2·R`, so `t` is kept in `N` limbs and a carry; that carry is what makes a modulus near `R` (its top limb `u64::MAX`, up to `R − 1` itself) come out right. When `a·b < m·R`, which holds as soon as one factor is below `m`, the end result is below `2·m`, and one conditional subtraction leaves it below `m`. Below 11 limbs `square` is `mul` of a number by itself. From 11 limbs on, the product is `Number`'s schoolbook kernel (assembly on aarch64 and x86-64), the square its square kernel, with the `N(N − 1)/2` cross products once and doubled, and the reduction of the `2N` limbs a separate pass by `Number`'s REDC kernel, which clears two limbs at a time with `−m⁻¹ mod 2¹²⁸`, the crossover measured on an Apple M4 Max.
+- **The constants.** `−m⁻¹ mod 2¹²⁸` by Newton's iteration `y ← y·(2 − m·y)` from `y = m`, which is right to 3 bits and doubles them each step. `R mod m` and `R² mod m` are the remainders of `2^(64·N)` and `2^(128·N)` by Knuth's algorithm D (*The Art of Computer Programming*, vol. 2, 4.3.1), normalised so that the divisor's top bit is set, the dividend shifted as far into a buffer on the stack, and reduced there from the top, with the loops unrolled for a divisor of `N` limbs: each quotient limb is the quotient of the top three limbs by the divisor's top two, by Möller and Granlund's 3-by-2 division with the divisor's reciprocal (a 2-by-1 division for a divisor of one limb), right or one too large (Theorem B), which the add-back of step D6 corrects; the 3-by-2 division gives the top two limbs of the remainder, so only the divisor's other limbs times the quotient limb are subtracted. The same division reduces the double-width products of `mul_mod` and the operands of `add_mod`, `sub_mod`, `mod_inverse`, and is the one of `Uint::div_rem`; where the dividend's top limbs are already below the divisor, as for a product of two residues, it starts a limb lower, `N` quotient limbs for `mul_mod`.
 - **Powers.** The sliding-window method (Menezes, van Oorschot and Vanstone, *Handbook of Applied Cryptography*, 1996, Algorithm 14.85): from the top bit down a zero bit costs a squaring, and a window of up to `w` bits that starts and ends with a one costs its length in squarings and one product by an odd power from a table `x, x³, …, x^(2^w − 1)`. For an exponent of `ℓ` bits, `w` minimises `T(w) + ℓ/(w + 1)`, about `ℓ/(w + 1)` windows and the cost `T(w)` of the table: 0 for `w = 1`, which needs no table, and `2^(w−1)` for `w ≥ 2` (a squaring for `x²` and `2^(w−1) − 1` products), a tie going to the smaller `w`. That gives 1 up to 12 bits, 2 up to 24, 3 up to 80, 4 up to 240, 5 up to 672, 6 beyond (checked against the code for every length up to 20,000 bits). The table is on the stack: from 33 limbs on `w` is at most 4, from 129 limbs on at most 2, which keeps it within 8 KiB up to 512 limbs. Counted on 200 random exponents of each length, the products came to `ℓ/(w + 1) + 2^(w−1)` less 1.5 on average (57.2 for 256 bits, 99.7 for 512, 176.7 for 1024, where binary exponentiation takes 128, 256 and 512), and the squarings to `ℓ` less 1 to 4.
 - **Even moduli.** `m = 2ᵏ·q` with `q` odd: `x^e mod q` in Montgomery form, `x^e mod 2^(64·N)` by wrapping products (the low halves) and its low `k` bits, put together in Garner's form `y = r₁ + q·((r₂ − r₁)·q⁻¹ mod 2ᵏ)`, which is below `m` and so needs no reduction. `q⁻¹ mod 2^(64·N)` is Newton's iteration again, from the inverse of the low limb, `⌈log₂ N⌉` steps of two wrapping products, `O(N²·log N)` in all, which is what an even modulus adds to `pow_mod` and `mod_inverse`. A power of two (`q = 1`) is the wrapping power alone. `mod_inverse` splits the same way: an inverse modulo `2ᵏ` exists exactly for odd numbers.
-- **Inverses.** The binary algorithm of Hankerson, Menezes and Vanstone (*Guide to Elliptic Curve Cryptography*, 2004, Algorithm 2.22), which needs an odd modulus but not a prime one: it keeps `x₁·x ≡ u` and `x₂·x ≡ v (mod m)` from `u = x, v = m`, halves the even one of `u` and `v` and its coefficient modulo `m`, and subtracts the smaller of the two odd ones from the larger, until one of them is 1, whose coefficient is the inverse, or they meet at a common divisor above 1, when there is none. Each step shortens `u·v` by a bit or more: at most `2·64·N` steps of `O(N)`. `Montgomery::inverse` inverts the form `x·R` itself and multiplies by `R² mod m` twice, which takes `(x·R)⁻¹` to `x⁻¹·R`.
+- **Inverses.** The binary GCD, which needs an odd modulus but not a prime one, in the form of Pornin (*Optimized binary GCD for modular inversion*, IACR ePrint 2020/972, Algorithm 2), not constant-time: it keeps `a ≡ u·x` and `b ≡ v·x (mod m)` from `a = x, b = m`, `b` odd; an even `a` is halved, an odd one, if below `b`, swapped with it, then `a ← (a − b)/2`, with `u` following modulo `m`; when `a` reaches 0, `b` is the GCD, and for `b = 1`, `v` the inverse. The steps run 31 at a time on 64-bit approximations of `a` and `b` — their low 31 bits, which decide every parity exactly, and their top 33 bits at a common position, which decide the comparisons — without branches, recording them as factors of at most `2³¹` that are then applied to the full `a` and `b` (negated where a wrong comparison made one negative) and to `u` and `v` modulo `m`, divided by `2³¹` there as in Montgomery's reduction. Below 65 bits the approximations are exact. Each batch shortens `a·b` by about 31 bits: about `2·64·N/31` batches of `O(N)` products. For one limb, odd modulus or even, the extended Euclidean algorithm with the hardware's 64-bit division is faster: the cofactors of `x` alternate in sign, so their absolute values, which grow to at most `m`, are kept without signs and the parity of the last step gives the sign. From 11 limbs on, `mod_inverse` and `Montgomery::inverse` call `Number::mod_inverse` (Lehmer's and subquadratic GCDs), and `pow_mod` and `Montgomery::pow` `Number::pow_mod` (products and reductions on assembly kernels), faster there even with the conversions (measured on an Apple M4 Max on random operands); below 11 limbs an inverse modulo an even number is not, as an even number has no inverse there, which this module sees at once. `Montgomery::inverse` inverts the form `x·R` itself and multiplies by `R² mod m` twice, which takes `(x·R)⁻¹` to `x⁻¹·R`.
 
 ### Example
 
@@ -222,6 +222,7 @@ assert_eq!(Uint::<2>::from_u64(6).mod_inverse(&m), None);
 ### Verified
 
 - **`Number`, at every width and every length of the modulus.** For each `N` from 1 to 9 and 16 (`lib/tests/math/uint/mont.rs`, seeded): an odd modulus of each bit length from 2 to `64·N`, 3,894 in all, against `Number` for `R mod m`, `to_montgomery`, `from_montgomery`, their round trip, `mul` (as `a·b·R⁻¹ mod m`, both orders), `square`, `add`, `sub`, `neg`, `inverse` (as `R²·a⁻¹ mod m` or `None`, by `Number::mod_inverse`), and `pow` or `pow_limbs` of the first operand by an exponent of up to 2 limbs (as `(a·R⁻¹)^e·R mod m`), on 9,696 pairs of operands: 5,166 random, half reduced and half anywhere below `R`, biased to 0, 1, `MAX`, all-ones and zero limbs and single bits, and 4,530 with a first operand from `m`, `m + 1`, `2m − 1` (where it fits), `m − 1` and `MAX`, which every operation must reduce or keep, taken in turn; `pow_mod` against `Number::pow_mod` for an odd and an even modulus of each length (7,788 powers), the even ones with 1 to `ℓ − 1` trailing zeros and powers of two among them, with exponents of 1 and 2 limbs and small ones; `mul_mod`, `add_mod`, `sub_mod` and `mod_inverse` (also of an odd operand modulo an even modulus) for a modulus of each length from 1 bit, odd and even (3,904).
+- **Both sides of the crossovers**: at 9 and 10 limbs (the rows of CIOS, the powers' own windows) and at 11 and 12 (`Number`'s kernels for the products, powers and inverses by `Number`), the `Montgomery` check against `Number` for an odd modulus of every length, `pow_mod` for an odd and an even modulus of every length, and the moduli of special shape below (`lib/tests/math/uint/mont.rs`, `the_widths_on_both_sides_of_the_crossovers_agree_with_number`).
 - **Moduli of special shape and edge operands.** For each of the ten widths, 304 moduli in all: `2^(64N) − 1`, `2^(64N−1) + 1`, `2^(64N−1)`, `2^(64N) − 2`, 2, 3, `2⁶⁴ − 1`, `2⁶³`, the top limb `u64::MAX` (odd and even), and `2ᵏ − 1`, `2ᵏ`, `2ᵏ + 1` for `k` = 2, 63, 64, 65, `32N`, `64N − 2`, `64N − 1`. For each, the bases 0, 1, `m − 1`, `m`, `m + 1`, `MAX` and a random one, and the exponents 0, 1, 2, `2⁶⁴ − 1`, `2^(64N) − 1`, `m − 1` and a random one: `pow_mod` and `Montgomery::pow` against `Number::pow_mod` (14,896 powers), `mul_mod`, `add_mod`, `sub_mod` for every pair of the bases, `mod_inverse` of each base, and the whole `Montgomery` check above on the odd moduli, with every one of the operands `m`, `m + 1`, `2m − 1`, `m − 1` and `MAX` that fits. Modulo `2^(64N−1) + 1` for `N ≥ 3`, the remainder of `R` goes through the add-back of algorithm D (estimated quotient 2, true quotient 1), checked by its own test.
 - **Named primes.** The primes of P-256, secp256k1, BN254 and Curve25519 (4 limbs), P-384 and BLS12-381's base field (381 bits, 6 limbs), P-521 (9 limbs), and P-256 and BLS12-381 again in 5 and 8 limbs, where the top limbs are zero: Fermat's `x^(p−1) = 1` and `x^p = x`, `x^(p−2)` equal to `inverse`, `mod_inverse` equal to it, and `pow_mod` with full-length exponents against `Number`; and the whole `Montgomery` check, every edge operand included.
 - **RSA-like moduli.** Products of two primes of 128, 256, 512 and 1024 bits (Python with SymPy's `nextprime`, seeded): the factors, their multiples, 0 and `m` have no inverse (both `inverse` and `mod_inverse`); for random `x`, `x^65537` against `Number`, the round trip with `d = 65537⁻¹ mod φ(m)`, and Euler's `x^φ(m) = 1` for units; and the whole `Montgomery` check, every edge operand included.
@@ -240,6 +241,179 @@ To run the tests: `cargo test --test math -- uint::mont`, and `cargo test --rele
 
 - **Nothing is constant-time**, and none of it is meant for secret exponents or keys: the time of a power depends on the exponent's length and bits (a zero bit costs a squaring, a window a product); the final subtraction of a product is taken or not depending on the values; an operand at or above the modulus is reduced and one below it is not; the inverse takes as many steps as its values need; the division's corrections depend on the values.
 - `Uint::pow_mod` and the other functions on `Uint` compute their constants on every call (for `pow_mod` the constants of `Montgomery`, for an even modulus also `q⁻¹ mod 2^(64·N)`); for many operations modulo the same odd number, a `Montgomery` kept and reused saves them.
-- `square` is a product (no separate squaring kernel yet), the products are the plain rows of CIOS, with no assembly and no SIMD, and nothing is tuned: the release will time it and may reuse the register kernels of `a::math::ec`'s internal Montgomery arithmetic.
+- Below 11 limbs the products are the plain rows of CIOS (and `square` is a product), with no assembly and no SIMD. The crossovers (the kernels and `Number` from 11 limbs on) were measured on an Apple M4 Max only. One crossover serves powers and inverses alike, and the inverse modulo an even number holds it at 11 limbs: `Number`'s powers by long exponents, and its inverses modulo an odd number, are faster from 2 limbs on.
 - The values and the table of a power are on the stack; for very wide `Uint`s (thousands of limbs) that is a lot of stack, beyond the window's limit of two powers from 129 limbs on.
 - `N = 0` holds no odd number and no nonzero modulus: `Montgomery::new` panics, and so do `pow_mod`, `mul_mod`, `add_mod`, `sub_mod` and `mod_inverse` on `Uint<0>`, whose only modulus is 0.
+
+## Measured
+
+Measured on an Apple M4 Max (macOS 27.2) on 2026-11-26 between 07:55 and 07:57, with nothing else running: the areas of the release's final run were timed one after another, and every timed process ran alone on the machine. One thread; `a` as a user builds it, `cargo build --release` with the default profile (opt-level 3, no LTO, the default codegen units, no `target-cpu`), on Rust 1.100.0 stable, and the Rust references the same way, by the harness in the repository's [`bench/numtypes`](../../../bench/numtypes) (see [`bench/README.md`](../../../bench/README.md)). Each figure is the median time an operation of 21 samples of at least 1.5 ms, each a pass over a pool of fresh random inputs (64 bytes to 96 KiB), all the contenders of a row alternating sample by sample in one process; every reference's results were compared with `a`'s on the whole pool before the timing, exactly. Each row gives the fastest reference that does the same work, its time and `a`'s time over it: below 1, `a` is faster. Times below a nanosecond are a few cycles, and their spreads are wide. The references: ruint 1.21.1, crypto-bigint 0.6.1, bnum 0.13.0, malachite-nz 0.14.0, and GMP 6.3.0 and OpenSSL 3.5.9's `BIGNUM` (Homebrew's builds, called through FFI: GMP's `mpn` functions a library call an item, `mpz` functions into a preallocated `mpz_t`, OpenSSL's into `BIGNUM`s and a `BN_MONT_CTX` kept); the primitive `u64`, `u128`, `i64` and `i128` at 64 and 128 bits. Not counted, as they do other work: crypto-bigint's constant-time forms (`MontyForm::pow`, `inv_odd_mod`, `inv_mod`), which `a` does not offer (nothing here is constant-time), and its `add_mod` and `sub_mod`, which need reduced operands where `a`'s reduce them.
+
+### `Uint` and `Int`
+
+`Uint<N>` of `N` limbs, random full-width operands unless a row says otherwise; `div_rem` of a dividend of `N` limbs by a divisor of the limbs given, `div_rem_u64` by an odd 64-bit divisor, the shifts by random amounts below the width, `pow` of a base below `2^16` whose power fits, `wrapping_pow` of a random base by an exponent from 2 to 255, `checked_mul` of operands whose bit lengths sum to the width ± 32; `to_string` and `to_str_radix(16)` give a `String` (GMP's `mpz_get_str` writes into a caller's buffer):
+
+| Operation | Bits | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `wrapping_add` | 64 | 0.696 ns | bnum | 0.725 ns | 0.96 |
+|  | 256 | 1.55 ns | ruint | 1.55 ns | 1.00 |
+|  | 1,024 | 3.53 ns | ruint | 3.55 ns | 1.00 |
+| `wrapping_mul` | 64 | 0.646 ns | bnum | 0.732 ns | 0.88 |
+|  | 128 | 0.905 ns | ruint | 1.38 ns | 0.66 |
+|  | 256 | 2.18 ns | ruint | 1.64 ns | 1.33 |
+|  | 512 | 7.75 ns | ruint | 6.73 ns | 1.15 |
+|  | 1,024 | 79.1 ns | GMP | 45.1 ns | 1.75 |
+| `widening_mul` | 64 | 1.41 ns | `u64` | 1.35 ns | 1.04 |
+|  | 256 | 3.85 ns | bnum | 3.77 ns | 1.02 |
+|  | 512 | 20.1 ns | GMP | 27.7 ns | 0.73 |
+|  | 1,024 | 144 ns | GMP | 92.0 ns | 1.57 |
+| `overflowing_mul` | 128, operands of 64 bits | 1.81 ns | bnum | 0.815 ns | 2.22 |
+|  | 256, operands of 128 bits | 4.07 ns | ruint | 2.62 ns | 1.56 |
+|  | 1,024, operands of 512 bits | 41.2 ns | ruint | 44.0 ns | 0.94 |
+| `checked_mul` | 128 | 2.02 ns | ruint | 1.60 ns | 1.26 |
+|  | 256 | 4.99 ns | ruint | 2.61 ns | 1.91 |
+|  | 1,024 | 53.6 ns | ruint | 45.5 ns | 1.18 |
+| `div_rem` | 128, divisor of 1 limb | 7.56 ns | ruint | 5.85 ns | 1.29 |
+|  | 256, divisor of 2 limbs | 23.9 ns | ruint | 15.9 ns | 1.50 |
+|  | 1,024, divisor of 8 limbs | 127 ns | GMP | 99.7 ns | 1.27 |
+|  | 128, divisor of 2 limbs | 5.66 ns | `u128` | 2.59 ns | 2.18 |
+|  | 256, divisor of 4 limbs | 10.9 ns | ruint | 7.40 ns | 1.47 |
+|  | 1,024, divisor of 16 limbs | 33.5 ns | GMP | 25.2 ns | 1.33 |
+| `div_rem_u64` | 128 | 5.99 ns | GMP | 5.20 ns | 1.15 |
+|  | 256 | 9.62 ns | GMP | 7.98 ns | 1.21 |
+|  | 1,024 | 49.5 ns | GMP | 32.5 ns | 1.52 |
+| `wrapping_shr` | 64 | 0.658 ns | ruint | 0.622 ns | 1.06 |
+|  | 256 | 2.30 ns | ruint | 1.58 ns | 1.46 |
+|  | 1,024 | 8.61 ns | bnum | 5.91 ns | 1.46 |
+| `cmp` | 64 | 0.377 ns | bnum | 0.350 ns | 1.08 |
+|  | 256 | 0.503 ns | crypto-bigint | 0.509 ns | 0.99 |
+|  | 1,024 | 1.00 ns | crypto-bigint | 1.01 ns | 0.99 |
+| `isqrt` | 64 | 4.19 ns | bnum | 1.74 ns | 2.41 |
+|  | 128 | 8.19 ns | GMP | 9.06 ns | 0.91 |
+|  | 256 | 45.2 ns | GMP | 42.1 ns | 1.08 |
+|  | 1,024 | 149 ns | GMP | 169 ns | 0.88 |
+| `pow` | 128 | 1.60 ns | `u128` | 1.61 ns | 0.99 |
+|  | 256 | 5.37 ns | bnum | 8.57 ns | 0.63 |
+|  | 1,024 | 88.2 ns | GMP | 57.9 ns | 1.52 |
+| `wrapping_pow` | 128 | 5.60 ns | bnum | 4.80 ns | 1.17 |
+|  | 256 | 14.8 ns | bnum | 12.4 ns | 1.19 |
+|  | 1,024 | 554 ns | bnum | 643 ns | 0.86 |
+| `ilog10` | 64 | 0.960 ns | `u64` | 1.04 ns | 0.93 |
+|  | 128 | 2.50 ns | `u128` | 1.54 ns | 1.62 |
+|  | 256 | 12.4 ns | ruint | 99.1 ns | 0.12 |
+|  | 1,024 | 82.2 ns | ruint | 733 ns | 0.11 |
+| `to_f64` | 128 | 1.45 ns | `u128` | 1.28 ns | 1.13 |
+|  | 512 | 2.75 ns | ruint | 1.71 ns | 1.60 |
+|  | 1,024 | 2.67 ns | ruint | 3.92 ns | 0.68 |
+| `leading_zeros` | 256 | 0.699 ns | ruint | 0.678 ns | 1.03 |
+|  | 384 | 1.50 ns | bnum | 1.15 ns | 1.31 |
+|  | 1,024 | 2.85 ns | crypto-bigint | 2.90 ns | 0.98 |
+| `to_string` | 64 | 26.7 ns | `u64` | 20.4 ns | 1.31 |
+|  | 128 | 30.1 ns | `u128` | 24.6 ns | 1.23 |
+|  | 256 | 75.3 ns | ruint | 96.5 ns | 0.78 |
+|  | 1,024 | 496 ns | GMP | 599 ns | 0.83 |
+| `from_str_radix(10)` | 64 | 14.6 ns | `u64` | 14.4 ns | 1.01 |
+|  | 256 | 50.5 ns | bnum | 68.3 ns | 0.74 |
+|  | 1,024 | 248 ns | malachite-nz | 259 ns | 0.96 |
+| `to_str_radix(16)` | 64 | 27.9 ns | GMP | 14.1 ns | 1.98 |
+|  | 256 | 53.5 ns | bnum | 38.8 ns | 1.38 |
+|  | 1,024 | 150 ns | bnum | 114 ns | 1.32 |
+| `from_str_radix(16)` | 64 | 8.91 ns | malachite-nz | 8.63 ns | 1.03 |
+|  | 256 | 50.0 ns | malachite-nz | 65.9 ns | 0.76 |
+|  | 1,024 | 254 ns | bnum | 222 ns | 1.15 |
+| `Int` `wrapping_mul` | 64 | 0.596 ns | bnum | 0.711 ns | 0.84 |
+|  | 256 | 2.16 ns | bnum | 1.63 ns | 1.33 |
+|  | 1,024 | 81.6 ns | bnum | 62.7 ns | 1.30 |
+| `Int` `wrapping_abs` | 64 | 0.739 ns | bnum | 0.640 ns | 1.15 |
+|  | 256 | 1.55 ns | bnum | 2.28 ns | 0.68 |
+|  | 1,024 | 2.73 ns | bnum | 11.7 ns | 0.23 |
+| `Int` `div_rem` | 64, divisor of 1 limb | 1.40 ns | `i64` | 1.46 ns | 0.96 |
+|  | 256, divisor of 2 limbs | 20.8 ns | crypto-bigint | 78.7 ns | 0.27 |
+|  | 1,024, divisor of 8 limbs | 132 ns | crypto-bigint | 324 ns | 0.41 |
+| `Int` `to_string` | 64 | 29.4 ns | `i64` | 19.8 ns | 1.48 |
+|  | 128 | 42.4 ns | `i128` | 28.6 ns | 1.49 |
+|  | 256 | 75.7 ns | bnum | 219 ns | 0.35 |
+|  | 1,024 | 497 ns | bnum | 3.27 µs | 0.15 |
+| `Int` `from_str_radix(10)` | 64 | 17.1 ns | `i64` | 14.5 ns | 1.18 |
+|  | 256 | 53.5 ns | bnum | 70.8 ns | 0.76 |
+|  | 1,024 | 256 ns | bnum | 346 ns | 0.74 |
+
+- The sums, the comparisons and the bit counts take 0.74 to 1.08 of the fastest reference's time, above 1.05 only for `cmp` and `checked_add` of one limb, a fraction of a nanosecond; `widening_mul` to 256 bits 1.01 to 1.04; `widening_mul_u64` takes 0.44 to 1.04 of GMP's `mpn_mul_1`, and `widening_mul` at 512 bits 0.73 of GMP's `mpn_mul_n`.
+- From 256 bits the text is faster than every reference's both ways in decimal (`to_string` 0.73 to 0.83, `from_str_radix(10)` 0.74 to 0.96), and so are `ilog10` (0.088 to 0.12) and the signed `div_rem`, `wrapping_abs`, arithmetic shifts and text (0.15 to 0.80).
+- Behind: the quotients (`div_rem` 1.08 to 2.18 from 128 bits, `div_rem_u64` 1.15 to 1.52), the truncated and checked products from 128 to 384 bits, the shifts from 256 bits, hexadecimal text, and the text of one and two limbs against the primitive types (see [below](#where-the-references-are-faster)).
+
+### Montgomery and modular arithmetic
+
+`Montgomery` of an odd modulus of `N` limbs, against ruint (`mul_redc`, `square_redc`, `pow_mod`, `inv_mod`, `mul_mod`, `add_mod`), crypto-bigint (`MontyParams::new_vartime`, `MontyForm`'s `new`, `retrieve`, `mul`, `square` and `inv_vartime`), malachite-nz, GMP (`mpz_powm`, `mpz_invert`, `mpn_mul_n` and `mpn_tdiv_qr` for `mul_mod`) and OpenSSL (`BN_MONT_CTX_set`, `BN_mod_mul_montgomery`, `BN_mod_exp` and `BN_mod_exp_mont`), random odd moduli of the full width and, where marked, even ones; `pow_mod` and `pow` by an exponent of the modulus's width, `mul_mod` and `add_mod` of reduced operands:
+
+| Operation | Bits | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `Montgomery::new` | 64 | 6.10 ns | crypto-bigint | 77.7 ns | 0.079 |
+|  | 256 | 47.7 ns | crypto-bigint | 376 ns | 0.13 |
+|  | 1,024 | 284 ns | crypto-bigint | 1.98 µs | 0.14 |
+|  | 4,096 | 3.67 µs | OpenSSL | 12.8 µs | 0.29 |
+| `Montgomery::mul` | 64 | 1.00 ns | ruint | 1.03 ns | 0.97 |
+|  | 256 | 11.7 ns | ruint | 10.9 ns | 1.08 |
+|  | 512 | 49.9 ns | OpenSSL | 37.7 ns | 1.32 |
+|  | 1,024 | 171 ns | OpenSSL | 130 ns | 1.32 |
+|  | 2,048 | 545 ns | OpenSSL | 518 ns | 1.05 |
+|  | 4,096 | 2.26 µs | OpenSSL | 2.03 µs | 1.11 |
+| `Montgomery::square` | 256 | 11.8 ns | OpenSSL | 11.0 ns | 1.07 |
+|  | 512 | 49.8 ns | OpenSSL | 27.4 ns | 1.82 |
+|  | 1,024 | 160 ns | OpenSSL | 92.7 ns | 1.73 |
+|  | 4,096 | 1.78 µs | OpenSSL | 1.30 µs | 1.37 |
+| `to_montgomery` | 64 | 0.660 ns | crypto-bigint | 5.97 ns | 0.11 |
+|  | 1,024 | 142 ns | crypto-bigint | 306 ns | 0.46 |
+|  | 4,096 | 2.23 µs | crypto-bigint | 4.60 µs | 0.48 |
+| `from_montgomery` | 64 | 0.555 ns | crypto-bigint | 2.24 ns | 0.25 |
+|  | 1,024 | 143 ns | crypto-bigint | 172 ns | 0.83 |
+|  | 4,096 | 2.24 µs | crypto-bigint | 3.07 µs | 0.73 |
+| `Montgomery::inverse` | 64 | 96.2 ns | crypto-bigint | 256 ns | 0.38 |
+|  | 256 | 879 ns | crypto-bigint | 1.11 µs | 0.79 |
+|  | 1,024 | 2.88 µs | crypto-bigint | 7.97 µs | 0.36 |
+|  | 4,096 | 20.0 µs | crypto-bigint | 129 µs | 0.16 |
+| `Montgomery::pow` | 256 | 4.87 µs | OpenSSL | 4.56 µs | 1.07 |
+|  | 512 | 30.4 µs | OpenSSL | 20.1 µs | 1.51 |
+|  | 1,024 | 108 µs | OpenSSL | 123 µs | 0.88 |
+|  | 2,048 | 1.09 ms | OpenSSL | 862 µs | 1.27 |
+|  | 4,096 | 8.12 ms | OpenSSL | 6.63 ms | 1.22 |
+| `Uint::pow_mod` | 64 | 281 ns | GMP | 250 ns | 1.13 |
+|  | 256 | 4.97 µs | OpenSSL | 6.64 µs | 0.75 |
+|  | 512 | 30.5 µs | OpenSSL | 22.2 µs | 1.37 |
+|  | 1,024 | 108 µs | OpenSSL | 126 µs | 0.86 |
+|  | 2,048 | 1.09 ms | OpenSSL | 870 µs | 1.25 |
+|  | 4,096 | 8.07 ms | OpenSSL | 6.63 ms | 1.22 |
+|  | 256, even modulus | 5.62 µs | GMP | 8.18 µs | 0.69 |
+|  | 4,096, even modulus | 8.02 ms | GMP | 9.17 ms | 0.88 |
+| `Uint::mod_inverse` | 64 | 106 ns | malachite-nz | 36.3 ns | 2.92 |
+|  | 128 | 393 ns | ruint | 219 ns | 1.79 |
+|  | 256 | 859 ns | ruint | 515 ns | 1.67 |
+|  | 512 | 2.07 µs | ruint | 1.27 µs | 1.64 |
+|  | 1,024 | 2.86 µs | malachite-nz | 2.90 µs | 0.98 |
+|  | 4,096 | 15.0 µs | malachite-nz | 16.9 µs | 0.89 |
+|  | 256, even modulus | 876 ns | ruint | 516 ns | 1.70 |
+| `Uint::mul_mod` | 64 | 4.09 ns | ruint | 4.26 ns | 0.96 |
+|  | 256 | 37.8 ns | ruint | 36.1 ns | 1.05 |
+|  | 1,024 | 318 ns | GMP | 304 ns | 1.05 |
+|  | 2,048 | 1.26 µs | GMP | 912 ns | 1.38 |
+|  | 4,096 | 4.65 µs | GMP | 2.80 µs | 1.66 |
+| `Uint::add_mod` | 64 | 0.749 ns | ruint | 3.26 ns | 0.23 |
+|  | 256 | 3.08 ns | ruint | 4.28 ns | 0.72 |
+|  | 1,024 | 9.46 ns | ruint | 20.6 ns | 0.46 |
+|  | 4,096 | 80.5 ns | malachite-nz | 74.9 ns | 1.07 |
+
+- Setting a modulus up and converting into and out of its form take 0.079 to 0.98 of the fastest reference's time, `Montgomery::inverse` 0.16 to 0.83 of crypto-bigint's `inv_vartime`.
+- `Uint::pow_mod` takes 0.44 to 0.91 of the fastest reference's time at 128, 256, 384 and 1,024 bits, and is behind at 512, 2,048 and 4,096 bits for odd moduli (1.22 to 1.37, against OpenSSL), where the products are; for even moduli, against GMP, 0.53 to 1.11.
+- `Uint::mod_inverse` is behind to 512 bits (1.64 to 2.92) and ahead from 1,024 (0.89 to 0.99); `mul_mod` at par to 1,024 bits (0.92 to 1.05) and behind from 2,048 (1.37 to 1.66).
+
+### Where the references are faster
+
+Every case above 1.05 times the fastest same-work reference's time, by cause: 105 of the 315 cases of the integers and the modular arithmetic that have one.
+
+- **Quotients** (`div_rem` 1.08 to 2.18, `div_rem_u64` 1.15 to 1.52): Knuth's algorithm D with Möller and Granlund's reciprocals, 3-by-2 for the quotient digits and 2-by-1 for a divisor of one limb, in portable Rust, against ruint to 512 bits and GMP's `mpn_tdiv_qr` and `mpn_divrem_1` beyond (and `u128`'s division, compiler-rt's, at 128 bits by a full-width divisor, 2.18); the method is GMP's, and the remaining difference was not narrowed.
+- **Products cut to the width, and the powers on them** (`wrapping_mul` 1.15 to 1.75, `overflowing_mul`, `checked_mul` and `saturating_mul` 1.07 to 2.22, `wrapping_pow` at 128 and 256 bits 1.17 to 1.19, `Int::wrapping_mul` 1.30 to 1.33): the low half is rows of fixed length up to ten limbs, unrolled, and the overflow is found from the bit lengths and the high half where they are ambiguous, against ruint's and bnum's; at 1,024 bits `wrapping_mul`, `widening_mul` and `pow` 1.52 to 1.75 are against GMP's `mpn_mullo_n`, `mpn_mul_n` and `mpz_pow_ui`, whose basecases are assembly. The cause of the rest was not established.
+- **Small kernels** (shifts by a random amount 1.06 to 1.53, `leading_zeros` at 384 and 512 bits 1.18 to 1.31, `to_f64` 1.13 to 1.60, `isqrt` of one limb 2.41 against bnum and of 256 bits 1.08 against GMP, and one-limb `cmp`, `checked_add` and `Int::wrapping_abs` 1.08 to 1.15, a fraction of a nanosecond): generic loops over the limbs with branches on the amount or the length, where ruint and bnum specialise; not narrowed further.
+- **Text of one and two limbs** (`to_string` 1.23 to 1.49 against `u64`, `u128`, `i64` and `i128`, `Int::from_str_radix(10)` of one limb 1.18, `ilog10` of two limbs 1.62), and **hexadecimal text** (`to_str_radix(16)` 1.20 to 1.98 against GMP into a buffer and bnum, `from_str_radix(16)` 1.15 to 1.17): at one and two limbs `Display` is `u64`'s and `u128`'s own, and the cause of the difference was not established; the hexadecimal digits are read off the bits a limb at a time into a `String`, against bnum and GMP's `mpz_get_str` into a buffer: not narrowed further.
+- **Montgomery products from 512 bits and the powers on them** (`Montgomery::mul` 1.11 to 1.32, `square` 1.36 to 1.82, `Montgomery::pow` 1.22 to 1.51 and `Uint::pow_mod` of odd moduli 1.22 to 1.37, against OpenSSL): below 11 limbs the products are the plain rows of CIOS in portable Rust and `square` is a product, against OpenSSL's ARMv8 assembly (`bn_mul_mont`, and from 512 bits its 4-way and 8-way kernels and squaring); from 11 limbs `Number`'s schoolbook product and square kernels with a separate reduction. Matching OpenSSL there would take assembly of its quality. At 256 and 384 bits `mul`, `square` and `pow` take 1.07 to 1.08 of ruint's and OpenSSL's time, and `pow_mod` at 64 bits (1.13) and of even moduli at 512 bits (1.11) behind GMP's `mpz_powm`.
+  **Modular inverses to 512 bits** (`Uint::mod_inverse` 1.64 to 2.92, against malachite-nz at 64 bits and ruint beyond): Pornin's binary GCD, 31 steps at a time on approximations, takes about `2·64·N/31` batches, where ruint's Lehmer steps and malachite-nz's extended Euclid on words take fewer; from 1,024 bits `a` is ahead. **`mul_mod` from 2,048 bits** (1.37 to 1.66 against GMP's `mpn_mul_n` and `mpn_tdiv_qr`): a schoolbook product and the division of algorithm D, where GMP multiplies by Karatsuba and Toom and divides by divide and conquer. **`add_mod` at 4,096 bits** (1.07 against malachite-nz): not established.
+

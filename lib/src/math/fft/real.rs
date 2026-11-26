@@ -2,15 +2,22 @@
 //!
 //! An even length `n = 2m` takes the pairs `x[2j] + i·x[2j + 1]` through the complex transform
 //! of `m` and separates the spectra of the even and odd halves in one pass over the pairs of
-//! values `(k, m − k)`, vectorised. An odd length with a small factor `r`, `n = r·m`, splits
-//! into the `r` sequences of the residues of the index modulo `r`: their spectra two at a time
-//! from one complex transform of `m` (the last one, of an odd `r`, by the real transform of `m`
-//! again), then a pass of radix `r` that only makes the first half of the spectrum. Any other
-//! odd length (a prime, or one whose factors are all large) runs the complex transform of the
-//! length on the reals, and the shortest odd ones are summed directly from a table.
+//! values `(k, m − k)`, vectorised: for a half of one butterfly the whole transform in one
+//! kernel, and for `f64` the pass fused with the complex transform's last pass. An odd length
+//! with a factor `r` among `SPLIT_RADICES` (19, 17, 15, 13, 11, 9, 7, 5 and 3, the first that
+//! divides it taken, so the largest, composites included), `n = r·m`, splits into the `r`
+//! sequences of the residues of the index modulo `r`: their spectra two at a time from one
+//! complex transform of `m` (the last one, of an odd `r`, by the real transform of `m` again),
+//! then a pass of radix `r` that only makes the first half of the spectrum. The odd lengths 3 to
+//! 15 take the complex butterfly on the reals; any other odd length (a prime above 15, or one
+//! with no factor up to 19) runs the complex transform of the length on the reals; and `n = 2`
+//! is summed directly from a table.
 
+use super::complex::{
+    HKern, Isa as ComplexIsa, RKern, SFwd, SInv, real_kernels, real_odd_kernels, split_kernels,
+};
 use super::twiddle;
-use super::{Fft, FftFloat, check_batch};
+use super::{Fft, FftFloat, check_batch, with_raw, with_work};
 use crate::math::complex::Complex;
 use core::any::TypeId;
 use std::sync::Arc;
@@ -37,37 +44,29 @@ pub(super) mod simd;
 
 pub(super) use simd::Isa;
 
-/// The largest odd factor `r` an odd length is split by; a length whose smallest factor is
-/// larger runs the complex transform of the length.
-const MAX_SPLIT: usize = 11;
+/// The radices an odd length is split by, the first that divides it (and is below it) taken: the
+/// butterflies of the complex passes, composite ones too (fewer levels of the split); a length
+/// none divides runs the complex transform of the length. Measured on an Apple M4 Max (odd
+/// lengths 45 to 99,225, smooth and with large prime factors, both types, forward and inverse,
+/// against 19, 17, 15, 13, 11, 9, 7, 5, 3): 15 and 9 before 17, 13 and 11 take 0.86 to 0.98 of
+/// the time where both divide (99, 117, 153, 255, 297, 351, 459, 693, 1071, 1683, 2295), within
+/// the noise elsewhere; 19 stays first, as after 15 and 9 the forward `f64` transforms of 171, 285 and
+/// 4845 took 1.05 to 1.06 times. 9 before 15 would gain up to 18 % at 45 to 1215 but lose up to
+/// 4 % at 225, 3375, 4725 and 10,395; the primes alone, or the smallest first, up to 1.3 times
+/// at 81, 135 and 225 (and 625 and 3125 lost 10 % with 25, 5·5 in one butterfly, under load).
+const SPLIT_RADICES: [usize; 9] = [19, 15, 9, 17, 13, 11, 7, 5, 3];
 
-/// The longest odd and even lengths summed directly (the sums of the whole spectrum held in
-/// registers, faster there than the transforms and their fixed costs; measured).
+/// The bounds of the short lengths. The odd lengths up to `ODD_DIRECT` take the complex
+/// butterfly on the reals (`Algo::Odd`), and the even ones up to `EVEN_DIRECT` the fused kernels
+/// where their half is one butterfly (`Algo::Half` with `fused`); the sums of the whole spectrum
+/// from a table (`Algo::Direct`) are left for the lengths in these bounds that neither takes,
+/// which is `n = 2` alone.
 const ODD_DIRECT: usize = 15;
 const EVEN_DIRECT: usize = 16;
-
-/// The most values of working memory taken on the stack rather than from the heap.
-const STACK_WORK: usize = 512;
 
 /// The complex values a batch of short even lengths stages at a time: the complex transforms of
 /// the runs as one batch, out of place, the pass reading them from there.
 const STAGE: usize = 4096;
-
-/// Calls `f` with `len` values of zeroed working memory: on the stack when there are few.
-#[inline]
-pub(super) fn with_work<T: FftFloat, R>(len: usize, f: impl FnOnce(&mut [Complex<T>]) -> R) -> R {
-    if len <= STACK_WORK {
-        let mut buf = [const { core::mem::MaybeUninit::<Complex<T>>::uninit() }; STACK_WORK];
-        for v in &mut buf[..len] {
-            v.write(Complex::ZERO);
-        }
-        // SAFETY: the first `len` values were initialised.
-        let work = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len) };
-        f(work)
-    } else {
-        f(&mut vec![Complex::ZERO; len])
-    }
-}
 
 /// The discrete Fourier transform of real sequences of the length `n`, planned once.
 ///
@@ -113,6 +112,11 @@ enum Algo<T> {
         fwd: Vec<Complex<T>>,
         inv: Vec<Complex<T>>,
         isa: Isa,
+        /// For an `m` of one butterfly: the complex transform and the pass in one kernel.
+        fused: Option<Fused<T>>,
+        /// Else, for the plans that have it: the complex transform's last pass fused with the
+        /// pass over the pairs (forward).
+        last: Option<HKern<T>>,
     },
     /// An odd `n`: the complex transform of `n`.
     Full(Fft<T>),
@@ -125,32 +129,71 @@ enum Algo<T> {
     },
     /// An odd `n = r·m` by the residue sequences modulo `r`.
     Split(Split<T>),
+    /// A short odd `n` of one complex butterfly: that butterfly on the reals.
+    Odd { kern: [RKern<T>; 2], g: Vec<T> },
 }
 
-/// The transform of an odd `n = r·m` for the smallest prime factor `r` of `n`: the complex
+/// The fused kernels of an even `n = 2m` for an `m` of one complex butterfly: the butterfly
+/// and the pass over the pairs in registers, `fwd` and `inv` the pass's factors in compact form.
+struct Fused<T> {
+    kern: [RKern<T>; 2],
+    g: Vec<T>,
+    fwd: Vec<T>,
+    inv: Vec<T>,
+}
+
+impl<T: FftFloat> Fused<T> {
+    fn new(m: usize, fwd: &[Complex<T>], inv: &[Complex<T>]) -> Option<Fused<T>> {
+        let (kern, g) = real_kernels::<T>(m, ComplexIsa::detect())?;
+        let compact = |w: &[Complex<T>]| -> Vec<T> {
+            w.iter()
+                .flat_map(|w| [w.re, w.re, T::ZERO - w.im, w.im])
+                .collect()
+        };
+        Some(Fused {
+            kern,
+            g,
+            fwd: compact(fwd),
+            inv: compact(inv),
+        })
+    }
+
+    /// The spectrum `y` (`m + 1` values) of the `2m` reals packed at `x` (`m` values); `x` and
+    /// `y` may start at the same place.
+    ///
+    /// # Safety
+    /// `x` must be valid for reading `m` values and `y` for writing `m + 1`.
+    #[inline(always)]
+    unsafe fn forward(&self, x: *const Complex<T>, y: *mut Complex<T>) {
+        // SAFETY: the caller's contract; the kernel loads every value before it stores one.
+        unsafe { (self.kern[0])(&self.g, self.fwd.as_ptr(), x, y) }
+    }
+
+    /// The `2m` reals packed at `y` (`m` values) of the spectrum at `x` (`m + 1` values),
+    /// unscaled; `x` and `y` may start at the same place.
+    ///
+    /// # Safety
+    /// `x` must be valid for reading `m + 1` values and `y` for writing `m`.
+    #[inline(always)]
+    unsafe fn inverse(&self, x: *const Complex<T>, y: *mut Complex<T>) {
+        // SAFETY: as for `forward`.
+        unsafe { (self.kern[1])(&self.g, self.inv.as_ptr(), x, y) }
+    }
+}
+
+/// The transform of an odd `n = r·m` for a radix `r` of [`SPLIT_RADICES`]: the complex
 /// transform of `m` for the pairs of residue sequences, the real transform of `m` for the last
-/// one, `tw[(a − 1)·h + s] = e^(−2πi·a·s/n)` for `1 ≤ a < r` and `s < h = (m + 1)/2`, and
-/// `wr[j] = e^(−2πi·j/r)`.
+/// one, and the combine passes by the butterfly of `r` (its table `g`), with `tw` the twiddles
+/// `e^(−2πi·a·s/n)` for `1 ≤ a < r` (by `a`, then `s < h = (m + 1)/2`) in compact form.
 struct Split<T> {
-    n: usize,
     r: usize,
     m: usize,
     pairs: Fft<T>,
     rest: Box<RealFft<T>>,
-    tw: Vec<Complex<T>>,
-    wr: Vec<Complex<T>>,
-}
-
-/// The smallest prime factor of an odd `n ≥ 3`.
-fn smallest_factor(n: usize) -> usize {
-    let mut p = 3;
-    while p * p <= n {
-        if n.is_multiple_of(p) {
-            return p;
-        }
-        p += 2;
-    }
-    n
+    fwd: SFwd<T>,
+    inv: SInv<T>,
+    g: Vec<T>,
+    tw: Vec<T>,
 }
 
 /// `x` as complex values, two reals each.
@@ -216,9 +259,22 @@ impl<T: FftFloat> RealFft<T> {
         } else {
             ODD_DIRECT
         };
+        // The even lengths up to 16 take the fused kernels rather than the direct sums:
+        // measured on an Apple M4 Max, the sums take 1.45 to 3.6 times the kernels' time forward
+        // and 3.6 to 6.0 times inverse (one run, both types), 1.8 to 11.8 times on batches.
+        let fused_m = n.is_multiple_of(2)
+            && n >= 4
+            && real_kernels::<T>(n / 2, ComplexIsa::detect()).is_some();
+        // The odd lengths up to 15 by the complex butterfly rather than the direct sums: the
+        // sums take 1.12 to 3.5 times its time (Apple M4 Max, one run and batches, both types).
+        let odd = (n % 2 == 1 && n <= ODD_DIRECT)
+            .then(|| real_odd_kernels::<T>(n, ComplexIsa::detect()))
+            .flatten();
         let algo = if n <= 1 {
             Algo::Trivial
-        } else if n <= direct {
+        } else if let Some((kern, g)) = odd {
+            Algo::Odd { kern, g }
+        } else if n <= direct && !fused_m {
             let h = n / 2 + 1;
             let hp = if n <= 15 { 8 } else { 9 };
             let jp = 16;
@@ -237,37 +293,63 @@ impl<T: FftFloat> RealFft<T> {
             let m = n / 2;
             let h = m.div_ceil(2);
             let mut fwd = roots::table::<T>(n, h);
-            let inv = fwd.iter().map(|w| Complex::new(w.im, w.re)).collect();
+            let inv: Vec<Complex<T>> = fwd.iter().map(|w| Complex::new(w.im, w.re)).collect();
             for w in &mut fwd {
                 *w = Complex::new(w.im * T::HALF, -w.re * T::HALF);
             }
+            let fused = Fused::new(m, &fwd, &inv);
+            let fft = Fft::new(m);
+            // The fused last pass on blocks of one value: faster for `f64`, slower for `f32`,
+            // whose separate pass runs four pairs a vector (it would need the pass on blocks of
+            // two values, lanes q, q + 1 against s − q, s − q − 1). Measured on an Apple M4 Max
+            // (the forward transform of 96 to 2²⁰ values; the inverse's time is unchanged): `f64`
+            // takes 0.79 to 1.0 of the separate pass's time but at 2¹⁶ and 2¹⁹ (1.10 and 1.34, a
+            // last pass of radix 8 over 2¹⁵ and 2¹⁸ values), `f32` 1.01 to 1.51 times.
+            let last = if fused.is_none() && T::MANTISSA_DIGITS >= 53 {
+                fft.half_last()
+            } else {
+                None
+            };
             Algo::Half {
-                fft: Fft::new(m),
+                fft,
                 fwd,
                 inv,
                 isa: Isa::detect(),
+                fused,
+                last,
             }
         } else {
-            let r = smallest_factor(n);
-            if r == n || r > MAX_SPLIT {
-                Algo::Full(Fft::new(n))
-            } else {
-                let m = n / r;
-                let h = m.div_ceil(2);
-                let tw: Vec<Complex<T>> = (1..r).flat_map(|a| roots::affine(n, 0, a, h)).collect();
-                Algo::Split(Split {
-                    n,
-                    r,
-                    m,
-                    pairs: Fft::new(m),
-                    rest: Box::new(RealFft::new(m)),
-                    tw,
-                    wr: twiddle::table(r, r),
-                })
+            let isa = ComplexIsa::detect();
+            let split = SPLIT_RADICES
+                .iter()
+                .find(|&&r| r < n && n.is_multiple_of(r))
+                .and_then(|&r| split_kernels::<T>(r, isa).map(|k| (r, k)));
+            match split {
+                None => Algo::Full(Fft::new(n)),
+                Some((r, (fwd, inv, g))) => {
+                    let m = n / r;
+                    let h = m.div_ceil(2);
+                    let tw = (1..r)
+                        .flat_map(|a| roots::affine::<T>(n, 0, a, h))
+                        .flat_map(|w| [w.re, w.re, -w.im, w.im])
+                        .collect();
+                    Algo::Split(Split {
+                        r,
+                        m,
+                        pairs: Fft::new(m),
+                        rest: Box::new(RealFft::new(m)),
+                        fwd,
+                        inv,
+                        g,
+                        tw,
+                    })
+                }
             }
         };
         let work = match &algo {
-            Algo::Trivial | Algo::Direct { .. } => 0,
+            Algo::Trivial | Algo::Direct { .. } | Algo::Odd { .. } => 0,
+            // The fused kernels take no working memory.
+            Algo::Half { fused: Some(_), .. } => 0,
             Algo::Half { fft, .. } => fft.scratch_len(),
             Algo::Full(fft) => n + fft.scratch_len(),
             Algo::Split(sp) => sp.work_len(),
@@ -312,17 +394,46 @@ impl<T: FftFloat> RealFft<T> {
         if n == 0 || runs == 0 {
             return;
         }
-        if let (Algo::Half { fft, .. }, false) = (&*self.algo, runs == 1 && self.work <= STACK_WORK)
+        if let Algo::Half {
+            fused: Some(fu), ..
+        } = &*self.algo
         {
-            // One long sequence: its complex transform straight into the output (a short one
-            // takes its working memory on the stack below); several: theirs as batches, out of
-            // place, into a buffer the pass reads.
+            let x = as_complex(input).as_ptr();
+            for r in 0..runs {
+                // SAFETY: run `r` of the input, `m` packed values, and of the output, `m + 1`.
+                unsafe { fu.forward(x.add(r * (n / 2)), output.as_mut_ptr().add(r * h)) };
+            }
+            return;
+        }
+        if let Algo::Half { fft, .. } = &*self.algo {
+            // One sequence: its complex transform straight into the output, the working memory
+            // not initialised; several: theirs as batches, out of place, into a buffer the pass
+            // reads.
             let m = n / 2;
             if runs == 1 {
-                fft.forward_to(as_complex(input), &mut output[..m]);
-                let p = output.as_mut_ptr();
-                // SAFETY: in place, `m + 1` values.
-                unsafe { self.separate(p, p) };
+                let (x, p) = (as_complex(input).as_ptr(), output.as_mut_ptr());
+                if let Algo::Half {
+                    last: Some(k), fwd, ..
+                } = &*self.algo
+                {
+                    let tw = fwd.as_ptr().cast::<T>();
+                    with_raw(fft.scratch_len(), |scr| {
+                        // SAFETY: `x` holds the `m` packed values, `output` room for `m + 1`,
+                        // apart; the working memory of the transform, a third buffer; `tw` the
+                        // pass's factors.
+                        unsafe { fft.run_half_last(x, p, scr, *k, tw) }
+                    });
+                    return;
+                }
+                with_raw(fft.scratch_len(), |scr| {
+                    // SAFETY: `x` holds the `m` packed values, `output` room for `m + 1`, apart;
+                    // the working memory of the transform, a third buffer; then the pass in
+                    // place on the `m + 1` values.
+                    unsafe {
+                        fft.run_to_raw(x, p, scr, false);
+                        self.separate(p, p);
+                    }
+                });
                 return;
             }
             let g = (STAGE / m).clamp(1, runs);
@@ -346,6 +457,26 @@ impl<T: FftFloat> RealFft<T> {
     /// `input`, one after the other in `output`.
     #[track_caller]
     pub fn inverse(&self, input: &[Complex<T>], output: &mut [T]) {
+        if let Algo::Half { fused: Some(_), .. } = &*self.algo {
+            // No working memory.
+            return self.inverse_with_scratch(input, output, &mut []);
+        }
+        if let Algo::Half { fft, .. } = &*self.algo
+            && input.len() == self.n / 2 + 1
+            && output.len() == self.n
+        {
+            // One sequence: the pass into the output, then the complex transform in place with
+            // the working memory not initialised.
+            let z = as_complex_mut(output);
+            self.combine(input, z);
+            let (p, len) = (z.as_mut_ptr(), z.len());
+            with_raw(fft.scratch_len(), |scr| {
+                // SAFETY: `z` holds the `m` values, transformed in place; the working memory of
+                // the transform, apart, `scratch_len()` values.
+                unsafe { fft.run_raw(p, len, scr, fft.scratch_len(), true) }
+            });
+            return;
+        }
         with_work(self.work, |work| {
             self.inverse_with_scratch(input, output, work)
         });
@@ -437,6 +568,17 @@ impl<T: FftFloat> RealFft<T> {
         if n == 0 || runs == 0 {
             return;
         }
+        if let Algo::Half {
+            fused: Some(fu), ..
+        } = &*self.algo
+        {
+            let y = as_complex_mut(output).as_mut_ptr();
+            for r in 0..runs {
+                // SAFETY: run `r` of the input, `m + 1` values, and of the output, `m` packed.
+                unsafe { fu.inverse(input.as_ptr().add(r * h), y.add(r * (n / 2))) };
+            }
+            return;
+        }
         if let Algo::Half { fft, .. } = &*self.algo {
             // The pass of every sequence into its place, then their complex transforms as one
             // batch, in place.
@@ -481,6 +623,12 @@ impl<T: FftFloat> RealFft<T> {
     pub(super) fn forward_run(&self, x: &[T], y: &mut [Complex<T>], work: &mut [Complex<T>]) {
         match &*self.algo {
             Algo::Trivial => y[0] = Complex::new(x[0], T::ZERO),
+            Algo::Half {
+                fused: Some(fu), ..
+            } => {
+                // SAFETY: `x` holds the `m` packed values, `y` room for `m + 1`.
+                unsafe { fu.forward(as_complex(x).as_ptr(), y.as_mut_ptr()) }
+            }
             Algo::Half { .. } => {
                 let m = self.n / 2;
                 y[..m].copy_from_slice(as_complex(x));
@@ -505,15 +653,36 @@ impl<T: FftFloat> RealFft<T> {
                 }
             }
             Algo::Split(sp) => sp.forward(x, y, work),
+            Algo::Odd { kern, g } => {
+                // SAFETY: `x` holds the n reals and `y` room for `(n + 1)/2` values.
+                unsafe { (kern[0])(g, core::ptr::null(), x.as_ptr().cast(), y.as_mut_ptr()) }
+            }
         }
     }
 
     /// For an even `n = 2m`: the transform of the reals packed in `y[..m]` as complex values
     /// (`y[j] = x[2j] + i·x[2j + 1]`) into all of `y`, `m + 1` values.
     pub(super) fn forward_packed(&self, y: &mut [Complex<T>], work: &mut [Complex<T>]) {
-        let Algo::Half { fft, .. } = &*self.algo else {
+        let Algo::Half { fft, fused, .. } = &*self.algo else {
             unreachable!("an even length")
         };
+        if let Some(fu) = fused {
+            let p = y[..=self.n / 2].as_mut_ptr();
+            // SAFETY: `y` holds the `m + 1` values, the packed reals first, in place.
+            unsafe { fu.forward(p, p) };
+            return;
+        }
+        if let Algo::Half {
+            last: Some(k), fwd, ..
+        } = &*self.algo
+            && work.len() >= fft.scratch_len()
+        {
+            let p = y[..=self.n / 2].as_mut_ptr();
+            // SAFETY: in place on the `m` packed values, `m + 1` written; `work` the transform's
+            // working memory, apart; `fwd` the pass's factors.
+            unsafe { fft.run_half_last(p, p, work.as_mut_ptr(), *k, fwd.as_ptr().cast()) };
+            return;
+        }
         fft.forward_with_scratch(&mut y[..self.n / 2], work);
         let p = y.as_mut_ptr();
         // SAFETY: in place, `m + 1` values.
@@ -567,6 +736,10 @@ impl<T: FftFloat> RealFft<T> {
                 direct_inverse::<T, 16>(x, rows, y);
             }
             Algo::Split(sp) => sp.inverse(x, y, work),
+            Algo::Odd { kern, g } => {
+                // SAFETY: `x` holds `(n + 1)/2` values and `y` room for the n reals.
+                unsafe { (kern[1])(g, core::ptr::null(), x.as_ptr(), y.as_mut_ptr().cast()) }
+            }
         }
     }
 
@@ -578,9 +751,15 @@ impl<T: FftFloat> RealFft<T> {
         z: &mut [Complex<T>],
         work: &mut [Complex<T>],
     ) {
-        let Algo::Half { fft, .. } = &*self.algo else {
+        let Algo::Half { fft, fused, .. } = &*self.algo else {
             unreachable!("an even length")
         };
+        if let Some(fu) = fused {
+            let (x, z) = (&x[..=self.n / 2], &mut z[..self.n / 2]);
+            // SAFETY: `x` holds `m + 1` values and `z` room for `m`.
+            unsafe { fu.inverse(x.as_ptr(), z.as_mut_ptr()) };
+            return;
+        }
         self.combine(x, z);
         fft.inverse_with_scratch(&mut z[..self.n / 2], work);
     }
@@ -634,67 +813,6 @@ fn direct_inverse<T: FftFloat, const Q: usize>(x: &[Complex<T>], rows: &[Complex
     y.copy_from_slice(&acc[..n]);
 }
 
-/// `Σ_j t[j]·wr[(j·q) mod r]` for the `r` values `t`.
-#[inline]
-fn dft_row<T: FftFloat>(t: &[Complex<T>], wr: &[Complex<T>], q: usize) -> Complex<T> {
-    let r = t.len();
-    let mut acc = t[0];
-    let mut e = 0;
-    for &v in &t[1..] {
-        e += q;
-        if e >= r {
-            e -= r;
-        }
-        acc += v * wr[e];
-    }
-    acc
-}
-
-/// `i·x`.
-#[inline(always)]
-fn times_i<T: FftFloat>(x: Complex<T>) -> Complex<T> {
-    Complex::new(-x.im, x.re)
-}
-
-/// The `r` values `out[q] = Σ_a t[a]·e^(∓2πi·a·q/r)` (`+` when `inv`) for the `r = t.len()`
-/// values `t`: the butterflies of radix 3 and 5 written out, the sums for the others.
-#[inline(always)]
-fn butterfly<T: FftFloat>(t: &[Complex<T>], wr: &[Complex<T>], inv: bool, out: &mut [Complex<T>]) {
-    let sign = |v: T| if inv { -v } else { v };
-    match t.len() {
-        3 => {
-            // With S = t1 + t2, D = t1 − t2 and h = −sin(2π/3):
-            // X0 = t0 + S, X1,2 = t0 − S/2 ± i·h·D.
-            let (s, d) = (t[1] + t[2], t[1] - t[2]);
-            out[0] = t[0] + s;
-            let mid = t[0] - s * T::HALF;
-            let id = times_i(d) * sign(wr[1].im);
-            out[1] = mid + id;
-            out[2] = mid - id;
-        }
-        5 => {
-            let (c1, c2) = (wr[1].re, wr[2].re);
-            let (s1, s2) = (sign(-wr[1].im), sign(-wr[2].im));
-            let (a1, b1) = (t[1] + t[4], t[1] - t[4]);
-            let (a2, b2) = (t[2] + t[3], t[2] - t[3]);
-            out[0] = t[0] + a1 + a2;
-            let m1 = t[0] + a1 * c1 + a2 * c2;
-            let m2 = t[0] + a1 * c2 + a2 * c1;
-            let n1 = times_i(b1 * s1 + b2 * s2);
-            let n2 = times_i(b1 * s2 - b2 * s1);
-            out[1] = m1 - n1;
-            out[4] = m1 + n1;
-            out[2] = m2 - n2;
-            out[3] = m2 + n2;
-        }
-        r => {
-            for (q, o) in out.iter_mut().enumerate() {
-                *o = dft_row(t, wr, if inv { (r - q) % r } else { q });
-            }
-        }
-    }
-}
-
 impl<T: FftFloat> Split<T> {
     /// The values of working memory [`forward`](Self::forward) and [`inverse`](Self::inverse)
     /// take: the pairs, the spectrum and the reals of the last sequence, and the scratch.
@@ -723,80 +841,44 @@ impl<T: FftFloat> Split<T> {
             *v = x[r - 1 + r * j];
         }
         self.rest.forward_run(xl, yl, work);
-        // For each s < h: the spectra Y_a[s] of the residue sequences (a pair's apart as
-        // Y_2p = (Z[s] + conj Z[m − s])/2, Y_2p+1 = (Z[s] − conj Z[m − s])/2i), twiddled, then
-        // X[s + q·m] = Σ_a e^(−2πi·a·s/n)·Y_a[s]·e^(−2πi·a·q/r): the first half of the spectrum
-        // directly for q ≤ (r − 1)/2, by conjugates at n − s − q·m for the others.
-        let mut t = [Complex::ZERO; MAX_SPLIT];
-        let mut o = [Complex::ZERO; MAX_SPLIT];
-        let (t, o) = (&mut t[..r], &mut o[..r]);
-        for s in 0..h {
-            let sm = if s == 0 { 0 } else { m - s };
-            for (p, z) in zb.chunks_exact(m).enumerate() {
-                let (a, b) = (z[s], z[sm].conj());
-                let (e, d) = ((a + b) * T::HALF, (a - b) * T::HALF);
-                t[2 * p] = e;
-                t[2 * p + 1] = Complex::new(d.im, -d.re);
-            }
-            t[r - 1] = yl[s];
-            for (a, t) in t.iter_mut().enumerate().skip(1) {
-                *t *= self.tw[(a - 1) * h + s];
-            }
-            butterfly(t, &self.wr, false, o);
-            for q in 0..=np {
-                y[s + q * m] = o[q];
-            }
-            if s != 0 {
-                for q in np + 1..r {
-                    y[(r - 1 - q) * m + m - s] = o[q].conj();
-                }
-            }
-        }
+        // For each s < h: the spectra of the residue sequences (a pair's apart), twiddled, and
+        // the butterfly of r: the first half of the spectrum.
+        // SAFETY: the pairs' `np·m` and the last sequence's `h` values, the `4(r − 1)h` reals of
+        // the twiddles, and `y` of `(n + 1)/2` values, apart from each other.
+        unsafe {
+            (self.fwd)(
+                &self.g,
+                self.tw.as_ptr(),
+                zb.as_ptr(),
+                yl.as_ptr(),
+                m,
+                y.as_mut_ptr(),
+            )
+        };
         y[0].im = T::ZERO;
     }
 
     /// The unscaled inverse transform of the `(n + 1)/2` values `x` into the `n` reals `y`.
     fn inverse(&self, x: &[Complex<T>], y: &mut [T], work: &mut [Complex<T>]) {
-        let (n, r, m) = (self.n, self.r, self.m);
-        let (h, np, half) = (m.div_ceil(2), (r - 1) / 2, (n - 1) / 2);
+        let (r, m) = (self.r, self.m);
+        let (h, np) = (m.div_ceil(2), (r - 1) / 2);
         let (zb, work) = work.split_at_mut(np * m);
         let (ul, work) = work.split_at_mut(h);
         let (xl, work) = work.split_at_mut(h);
-        // For each s < h: U_a[s] = e^(2πi·a·s/n)·Σ_q X[s + q·m]·e^(2πi·a·q/r), the inverse
-        // transform of U_a being the residue sequence a; a pair's as Z = U_2p + i·U_2p+1 over
-        // all of m.
-        let mut t = [Complex::ZERO; MAX_SPLIT];
-        let mut o = [Complex::ZERO; MAX_SPLIT];
-        let (t, o) = (&mut t[..r], &mut o[..r]);
-        for s in 0..h {
-            for (q, t) in t.iter_mut().enumerate() {
-                let k = s + q * m;
-                *t = if k == 0 {
-                    Complex::new(x[0].re, T::ZERO)
-                } else if k <= half {
-                    x[k]
-                } else {
-                    x[n - k].conj()
-                };
-            }
-            butterfly(t, &self.wr, true, o);
-            for (a, o) in o.iter_mut().enumerate().skip(1) {
-                *o *= self.tw[(a - 1) * h + s].conj();
-            }
-            if s == 0 {
-                for v in o.iter_mut() {
-                    v.im = T::ZERO;
-                }
-            }
-            for (p, z) in zb.chunks_exact_mut(m).enumerate() {
-                let (a, b) = (o[2 * p], o[2 * p + 1]);
-                z[s] = Complex::new(a.re - b.im, a.im + b.re);
-                if s != 0 {
-                    z[m - s] = Complex::new(a.re + b.im, b.re - a.im);
-                }
-            }
-            ul[s] = o[r - 1];
-        }
+        // For each s < h: the butterfly of r on X[s + q·m], twiddled, into the pairs'
+        // transforms Z = U_2p + i·U_2p+1 (all of m) and the last sequence's half spectrum.
+        // SAFETY: `x` holds the `(n + 1)/2` values, the twiddles `4(r − 1)h` reals; the pairs'
+        // `np·m` and the last sequence's `h` values, apart from each other.
+        unsafe {
+            (self.inv)(
+                &self.g,
+                self.tw.as_ptr(),
+                x.as_ptr(),
+                m,
+                zb.as_mut_ptr(),
+                ul.as_mut_ptr(),
+            )
+        };
         self.pairs.inverse_with_scratch(zb, work);
         for (p, z) in zb.chunks_exact(m).enumerate() {
             for (j, z) in z.iter().enumerate() {

@@ -7,8 +7,8 @@
 //! `2^k - c` with a small `c` of four, six and nine limbs (secp256k1's, Curve25519's), whose
 //! products fold the high half back by a product by `c`; the NIST primes of P-256 and P-384,
 //! Montgomery's form with their own products on aarch64; P-521's `2^521 - 1` in nine limbs of 58
-//! bits; [`Number`] with a prepared [`Divisor`](crate::math::numbers::Divisor) beyond nine limbs;
-//! and bits for `GF(2)`. Each operation matches the form once.
+//! bits; Montgomery's form of any length beyond nine limbs, in a vector of limbs; and bits for
+//! `GF(2)`. Each operation matches the form once; the assignments write only the form's limbs.
 //!
 //! An element holds its limbs inline up to nine limbs, so that sums, differences, products,
 //! negation, squares and doubling, with their assignments, comparisons, hashes, `zero`, `one`,
@@ -19,8 +19,8 @@
 //! (`from_bytes_*_reduced`) three times, the bytes as a number, its remainder and the remainder's
 //! limbs; powers and square roots their tables of powers; `element`, `value`, `to_bytes_*`,
 //! `batch_invert` and the formatting their numbers and vectors. `GF(2)` inverts and takes symbols
-//! without allocating, and the elements of longer fields are numbers, which every operation
-//! allocates.
+//! without allocating; the elements of longer fields are vectors of limbs, which the assignments
+//! reuse and the other operations allocate.
 //!
 //! Inversion is by Lehmer's extended Euclid of [`Number::mod_inverse`] (see `prime_inv`), the
 //! Legendre symbol by the binary method and Lehmer's steps of [`Number::jacobi`], both on the
@@ -32,9 +32,11 @@
 //! Like the rest of the library this is not constant-time: the time of an inversion, a square
 //! root, a power or a comparison depends on the values.
 
-use super::prime_form::{Arith, Canon, Form, Value, canonical, legendre, with_form, with_limbs};
+use super::prime_form::{
+    Arith, Canon, Form, Value, canonical, canonical_value, legendre, with_form, with_limbs,
+};
 use super::prime_sqrt::{Plan, sqrt};
-use crate::math::ec::field::{Field, limbs_of, number_of};
+use crate::math::ec::field::{Field, Prime, limbs_of, number_of};
 use crate::math::numbers::{ByteOrder, Number};
 use core::cmp::Ordering;
 use core::fmt;
@@ -62,7 +64,7 @@ pub struct PrimeField {
     /// The arithmetic.
     form: Form,
     /// The limbs of `p`, the low one first.
-    limbs: Vec<u64>,
+    pub(super) limbs: Vec<u64>,
     /// The limbs of `(p - 1) / 2`, as many as `p`'s: the larger of two roots is above it.
     half: Vec<u64>,
     /// What square roots need, computed with the field: at most one power, against the several
@@ -207,7 +209,7 @@ impl PrimeField {
     /// ```
     #[must_use]
     pub fn element(&self, x: &Number) -> Fp<'_> {
-        let v = with_form!(&self.form, f => f.put(f.enter(x)));
+        let v = with_form!(&self.form, f => f.put_number(x));
         Fp { f: self, v }
     }
 
@@ -672,7 +674,8 @@ impl PrimeField {
     }
 
     /// The name of the form of this field's arithmetic, such as `"Montgomery, 4 limbs"`,
-    /// `"2^k - c, 4 limbs"`, `"P-256"`, `"P-521, limbs of 58 bits"` or `"Number"`.
+    /// `"2^k - c, 4 limbs"`, `"P-256"`, `"P-521, limbs of 58 bits"` or
+    /// `"Montgomery, more than 9 limbs"`.
     ///
     /// # Examples
     ///
@@ -688,9 +691,15 @@ impl PrimeField {
         self.form.name()
     }
 
+    /// The form of the arithmetic, for the towers.
+    #[inline(always)]
+    pub(super) fn form_ref(&self) -> &Form {
+        &self.form
+    }
+
     /// The element of the number below `p` with the limbs `c`.
     fn of_limbs(&self, c: &Canon) -> Fp<'_> {
-        let v = with_form!(&self.form, f => f.put(f.of_canon(c.limbs())));
+        let v = with_form!(&self.form, f => f.put_canon(c.limbs()));
         Fp { f: self, v }
     }
 
@@ -701,13 +710,24 @@ impl PrimeField {
         }
         let mut c = Canon::zeros(self.limbs.len());
         let l = c.limbs_mut();
-        for (i, &b) in bytes.iter().enumerate() {
-            // The position of the byte from the least significant one.
-            let k = match order {
-                ByteOrder::BigEndian => bytes.len() - 1 - i,
-                ByteOrder::LittleEndian => i,
+        // Eight bytes a limb, from the least significant end; the top limb may take fewer.
+        let n = bytes.len();
+        for (j, limb) in l.iter_mut().enumerate() {
+            let (lo, hi) = (8 * j, (8 * j + 8).min(n));
+            if lo >= hi {
+                break;
+            }
+            let mut w = [0u8; 8];
+            *limb = match order {
+                ByteOrder::LittleEndian => {
+                    w[..hi - lo].copy_from_slice(&bytes[lo..hi]);
+                    u64::from_le_bytes(w)
+                }
+                ByteOrder::BigEndian => {
+                    w[8 - (hi - lo)..].copy_from_slice(&bytes[n - hi..n - lo]);
+                    u64::from_be_bytes(w)
+                }
             };
-            l[k / 8] |= u64::from(b) << (8 * (k % 8));
         }
         (compare(c.limbs(), &self.limbs) == Ordering::Less).then(|| self.of_limbs(&c))
     }
@@ -720,11 +740,22 @@ impl PrimeField {
         self.element(&Number::new(bytes.to_vec(), order))
     }
 
-    /// Panics unless `x` is an element of this field.
+    /// Panics unless `x` is an element of this field: one comparison of pointers on the way of
+    /// the operations, the primes compared only for two fields built apart.
     #[track_caller]
-    #[inline]
-    fn check(&self, x: &Fp<'_>) {
-        if !self.same_field(x.f) {
+    #[inline(always)]
+    pub(super) fn check(&self, x: &Fp<'_>) {
+        if !core::ptr::eq(self, x.f) {
+            self.check_apart(x.f);
+        }
+    }
+
+    /// Panics unless `other`, a field built apart from this one, has the same prime.
+    #[cold]
+    #[inline(never)]
+    #[track_caller]
+    fn check_apart(&self, other: &PrimeField) {
+        if self.p != other.p {
             different_fields();
         }
     }
@@ -909,6 +940,58 @@ impl<'f> Fp<'f> {
     #[must_use]
     pub fn square(&self) -> Fp<'f> {
         self.with(with_form!(&self.f.form, f => f.put(f.sqr(f.get(&self.v)))))
+    }
+
+    /// Squares the element in place: [`square`](Fp::square) without making a new element, so that
+    /// only the form's limbs are written (as `*=` does).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::PrimeField;
+    /// use a::math::numbers::Number;
+    ///
+    /// let f = PrimeField::new(&Number::from(13u8));
+    /// let mut x = f.from_u64(5);
+    /// x.square_in_place();
+    /// assert_eq!(x, f.from_u64(12)); // 25 = 13 + 12
+    /// ```
+    pub fn square_in_place(&mut self) {
+        with_form!(&self.f.form, f => f.update(&mut self.v, |x| f.sqr(x)));
+    }
+
+    /// Doubles the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::PrimeField;
+    /// use a::math::numbers::Number;
+    ///
+    /// let f = PrimeField::new(&Number::from(13u8));
+    /// let mut x = f.from_u64(9);
+    /// x.double_in_place();
+    /// assert_eq!(x, f.from_u64(5)); // 18 = 13 + 5
+    /// ```
+    pub fn double_in_place(&mut self) {
+        with_form!(&self.f.form, f => f.update(&mut self.v, |x| f.twice(x)));
+    }
+
+    /// Negates the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::PrimeField;
+    /// use a::math::numbers::Number;
+    ///
+    /// let f = PrimeField::new(&Number::from(13u8));
+    /// let mut x = f.from_u64(3);
+    /// x.neg_in_place();
+    /// assert_eq!(x, f.from_u64(10));
+    /// ```
+    pub fn neg_in_place(&mut self) {
+        with_form!(&self.f.form, f => f.update(&mut self.v, |x| f.neg(x)));
     }
 
     /// Twice the element.
@@ -1109,8 +1192,19 @@ impl<'f> Fp<'f> {
     /// ```
     #[must_use]
     pub fn to_bytes_be(&self) -> Vec<u8> {
-        let mut b = self.to_bytes_le();
-        b.reverse();
+        let c = self.canonical();
+        let l = c.limbs();
+        let mut b = vec![0u8; self.f.byte_len()];
+        // Eight bytes a limb from the least significant end; the top limb's low bytes in front.
+        let mut chunks = b.rchunks_exact_mut(8);
+        for (dst, w) in (&mut chunks).zip(l) {
+            dst.copy_from_slice(&w.to_be_bytes());
+        }
+        let top = chunks.into_remainder();
+        if let Some(w) = l.last().filter(|_| !top.is_empty()) {
+            let n = top.len();
+            top.copy_from_slice(&w.to_be_bytes()[8 - n..]);
+        }
         b
     }
 
@@ -1132,20 +1226,78 @@ impl<'f> Fp<'f> {
     #[must_use]
     pub fn to_bytes_le(&self) -> Vec<u8> {
         let c = self.canonical();
-        let mut b: Vec<u8> = c.limbs().iter().flat_map(|l| l.to_le_bytes()).collect();
-        b.truncate(self.f.byte_len());
+        let l = c.limbs();
+        let mut b = vec![0u8; self.f.byte_len()];
+        let (chunks, top) = b.as_chunks_mut::<8>();
+        for (dst, w) in chunks.iter_mut().zip(l) {
+            *dst = w.to_le_bytes();
+        }
+        if let Some(w) = l.last().filter(|_| !top.is_empty()) {
+            let n = top.len();
+            top.copy_from_slice(&w.to_le_bytes()[..n]);
+        }
         b
     }
 
     /// The limbs of the value.
     fn canonical(&self) -> Canon {
-        with_form!(&self.f.form, f => canonical(f, f.get(&self.v)))
+        with_form!(&self.f.form, f => canonical_value(f, &self.v))
     }
 
     /// The element of this field held in `v`.
     #[inline(always)]
     fn with(&self, v: Value) -> Fp<'f> {
         Fp { f: self.f, v }
+    }
+
+    /// The element of `f` whose Montgomery residue `xR mod p` (`R = 2^(64 n)`, fully reduced) has
+    /// the limbs `limbs`, the low one first, as the curves' fields hold their elements: for a
+    /// field in Montgomery's form of four or six limbs (BN254's and BLS12-381's base fields and
+    /// the like); `None` for another form, another number of limbs, or limbs not below `p`.
+    #[inline]
+    pub(crate) fn from_montgomery(f: &'f PrimeField, limbs: &[u64]) -> Option<Fp<'f>> {
+        fn below(x: &[u64], m: &[u64]) -> bool {
+            compare(x, m) == Ordering::Less
+        }
+        match &f.form {
+            Form::Odd(Prime::Mont4(m)) if limbs.len() == 4 && below(limbs, &f.limbs) => {
+                Some(Fp::from_raw(f, m.put(m.load(limbs))))
+            }
+            Form::Odd(Prime::Mont6(m)) if limbs.len() == 6 && below(limbs, &f.limbs) => {
+                Some(Fp::from_raw(f, m.put(m.load(limbs))))
+            }
+            _ => None,
+        }
+    }
+
+    /// The limbs of the element's Montgomery residue, the low one first, for a field in
+    /// Montgomery's form of four or six limbs ([`from_montgomery`](Fp::from_montgomery)'s
+    /// inverse); `None` for another form.
+    #[inline]
+    pub(crate) fn montgomery(&self) -> Option<&[u64]> {
+        match &self.f.form {
+            Form::Odd(Prime::Mont4(m)) => Some(&m.get(&self.v)[..]),
+            Form::Odd(Prime::Mont6(m)) => Some(&m.get(&self.v)[..]),
+            _ => None,
+        }
+    }
+
+    /// The element as the field's form holds it, for the arithmetic of the towers.
+    #[inline(always)]
+    pub(super) fn raw(&self) -> &Value {
+        &self.v
+    }
+
+    /// The element of `f` that its form holds as `v`.
+    #[inline(always)]
+    pub(super) fn from_raw(f: &'f PrimeField, v: Value) -> Fp<'f> {
+        Fp { f, v }
+    }
+
+    /// The element as its form holds it, to change in place.
+    #[inline(always)]
+    pub(super) fn raw_mut(&mut self) -> &mut Value {
+        &mut self.v
     }
 }
 
@@ -1194,10 +1346,11 @@ impl<'f> Neg for Fp<'f> {
 /// The binary operators for the four combinations of owned and borrowed operands, and their
 /// assignments, from the one on two borrows.
 macro_rules! binary {
-    ($tr:ident, $m:ident, $atr:ident, $am:ident, $op:ident) => {
+    ($tr:ident, $m:ident, $atr:ident, $am:ident, $op:ident, $into:ident) => {
         impl<'f> $tr<&Fp<'f>> for &Fp<'f> {
             type Output = Fp<'f>;
             #[track_caller]
+            #[inline]
             fn $m(self, rhs: &Fp<'f>) -> Fp<'f> {
                 self.f.check(rhs);
                 self.with($op(self.f, &self.v, &rhs.v))
@@ -1226,13 +1379,15 @@ macro_rules! binary {
         }
         impl<'f> $atr<&Fp<'f>> for Fp<'f> {
             #[track_caller]
+            #[inline]
             fn $am(&mut self, rhs: &Fp<'f>) {
                 self.f.check(rhs);
-                self.v = $op(self.f, &self.v, &rhs.v);
+                $into(self.f, &mut self.v, &rhs.v);
             }
         }
         impl<'f> $atr<Fp<'f>> for Fp<'f> {
             #[track_caller]
+            #[inline]
             fn $am(&mut self, rhs: Fp<'f>) {
                 self.$am(&rhs);
             }
@@ -1240,10 +1395,10 @@ macro_rules! binary {
     };
 }
 
-binary!(Add, add, AddAssign, add_assign, sum);
-binary!(Sub, sub, SubAssign, sub_assign, difference);
-binary!(Mul, mul, MulAssign, mul_assign, product);
-binary!(Div, div, DivAssign, div_assign, quotient);
+binary!(Add, add, AddAssign, add_assign, sum, sum_into);
+binary!(Sub, sub, SubAssign, sub_assign, difference, difference_into);
+binary!(Mul, mul, MulAssign, mul_assign, product, product_into);
+binary!(Div, div, DivAssign, div_assign, quotient, quotient_into);
 
 /// `a + b` in the field `k`.
 fn sum(k: &PrimeField, a: &Value, b: &Value) -> Value {
@@ -1258,6 +1413,27 @@ fn difference(k: &PrimeField, a: &Value, b: &Value) -> Value {
 /// `a b` in the field `k`.
 fn product(k: &PrimeField, a: &Value, b: &Value) -> Value {
     with_form!(&k.form, f => f.put(f.mul(f.get(a), f.get(b))))
+}
+
+/// `a += b` in the field `k`, in place.
+fn sum_into(k: &PrimeField, a: &mut Value, b: &Value) {
+    with_form!(&k.form, f => f.add_into(a, b))
+}
+
+/// `a -= b` in the field `k`, in place.
+fn difference_into(k: &PrimeField, a: &mut Value, b: &Value) {
+    with_form!(&k.form, f => f.sub_into(a, b))
+}
+
+/// `a *= b` in the field `k`, in place.
+fn product_into(k: &PrimeField, a: &mut Value, b: &Value) {
+    with_form!(&k.form, f => f.mul_into(a, b))
+}
+
+/// `a /= b` in the field `k`, in place.
+#[track_caller]
+fn quotient_into(k: &PrimeField, a: &mut Value, b: &Value) {
+    *a = quotient(k, a, b);
 }
 
 /// `a / b` in the field `k`, as `a` times the inverse of `b`.

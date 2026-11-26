@@ -34,22 +34,23 @@ pub(crate) struct Kron<'a> {
     acc: Vec<u64>,
     t: Vec<u64>,
     s: Vec<u64>,
-    lm: Option<LimbRed>,
+    lm: Option<&'a LimbRed>,
 }
 
 impl<'a> Kron<'a> {
-    /// The products modulo the `n ≥ 2` of the limbs `d`, the top one not zero.
-    pub(crate) fn new(d: &'a [u64]) -> Kron<'a> {
-        let k = d.len();
+    /// The products modulo `m`, with its constants (a word's reciprocal, the division by
+    /// several limbs).
+    pub(crate) fn new(m: &'a crate::math::poly::modular::Modulus) -> Kron<'a> {
+        let (d, k) = (&m.d[..], m.k());
         Kron {
             k,
             d,
-            word: (k == 1).then(|| WordMod::new(d[0])),
+            word: m.word_mod().copied(),
             rev: Vec::new(),
             acc: Vec::new(),
             t: Vec::new(),
             s: Vec::new(),
-            lm: (k >= 2).then(|| LimbRed::new(d)),
+            lm: m.l.as_ref(),
         }
     }
 
@@ -62,7 +63,7 @@ impl<'a> Kron<'a> {
             wmul::mul_into(out, a, b, m);
             return;
         }
-        let red = self.lm.as_ref().expect("several limbs");
+        let red = self.lm.expect("several limbs");
         out.copy_from_slice(&mmul::mul(a, b, self.d, red));
     }
 
@@ -155,7 +156,7 @@ impl<'a> Kron<'a> {
             self.school(a, b, lo, end, out);
             return;
         }
-        let p = mmul::mul(a, b, self.d, self.lm.as_ref().expect("several limbs"));
+        let p = mmul::mul(a, b, self.d, self.lm.expect("several limbs"));
         out.copy_from_slice(&p[lo * k..end * k]);
     }
 
@@ -213,7 +214,7 @@ impl<'a> Kron<'a> {
     /// The residue of the limbs `x` into the `k` limbs `out`, modulo several limbs.
     #[inline]
     fn reduce(&mut self, x: &[u64], out: &mut [u64]) {
-        self.lm.as_ref().expect("several limbs").reduce(x, out);
+        self.lm.expect("several limbs").reduce(x, out);
     }
 }
 

@@ -153,35 +153,104 @@ pub(crate) fn mul(a: &[u64], b: &[u64]) -> Vec<u64> {
 /// The magnitude of `n` as limbs.
 pub(crate) fn of_number(n: &Number) -> Vec<u64> {
     let m = Magnitude::of(n);
-    let mut r = vec![0u64; m.bytes.len().div_ceil(8)];
-    for (i, &byte) in m.bytes.iter().enumerate() {
-        let i = if m.big_endian {
-            m.bytes.len() - 1 - i
-        } else {
-            i
-        };
-        r[i / 8] |= u64::from(byte) << (8 * (i % 8));
+    let b = m.bytes;
+    let mut r = Vec::with_capacity(b.len().div_ceil(8));
+    // Eight bytes at a time from the least significant end; the bytes are significant, so the
+    // top limb is not zero.
+    if m.big_endian {
+        let (rest, whole) = b.as_rchunks::<8>();
+        r.extend(whole.iter().rev().map(|c| u64::from_be_bytes(*c)));
+        if !rest.is_empty() {
+            let mut t = [0u8; 8];
+            t[8 - rest.len()..].copy_from_slice(rest);
+            r.push(u64::from_be_bytes(t));
+        }
+    } else {
+        let (whole, rest) = b.as_chunks::<8>();
+        r.extend(whole.iter().map(|c| u64::from_le_bytes(*c)));
+        if !rest.is_empty() {
+            let mut t = [0u8; 8];
+            t[..rest.len()].copy_from_slice(rest);
+            r.push(u64::from_le_bytes(t));
+        }
     }
-    trim(&mut r);
+    debug_assert!(r.last() != Some(&0));
     r
+}
+
+/// The magnitude of `n` in a `u128` when it has at most 128 bits, its sign apart.
+#[inline]
+pub(crate) fn small_of_number(n: &Number) -> Option<(bool, u128)> {
+    let m = Magnitude::of(n);
+    (m.bytes.len() <= 16).then(|| (m.negative, m.small()))
 }
 
 /// The number of the magnitude `m` and the sign `negative`, in the byte order `order`, in the
 /// shortest form; zero is never negative.
 pub(crate) fn to_number(m: &[u64], negative: bool, order: ByteOrder) -> Number {
-    let mut v: Vec<u8> = m.iter().flat_map(|l| l.to_le_bytes()).collect();
-    while v.last() == Some(&0) {
-        v.pop();
-    }
-    if v.is_empty() {
-        v.push(0);
-    }
+    let Some(t) = m.iter().rposition(|&w| w != 0) else {
+        return Number {
+            value: vec![0],
+            negative: false,
+            byte_order: order,
+        };
+    };
+    // The bytes of the top limb that are significant, one to eight.
+    let top = m[t];
+    let tb = 8 - (top.leading_zeros() / 8) as usize;
+    // Written once, into a vector of the exact length: the whole limbs by an iterator of known
+    // length (which the standard library extends with as a copy), the top limb's bytes apart.
+    let mut v = Vec::with_capacity(8 * t + tb);
     if order == ByteOrder::BigEndian {
-        v.reverse();
+        v.extend_from_slice(&top.to_be_bytes()[8 - tb..]);
+        v.extend(m[..t].iter().rev().flat_map(|w| w.to_be_bytes()));
+    } else {
+        v.extend(m[..t].iter().flat_map(|w| w.to_le_bytes()));
+        v.extend_from_slice(&top.to_le_bytes()[..tb]);
     }
-    let negative = negative && !m.is_empty();
     Number {
         value: v,
+        negative,
+        byte_order: order,
+    }
+}
+
+/// [`to_number`] in little-endian bytes of the mantissa `m` (its top bit set) shifted down by
+/// `s < 64` bits, the shifted limbs written straight into the bytes, with no vector of limbs
+/// between.
+pub(crate) fn to_number_shr(m: &[u64], s: u32, negative: bool) -> Number {
+    debug_assert!(s < 64 && m.last().is_some_and(|&t| t >> 63 == 1));
+    if s == 0 {
+        return to_number(m, negative, ByteOrder::LittleEndian);
+    }
+    let t = m.len() - 1;
+    let top = m[t] >> s;
+    let tb = 8 - (top.leading_zeros() / 8) as usize;
+    let mut v = Vec::with_capacity(8 * t + tb);
+    v.extend(
+        m.windows(2)
+            .flat_map(|w| (w[0] >> s | w[1] << (64 - s)).to_le_bytes()),
+    );
+    v.extend_from_slice(&top.to_le_bytes()[..tb]);
+    Number {
+        value: v,
+        negative,
+        byte_order: ByteOrder::LittleEndian,
+    }
+}
+
+/// The integer `±w` (`w` not zero) as a [`Number`] of its significant bytes in the order `order`.
+#[inline]
+pub(crate) fn word_number(w: u128, negative: bool, order: ByteOrder) -> Number {
+    debug_assert!(w != 0);
+    let n = (128 - w.leading_zeros() as usize).div_ceil(8);
+    let value = if order == ByteOrder::BigEndian {
+        w.to_be_bytes()[16 - n..].to_vec()
+    } else {
+        w.to_le_bytes()[..n].to_vec()
+    };
+    Number {
+        value,
         negative,
         byte_order: order,
     }

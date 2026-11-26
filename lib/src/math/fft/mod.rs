@@ -42,7 +42,10 @@ mod plan;
 mod real;
 mod twiddle;
 
-pub use conv::{Sample, circular_convolve, circular_correlate, convolve, correlate};
+pub use conv::{
+    Sample, circular_convolve, circular_correlate, convolve, convolve_into, correlate,
+    correlate_into,
+};
 pub use dct::{Dct, DctKind, Dst, DstKind};
 pub use nd::{Fft2, Fft3};
 pub use plan::Fft;
@@ -62,6 +65,46 @@ pub trait FftFloat: Float + sealed::FftFloat {}
 
 impl FftFloat for f32 {}
 impl FftFloat for f64 {}
+
+/// The most values of working memory taken on the stack rather than from the heap.
+pub(crate) const STACK_WORK: usize = 512;
+
+/// Calls `f` with `len` values of zeroed working memory: on the stack when there are few.
+#[inline]
+pub(crate) fn with_work<T: FftFloat, R>(
+    len: usize,
+    f: impl FnOnce(&mut [crate::math::complex::Complex<T>]) -> R,
+) -> R {
+    if len <= STACK_WORK {
+        let mut buf = [const { core::mem::MaybeUninit::<crate::math::complex::Complex<T>>::uninit() };
+            STACK_WORK];
+        for v in &mut buf[..len] {
+            v.write(crate::math::complex::Complex::ZERO);
+        }
+        // SAFETY: the first `len` values were initialised.
+        let work = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), len) };
+        f(work)
+    } else {
+        f(&mut vec![crate::math::complex::Complex::ZERO; len])
+    }
+}
+
+/// Calls `f` with a pointer to `len` values of uninitialised working memory (on the stack when
+/// there are few); `f` must write every value before reading it.
+#[inline]
+pub(crate) fn with_raw<T: FftFloat, R>(
+    len: usize,
+    f: impl FnOnce(*mut crate::math::complex::Complex<T>) -> R,
+) -> R {
+    if len <= STACK_WORK {
+        let mut buf = [const { core::mem::MaybeUninit::<crate::math::complex::Complex<T>>::uninit() };
+            STACK_WORK];
+        f(buf.as_mut_ptr().cast())
+    } else {
+        let mut v: Vec<crate::math::complex::Complex<T>> = Vec::with_capacity(len);
+        f(v.as_mut_ptr())
+    }
+}
 
 /// Panics unless `len` is a multiple of `n` (any length for `n = 0` must be 0).
 #[inline]

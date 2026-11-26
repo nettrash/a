@@ -13,7 +13,9 @@ pub(in crate::math::fft) struct Isa {
 impl Isa {
     pub(in crate::math::fft) fn detect() -> Isa {
         Isa {
-            avx2: std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma"),
+            avx2: !cfg!(a_baseline)
+                && std::is_x86_feature_detected!("avx2")
+                && std::is_x86_feature_detected!("fma"),
         }
     }
 }

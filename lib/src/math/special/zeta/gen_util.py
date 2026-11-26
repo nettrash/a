@@ -1,5 +1,6 @@
 """Prints the tables of util.rs, complex.rs and hurwitz.rs: sin(πr)/r and (cos(πr) − 1)/r² on
-|r| ≤ 1/4, 2^(j/32) as double-doubles, the split of ln 2/32, and B₂ₖ/(2k)!. Seconds."""
+|r| ≤ 1/4, 2^(j/32) as double-doubles, the split of ln 2/32, B₂ₖ/(2k)! and the table of
+ln_dd_tab. Seconds."""
 
 import os
 import sys
@@ -43,3 +44,18 @@ m, e = mpmath.frexp(l)
 hi = float(mpmath.ldexp(mpmath.floor(m * 2**36), e - 36))
 print(f"const LN2_32_HI: f64 = {hi!r};\nconst LN2_32_LO: f64 = {float(l - hi)!r};")
 print("const BERNOULLI_2K: [f64; 24] = [" + ", ".join(repr(float(mpmath.bernoulli(2 * k) / mpmath.factorial(2 * k))) for k in range(1, 25)) + "];")
+
+# The table of `ln_dd_tab` (the speed pass): cⱼ the double nearest 1/(1 + j/128) and −ln cⱼ as a
+# double-double, at 50 digits (`ln 2` written as the constant, for clippy).
+with mpmath.workdps(50):
+    print("/// `(cⱼ, −ln cⱼ as a double-double)` for `j = 0, …, 128`, `cⱼ` the double nearest `1/(1 + j/128)`")
+    print("/// (`c₀ = 1`, `c₁₂₈ = 1/2` exactly; mpmath at 50 digits).")
+    print("const LN_TAB: [(f64, f64, f64); 129] = [")
+    for j in range(129):
+        c = float(1 / (1 + mpmath.mpf(j) / 128))
+        L = -mpmath.log(mpmath.mpf(c))
+        h = float(L)
+        l = float(L - h)
+        hs = "core::f64::consts::LN_2" if h == 0.6931471805599453 else repr(h)
+        print(f"    ({c!r}, {hs}, {l!r}),")
+    print("];")

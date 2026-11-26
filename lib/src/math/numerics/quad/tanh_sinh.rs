@@ -34,11 +34,101 @@ enum Map {
     Whole,
 }
 
-/// A node of the rule: the point where the integrand is evaluated and the factor `x′(t)` its
-/// value is multiplied by; `None` past the end of the side (the point would round onto a finite
-/// end, or leave the range of the type).
-fn node<T: Real>(map: Map, t: f64) -> Option<(f64, f64)> {
-    let u = FRAC_PI_2 * t.sinh();
+/// The transcendental parts of the node at `t`, which depend on `t` alone: with
+/// `u = (π/2) sinh t`, `cosh t`, `e^(−2|u|)`, `e^u`, `sinh u` and `cosh u`, from which [`node`] forms the point
+/// and the weight of each map with the arithmetic it always used, so that a node from the table
+/// is the node computed afresh to the last bit.
+#[derive(Clone, Copy, Debug)]
+struct Abscissa {
+    cosh_t: f64,
+    q: f64,
+    exp_u: f64,
+    sinh_u: f64,
+    cosh_u: f64,
+}
+
+impl Abscissa {
+    fn compute(t: f64) -> Self {
+        let u = FRAC_PI_2 * t.sinh();
+        Self {
+            cosh_t: t.cosh(),
+            q: (-2.0 * u.abs()).exp(),
+            exp_u: u.exp(),
+            sinh_u: u.sinh(),
+            cosh_u: u.cosh(),
+        }
+    }
+
+    /// The parts at `t`, a multiple of the step `2^−level` of the level evaluating it: from the
+    /// table of the level that first has `t` among its nodes, made once, when that level is
+    /// [`CACHED`] or coarser and `|t|` within [`T_MAX`]; computed otherwise.
+    fn at(t: f64, level: u32) -> Self {
+        let scaled = t.abs() * (1u64 << level) as f64;
+        if level > CACHED || t.abs() > T_MAX || scaled.fract() != 0.0 {
+            return Self::compute(t);
+        }
+        let k = scaled as u64;
+        // The coarsest level whose grid holds `t`, and its index there: the integers on level 0,
+        // the odd multiples of the step on the others.
+        let (first, index) = if k == 0 {
+            (0, 0)
+        } else {
+            let z = k.trailing_zeros().min(level);
+            let odd = k >> z;
+            let first = level - z;
+            if first == 0 {
+                (0, odd as usize)
+            } else {
+                (first, (odd as usize - 1) / 2)
+            }
+        };
+        let side = usize::from(t < 0.0);
+        let table = TABLES[first as usize][side].get_or_init(|| {
+            let step = 0.5f64.powi(first as i32);
+            let sign = if side == 1 { -1.0 } else { 1.0 };
+            let ks: Vec<f64> = if first == 0 {
+                (0..=T_MAX as u64).map(|k| k as f64).collect()
+            } else {
+                (0..)
+                    .map(|i| (2 * i + 1) as f64)
+                    .take_while(|&k| k * step <= T_MAX)
+                    .collect()
+            };
+            ks.into_iter()
+                .map(|k| Self::compute(sign * k * step))
+                .collect()
+        });
+        table[index]
+    }
+}
+
+/// The finest level whose nodes are kept: a step of `2^−10`, 3,584 nodes a side on that level,
+/// about 570 kB for all of them; the finer levels, which only narrow features reach, compute
+/// their nodes.
+// Measured on an Apple M4 Max on integrands that reach levels 9 to 12 (peaks of widths 10⁻² and
+// 10⁻³, |x − 0.3| at 10⁻⁸): kept to 8 or 9 levels, a repeated integration takes up to 1.43
+// times as long; kept to 11 or 12, 0.80 to 0.95 of the time, but the first integration, which
+// makes the tables of the finer levels whole, 1.08 to 1.27 times as long, and the tables take
+// 1.1 or 2.3 MB (sweep 8 to 12).
+const CACHED: u32 = 10;
+/// The largest `|t|` kept: beyond about 6.8 no map has a node an `f64` can hold
+/// (`(π/2) sinh 7 ≈ 861`, past the range of `e^u`).
+const T_MAX: f64 = 7.0;
+
+/// The tables of the nodes, by level and by side (`t > 0`, `t < 0`), made on first use.
+static TABLES: [[std::sync::OnceLock<Box<[Abscissa]>>; 2]; CACHED as usize + 1] = [const {
+    [
+        const { std::sync::OnceLock::new() },
+        const { std::sync::OnceLock::new() },
+    ]
+};
+    CACHED as usize + 1];
+
+/// A node of the rule at `t`, a multiple of the step of `level`: the point where the integrand
+/// is evaluated and the factor `x′(t)` its value is multiplied by; `None` past the end of the
+/// side (the point would round onto a finite end, or leave the range of the type).
+fn node<T: Real>(map: Map, t: f64, level: u32) -> Option<(f64, f64)> {
+    let parts = Abscissa::at(t, level);
     let max = T::MAX.to_f64();
     let tiny = T::MIN_POSITIVE.to_f64();
     let round = |x: f64| T::from_f64(x).to_f64();
@@ -47,15 +137,15 @@ fn node<T: Real>(map: Map, t: f64) -> Option<(f64, f64)> {
             if t == 0.0 {
                 return Some((a + h, h * FRAC_PI_2));
             }
-            let q = (-2.0 * u.abs()).exp();
+            let q = parts.q;
             let d = h * 2.0 * q / (1.0 + q);
-            let w = h * FRAC_PI_2 * t.cosh() * 4.0 * q / ((1.0 + q) * (1.0 + q));
+            let w = h * FRAC_PI_2 * parts.cosh_t * 4.0 * q / ((1.0 + q) * (1.0 + q));
             let (x, end) = if t > 0.0 { (b - d, b) } else { (a + d, a) };
             (d >= tiny && round(x) != end && w > 0.0).then_some((x, w))
         }
         Map::Half { a, sign } => {
-            let e = u.exp();
-            let w = e * FRAC_PI_2 * t.cosh();
+            let e = parts.exp_u;
+            let w = e * FRAC_PI_2 * parts.cosh_t;
             let x = a + sign * e;
             let inside = if t < 0.0 {
                 e >= tiny && round(x) != a
@@ -65,8 +155,8 @@ fn node<T: Real>(map: Map, t: f64) -> Option<(f64, f64)> {
             (inside && w.is_finite()).then_some((x, w))
         }
         Map::Whole => {
-            let x = u.sinh();
-            let w = u.cosh() * FRAC_PI_2 * t.cosh();
+            let x = parts.sinh_u;
+            let w = parts.cosh_u * FRAC_PI_2 * parts.cosh_t;
             (x.abs() <= max && w.is_finite()).then_some((x, w))
         }
     }
@@ -227,8 +317,8 @@ fn falls_fast(d: f64, d1: f64, scale: f64) -> bool {
 }
 
 /// The rule on `range`.
-pub(super) fn integrate<T: Real>(
-    f: &mut Integrand<'_, T>,
+pub(super) fn integrate<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
     range: Range,
     s: &Settings,
 ) -> Option<Outcome> {
@@ -244,7 +334,7 @@ pub(super) fn integrate<T: Real>(
         Range::Empty => unreachable!("the empty range is answered before"),
     };
     let mut sides = [Side::new(map, 1.0), Side::new(map, -1.0)];
-    let (x0, w0) = node::<T>(map, 0.0).expect("the centre is a node");
+    let (x0, w0) = node::<T>(map, 0.0, 0).expect("the centre is a node");
     // An interval with no number of the type at its centre, only its ends (`[1, 1 + ε]`), or a
     // half-line whose end is so large that `a ± 1` rounds onto it: there is no point to
     // evaluate the integrand at that is not an end, and nothing is evaluated.
@@ -314,18 +404,16 @@ pub(super) fn integrate<T: Real>(
         // `cos 200x`, whose true error from it is a hundredth of that.
         let mut moved = 0.0f64;
         let mut scatter = 0.0f64;
-        let scale = |t: f64, x: f64| {
+        // `sp` is the node's `spread`, computed once for this and for `Side::record`.
+        let scale = |x: f64, sp: f64| {
             let point = T::from_f64(x).to_f64();
-            (
-                f64::EPSILON * (point.abs() + spread::<T>(map, t, x)),
-                (point - x).abs(),
-            )
+            (f64::EPSILON * (point.abs() + sp), (point - x).abs())
         };
         for (i, side) in sides.iter_mut().enumerate() {
             let reserve = if i == 0 { inner[1] } else { 0 };
-            let mut last = (scale(0.0, x0), f0);
-            let mut shift = |t: f64, x: f64, v: f64| {
-                let x = scale(t, x);
+            let mut last = (scale(x0, spread::<T>(map, 0.0, x0)), f0);
+            let mut shift = |x: f64, sp: f64, v: f64| {
+                let x = scale(x, sp);
                 // The change between two nodes is the slope about the one where the integrand is
                 // larger: on the stretched tail of an infinite side neighbours can be `10¹⁰` and
                 // `10⁴⁵`, and the far node's rounding has nothing to do with the near one's value.
@@ -338,17 +426,18 @@ pub(super) fn integrate<T: Real>(
             if level > 0 {
                 let mut t = h;
                 while t < side.reach {
-                    let (x, w) = node::<T>(map, side.sign * t)
+                    let (x, w) = node::<T>(map, side.sign * t, level)
                         .expect("a node inside the reach of its side is a node");
                     let v = f.at(x);
                     let g = w * v;
                     if !g.is_finite() {
                         return Some(Outcome::failed(g));
                     }
-                    shift(side.sign * t, x, v);
+                    let sp = spread::<T>(map, side.sign * t, x);
+                    shift(x, sp, v);
                     level_sum += g;
                     absolute += g.abs();
-                    side.record(t, spread::<T>(map, side.sign * t, x), g / w);
+                    side.record(t, sp, g / w);
                     t += 2.0 * h;
                 }
             }
@@ -362,7 +451,7 @@ pub(super) fn integrate<T: Real>(
             let mut negligible = 0;
             let mut t = if level == 0 { 1.0 } else { side.reach + h };
             while f.evaluations + reserve < s.max_evaluations {
-                let Some((x, w)) = node::<T>(map, side.sign * t) else {
+                let Some((x, w)) = node::<T>(map, side.sign * t, level) else {
                     side.ended = true;
                     break;
                 };
@@ -371,10 +460,11 @@ pub(super) fn integrate<T: Real>(
                 if !g.is_finite() {
                     return Some(Outcome::failed(g));
                 }
-                shift(side.sign * t, x, v);
+                let sp = spread::<T>(map, side.sign * t, x);
+                shift(x, sp, v);
                 level_sum += g;
                 absolute += g.abs();
-                side.record(t, spread::<T>(map, side.sign * t, x), g / w);
+                side.record(t, sp, g / w);
                 side.reach = t;
                 if side.infinite {
                     if g.abs() <= 0.25 * s.eps * absolute {

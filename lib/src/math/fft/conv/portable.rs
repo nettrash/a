@@ -58,6 +58,8 @@ macro_rules! lanes {
 
             fir_real!(fir, $t, $w, $na, $g, [$($s),*]);
             fir_complex!(firc, $t, $w, $na, [$($c),*]);
+            fir_real_few!(fir_few, $t, $w);
+            fir_complex_few!(firc_few, $t, $w);
 
             /// `x[j] = x[j]·y[j]·s` for the `n` complex values at `x` and `y` (interleaved parts).
             ///
@@ -82,5 +84,11 @@ macro_rules! lanes {
 lanes!(s32, f32, 4, 8, 2, [0, 1, 2, 3], [(0, 0, 1), (1, 2, 3)]);
 lanes!(s64, f64, 2, 8, 2, [0, 1], [(0, 0, 1)]);
 
-pub(super) use s32::{cmul as cmul_f32, fir as fir_f32, firc as firc_f32};
-pub(super) use s64::{cmul as cmul_f64, fir as fir_f64, firc as firc_f64};
+pub(super) use s32::{
+    cmul as cmul_f32, fir as fir_f32, fir_few as fir_few_f32, firc as firc_f32,
+    firc_few as firc_few_f32,
+};
+pub(super) use s64::{
+    cmul as cmul_f64, fir as fir_f64, fir_few as fir_few_f64, firc as firc_f64,
+    firc_few as firc_few_f64,
+};

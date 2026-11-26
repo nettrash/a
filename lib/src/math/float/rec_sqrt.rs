@@ -104,7 +104,8 @@ fn schedule(mf: usize) -> Vec<usize> {
 /// and `Y' = Y·B^(m' - m) + floor(Y·R / 2)` at `m'` limbs. Exact, the step has the relative error
 /// `-(3/2)δ^2 - δ^3/2` for `y_k = y(1 + δ)`, at most `1.5e^2 + 0.5e^3`; the cut of `a` (below
 /// `B^-(m' + 1)`, times `y^3/2 < 4`), that of `U` (below `B^-(m' + 1)`, times `y/2 < 1`) and the
-/// floor (one unit of `B^-m'`) add less than `(1 + 2^-60)·B^-m'`, relative too as `y > 1`. The
+/// floor (one unit of `B^-m'`) add less than `(1 + 2^-60)·B^-m'`, relative too as `y > 1`, and a
+/// short product for `U` ([`cut_product`]) `(L - 1)·B^-(m' + 1)` more for its `L` limbs. The
 /// start is `1/sqrt` of the top limb of `a` in double precision, within `2^-51` relatively (the
 /// conversion, the limbs below it, the square root and the division), cut to one limb: `e ≤
 /// 2^-50`. The bound is carried as `c = e·B^m`, in an `f64`.
@@ -142,15 +143,16 @@ pub(super) fn newton(x: Op<'_>, prec: u64, round: Round, w: &mut Work) -> Option
     y.extend_from_slice(&[y0 as u64, (y0 >> 64) as u64]);
     let mut m = 1usize;
     let mut c = 2f64.powi(14);
+    let pad = &mut Vec::new();
     for mn in schedule(mf) {
         // `T = Y^2`, of `2m + 2` limbs, `y^2 = T·B^-2m`.
         nat::sqr_into(t, y, scratch);
         // `U = A'·T`, `A'` the top `m' + 1` limbs of `a` (or all of it), `a·y^2 ≈ U·B^-(ls + 2m)`.
         let ls = la.min(mn + 1);
-        nat::mul_into(u, &a[la - ls..], t, scratch);
-        // `U` cut to `m' + 1` limbs after the point: `U[d..]`, `d = ls + 2m - (m' + 1) ≥ 0`.
+        // `U` cut to `m' + 1` limbs after the point: `U[d..]`, `d = ls + 2m - (m' + 1) ≥ 0`, below
+        // the exact cut by less than `short` units (1 for the whole product).
         let d = ls + 2 * m - (mn + 1);
-        let top = &u[d..];
+        let (top, short) = cut_product(u, &a[la - ls..], t, d, pad, scratch);
         // `R = B^(m' + 1) - U'`: its sign and magnitude, in `t`.
         let over = top[mn + 1..].iter().any(|&v| v != 0);
         t.clear();
@@ -191,10 +193,12 @@ pub(super) fn newton(x: Op<'_>, prec: u64, round: Round, w: &mut Work) -> Option
             }
         }
         core::mem::swap(y, t);
-        // The bound: `c' = 1.5c^2·B^(m' - 2m) + 0.5c^3·B^(m' - 3m) + 1 + 2^-60`.
+        // The bound: `c' = 1.5c^2·B^(m' - 2m) + 0.5c^3·B^(m' - 3m) + 1 + 2^-60`, and the cut of
+        // `U` short by `short - 1` more units of `B^-(m' + 1)` (times `y/2 < 1`).
         let s2 = 2f64.powi(64 * (mn as i32 - 2 * m as i32));
         let s3 = 2f64.powi(64 * (mn as i32 - 3 * m as i32));
-        c = (1.5 * c * c * s2 + 0.5 * c * c * c * s3 + 1.0 + 1e-18) * (1.0 + 1e-15);
+        let cut = (short - 1) as f64 / TWO_64;
+        c = (1.5 * c * c * s2 + 0.5 * c * c * c * s3 + 1.0 + 1e-18 + cut) * (1.0 + 1e-15);
         m = mn;
     }
     // A bound that is not finite, or large, is left to the exact method.
@@ -219,6 +223,39 @@ pub(super) fn newton(x: Op<'_>, prec: u64, round: Round, w: &mut Work) -> Option
         round,
         Vec::new(),
     ))
+}
+
+/// The limbs of `x·y` from its limb `d < |x| + |y|` into `u`, as a slice of it, and
+/// how many units of their last limb they may fall short by (less than): the whole product (1:
+/// exact), or for long operands nearly alike the short product of `x` and `y` padded below with
+/// zero limbs to `L = max(|x| + |y| - d, |x|, |y|)` limbs each (`nat::mulhigh_to`), whose high
+/// half `A ≤ ⌊x·y·B^(2L - |x| - |y|) / B^L⌋ ≤ A + L - 1` holds the limbs from `d` up at its limb
+/// `p - L`, `p = d + 2L - |x| - |y| ≥ L`, those below that limb `L - 1` units at most (`L`).
+fn cut_product<'u>(
+    u: &'u mut Vec<u64>,
+    x: &[u64],
+    y: &[u64],
+    d: usize,
+    pad: &mut Vec<u64>,
+    scratch: &mut Vec<u64>,
+) -> (&'u [u64], usize) {
+    let (lx, ly) = (x.len(), y.len());
+    let l = (lx + ly - d).max(lx).max(ly);
+    // Short only for operands within a few limbs of `L`: else the padding costs more.
+    if !super::general::short_pays(l) || lx + 4 < l || ly + 4 < l {
+        nat::mul_into(u, x, y, scratch);
+        return (&u[d..], 1);
+    }
+    pad.clear();
+    pad.resize(2 * l, 0);
+    pad[l - lx..l].copy_from_slice(x);
+    pad[2 * l - ly..].copy_from_slice(y);
+    u.clear();
+    u.resize(2 * l, 0);
+    let (px, py) = pad.split_at(l);
+    nat::mulhigh_to(u, px, py, scratch);
+    let p = d + 2 * l - lx - ly;
+    (&u[p..], l)
 }
 
 /// `1/sqrt(x)` for a positive `x` that is not a power of 4, rounded to `prec` bits, from the square

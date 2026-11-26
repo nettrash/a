@@ -323,6 +323,75 @@ fn word_text(x: Small, radix: u32) -> String {
     String::from(ascii(&out[..len]))
 }
 
+/// The digits of `x` in the radix `radix` (not 10), written backward into `buf` ending at its end:
+/// the index of the first. Parts of up to 64 bits are the words' digits; longer ones split by the
+/// largest power of the radix below `2^64`, once or twice, each piece below it written as a word,
+/// with its zeros in front below the top one.
+fn digits_wide(x: u128, radix: u32, buf: &mut [u8; 128]) -> usize {
+    let mut word = [0u8; 64];
+    let put = |buf: &mut [u8; 128], end: usize, w: u64, pad: usize, word: &mut [u8; 64]| -> usize {
+        let i = digits_radix(w, radix, word);
+        let n = 64 - i;
+        let start = end - n.max(pad);
+        buf[start..end - n].fill(b'0');
+        buf[end - n..end].copy_from_slice(&word[i..]);
+        start
+    };
+    if x >> 64 == 0 {
+        return put(buf, 128, x as u64, 0, &mut word);
+    }
+    if radix.is_power_of_two() {
+        // Pieces of 60 bits (a multiple of the bits of every power of two up to 32) from the low
+        // end, in their own digits, then the rest.
+        let bits = radix.trailing_zeros() as usize;
+        let (mut x, mut end) = (x, 128);
+        while x >> 64 != 0 {
+            end = put(
+                buf,
+                end,
+                (x & ((1u128 << 60) - 1)) as u64,
+                60 / bits,
+                &mut word,
+            );
+            x >>= 60;
+        }
+        return put(buf, end, x as u64, 0, &mut word);
+    }
+    // `p = radix^k`, the largest power below `2^64`.
+    let (mut p, mut k) = (u64::from(radix), 1usize);
+    while let Some(q) = p.checked_mul(u64::from(radix)) {
+        p = q;
+        k += 1;
+    }
+    let p128 = u128::from(p);
+    let (q, r) = (x / p128, (x % p128) as u64);
+    let end = put(buf, 128, r, k, &mut word);
+    if q >> 64 == 0 {
+        return put(buf, end, q as u64, 0, &mut word);
+    }
+    let (q2, r2) = (q / p128, (q % p128) as u64);
+    let end = put(buf, end, r2, k, &mut word);
+    put(buf, end, q2 as u64, 0, &mut word)
+}
+
+/// The text of `±num/den` (or `±num` for `den = 1`) for parts of up to 128 bits in the radix
+/// `radix` (not 10), in registers: the only allocation is the text.
+fn wide_text(negative: bool, num: u128, den: u128, radix: u32) -> String {
+    let mut buf = [0u8; 128];
+    let mut out = String::with_capacity(258);
+    if negative {
+        out.push('-');
+    }
+    let i = digits_wide(num, radix, &mut buf);
+    out.push_str(ascii(&buf[i..]));
+    if den != 1 {
+        out.push('/');
+        let j = digits_wide(den, radix, &mut buf);
+        out.push_str(ascii(&buf[j..]));
+    }
+    out
+}
+
 impl fmt::Debug for Rational {
     /// Writes the number as [`Display`](fmt::Display) does.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -376,8 +445,35 @@ macro_rules! from_signed {
     )*};
 }
 
-from_unsigned!(u8, u16, u32, u64, u128, usize);
-from_signed!(i8, i16, i32, i64, i128, isize);
+from_unsigned!(u128);
+from_signed!(i128);
+
+macro_rules! from_unsigned_word {
+    ($($t:ty),*) => {$(
+        impl From<$t> for Rational {
+            #[doc = concat!("The `", stringify!($t), "` `v` as `v/1`, little-endian, in words.")]
+            #[inline]
+            fn from(v: $t) -> Rational {
+                Rational::from_word(false, v as u64, 1, ByteOrder::LittleEndian)
+            }
+        }
+    )*};
+}
+
+macro_rules! from_signed_word {
+    ($($t:ty),*) => {$(
+        impl From<$t> for Rational {
+            #[doc = concat!("The `", stringify!($t), "` `v` as `v/1`, little-endian, in words.")]
+            #[inline]
+            fn from(v: $t) -> Rational {
+                Rational::from_word(v < 0, (v as i64).unsigned_abs(), 1, ByteOrder::LittleEndian)
+            }
+        }
+    )*};
+}
+
+from_unsigned_word!(u8, u16, u32, u64, usize);
+from_signed_word!(i8, i16, i32, i64, isize);
 
 // Writing
 
@@ -408,6 +504,13 @@ impl Rational {
         );
         if let Some(x) = Small::of(self) {
             return word_text(x, radix);
+        }
+        // Powers of two are shifts on the numbers' bytes, and radix 10 their own writing.
+        if radix != 10 && !radix.is_power_of_two() {
+            let (n, d) = self.magnitudes();
+            if n.bytes.len() <= 16 && d.bytes.len() <= 16 {
+                return wide_text(n.negative, n.small(), d.small(), radix);
+            }
         }
         let (num, den) = (self.numer(), self.denom());
         if is_one(den) {

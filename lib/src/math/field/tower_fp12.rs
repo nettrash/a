@@ -3,8 +3,10 @@
 
 use super::prime::Fp;
 use super::tower::{Tower, tower_ops};
+use super::tower_fast::fast;
 use super::tower_fp2::Fp2;
 use super::tower_fp6::Fp6;
+use crate::math::ec::field::limbs_of;
 use crate::math::numbers::Number;
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -176,6 +178,7 @@ impl<'t> Fp12<'t> {
     /// products of `F_p⁶`.
     #[must_use]
     pub fn square(&self) -> Fp12<'t> {
+        fast!(self.tower(), k => k.st12(k.sqr12(&k.ld12(self))));
         let (a0, a1) = (&self.c0, &self.c1);
         let ab = a0 * a1;
         let c0 = (a0 + a1) * (a0 + &a1.mul_by_v()) - &ab - ab.mul_by_v();
@@ -185,9 +188,137 @@ impl<'t> Fp12<'t> {
         }
     }
 
+    /// Negates the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Fp12, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let a2 = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let mut a = Fp12::new(Fp6::from_fp2(a2.clone()), Fp6::from_fp2(a2));
+    /// let b = -&a;
+    /// a.neg_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn neg_in_place(&mut self) {
+        let t = self.tower();
+        fast!(t, k => {
+            let r = k.neg12(&k.ld12(self));
+            k.put12(r, self)
+        });
+        *self = -&*self;
+    }
+
+    /// Doubles the element in place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Fp12, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let a2 = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let mut a = Fp12::new(Fp6::from_fp2(a2.clone()), Fp6::from_fp2(a2));
+    /// let b = &a + &a;
+    /// a.double_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn double_in_place(&mut self) {
+        let t = self.tower();
+        fast!(t, k => {
+            let x = k.ld12(self);
+            let r = k.add12(&x, &x);
+            k.put12(r, self)
+        });
+        *self = &*self + &*self;
+    }
+
+    /// Squares the element in place, writing only its coefficients' limbs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Fp12, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let a2 = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let mut a = Fp12::new(Fp6::from_fp2(a2.clone()), Fp6::from_fp2(a2));
+    /// let b = a.square();
+    /// a.square_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn square_in_place(&mut self) {
+        let t = self.tower();
+        fast!(t, k => {
+            let r = k.sqr12(&k.ld12(self));
+            k.put12(r, self)
+        });
+        *self = self.square();
+    }
+
+    /// Conjugates the element in place: `c₀ − c₁w`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Fp12, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bn254();
+    /// let a2 = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let mut a = Fp12::new(Fp6::from_fp2(a2.clone()), Fp6::from_fp2(a2));
+    /// let b = a.conjugate();
+    /// a.conjugate_in_place();
+    /// assert_eq!(a, b);
+    /// ```
+    pub fn conjugate_in_place(&mut self) {
+        let t = self.tower();
+        fast!(t, k => {
+            let r = k.neg6(&k.ld6(&self.c1));
+            k.put6(r, &mut self.c1)
+        });
+        for c in [&mut self.c1.c0, &mut self.c1.c1, &mut self.c1.c2] {
+            c.c0.neg_in_place();
+            c.c1.neg_in_place();
+        }
+    }
+
+    /// [`cyclotomic_square`](Fp12::cyclotomic_square) in place, for an element of the cyclotomic
+    /// subgroup.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::field::{Fp2, Fp6, Fp12, Tower};
+    /// use a::math::numbers::Number;
+    ///
+    /// let t = Tower::bls12_381();
+    /// let a2 = Fp2::from_numbers(t, &Number::from(3u8), &Number::from(4u8));
+    /// let x = Fp12::new(Fp6::from_fp2(a2.clone()), Fp6::from_fp2(Fp2::one(t)));
+    /// let c = &x.conjugate() / &x; // in the subgroup after the easy part:
+    /// let mut c = &c.frobenius(2) * &c;
+    /// let s = c.square();
+    /// c.cyclotomic_square_in_place();
+    /// assert_eq!(c, s);
+    /// ```
+    pub fn cyclotomic_square_in_place(&mut self) {
+        let t = self.tower();
+        fast!(t, k => {
+            let r = k.cyc_sqr(&k.ld12(self));
+            k.put12(r, self)
+        });
+        *self = self.cyclotomic_square();
+    }
+
     /// The conjugate `c₀ − c₁ w`, which is `x^(p⁶)`; in the cyclotomic subgroup, the inverse.
     #[must_use]
     pub fn conjugate(&self) -> Fp12<'t> {
+        fast!(self.tower(), k => k.st12(k.conj12(&k.ld12(self))));
         Fp12 {
             c0: self.c0.clone(),
             c1: -&self.c1,
@@ -200,6 +331,7 @@ impl<'t> Fp12<'t> {
     /// `F_p` where the constants lie there, as they do for even `k`; no power.
     #[must_use]
     pub fn frobenius(&self, k: usize) -> Fp12<'t> {
+        fast!(self.tower(), q => q.st12(q.frob12(&q.ld12(self), k)));
         let t = self.tower();
         let k = k % 12;
         if k == 0 {
@@ -231,6 +363,7 @@ impl<'t> Fp12<'t> {
     /// The norm to `F_p⁶`, `x · x̄ = c₀² − v c₁²`.
     #[must_use]
     pub fn norm(&self) -> Fp6<'t> {
+        fast!(self.tower(), k => k.st6(k.norm12(&k.ld12(self))));
         self.c0.square() - self.c1.square().mul_by_v()
     }
 
@@ -243,6 +376,7 @@ impl<'t> Fp12<'t> {
     /// The inverse, the conjugate over the norm, or `None` for 0.
     #[must_use]
     pub fn inverse(&self) -> Option<Fp12<'t>> {
+        fast!(self.tower(), k => k.inv12(&k.ld12(self)).map(|r| k.st12(r)));
         let n = self.norm().inverse()?;
         Some(Fp12 {
             c0: &self.c0 * &n,
@@ -269,6 +403,7 @@ impl<'t> Fp12<'t> {
             let inv = self.inverse().expect("0 has no inverse");
             return inv.pow(&-e);
         }
+        fast!(self.tower(), k => k.st12(k.pow12(&k.ld12(self), &limbs_of(e))));
         let mut r = Fp12::one(self.tower());
         for i in (0..e.bits()).rev() {
             r = r.square();
@@ -289,6 +424,11 @@ impl<'t> Fp12<'t> {
     #[track_caller]
     #[must_use]
     pub fn mul_by_034(&self, c0: &Fp2<'t>, c3: &Fp2<'t>, c4: &Fp2<'t>) -> Fp12<'t> {
+        let t = self.tower();
+        t.check(c0.t);
+        t.check(c3.t);
+        t.check(c4.t);
+        fast!(t, k => k.st12(k.mul_034(&k.ld12(self), &k.ld2(c0), &k.ld2(c3), &k.ld2(c4))));
         let (a, b) = (&self.c0, &self.c1);
         let t0 = a.mul_by_fp2(c0);
         let t1 = b.mul_by_01(c3, c4);
@@ -309,6 +449,11 @@ impl<'t> Fp12<'t> {
     #[track_caller]
     #[must_use]
     pub fn mul_by_014(&self, c0: &Fp2<'t>, c1: &Fp2<'t>, c4: &Fp2<'t>) -> Fp12<'t> {
+        let t = self.tower();
+        t.check(c0.t);
+        t.check(c1.t);
+        t.check(c4.t);
+        fast!(t, k => k.st12(k.mul_014(&k.ld12(self), &k.ld2(c0), &k.ld2(c1), &k.ld2(c4))));
         let (a, b) = (&self.c0, &self.c1);
         let t0 = a.mul_by_01(c0, c1);
         let t1 = b.mul_by_1(c4);
@@ -350,6 +495,7 @@ impl<'t> Fp12<'t> {
     /// ```
     #[must_use]
     pub fn cyclotomic_square(&self) -> Fp12<'t> {
+        fast!(self.tower(), k => k.st12(k.cyc_sqr(&k.ld12(self))));
         // A = g₀ + h₁ s, B = h₀ + g₂ s, C = g₁ + h₂ s, for c₀ = g₀ + g₁ v + g₂ v² and
         // c₁ = h₀ + h₁ v + h₂ v², since v = w², s = w³, w⁴ = s w and w⁵ = s w².
         let (g0, g1, g2) = (&self.c0.c0, &self.c0.c1, &self.c0.c2);
@@ -391,6 +537,10 @@ impl<'t> Fp12<'t> {
     #[must_use]
     pub fn cyclotomic_pow(&self, e: &Number) -> Fp12<'t> {
         let digits = signed_digits(&e.abs());
+        fast!(self.tower(), k => {
+            let r = k.cyc_pow(&k.ld12(self), &digits);
+            k.st12(if e.is_negative() { k.conj12(&r) } else { r })
+        });
         let Some((_, rest)) = digits.split_last() else {
             return Fp12::one(self.tower());
         };
@@ -408,9 +558,44 @@ impl<'t> Fp12<'t> {
         if e.is_negative() { r.conjugate() } else { r }
     }
 
+    /// `a += b` in place.
+    #[track_caller]
+    pub(super) fn add_assign_ref(a: &mut Fp12<'t>, b: &Fp12<'t>) {
+        a.tower().check(b.tower());
+        fast!(a.tower(), k => {
+            let r = k.add12(&k.ld12(a), &k.ld12(b));
+            k.put12(r, a)
+        });
+        *a = Self::add_ref(a, b);
+    }
+
+    /// `a -= b` in place.
+    #[track_caller]
+    pub(super) fn sub_assign_ref(a: &mut Fp12<'t>, b: &Fp12<'t>) {
+        a.tower().check(b.tower());
+        fast!(a.tower(), k => {
+            let r = k.sub12(&k.ld12(a), &k.ld12(b));
+            k.put12(r, a)
+        });
+        *a = Self::sub_ref(a, b);
+    }
+
+    /// `a *= b` in place.
+    #[track_caller]
+    pub(super) fn mul_assign_ref(a: &mut Fp12<'t>, b: &Fp12<'t>) {
+        a.tower().check(b.tower());
+        fast!(a.tower(), k => {
+            let r = k.mul12(&k.ld12(a), &k.ld12(b));
+            k.put12(r, a)
+        });
+        *a = Self::mul_ref(a, b);
+    }
+
     /// The sum.
     #[track_caller]
     pub(super) fn add_ref(a: &Fp12<'t>, b: &Fp12<'t>) -> Fp12<'t> {
+        a.tower().check(b.tower());
+        fast!(a.tower(), k => k.st12(k.add12(&k.ld12(a), &k.ld12(b))));
         Fp12 {
             c0: &a.c0 + &b.c0,
             c1: &a.c1 + &b.c1,
@@ -420,6 +605,8 @@ impl<'t> Fp12<'t> {
     /// The difference.
     #[track_caller]
     pub(super) fn sub_ref(a: &Fp12<'t>, b: &Fp12<'t>) -> Fp12<'t> {
+        a.tower().check(b.tower());
+        fast!(a.tower(), k => k.st12(k.sub12(&k.ld12(a), &k.ld12(b))));
         Fp12 {
             c0: &a.c0 - &b.c0,
             c1: &a.c1 - &b.c1,
@@ -429,6 +616,8 @@ impl<'t> Fp12<'t> {
     /// The product, by Karatsuba: `a₀b₀ + v a₁b₁` and `(a₀ + a₁)(b₀ + b₁) − a₀b₀ − a₁b₁`.
     #[track_caller]
     pub(super) fn mul_ref(a: &Fp12<'t>, b: &Fp12<'t>) -> Fp12<'t> {
+        a.tower().check(b.tower());
+        fast!(a.tower(), k => k.st12(k.mul12(&k.ld12(a), &k.ld12(b))));
         let v0 = &a.c0 * &b.c0;
         let v1 = &a.c1 * &b.c1;
         let c1 = (&a.c0 + &a.c1) * (&b.c0 + &b.c1) - &v0 - &v1;
@@ -447,6 +636,7 @@ impl<'t> Fp12<'t> {
 
     /// The negation.
     pub(super) fn neg_ref(&self) -> Fp12<'t> {
+        fast!(self.tower(), k => k.st12(k.neg12(&k.ld12(self))));
         Fp12 {
             c0: -&self.c0,
             c1: -&self.c1,

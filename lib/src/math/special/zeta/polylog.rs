@@ -7,14 +7,16 @@
 //! `Re Li₂(x) = π²/3 − ½ ln² x − Li₂(1/x)` (`x > 2`), with the constants and products as
 //! double-doubles; about the zero `x₀ = 12.595…` of `Re Li₂` a polynomial in `x − x₀`.
 //!
-//! The tables are printed by `gen_polylog.py` in this directory (with `gen_fit.py`).
+//! The tables are printed by `gen_polylog.py` in this directory (with `gen_fit.py`); the fits of
+//! the orders 1/2, 3/2, 5/2 and 3 on `−7.3·10²⁶ ≤ x < 0` (`fd_tables.rs`) are written by
+//! `gen_fd.py`.
 
 use super::complex::{Cd, cmul_dd, turn_dd};
 use super::hurwitz::BERNOULLI_2K;
 use super::real::{digamma_rough, lgamma_dd, pow_2pi_neg, zeta_f64, zeta_regular, zeta_right};
 use super::util::{
-    PI_HI, atan_dd, exp_dd, exp_mul, exp_parts, horner, ln_dd, ln_dd_acc, mla, poly_tail, scale,
-    sincos_pi, two_prod, two_sum,
+    PI_HI, atan_dd, exp_dd, exp_mul, exp_parts, horner, ln_dd, ln_dd_acc, ln_dd_tab, mla,
+    poly_tail, scale, sincos_pi, two_prod, two_sum,
 };
 use crate::math::complex::Complex;
 use crate::math::special::dd::Dd;
@@ -1263,6 +1265,113 @@ fn pow_mul_ln(y: f64, s: f64, g: f64) -> f64 {
     exp_mul(a, g, g * (ae + s * ll))
 }
 
+/// `k` for `s = k + 1/2` with `k` 0, 1 or 2, and 3 for `s = 3` (the orders of the fits of
+/// `fd_tables.rs`).
+#[inline(always)]
+fn half_order(s: f64) -> Option<usize> {
+    if s == 3.0 {
+        return Some(3);
+    }
+    let k = s - 0.5;
+    (k == k.round() && (0.0..=2.0).contains(&k)).then_some(k as usize)
+}
+
+/// `Li_s(x)` for `s = k + 1/2` (`k` 0, 1 or 2) and `−2 ≤ x < −3/4`: `−F(μ)`, `μ = ln(−x)` a
+/// double-double and `F` the polynomial of `fd_tables.rs` (its first two terms as a
+/// double-double, `μ`'s low part through `c₁`).
+#[inline(never)]
+fn polylog_fd_half_m1(k: usize, x: f64) -> f64 {
+    let (mu, mul) = ln_dd_tab(-x);
+    let row = if k == 3 {
+        &super::fd_tables::FD_NEAR_M1_3
+    } else {
+        &super::fd_tables::FD_NEAR_M1[k]
+    };
+    let q = crate::math::special::bessel::kernels::estrin_at(mu, row, 4);
+    let (p, pe) = two_prod(row[2], mu);
+    let (r, re) = two_sum(row[0], p);
+    -(r + (re + (pe + mla(row[2], mul, mla(row[3], mu, mla(mu * mu, q, row[1]))))))
+}
+
+/// `Li_s(x)` for `s = k + 1/2` (`k` 0, 1 or 2) and `−3/4 ≤ x < 0`: `x·G(x)`, `G` the polynomial
+/// of `fd_tables.rs` in `u = x + 3/8` (its first two terms as a double-double, the rounding of `u`
+/// through `c₁`), the product rounded once.
+#[inline(never)]
+fn polylog_fd_half_neg(k: usize, x: f64) -> f64 {
+    let row = if k == 3 {
+        &super::fd_tables::FD_NEG_3
+    } else {
+        &super::fd_tables::FD_NEG[k]
+    };
+    let (u, ul) = two_sum(x, 0.375);
+    let q = crate::math::special::bessel::kernels::estrin_at(u, row, 4);
+    let (p, pe) = two_prod(row[2], u);
+    let (r, re) = two_sum(row[0], p);
+    let gl = re + (pe + mla(row[2], ul, mla(row[3], u, mla(u * u, q, row[1]))));
+    let (h, he) = two_prod(x, r);
+    h + mla(x, gl, he)
+}
+
+/// `1/6` as a double-double.
+const SIXTH: Dd = Dd {
+    hi: 0.16666666666666666,
+    lo: 9.25185853854297e-18,
+};
+
+/// `1/Γ(k + 3/2)` for `k = 0, 1, 2` as double-doubles.
+const FD_HALF_GAMMA: [(f64, f64); 3] = [
+    (core::f64::consts::FRAC_2_SQRT_PI, 1.533545961316588e-17),
+    (0.7522527780636751, -2.6783794412061297e-17),
+    (0.30090111122547003, -1.0713517764824519e-17),
+];
+
+/// `Li_s(x)` for `s = k + 1/2` (`k` 0, 1 or 2) and `x < −2` with `μ = ln(−x)` at most
+/// `e^4.125`: `−μˢ/Γ(s + 1)·R_s(μ)`, `R_s` from the fits of `fd_tables.rs` by pieces of
+/// `v = ln μ` (to `10⁻²¹`), `μ`, `v` and the prefactor as double-doubles, `μ`'s low part
+/// carried into `v` (so into `R_s`) and into `μˢ`.
+#[inline(never)]
+fn polylog_fd_half(k: usize, x: f64) -> f64 {
+    use super::fd_tables::{FD_HALF_0, FD_HALF_1, FD_HALF_2, FD_HALF_3};
+    let (mu, mul) = ln_dd_tab(-x);
+    let (v, vl) = ln_dd_tab(mu);
+    let j = ((2.0 * v + 0.75).floor() as i64).clamp(0, 8) as usize;
+    let row = match k {
+        0 => &FD_HALF_0[j],
+        1 => &FD_HALF_1[j],
+        2 => &FD_HALF_2[j],
+        _ => &FD_HALF_3[j],
+    };
+    // t = 4(v − cⱼ) + 4(vl + mul/μ), cⱼ = −1/8 + j/2: the first part exact (|v − cⱼ| ≤ 1/4,
+    // cⱼ a multiple of 1/8)
+    let th = 4.0 * (v - (-0.125 + 0.5 * j as f64));
+    let tl = 4.0 * (vl + mul / mu);
+    let t = th + tl;
+    let q = crate::math::special::bessel::kernels::estrin_at(t, row, 4);
+    let (p, pe) = two_prod(row[2], th);
+    let (r, re) = two_sum(row[0], p);
+    let rr = Dd {
+        hi: r,
+        lo: re + (pe + mla(row[2], tl, mla(row[3], th, mla(t * t, q, row[1])))),
+    };
+    if k == 3 {
+        // μ³/6
+        let m = Dd { hi: mu, lo: mul };
+        let pre = m.mul(m).mul(m).mul(SIXTH);
+        return -pre.mul(rr).value();
+    }
+    // √μ = sh + sl
+    let sh = mu.sqrt();
+    let (pp, ppe) = two_prod(sh, sh);
+    let sl = ((mu - pp) - ppe + mul) * (0.5 / sh);
+    let mut pre = Dd { hi: sh, lo: sl };
+    let m = Dd { hi: mu, lo: mul };
+    for _ in 0..k {
+        pre = pre.mul(m);
+    }
+    let (gh, gl) = FD_HALF_GAMMA[k];
+    -pre.mul(Dd { hi: gh, lo: gl }).mul(rr).value()
+}
+
 /// `Li_s(x)` of `f64`s.
 pub(crate) fn polylog_real(s: f64, x: f64) -> f64 {
     if s.is_nan() || x.is_nan() || x > 1.0 {
@@ -1323,6 +1432,15 @@ pub(crate) fn polylog_real(s: f64, x: f64) -> f64 {
         return polylog_negative(s, x, int);
     }
     let ax = x.abs();
+    if (-2.0..0.0).contains(&x)
+        && let Some(k) = half_order(s)
+    {
+        return if x < -0.75 {
+            polylog_fd_half_m1(k, x)
+        } else {
+            polylog_fd_half_neg(k, x)
+        };
+    }
     if (1.0..20.0).contains(&s) && (-2.0..-0.75).contains(&x) {
         return polylog_near_minus_one(s, (-x).ln());
     }
@@ -1341,6 +1459,16 @@ pub(crate) fn polylog_real(s: f64, x: f64) -> f64 {
     }
     if x >= -2.0 {
         return polylog_near_minus_one(s, (-x).ln());
+    }
+    // The end of the fits for s = 1/2, 3/2, 5/2, 3: the top of their last piece, μ = e^4.125
+    // (x = −7.39·10²⁶). Measured on an Apple M4 Max (x from −2.4·10¹⁶ to −7.3·10²⁶ by decades):
+    // the fits take 30 ns against 75–215 ns for Sommerfeld's expansion (s = 1/2, 3/2, 5/2) and
+    // the inversion formula (s = 3), and stay within 0.50 ulp there (40,000 cases: mpmath on the
+    // 8,506 whose result changed and 800 more).
+    if x >= -7.3e26
+        && let Some(k) = half_order(s)
+    {
+        return polylog_fd_half(k, x);
     }
     if int && s >= 1.0 {
         return polylog_inverse_int(s as usize, x);

@@ -377,6 +377,44 @@ fn the_default_is_zero_in_the_form() {
 }
 
 #[test]
+fn powers_of_parts_of_up_to_128_bits() {
+    // The register powers of both parts together, for words and parts of up to 16 bytes, to the
+    // largest exponent they take and past it, against the powers of the numbers.
+    let mut s = 0x706f_7765_7273_0001u64;
+    for _ in 0..size(3000, 80) {
+        let o = if below(&mut s, 2) == 0 {
+            ByteOrder::LittleEndian
+        } else {
+            ByteOrder::BigEndian
+        };
+        let (num, den) = (
+            1 + below(&mut s, 16) as usize,
+            1 + below(&mut s, 16) as usize,
+        );
+        let r = sized(&mut s, num, den, o);
+        let k = below(&mut s, 21) as i32;
+        for e in [k, -k] {
+            if e < 0 && r.is_zero() {
+                continue;
+            }
+            let got = r.pow(e);
+            check(&got);
+            let (n, d) = (
+                r.numer().pow(e.unsigned_abs()),
+                r.denom().pow(e.unsigned_abs()),
+            );
+            let want = if e < 0 {
+                Rational::new(d, n)
+            } else {
+                Rational::new(n, d)
+            };
+            assert_eq!(got, want, "({r})^{e}");
+            assert!(got.byte_order() == r.byte_order(), "({r})^{e}: byte order");
+        }
+    }
+}
+
+#[test]
 fn powers_reciprocals_and_signs() {
     let mut s = 77u64;
     for _ in 0..size(400, 20) {
@@ -1102,4 +1140,72 @@ fn powers_of_words_across_the_boundary() {
     }
     assert_eq!(Rational::from(0u8).pow(0), 1u8);
     assert_eq!((Rational::from(-2) / 3u8).pow(3).to_string(), "-8/27");
+}
+
+#[test]
+fn a_word_with_long_parts_in_every_form() {
+    // A rational in words with one of 17 to 1200 bytes (the passes of the short operand with a long
+    // one, the numbers' kernels from 96 bytes, and the limbs' path for big-endian parts), in both
+    // orders and every form, against the unreduced formulas: denominators sharing factors with the
+    // word's parts, integers on either side, a denominator of 1 on the long side, and long parts of
+    // either byte order.
+    let mut state = 0x6d69_7865_6400_0001u64;
+    let lims: &[usize] = if cfg!(miri) {
+        &[24, 64, 260, 300]
+    } else {
+        &[24, 64, 260, 300, 1200]
+    };
+    for _ in 0..size(3000, 40) {
+        let word = rational(&mut state, 8);
+        let lim = lims[below(&mut state, lims.len() as u64) as usize];
+        let mut long = rational(&mut state, lim);
+        if long.numer().value.len().max(long.denom().value.len()) <= 16 {
+            // Make it long: a factor of 17 to 40 bytes on a part.
+            let f = integer(&mut state, 40);
+            if !f.is_zero() {
+                long = &long * &Rational::from(&f + &Number::from(u64::MAX));
+            }
+        }
+        if below(&mut state, 4) == 0 && !word.denom().value.is_empty() {
+            // A denominator sharing the word's.
+            long = &long / &Rational::from(word.denom().clone());
+        }
+        for op in ['+', '-', '*'] {
+            every_form(&word, &long, op);
+            every_form(&long, &word, op);
+        }
+        if !long.is_zero() {
+            every_form(&word, &long, '/');
+        }
+        if !word.is_zero() {
+            every_form(&long, &word, '/');
+        }
+    }
+}
+
+#[test]
+fn rounding_into_a_number_agrees_with_rounding() {
+    // One number written again and again, over values in words and in numbers, of either byte
+    // order: each `_into` gives what its method gives.
+    let mut state = 0x726f_756e_6400_0001u64;
+    let mut out = Number::from(0u8);
+    for _ in 0..size(4000, 60) {
+        let x = rational(&mut state, 40);
+        x.floor_into(&mut out);
+        assert_eq!(out, x.floor(), "{x}");
+        x.ceil_into(&mut out);
+        assert_eq!(out, x.ceil(), "{x}");
+        x.trunc_into(&mut out);
+        assert_eq!(out, x.trunc(), "{x}");
+        x.round_into(&mut out);
+        assert_eq!(out, x.round(), "{x}");
+        x.round_ties_even_into(&mut out);
+        assert_eq!(out, x.round_ties_even(), "{x}");
+        assert_eq!(out.byte_order(), x.byte_order());
+        // And `clone_from` into a rational of another form.
+        let mut y = rational(&mut state, 40);
+        y.clone_from(&x);
+        assert_eq!(y, x);
+        assert_eq!(y.byte_order(), x.byte_order());
+    }
 }

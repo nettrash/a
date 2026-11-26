@@ -266,6 +266,7 @@ fn asymptotic(x: f64, one: bool) -> (f64, f64) {
 }
 
 /// `J₀(x)`.
+#[inline]
 pub(crate) fn j0(x: f64) -> f64 {
     let ax = x.abs();
     if ax < J0_B[0] {
@@ -285,6 +286,7 @@ pub(crate) fn j0(x: f64) -> f64 {
 }
 
 /// `J₁(x)`.
+#[inline]
 pub(crate) fn j1(x: f64) -> f64 {
     let ax = x.abs();
     let v = if ax < J1_B[0] {
@@ -304,6 +306,7 @@ pub(crate) fn j1(x: f64) -> f64 {
 }
 
 /// `Y₀(x)` (NaN for `x < 0`, `−∞` at 0).
+#[inline]
 pub(crate) fn y0(x: f64) -> f64 {
     if x < Y0_B[0] {
         if x <= 0.0 {
@@ -337,6 +340,7 @@ pub(crate) fn y0(x: f64) -> f64 {
 }
 
 /// `Y₁(x)` (NaN for `x < 0`, `−∞` at 0).
+#[inline]
 pub(crate) fn y1(x: f64) -> f64 {
     if x < Y1_B[0] {
         if x <= 0.0 {
@@ -376,4 +380,41 @@ pub(crate) fn y1(x: f64) -> f64 {
 /// `(J_n(x), Y_n(x))` for `n` 0 or 1 and `x ≥ 24`, together (one reduction).
 pub(crate) fn jy01_large(x: f64, one: bool) -> (f64, f64) {
     asymptotic(x, one)
+}
+
+/// `(J₀(x), J₁(x), Y₀(x), Y₁(x))` for `x ≥ 24`: the values of `jy01_large` for both orders (the
+/// same operations), with `1/x`, `1/√x` and the reduction of `x` modulo `π/2` computed once.
+pub(crate) fn jy01_large_both(x: f64) -> (f64, f64, f64, f64) {
+    let t = 1.0 / x;
+    let (p, e) = two_prod(x, t);
+    let tl = ((1.0 - p) - e) * t;
+    let s = t * t;
+    let (n, red) = rem_pio2(x);
+    let r = x.sqrt();
+    let (p, e) = two_prod(r, r);
+    let rl = ((x - p) - e) * (0.5 / r);
+    let inv = 1.0 / r;
+    let (p, e) = two_prod(r, inv);
+    let il = inv * (((1.0 - p) - e) - rl * inv);
+    let order = |one: bool| -> (f64, f64) {
+        let (m, a, a0, phase) = if one {
+            (&M1, &A1, 0.375, PI3O4)
+        } else {
+            (&M0, &A0, -0.125, PIO4)
+        };
+        let mm = s * estrin(s, m);
+        let (ah, al) = two_prod(a0, t);
+        let al = al + mla(a0, tl, t * s * estrin(s, a));
+        let phi = Dd { hi: ah, lo: al }.sub(phase);
+        let u = red.add(phi);
+        let k = (u.hi * core::f64::consts::FRAC_2_PI).round_ties_even();
+        let u = u.sub(super::kernels::PIO2.mul_f64(k));
+        let (mh, ml) = two_prod(SQRT_2_OVER_PI.hi, inv);
+        let ml = ml + (SQRT_2_OVER_PI.hi * il + SQRT_2_OVER_PI.lo * inv + mh * mm);
+        let (s_, c_) = super::kernels::sin_cos_quadrant_dd(n.wrapping_add(k as i64), u);
+        (times(mh, ml, c_), times(mh, ml, s_))
+    };
+    let (j0, y0) = order(false);
+    let (j1, y1) = order(true);
+    (j0, j1, y0, y1)
 }

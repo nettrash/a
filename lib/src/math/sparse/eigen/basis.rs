@@ -24,9 +24,28 @@ const KEPT: f64 = core::f64::consts::FRAC_1_SQRT_2;
 /// nothing but rounding errors.
 const PASSES: usize = 4;
 
-/// The 2-norm of a vector, scaled so that its squares neither overflow nor underflow.
+/// The 2-norm of a vector, scaled so that its squares neither overflow nor underflow: the sum of
+/// the squares in four running sums, and only where it leaves the safe range the scaled sum of
+/// the dense `norm2`.
 pub(super) fn norm<T: Scalar>(x: &[T]) -> T::Real {
-    norm2(x)
+    let mut lanes = [T::Real::ZERO; 4];
+    let (chunks, chunks_rest) = x.as_chunks::<4>();
+    for x4 in chunks.iter() {
+        for (lane, v) in lanes.iter_mut().zip(x4) {
+            *lane += v.abs2();
+        }
+    }
+    for v in chunks_rest {
+        lanes[0] += v.abs2();
+    }
+    let sum = (lanes[0] + lanes[1]) + (lanes[2] + lanes[3]);
+    // Within this range no square overflowed and none that matters underflowed.
+    let low = T::Real::MIN_POSITIVE / T::Real::EPSILON;
+    if sum.is_finite() && sum >= low {
+        sum.sqrt()
+    } else {
+        norm2(x)
+    }
 }
 
 /// Whether every element of the vector is finite.
@@ -151,41 +170,112 @@ impl Random {
     }
 }
 
+/// The rows a pass of [`project`] reads at a time, so that the piece of `w` stays in the
+/// first-level cache while every column streams by once.
+// Measured on an Apple M4 Max (`lanczos_with` and `arnoldi_with`, two restarts, on Laplacians of
+// 10⁴ and 10⁵ unknowns and a random matrix of 10⁵, bases of 20 and 40; sweep 512 to 8192): mixed,
+// so kept: with a basis of 40, 2048 to 8192 rows take 8 to 10 % off; with 20, every larger block
+// costs 1 to 3 %.
+const BLOCK: usize = 512;
+
 /// Takes out of `w` its components along the `count` orthonormal columns of `columns` (of the
-/// length of `w`): `c = Vᴴ·w`, then `w −= V·c`, two products of blocks. The coefficients go into
-/// `c`.
+/// length of `w`): `c = Vᴴ·w`, then `w −= V·c`, two passes over the columns, a block of rows of
+/// `w` at a time. Each coefficient is summed in four running sums (the row `i` to the sum
+/// `i mod 4`), the same order every time.
 fn project<T: Scalar>(columns: &[T], count: usize, w: &mut [T], c: &mut [T]) {
     let n = w.len();
-    gemm(
-        count,
-        1,
-        n,
-        T::one(),
-        columns,
-        n,
-        Op::C,
-        w,
-        n,
-        Op::N,
-        T::zero(),
-        c,
-        count,
-    );
-    gemm(
-        n,
-        1,
-        count,
-        -T::one(),
-        columns,
-        n,
-        Op::N,
-        c,
-        count,
-        Op::N,
-        T::one(),
-        w,
-        n,
-    );
+    debug_assert!(columns.len() >= count * n && c.len() >= count);
+    let mut lanes = vec![[T::zero(); 4]; count];
+    let mut start = 0;
+    while start < n {
+        // The blocks begin at multiples of 4: a row's sum is its index mod 4.
+        let end = (start + BLOCK).min(n);
+        let wb = &w[start..end];
+        let column = |k: usize| &columns[k * n + start..k * n + end];
+        // Four columns at a time, each piece of `w` read once for the four.
+        let mut k = 0;
+        while k + 4 <= count {
+            let m = wb.len();
+            let (v0, v1, v2, v3) = (
+                &column(k)[..m],
+                &column(k + 1)[..m],
+                &column(k + 2)[..m],
+                &column(k + 3)[..m],
+            );
+            let mut l = [lanes[k], lanes[k + 1], lanes[k + 2], lanes[k + 3]];
+            let whole = wb.len() / 4 * 4;
+            for i in (0..whole).step_by(4) {
+                for q in 0..4 {
+                    let x = wb[i + q];
+                    l[0][q] += v0[i + q].conj() * x;
+                    l[1][q] += v1[i + q].conj() * x;
+                    l[2][q] += v2[i + q].conj() * x;
+                    l[3][q] += v3[i + q].conj() * x;
+                }
+            }
+            for i in whole..wb.len() {
+                let x = wb[i];
+                l[0][0] += v0[i].conj() * x;
+                l[1][0] += v1[i].conj() * x;
+                l[2][0] += v2[i].conj() * x;
+                l[3][0] += v3[i].conj() * x;
+            }
+            lanes[k..k + 4].copy_from_slice(&l);
+            k += 4;
+        }
+        for (k, lane) in lanes.iter_mut().enumerate().skip(k) {
+            let v = column(k);
+            let (vc, vc_rest) = v.as_chunks::<4>();
+            let (wc, wc_rest) = wb.as_chunks::<4>();
+            let mut l = *lane;
+            for (v4, w4) in vc.iter().zip(wc.iter()) {
+                for q in 0..4 {
+                    l[q] += v4[q].conj() * w4[q];
+                }
+            }
+            for (&v, &x) in vc_rest.iter().zip(wc_rest) {
+                l[0] += v.conj() * x;
+            }
+            *lane = l;
+        }
+        start = end;
+    }
+    for (c, l) in c[..count].iter_mut().zip(&lanes) {
+        *c = (l[0] + l[1]) + (l[2] + l[3]);
+    }
+    let mut start = 0;
+    while start < n {
+        let end = (start + BLOCK).min(n);
+        let wb = &mut w[start..end];
+        let column = |k: usize| &columns[k * n + start..k * n + end];
+        // Four columns at a time, the element of `w` held while the four are taken out of it in
+        // their order: the same arithmetic as one column after another.
+        let mut k = 0;
+        while k + 4 <= count {
+            let m = wb.len();
+            let (v0, v1, v2, v3) = (
+                &column(k)[..m],
+                &column(k + 1)[..m],
+                &column(k + 2)[..m],
+                &column(k + 3)[..m],
+            );
+            let (c0, c1, c2, c3) = (c[k], c[k + 1], c[k + 2], c[k + 3]);
+            for (i, w) in wb.iter_mut().enumerate() {
+                *w = w
+                    .mul_sub(c0, v0[i])
+                    .mul_sub(c1, v1[i])
+                    .mul_sub(c2, v2[i])
+                    .mul_sub(c3, v3[i]);
+            }
+            k += 4;
+        }
+        for (k, &ck) in c[..count].iter().enumerate().skip(k) {
+            for (w, &v) in wb.iter_mut().zip(column(k)) {
+                *w = w.mul_sub(ck, v);
+            }
+        }
+        start = end;
+    }
 }
 
 /// Takes out of `w` its components along the orthonormal columns of every slice of `locked` and
@@ -906,9 +996,8 @@ impl<T: Scalar> Run<'_, T> {
     pub(super) fn apply(&mut self, x: &[T], y: &mut [T]) -> bool {
         self.operator.apply(x, y);
         self.state.applications += 1;
-        if !finite(y) {
-            return false;
-        }
+        // The norm is finite exactly when every element is: a NaN makes it NaN, an infinity
+        // infinite, and a square that overflows is caught by the scaled sum.
         let size = norm(y);
         if !size.is_finite() {
             return false;

@@ -1,0 +1,32 @@
+[package]
+name = "curves-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../../lib" }
+ark-bls12-381 = "=0.5.0"
+ark-bn254 = "=0.5.0"
+ark-ec = "=0.5.0"
+ark-ff = "=0.5.0"
+ark-serialize = "=0.5.0"
+ark-std = "=0.5.0"
+bls12_381 = { version = "=0.8.0", features = ["experimental"] }
+blst = "=0.3.17"
+ff = "0.13"
+group = "0.13"
+sha2_09 = { package = "sha2", version = "0.9" }
+sha2_10 = { package = "sha2", version = "=0.10.9" }
+sha2_11 = { package = "sha2", version = "=0.11.1" }
+ring = "=0.17.14"
+elliptic-curve = { version = "=0.13.8", features = ["hash2curve", "arithmetic"] }
+p256 = { version = "=0.13.2", features = ["hash2curve"] }
+p384 = { version = "=0.13.1", features = ["hash2curve"] }
+k256 = { version = "0.13", features = ["hash2curve"] }
+p521 = { version = "0.13", features = ["hash2curve"] }
+substrate-bn = "0.6"
+curve25519-dalek = { version = "=5.0.0", features = ["digest"] }
+
+[workspace]

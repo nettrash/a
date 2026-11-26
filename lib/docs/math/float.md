@@ -476,1066 +476,840 @@ Errors found in MPFR 4.2.2 and MPC 1.4.1, each checked against a computation at 
 
 ## Measured
 
-Measured on an Apple M4 Max on 2026-11-14 between 13:47 and 15:31 (load averages 1.2 to 2.2 at the start of each harness, 2.7 at the first one as the Miri runs ended; nothing else running), the text's tables again at 16:48, after the change to the scan of the digits (load averages 3.9 and falling, as the tests had just ended), and the constants on 2026-11-13 between 21:55 and 00:20 (load averages 1.2 to 1.9), none of their code having changed since, one thread, `env -u MallocNanoZone`, fat LTO: the median of three passes of rounds with fresh arguments each round and the contenders' order rotated, in ns, µs, ms or s a call. The clock read between 3.1 and 4.4 GHz from one table to the next, so the times compare within a table and the ratios across them. The references are MPFR 4.2.2 (Homebrew's static archives, called directly through FFI, with its exponent range set to that of `BigFloat`), Arb in FLINT 3.6 (its balls enclose the value but are not correctly rounded, so its column is for the time only), and GNU MPC 1.4.1 for the complex numbers; rug 1.30 on the same MPFR took the time of MPFR to within a few per cent everywhere, so it has no column. MPFR and MPC write into a variable that exists and `a` returns a new number, unless a table says otherwise. The arguments have the precision of the result and full mantissas, of exponents from −2 to 1 unless a table says otherwise, and every result is rounded to nearest; each harness checks its results against the reference's before it times them. The ratio is `a`'s time over the reference's: below 1, `a` is faster.
+Measured on an Apple M4 Max (macOS 27.2) on 2026-11-26 between 06:07 and 06:22, with nothing else running: the areas of the release's final run were timed one after another, and every timed process ran alone on the machine. One thread; `a` as a user builds it, `cargo build --release` with the default profile (opt-level 3, no LTO, the default codegen units, no `target-cpu`), on Rust 1.100.0 stable, by the harness in the repository's [`bench/float`](../../../bench/float) (see [`bench/README.md`](../../../bench/README.md)). Each figure is the median of 15 samples (fewer where a call is long), each a batch of at least 1 ms over a pool of distinct arguments, all the contenders of a row alternating sample by sample in one process; every reference's results were compared with `a`'s before the timing, and agreed, but where a reference does less by design (Arb's balls, dashu-float's sums kept to a bit more than the precision, its decimal text). The references: MPFR 4.2.2 and GNU MPC 1.4.1 on GMP 6.3.0 (Homebrew's static archives, called through FFI, MPFR's exponent range set to that of `BigFloat`), rug 1.30.0 on the same libraries, malachite-float 0.15.0, astro-float 0.9.6 (which rounds every precision up to whole words, so its rows are against `a` at that precision), dashu-float 0.6.2, and Arb of FLINT 3.6.0. Each row gives the fastest reference that does the same work, the same arguments to the same correctly rounded result, its time and `a`'s time over it: below 1, `a` is faster. Arb's balls enclose the value but are not correctly rounded, so Arb does less: its column is its time alone, at the precision and the guard bits of Ziv's first attempt. MPFR and MPC write into a variable that exists and `a` returns a new number, unless a table says otherwise; the arguments have the precision of the result and full mantissas, of magnitudes in `[1/4, 4)` and both signs (positive for the roots and the logarithms) unless a table says otherwise, and every result is rounded to nearest.
 
 ### Arithmetic
 
-Into an existing number (`set_add` and the others against `mpfr_add (r, a, b, rnd)` and the others; `x·x` is `set_mul(&x, &x)` against `mpfr_sqr`). A precision `p (operands q)` is a result of `p` bits from operands of `q`; the sums take operands of both signs:
+Into an existing number, at its precision: `set_add` and the others against `mpfr_add (r, a, b, rnd)` and rug's `assign_round`, `x·x` being `set_mul(&x, &x)`. A precision `p (operands q)` is a result of `p` bits from operands of `q`:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR |
-| --- | --- | ---: | ---: | ---: |
-| `set_add` | 24 | 5 ns | 5.1 ns | 0.98 |
-|  | 53 | 5 ns | 5.1 ns | 0.98 |
-|  | 64 | 4.6 ns | 5.6 ns | 0.82 |
-|  | 113 | 6.9 ns | 5.8 ns | 1.19 |
-|  | 128 | 6.3 ns | 6.3 ns | 1.00 |
-|  | 256 | 12.7 ns | 10.2 ns | 1.25 |
-|  | 1,000 | 17.7 ns | 14.6 ns | 1.21 |
-|  | 10,000 | 53.9 ns | 93.4 ns | 0.58 |
-|  | 100,000 | 483 ns | 993 ns | 0.49 |
-|  | 1,000,000 | 6.15 µs | 9.07 µs | 0.68 |
-|  | 53 (operands 1,000) | 14 ns | 14.8 ns | 0.95 |
-|  | 53 (operands 100,000) | 12.5 ns | 12.1 ns | 1.03 |
-|  | 1,000 (operands 53) | 12.5 ns | 16.1 ns | 0.78 |
-|  | 1,000 (operands 100,000) | 55.1 ns | 274 ns | 0.20 |
-|  | 100,000 (operands 1,000,000) | 1.27 µs | 2.19 µs | 0.58 |
-| `set_sub` | 24 | 4.9 ns | 5.5 ns | 0.89 |
-|  | 53 | 4.8 ns | 5.7 ns | 0.84 |
-|  | 64 | 4.4 ns | 6.1 ns | 0.72 |
-|  | 113 | 6.7 ns | 6.4 ns | 1.05 |
-|  | 128 | 6.1 ns | 6.8 ns | 0.90 |
-|  | 256 | 12.3 ns | 10.6 ns | 1.16 |
-|  | 1,000 | 18.2 ns | 15.4 ns | 1.18 |
-|  | 10,000 | 53.9 ns | 87.2 ns | 0.62 |
-|  | 100,000 | 375 ns | 875 ns | 0.43 |
-|  | 1,000,000 | 6.27 µs | 10.3 µs | 0.61 |
-|  | 53 (operands 1,000) | 14.6 ns | 15.4 ns | 0.95 |
-|  | 53 (operands 100,000) | 13.6 ns | 269 ns | 0.05 |
-|  | 1,000 (operands 53) | 12.2 ns | 15.9 ns | 0.77 |
-|  | 1,000 (operands 100,000) | 53.7 ns | 142 ns | 0.38 |
-|  | 100,000 (operands 1,000,000) | 1.28 µs | 2.11 µs | 0.61 |
-| `set_mul` | 24 | 4 ns | 5.4 ns | 0.74 |
-|  | 53 | 3.5 ns | 5.4 ns | 0.65 |
-|  | 64 | 3.4 ns | 5.4 ns | 0.63 |
-|  | 113 | 5.1 ns | 5.9 ns | 0.86 |
-|  | 128 | 5 ns | 11 ns | 0.45 |
-|  | 256 | 12 ns | 21.8 ns | 0.55 |
-|  | 1,000 | 92.4 ns | 101 ns | 0.91 |
-|  | 10,000 | 3.24 µs | 3.24 µs | 1.00 |
-|  | 100,000 | 48.6 µs | 93.5 µs | 0.52 |
-|  | 1,000,000 | 559 µs | 1.42 ms | 0.40 |
-|  | 53 (operands 1,000) | 30.5 ns | 98.4 ns | 0.31 |
-|  | 53 (operands 100,000) | 25.8 ns | 43.6 ns | 0.59 |
-|  | 1,000 (operands 53) | 7.3 ns | 10.4 ns | 0.70 |
-|  | 1,000 (operands 100,000) | 109 ns | 116 ns | 0.94 |
-|  | 100,000 (operands 1,000,000) | 48.6 µs | 94.8 µs | 0.51 |
-| `x·x` | 24 | 3.5 ns | 5.1 ns | 0.69 |
-|  | 53 | 3.1 ns | 5.1 ns | 0.61 |
-|  | 64 | 2.9 ns | 5.3 ns | 0.55 |
-|  | 113 | 4.1 ns | 5.5 ns | 0.75 |
-|  | 128 | 4.1 ns | 13.2 ns | 0.31 |
-|  | 256 | 12.3 ns | 18.7 ns | 0.66 |
-|  | 1,000 | 79 ns | 79.4 ns | 0.99 |
-|  | 10,000 | 2.36 µs | 2.14 µs | 1.11 |
-|  | 100,000 | 37.2 µs | 60.7 µs | 0.61 |
-|  | 1,000,000 | 415 µs | 1.21 ms | 0.34 |
-|  | 53 (operands 1,000) | 31.6 ns | 77.6 ns | 0.41 |
-|  | 1,000 (operands 100,000) | 87.5 ns | 100 ns | 0.87 |
-| `set_div` | 24 | 6 ns | 6.2 ns | 0.97 |
-|  | 53 | 6 ns | 6.2 ns | 0.97 |
-|  | 64 | 6.3 ns | 6.8 ns | 0.93 |
-|  | 113 | 11.3 ns | 8.8 ns | 1.28 |
-|  | 128 | 12.1 ns | 27 ns | 0.45 |
-|  | 256 | 70.7 ns | 62.4 ns | 1.13 |
-|  | 1,000 | 180 ns | 220 ns | 0.82 |
-|  | 10,000 | 4.58 µs | 5.44 µs | 0.84 |
-|  | 100,000 | 123 µs | 192 µs | 0.64 |
-|  | 1,000,000 | 1.36 ms | 4.01 ms | 0.34 |
-|  | 53 (operands 1,000) | 21.1 ns | 17.4 ns | 1.21 |
-|  | 53 (operands 100,000) | 18.3 ns | 15 ns | 1.22 |
-|  | 1,000 (operands 53) | 48.2 ns | 36.6 ns | 1.32 |
-|  | 1,000 (operands 100,000) | 217 ns | 214 ns | 1.01 |
-|  | 100,000 (operands 1,000,000) | 123 µs | 197 µs | 0.62 |
-| `set_mul_add` | 24 | 8.9 ns | 11.6 ns | 0.77 |
-|  | 53 | 8.8 ns | 12.2 ns | 0.72 |
-|  | 64 | 8.8 ns | 21.6 ns | 0.41 |
-|  | 113 | 16 ns | 22.8 ns | 0.70 |
-|  | 128 | 15.7 ns | 23.9 ns | 0.66 |
-|  | 256 | 29 ns | 30.2 ns | 0.96 |
-|  | 1,000 | 137 ns | 113 ns | 1.21 |
-|  | 10,000 | 3.51 µs | 3.64 µs | 0.96 |
-|  | 100,000 | 50.3 µs | 109 µs | 0.46 |
-|  | 1,000,000 | 573 µs | 1.43 ms | 0.40 |
-|  | 53 (operands 1,000) | 98.8 ns | 110 ns | 0.89 |
-|  | 53 (operands 100,000) | 48.7 µs | 109 µs | 0.44 |
-|  | 1,000 (operands 53) | 13.4 ns | 23.2 ns | 0.58 |
-|  | 1,000 (operands 100,000) | 48.6 µs | 109 µs | 0.44 |
-|  | 100,000 (operands 1,000,000) | 562 µs | 1.42 ms | 0.40 |
-| `set_sqrt` | 24 | 7.1 ns | 6.2 ns | 1.15 |
-|  | 53 | 7.1 ns | 6.2 ns | 1.15 |
-|  | 64 | 12.7 ns | 6.8 ns | 1.87 |
-|  | 113 | 15.7 ns | 11.8 ns | 1.33 |
-|  | 128 | 21 ns | 63 ns | 0.33 |
-|  | 256 | 100 ns | 98.5 ns | 1.02 |
-|  | 1,000 | 258 ns | 264 ns | 0.97 |
-|  | 10,000 | 4.36 µs | 3.67 µs | 1.19 |
-|  | 100,000 | 116 µs | 139 µs | 0.84 |
-|  | 1,000,000 | 1.44 ms | 3.23 ms | 0.45 |
-|  | 53 (operands 1,000) | 7.1 ns | 13.6 ns | 0.52 |
-|  | 1,000 (operands 100,000) | 246 ns | 255 ns | 0.97 |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `set_add` | 24 | 3.90 ns | MPFR | 5.68 ns | 0.69 |
+|  | 53 | 3.44 ns | MPFR | 4.57 ns | 0.75 |
+|  | 113 | 5.50 ns | MPFR | 5.71 ns | 0.96 |
+|  | 256 | 12.5 ns | MPFR | 9.49 ns | 1.32 |
+|  | 1,000 | 18.6 ns | rug | 13.9 ns | 1.34 |
+|  | 10,000 | 63.4 ns | MPFR | 101 ns | 0.63 |
+|  | 100,000 | 540 ns | rug | 1.19 µs | 0.45 |
+|  | 1,000,000 | 4.91 µs | MPFR | 8.40 µs | 0.58 |
+|  | 53 (operands 100,000) | 16.4 ns | rug | 214 ns | 0.077 |
+|  | 1,000 (operands 53) | 15.7 ns | MPFR | 16.3 ns | 0.97 |
+| `set_sub` | 24 | 3.28 ns | MPFR | 5.24 ns | 0.63 |
+|  | 53 | 3.04 ns | rug | 5.25 ns | 0.58 |
+|  | 113 | 5.43 ns | MPFR | 6.23 ns | 0.87 |
+|  | 256 | 12.7 ns | MPFR | 10.4 ns | 1.22 |
+|  | 1,000 | 19.1 ns | MPFR | 14.8 ns | 1.29 |
+|  | 10,000 | 61.6 ns | rug | 97.9 ns | 0.63 |
+|  | 100,000 | 528 ns | rug | 1.09 µs | 0.48 |
+|  | 1,000,000 | 6.03 µs | rug | 9.84 µs | 0.61 |
+|  | 53 (operands 100,000) | 16.2 ns | MPFR | 207 ns | 0.078 |
+|  | 1,000 (operands 53) | 15.5 ns | MPFR | 16.2 ns | 0.95 |
+| `set_mul` | 24 | 2.84 ns | MPFR | 5.01 ns | 0.57 |
+|  | 53 | 2.44 ns | MPFR | 5.24 ns | 0.47 |
+|  | 113 | 3.97 ns | MPFR | 5.38 ns | 0.74 |
+|  | 256 | 13.0 ns | rug | 23.2 ns | 0.56 |
+|  | 1,000 | 97.7 ns | rug | 102 ns | 0.96 |
+|  | 10,000 | 2.70 µs | rug | 3.39 µs | 0.80 |
+|  | 100,000 | 50.5 µs | rug | 90.4 µs | 0.56 |
+|  | 1,000,000 | 567 µs | MPFR | 1.41 ms | 0.40 |
+|  | 53 (operands 100,000) | 41.0 ns | MPFR | 56.1 ns | 0.73 |
+|  | 1,000 (operands 53) | 7.55 ns | rug | 10.4 ns | 0.72 |
+| `x·x` | 24 | 2.43 ns | MPFR | 4.86 ns | 0.50 |
+|  | 53 | 1.93 ns | MPFR | 4.65 ns | 0.41 |
+|  | 113 | 3.37 ns | rug | 5.09 ns | 0.66 |
+|  | 256 | 11.8 ns | rug | 19.6 ns | 0.60 |
+|  | 1,000 | 81.9 ns | MPFR | 80.3 ns | 1.02 |
+|  | 10,000 | 1.68 µs | rug | 1.99 µs | 0.85 |
+|  | 100,000 | 38.3 µs | MPFR | 63.4 µs | 0.60 |
+|  | 1,000,000 | 416 µs | MPFR | 1.22 ms | 0.34 |
+|  | 53 (operands 1,000) | 35.1 ns | MPFR | 80.2 ns | 0.44 |
+| `set_div` | 24 | 5.11 ns | rug | 5.56 ns | 0.92 |
+|  | 53 | 5.11 ns | rug | 5.57 ns | 0.92 |
+|  | 113 | 10.5 ns | rug | 8.04 ns | 1.30 |
+|  | 256 | 54.3 ns | MPFR | 69.0 ns | 0.79 |
+|  | 1,000 | 191 ns | rug | 226 ns | 0.85 |
+|  | 10,000 | 4.74 µs | MPFR | 5.84 µs | 0.81 |
+|  | 100,000 | 122 µs | MPFR | 200 µs | 0.61 |
+|  | 1,000,000 | 1.34 ms | MPFR | 3.99 ms | 0.34 |
+|  | 53 (operands 1,000) | 25.1 ns | rug | 19.0 ns | 1.32 |
+|  | 53 (operands 100,000) | 28.2 ns | MPFR | 21.1 ns | 1.34 |
+|  | 1,000 (operands 53) | 53.6 ns | MPFR | 39.3 ns | 1.37 |
+| `set_mul_add` | 24 | 10.3 ns | MPFR | 10.8 ns | 0.95 |
+|  | 53 | 10.4 ns | MPFR | 11.6 ns | 0.90 |
+|  | 113 | 15.7 ns | rug | 23.2 ns | 0.67 |
+|  | 256 | 30.6 ns | MPFR | 32.5 ns | 0.94 |
+|  | 1,000 | 139 ns | MPFR | 118 ns | 1.18 |
+|  | 10,000 | 2.94 µs | MPFR | 3.89 µs | 0.76 |
+|  | 100,000 | 52.3 µs | MPFR | 109 µs | 0.48 |
+|  | 1,000,000 | 581 µs | rug | 1.43 ms | 0.41 |
+|  | 53 (operands 100,000) | 50.3 µs | MPFR | 108 µs | 0.47 |
+|  | 1,000 (operands 53) | 13.2 ns | MPFR | 24.2 ns | 0.55 |
+| `set_sqrt` | 24 | 4.46 ns | rug | 5.53 ns | 0.81 |
+|  | 53 | 4.48 ns | rug | 5.61 ns | 0.80 |
+|  | 113 | 11.7 ns | rug | 11.3 ns | 1.04 |
+|  | 256 | 118 ns | MPFR | 106 ns | 1.12 |
+|  | 1,000 | 272 ns | rug | 279 ns | 0.97 |
+|  | 10,000 | 3.98 µs | MPFR | 3.84 µs | 1.04 |
+|  | 100,000 | 121 µs | MPFR | 141 µs | 0.86 |
+|  | 1,000,000 | 1.45 ms | MPFR | 3.29 ms | 0.44 |
+|  | 53 (operands 1,000) | 7.58 ns | rug | 13.8 ns | 0.55 |
 
-With a new result (`add_round` and the others against `mpfr_init2`, the operation and `mpfr_clear`):
+With a new result: `add_round` and the others against `mpfr_init2`, the operation and `mpfr_clear`, rug's `with_val` and the Rust crates' allocating forms (malachite-float's `_prec_round_ref`):
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR |
-| --- | --- | ---: | ---: | ---: |
-| `add_round` | 24 | 13.5 ns | 17.1 ns | 0.79 |
-|  | 53 | 13.6 ns | 17.3 ns | 0.79 |
-|  | 64 | 12.9 ns | 17.2 ns | 0.75 |
-|  | 113 | 15.9 ns | 18.1 ns | 0.88 |
-|  | 128 | 15.2 ns | 18.4 ns | 0.83 |
-|  | 256 | 20.6 ns | 22.6 ns | 0.91 |
-|  | 1,000 | 27.6 ns | 25.9 ns | 1.07 |
-|  | 10,000 | 79 ns | 109 ns | 0.73 |
-|  | 100,000 | 618 ns | 1.01 µs | 0.61 |
-|  | 1,000,000 | 7.83 µs | 9.14 µs | 0.86 |
-|  | 53 (operands 1,000) | 22.9 ns | 27 ns | 0.85 |
-|  | 53 (operands 100,000) | 21.4 ns | 23 ns | 0.93 |
-|  | 1,000 (operands 53) | 22.8 ns | 29.3 ns | 0.78 |
-|  | 1,000 (operands 100,000) | 62.2 ns | 286 ns | 0.22 |
-|  | 100,000 (operands 1,000,000) | 1.29 µs | 2.2 µs | 0.58 |
-| `sub_round` | 24 | 13.6 ns | 17 ns | 0.80 |
-|  | 53 | 13.4 ns | 16.9 ns | 0.79 |
-|  | 64 | 13 ns | 17.4 ns | 0.75 |
-|  | 113 | 15.7 ns | 18.2 ns | 0.86 |
-|  | 128 | 15.1 ns | 18.7 ns | 0.81 |
-|  | 256 | 20.4 ns | 22.5 ns | 0.91 |
-|  | 1,000 | 26.7 ns | 27.5 ns | 0.97 |
-|  | 10,000 | 74.5 ns | 103 ns | 0.72 |
-|  | 100,000 | 522 ns | 891 ns | 0.59 |
-|  | 1,000,000 | 8.06 µs | 10.4 µs | 0.78 |
-|  | 53 (operands 1,000) | 23.2 ns | 27.4 ns | 0.85 |
-|  | 53 (operands 100,000) | 22.3 ns | 284 ns | 0.08 |
-|  | 1,000 (operands 53) | 22.5 ns | 29.1 ns | 0.77 |
-|  | 1,000 (operands 100,000) | 61.9 ns | 156 ns | 0.40 |
-|  | 100,000 (operands 1,000,000) | 1.29 µs | 2.14 µs | 0.60 |
-| `mul_round` | 24 | 13.2 ns | 18.2 ns | 0.73 |
-|  | 53 | 12.8 ns | 18 ns | 0.71 |
-|  | 64 | 12.9 ns | 18.1 ns | 0.71 |
-|  | 113 | 15.3 ns | 19 ns | 0.81 |
-|  | 128 | 15.1 ns | 25.5 ns | 0.59 |
-|  | 256 | 22.4 ns | 34.7 ns | 0.65 |
-|  | 1,000 | 102 ns | 112 ns | 0.92 |
-|  | 10,000 | 3.25 µs | 3.26 µs | 1.00 |
-|  | 100,000 | 48.7 µs | 93.5 µs | 0.52 |
-|  | 1,000,000 | 561 µs | 1.41 ms | 0.40 |
-|  | 53 (operands 1,000) | 37.5 ns | 109 ns | 0.34 |
-|  | 53 (operands 100,000) | 34.1 ns | 57.4 ns | 0.59 |
-|  | 1,000 (operands 53) | 16.8 ns | 22.9 ns | 0.73 |
-|  | 1,000 (operands 100,000) | 121 ns | 127 ns | 0.96 |
-|  | 100,000 (operands 1,000,000) | 48.7 µs | 95.2 µs | 0.51 |
-| `&x * &x` | 24 | 13.7 ns | 17.5 ns | 0.78 |
-|  | 53 | 12.6 ns | 17.7 ns | 0.71 |
-|  | 64 | 13 ns | 18 ns | 0.72 |
-|  | 113 | 14.9 ns | 19.3 ns | 0.77 |
-|  | 128 | 14.9 ns | 27.3 ns | 0.55 |
-|  | 256 | 22.2 ns | 31.7 ns | 0.70 |
-|  | 1,000 | 90.8 ns | 91.3 ns | 0.99 |
-|  | 10,000 | 2.38 µs | 2.17 µs | 1.09 |
-|  | 100,000 | 37.2 µs | 60.9 µs | 0.61 |
-|  | 1,000,000 | 415 µs | 1.21 ms | 0.34 |
-|  | 53 (operands 1,000) | 38.9 ns | 88.8 ns | 0.44 |
-|  | 1,000 (operands 100,000) | 102 ns | 111 ns | 0.92 |
-| `div_round` | 24 | 14.2 ns | 20.3 ns | 0.70 |
-|  | 53 | 14.6 ns | 20.5 ns | 0.71 |
-|  | 64 | 14.3 ns | 20.8 ns | 0.69 |
-|  | 113 | 18 ns | 19.9 ns | 0.90 |
-|  | 128 | 18.7 ns | 39.8 ns | 0.47 |
-|  | 256 | 77.9 ns | 77.6 ns | 1.00 |
-|  | 1,000 | 188 ns | 227 ns | 0.83 |
-|  | 10,000 | 4.59 µs | 5.46 µs | 0.84 |
-|  | 100,000 | 123 µs | 193 µs | 0.64 |
-|  | 1,000,000 | 1.36 ms | 4.01 ms | 0.34 |
-|  | 53 (operands 1,000) | 31.1 ns | 30.4 ns | 1.02 |
-|  | 53 (operands 100,000) | 26.4 ns | 25.9 ns | 1.02 |
-|  | 1,000 (operands 53) | 57.9 ns | 56.7 ns | 1.02 |
-|  | 1,000 (operands 100,000) | 226 ns | 224 ns | 1.01 |
-|  | 100,000 (operands 1,000,000) | 124 µs | 197 µs | 0.63 |
-| `mul_add_round` | 24 | 15.8 ns | 22.7 ns | 0.70 |
-|  | 53 | 15.8 ns | 23.3 ns | 0.68 |
-|  | 64 | 15.8 ns | 33.2 ns | 0.48 |
-|  | 113 | 21.9 ns | 35 ns | 0.63 |
-|  | 128 | 21.8 ns | 36.3 ns | 0.60 |
-|  | 256 | 34.9 ns | 41.6 ns | 0.84 |
-|  | 1,000 | 145 ns | 124 ns | 1.17 |
-|  | 10,000 | 3.5 µs | 3.65 µs | 0.96 |
-|  | 100,000 | 50.4 µs | 109 µs | 0.46 |
-|  | 1,000,000 | 575 µs | 1.42 ms | 0.40 |
-|  | 53 (operands 1,000) | 112 ns | 122 ns | 0.92 |
-|  | 53 (operands 100,000) | 48.8 µs | 109 µs | 0.45 |
-|  | 1,000 (operands 53) | 20.9 ns | 35.1 ns | 0.60 |
-|  | 1,000 (operands 100,000) | 48.8 µs | 110 µs | 0.45 |
-|  | 100,000 (operands 1,000,000) | 563 µs | 1.42 ms | 0.40 |
-| `sqrt_round` | 24 | 23.7 ns | 19.4 ns | 1.22 |
-|  | 53 | 22.4 ns | 19.2 ns | 1.17 |
-|  | 64 | 25.7 ns | 17.9 ns | 1.44 |
-|  | 113 | 32 ns | 20.7 ns | 1.55 |
-|  | 128 | 39.1 ns | 82.7 ns | 0.47 |
-|  | 256 | 112 ns | 116 ns | 0.96 |
-|  | 1,000 | 267 ns | 280 ns | 0.95 |
-|  | 10,000 | 4.35 µs | 3.7 µs | 1.18 |
-|  | 100,000 | 116 µs | 139 µs | 0.84 |
-|  | 1,000,000 | 1.44 ms | 3.23 ms | 0.45 |
-|  | 53 (operands 1,000) | 20.1 ns | 29.7 ns | 0.68 |
-|  | 1,000 (operands 100,000) | 256 ns | 265 ns | 0.97 |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `add_round` | 24 | 5.28 ns | malachite-float | 8.56 ns | 0.62 |
+|  | 53 | 5.54 ns | malachite-float | 8.54 ns | 0.65 |
+|  | 113 | 7.20 ns | MPFR | 17.1 ns | 0.42 |
+|  | 256 | 23.6 ns | MPFR | 22.5 ns | 1.05 |
+|  | 1,000 | 30.9 ns | MPFR | 27.6 ns | 1.12 |
+|  | 10,000 | 95.7 ns | MPFR | 115 ns | 0.83 |
+|  | 1,000,000 | 8.09 µs | MPFR | 8.50 µs | 0.95 |
+| `mul_round` | 24 | 4.86 ns | malachite-float | 9.01 ns | 0.54 |
+|  | 53 | 4.30 ns | malachite-float | 8.80 ns | 0.49 |
+|  | 113 | 5.07 ns | malachite-float | 17.9 ns | 0.28 |
+|  | 256 | 26.6 ns | rug | 34.5 ns | 0.77 |
+|  | 1,000 | 107 ns | rug | 117 ns | 0.91 |
+|  | 10,000 | 2.71 µs | rug | 3.48 µs | 0.78 |
+|  | 1,000,000 | 559 µs | malachite-float | 940 µs | 0.59 |
+| `x·x` | 24 | 4.49 ns | malachite-float | 6.17 ns | 0.73 |
+|  | 53 | 3.85 ns | malachite-float | 5.76 ns | 0.67 |
+|  | 113 | 4.69 ns | malachite-float | 15.6 ns | 0.30 |
+|  | 256 | 26.3 ns | MPFR | 31.2 ns | 0.84 |
+|  | 1,000 | 91.9 ns | MPFR | 89.8 ns | 1.02 |
+|  | 10,000 | 1.70 µs | rug | 2.11 µs | 0.81 |
+|  | 1,000,000 | 416 µs | malachite-float | 948 µs | 0.44 |
+| `div_round` | 24 | 6.19 ns | malachite-float | 16.1 ns | 0.39 |
+|  | 53 | 6.21 ns | malachite-float | 15.3 ns | 0.40 |
+|  | 113 | 11.5 ns | MPFR | 20.3 ns | 0.57 |
+|  | 256 | 68.1 ns | MPFR | 80.9 ns | 0.84 |
+|  | 1,000 | 201 ns | MPFR | 237 ns | 0.85 |
+|  | 10,000 | 4.66 µs | rug | 5.71 µs | 0.82 |
+|  | 1,000,000 | 1.34 ms | rug | 4.04 ms | 0.33 |
+| `mul_add_round` | 24 | 11.0 ns | MPFR | 23.9 ns | 0.46 |
+|  | 53 | 10.4 ns | rug | 23.9 ns | 0.43 |
+|  | 113 | 15.8 ns | rug | 36.0 ns | 0.44 |
+|  | 256 | 42.3 ns | rug | 44.4 ns | 0.95 |
+|  | 1,000 | 155 ns | MPFR | 130 ns | 1.19 |
+|  | 10,000 | 2.95 µs | rug | 4.57 µs | 0.65 |
+|  | 1,000,000 | 571 µs | malachite-float | 968 µs | 0.59 |
+| `sqrt_round` | 24 | 4.95 ns | malachite-float | 10.3 ns | 0.48 |
+|  | 53 | 4.92 ns | malachite-float | 9.35 ns | 0.53 |
+|  | 113 | 12.6 ns | malachite-float | 20.0 ns | 0.63 |
+|  | 256 | 125 ns | MPFR | 124 ns | 1.01 |
+|  | 1,000 | 283 ns | rug | 295 ns | 0.96 |
+|  | 10,000 | 3.97 µs | rug | 3.95 µs | 1.01 |
+|  | 1,000,000 | 1.45 ms | MPFR | 3.30 ms | 0.44 |
+
+Assigning, `x op= y` rounded at the precision of `x` (`add_assign_round` and the others) against `mpfr_add (x, x, y, rnd)`, rug's `op_assign_round` and malachite-float's `_prec_round_assign_ref`; and the operators, rounding to nearest at the larger precision, with primitive and `Number` operands against MPFR's `mpfr_add_si`, `mpfr_mul_d` and `mpfr_div_z` with a new variable:
+
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `add_assign_round` | 24 | 5.61 ns | MPFR | 4.58 ns | 1.22 |
+|  | 53 | 4.75 ns | MPFR | 4.75 ns | 1.00 |
+|  | 113 | 6.84 ns | MPFR | 5.22 ns | 1.31 |
+|  | 256 | 14.1 ns | MPFR | 9.86 ns | 1.43 |
+|  | 1,000 | 18.6 ns | MPFR | 15.2 ns | 1.22 |
+|  | 10,000 | 74.2 ns | MPFR | 126 ns | 0.59 |
+|  | 1,000,000 | 6.05 µs | MPFR | 11.7 µs | 0.52 |
+| `mul_assign_round` | 24 | 9.83 ns | rug | 8.50 ns | 1.16 |
+|  | 53 | 9.60 ns | rug | 8.49 ns | 1.13 |
+|  | 113 | 11.4 ns | MPFR | 8.81 ns | 1.30 |
+|  | 256 | 22.2 ns | MPFR | 25.4 ns | 0.87 |
+|  | 1,000 | 104 ns | MPFR | 106 ns | 0.98 |
+|  | 10,000 | 3.17 µs | rug | 3.43 µs | 0.93 |
+|  | 1,000,000 | 563 µs | malachite-float | 981 µs | 0.57 |
+| `div_assign_round` | 24 | 15.4 ns | MPFR | 12.9 ns | 1.19 |
+|  | 53 | 15.4 ns | MPFR | 13.0 ns | 1.19 |
+|  | 113 | 21.9 ns | MPFR | 21.6 ns | 1.01 |
+|  | 256 | 63.4 ns | MPFR | 70.5 ns | 0.90 |
+|  | 1,000 | 197 ns | MPFR | 224 ns | 0.88 |
+|  | 10,000 | 4.70 µs | rug | 5.73 µs | 0.82 |
+|  | 1,000,000 | 1.34 ms | rug | 4.03 ms | 0.33 |
+
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `&a + &b` | 53 | 7.16 ns | malachite-float | 8.33 ns | 0.86 |
+|  | 1,000 | 32.9 ns | MPFR | 27.1 ns | 1.21 |
+|  | 10,000 | 92.8 ns | rug | 126 ns | 0.74 |
+| `&a * &b` | 53 | 5.88 ns | malachite-float | 8.81 ns | 0.67 |
+|  | 1,000 | 106 ns | rug | 113 ns | 0.94 |
+|  | 10,000 | 2.72 µs | rug | 3.40 µs | 0.80 |
+| `&a / &b` | 53 | 8.45 ns | malachite-float | 14.0 ns | 0.60 |
+|  | 1,000 | 194 ns | rug | 234 ns | 0.83 |
+|  | 10,000 | 4.65 µs | MPFR | 5.74 µs | 0.81 |
+| `&a + i64` | 53 | 5.21 ns | rug | 28.1 ns | 0.18 |
+|  | 1,000 | 36.4 ns | rug | 32.7 ns | 1.11 |
+|  | 10,000 | 110 ns | MPFR | 72.7 ns | 1.52 |
+| `&a * f64` | 53 | 4.46 ns | MPFR | 26.3 ns | 0.17 |
+|  | 1,000 | 46.9 ns | rug | 41.8 ns | 1.12 |
+|  | 10,000 | 90.2 ns | rug | 111 ns | 0.81 |
+| `&a / &Number` | 53 | 29.3 ns | rug | 40.5 ns | 0.72 |
+|  | 1,000 | 118 ns | MPFR | 81.5 ns | 1.44 |
+|  | 10,000 | 412 ns | rug | 452 ns | 0.91 |
+
+Sums and dot products rounded once, `sum_round` against `mpfr_sum` and `dot_round` against `mpfr_dot`, both into an existing variable, of `n` terms of exponents from −20 to 20:
+
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `sum_round` | 53, n = 4 | 30.0 ns | MPFR | 36.6 ns | 0.82 |
+|  | 53, n = 100 | 421 ns | MPFR | 392 ns | 1.07 |
+|  | 256, n = 4 | 49.6 ns | MPFR | 37.4 ns | 1.33 |
+|  | 1,000, n = 4 | 82.5 ns | MPFR | 56.1 ns | 1.47 |
+|  | 1,000, n = 100 | 1.10 µs | MPFR | 1.02 µs | 1.07 |
+|  | 10,000, n = 4 | 337 ns | MPFR | 317 ns | 1.06 |
+|  | 10,000, n = 1,000 | 48.1 µs | MPFR | 65.2 µs | 0.74 |
+| `dot_round` | 53, n = 4 | 107 ns | MPFR | 140 ns | 0.77 |
+|  | 53, n = 100 | 1.36 µs | MPFR | 2.82 µs | 0.48 |
+|  | 256, n = 4 | 204 ns | MPFR | 188 ns | 1.09 |
+|  | 1,000, n = 4 | 590 ns | MPFR | 564 ns | 1.05 |
+|  | 1,000, n = 100 | 9.83 µs | MPFR | 13.5 µs | 0.73 |
+|  | 10,000, n = 4 | 14.1 µs | MPFR | 16.0 µs | 0.88 |
+|  | 10,000, n = 1,000 | 3.40 ms | MPFR | 4.09 ms | 0.83 |
+
+- One and two limbs, up to 128 bits, are added, multiplied, divided and rooted in registers, the mantissa held in the number itself with no vector: into an existing number `a` takes 0.21 to 1.10 of the fastest reference's time but for the quotient at 113 bits (1.30), `set_mul` at 128 bits 0.33 and `x·x` 0.21, where MPFR's two-limb kernels stop at 127 bits; with a new result 0.15 to 1.00, malachite-float being the fastest reference there at most sizes. From `10^4` bits the products, quotients and roots are those of the crate's integers, with short products for the squares and the fused products: 0.34 to 1.04 into an existing number, 0.33 to 1.01 with a new result.
+- Between three and sixteen limbs (256 and 1,000 bits) the sums and differences are behind MPFR's (`set_add` 1.32 and 1.34, `set_sub` 1.22 and 1.29), and so are the assigning forms at 13 of their 28 sizes up to 1,000 bits (up to 1.43); the products and quotients there are at par or ahead. See [below](#where-the-references-are-faster).
+- `dot_round` takes 0.48 to 0.84 of `mpfr_dot`'s time from 16 terms, and with four 0.77 to 1.09; `sum_round` 0.56 to 1.47 of `mpfr_sum`'s, behind for 4 to 100 terms of 256 and 1,000 bits (1.04 to 1.47), for 100 terms of 53 bits (1.07) and for four of `10^4` bits (1.06).
 
 ### Roots and powers
 
-With a new result, against `mpfr_rec_sqrt`, `mpfr_cbrt`, `mpfr_rootn_ui` and `mpfr_pow_si` into an existing variable:
+With a new result, against `mpfr_rec_sqrt`, `mpfr_cbrt`, `mpfr_rootn_ui`, `mpfr_pow_si` and `mpfr_pow_z` into an existing variable; `pow_rational_round` against malachite-float's `pow_rational`, as MPFR has no `x^(p/q)` rounded once:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR |
-| --- | --- | ---: | ---: | ---: |
-| `rec_sqrt_round` | 24 | 29.3 ns | 55.1 ns | 0.53 |
-|  | 53 | 29.5 ns | 55.1 ns | 0.54 |
-|  | 64 | 39.1 ns | 76.4 ns | 0.51 |
-|  | 113 | 38.9 ns | 96.6 ns | 0.40 |
-|  | 128 | 114 ns | 118 ns | 0.96 |
-|  | 256 | 160 ns | 172 ns | 0.93 |
-|  | 1,000 | 439 ns | 428 ns | 1.02 |
-|  | 10,000 | 8.49 µs | 9.33 µs | 0.91 |
-|  | 100,000 | 167 µs | 268 µs | 0.62 |
-| `cbrt_round` | 24 | 59.3 ns | 120 ns | 0.49 |
-|  | 53 | 58.4 ns | 188 ns | 0.31 |
-|  | 64 | 91.1 ns | 211 ns | 0.43 |
-|  | 113 | 105 ns | 247 ns | 0.43 |
-|  | 128 | 250 ns | 270 ns | 0.92 |
-|  | 256 | 325 ns | 359 ns | 0.90 |
-|  | 1,000 | 685 ns | 688 ns | 1.00 |
-|  | 10,000 | 9.25 µs | 8.73 µs | 1.06 |
-|  | 100,000 | 220 µs | 278 µs | 0.79 |
-| `nth_root_round(5)` | 24 | 83.8 ns | 178 ns | 0.47 |
-|  | 53 | 81.1 ns | 237 ns | 0.34 |
-|  | 64 | 134 ns | 265 ns | 0.51 |
-|  | 113 | 147 ns | 324 ns | 0.45 |
-|  | 128 | 335 ns | 351 ns | 0.96 |
-|  | 256 | 408 ns | 463 ns | 0.88 |
-|  | 1,000 | 934 ns | 988 ns | 0.95 |
-|  | 10,000 | 16.5 µs | 17.5 µs | 0.95 |
-|  | 100,000 | 328 µs | 526 µs | 0.62 |
-| `nth_root_round(100)` | 24 | 984 ns | 1.02 µs | 0.97 |
-|  | 53 | 1.03 µs | 1.79 µs | 0.57 |
-|  | 64 | 1.59 µs | 2.16 µs | 0.74 |
-|  | 113 | 1.6 µs | 3.95 µs | 0.41 |
-|  | 128 | 1.61 µs | 4.82 µs | 0.33 |
-|  | 256 | 3.03 µs | 7.6 µs | 0.40 |
-|  | 1,000 | 6.33 µs | 43.4 µs | 0.15 |
-| `powi_round(7)` | 24 | 34.7 ns | 61.1 ns | 0.57 |
-|  | 53 | 34.3 ns | 59.1 ns | 0.58 |
-|  | 64 | 33.9 ns | 68.5 ns | 0.49 |
-|  | 113 | 50.2 ns | 75.7 ns | 0.66 |
-|  | 128 | 51.1 ns | 85.3 ns | 0.60 |
-|  | 256 | 67 ns | 112 ns | 0.60 |
-|  | 1,000 | 358 ns | 413 ns | 0.87 |
-|  | 10,000 | 11.5 µs | 11.1 µs | 1.04 |
-|  | 100,000 | 175 µs | 373 µs | 0.47 |
-| `powi_round(-3)` | 24 | 41.3 ns | 89.7 ns | 0.46 |
-|  | 53 | 40.9 ns | 92.7 ns | 0.44 |
-|  | 64 | 41 ns | 100 ns | 0.41 |
-|  | 113 | 57.7 ns | 106 ns | 0.54 |
-|  | 128 | 59.4 ns | 112 ns | 0.53 |
-|  | 256 | 155 ns | 159 ns | 0.98 |
-|  | 1,000 | 398 ns | 470 ns | 0.85 |
-|  | 10,000 | 12.3 µs | 13.1 µs | 0.94 |
-|  | 100,000 | 211 µs | 409 µs | 0.51 |
-| `powi_round(1_000_000_007)` | 24 | 125 ns | 372 ns | 0.34 |
-|  | 53 | 125 ns | 386 ns | 0.32 |
-|  | 64 | 126 ns | 418 ns | 0.30 |
-|  | 113 | 196 ns | 547 ns | 0.36 |
-|  | 128 | 196 ns | 867 ns | 0.23 |
-|  | 256 | 361 ns | 1.19 µs | 0.30 |
-|  | 1,000 | 3.39 µs | 4.31 µs | 0.79 |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `rec_sqrt_round` | 53 | 16.2 ns | MPFR | 58.8 ns | 0.28 |
+|  | 113 | 29.4 ns | MPFR | 101 ns | 0.29 |
+|  | 1,000 | 490 ns | MPFR | 425 ns | 1.15 |
+|  | 10,000 | 7.73 µs | MPFR | 9.18 µs | 0.84 |
+|  | 100,000 | 166 µs | MPFR | 270 µs | 0.61 |
+| `cbrt_round` | 53 | 53.8 ns | MPFR | 188 ns | 0.28 |
+|  | 113 | 96.2 ns | MPFR | 240 ns | 0.40 |
+|  | 1,000 | 708 ns | MPFR | 698 ns | 1.02 |
+|  | 10,000 | 9.18 µs | MPFR | 9.04 µs | 1.02 |
+|  | 100,000 | 229 µs | MPFR | 286 µs | 0.80 |
+| `nth_root_round(5)` | 53 | 73.9 ns | MPFR | 234 ns | 0.32 |
+|  | 113 | 135 ns | MPFR | 314 ns | 0.43 |
+|  | 1,000 | 1.01 µs | MPFR | 1.05 µs | 0.96 |
+|  | 10,000 | 16.6 µs | MPFR | 17.1 µs | 0.97 |
+|  | 100,000 | 349 µs | MPFR | 626 µs | 0.56 |
+| `nth_root_round(100)` | 53 | 625 ns | MPFR | 1.81 µs | 0.34 |
+|  | 113 | 1.54 µs | MPFR | 4.14 µs | 0.37 |
+|  | 1,000 | 6.38 µs | MPFR | 43.9 µs | 0.14 |
+|  | 10,000 | 73.7 µs | MPFR | 1.18 ms | 0.063 |
+| `powi_round(7)` | 53 | 24.9 ns | MPFR | 62.0 ns | 0.40 |
+|  | 113 | 41.8 ns | MPFR | 80.6 ns | 0.52 |
+|  | 1,000 | 360 ns | MPFR | 417 ns | 0.86 |
+|  | 10,000 | 11.5 µs | MPFR | 11.4 µs | 1.01 |
+|  | 100,000 | 178 µs | malachite-float | 293 µs | 0.61 |
+| `powi_round(-3)` | 53 | 28.7 ns | MPFR | 101 ns | 0.28 |
+|  | 113 | 51.8 ns | MPFR | 110 ns | 0.47 |
+|  | 1,000 | 410 ns | MPFR | 482 ns | 0.85 |
+|  | 10,000 | 12.4 µs | MPFR | 13.6 µs | 0.91 |
+|  | 100,000 | 212 µs | MPFR | 417 µs | 0.51 |
+| `powi_round(1_000_000_007)` | 53 | 120 ns | MPFR | 429 ns | 0.28 |
+|  | 113 | 178 ns | MPFR | 595 ns | 0.30 |
+|  | 1,000 | 3.36 µs | MPFR | 4.37 µs | 0.77 |
+| `pow_number_round(2^64 + 13)` | 53 | 224 ns | MPFR | 462 ns | 0.48 |
+|  | 113 | 411 ns | MPFR | 969 ns | 0.42 |
+|  | 1,000 | 4.84 µs | MPFR | 5.95 µs | 0.81 |
+|  | 10,000 | 164 µs | MPFR | 140 µs | 1.17 |
+| `pow_rational_round(5/3)` | 53 | 580 ns | malachite-float | 11.9 µs | 0.049 |
+|  | 113 | 696 ns | malachite-float | 16.3 µs | 0.043 |
+|  | 1,000 | 1.50 µs | malachite-float | 64.4 µs | 0.023 |
+|  | 10,000 | 19.2 µs | malachite-float | 2.36 ms | 0.0081 |
+
+The roots and powers take 0.0081 to 1.17 of the fastest reference's time; behind are `rec_sqrt_round` at 1,000 bits (1.15) and `pow_number_round` at `10^4` bits (1.17).
 
 ### Conversions
 
-Against `mpfr_get_d`, `mpfr_set_d`, `mpfr_floor`, `mpfr_rint` and `mpfr_get_si`, MPFR writing into an existing number: `set_f64`, `set_floor` and `set_rint` write into one too, and `from_f64_round`, `floor` and `rint_round` make a new one; `floor` of a number with half its bits after the point, `rint_round` and `set_rint` to half the precision:
+Against `mpfr_get_d`, `mpfr_set_d`, `mpfr_floor`, `mpfr_rint`, `mpfr_set`, `mpfr_cmp`, `mpfr_get_si`, `mpfr_get_z`, `mpfr_set_z`, `mpfr_set_q` and `mpfr_get_q`, and the Rust crates' conversions. `set_f64`, `set_floor` and `set_rint` write into an existing number, as MPFR does; `from_f64_round`, `floor`, `rint_round`, `prec_round` and `from_number` make a new one, against MPFR's `mpfr_init2`, the operation and `mpfr_clear`. `floor` is of a number with half its bits after the point, `rint_round`, `set_rint` and `prec_round` to half the precision, `from_number` of an integer of twice the precision's bits, `from_rational` of a fraction of parts of the precision's bits, `to_i64_round` of numbers below `2^62`:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR |
-| --- | --- | ---: | ---: | ---: |
-| `to_f64_round` | 24 | 1.6 ns | 5.4 ns | 0.30 |
-|  | 53 | 1.6 ns | 5.4 ns | 0.30 |
-|  | 64 | 2.3 ns | 4.7 ns | 0.48 |
-|  | 113 | 2.3 ns | 4.8 ns | 0.48 |
-|  | 128 | 2.2 ns | 4.8 ns | 0.46 |
-|  | 256 | 2.2 ns | 4.7 ns | 0.48 |
-|  | 1,000 | 2.3 ns | 4.8 ns | 0.47 |
-|  | 10,000 | 2.3 ns | 4.8 ns | 0.48 |
-|  | 100,000 | 2.1 ns | 4.9 ns | 0.43 |
-|  | 1,000,000 | 2.3 ns | 4.7 ns | 0.50 |
-| `set_f64` | 24 | 2.5 ns | 8.1 ns | 0.31 |
-|  | 53 | 2.8 ns | 5.6 ns | 0.50 |
-|  | 64 | 2.8 ns | 7.5 ns | 0.37 |
-|  | 113 | 3 ns | 7.7 ns | 0.39 |
-|  | 256 | 3.5 ns | 8.1 ns | 0.43 |
-|  | 1,000 | 4.5 ns | 7.5 ns | 0.60 |
-|  | 10,000 | 16.1 ns | 17.9 ns | 0.90 |
-|  | 100,000 | 113 ns | 115 ns | 0.99 |
-|  | 1,000,000 | 782 ns | 575 ns | 1.36 |
-| `from_f64_round` | 24 | 12.5 ns | 8.1 ns | 1.54 |
-|  | 53 | 9.9 ns | 5.6 ns | 1.78 |
-|  | 64 | 10.1 ns | 7.5 ns | 1.36 |
-|  | 113 | 10 ns | 7.7 ns | 1.30 |
-|  | 256 | 10.3 ns | 8.1 ns | 1.27 |
-|  | 1,000 | 10.7 ns | 7.5 ns | 1.43 |
-|  | 10,000 | 25.6 ns | 17.9 ns | 1.43 |
-|  | 100,000 | 151 ns | 115 ns | 1.32 |
-|  | 1,000,000 | 711 ns | 575 ns | 1.24 |
-| `set_floor` | 24 | 7.3 ns | 8.5 ns | 0.86 |
-|  | 53 | 7.2 ns | 8.2 ns | 0.87 |
-|  | 64 | 7.2 ns | 8.4 ns | 0.85 |
-|  | 113 | 8.7 ns | 8.7 ns | 1.00 |
-|  | 128 | 8.2 ns | 8.5 ns | 0.97 |
-|  | 256 | 8.7 ns | 9.1 ns | 0.96 |
-|  | 1,000 | 8.2 ns | 8.7 ns | 0.95 |
-|  | 10,000 | 15.5 ns | 16.3 ns | 0.95 |
-|  | 100,000 | 123 ns | 112 ns | 1.10 |
-|  | 1,000,000 | 786 ns | 839 ns | 0.94 |
-| `floor` | 24 | 17 ns | 8.5 ns | 1.99 |
-|  | 53 | 16.9 ns | 8.2 ns | 2.06 |
-|  | 64 | 16.9 ns | 8.4 ns | 2.00 |
-|  | 113 | 18 ns | 8.7 ns | 2.08 |
-|  | 128 | 17.8 ns | 8.5 ns | 2.09 |
-|  | 256 | 19.2 ns | 9.1 ns | 2.12 |
-|  | 1,000 | 19.5 ns | 8.7 ns | 2.26 |
-|  | 10,000 | 37 ns | 16.3 ns | 2.27 |
-|  | 100,000 | 202 ns | 112 ns | 1.80 |
-|  | 1,000,000 | 1.8 µs | 839 ns | 2.15 |
-| `set_rint` | 24 | 8.2 ns | 8.6 ns | 0.96 |
-|  | 53 | 8.3 ns | 8.5 ns | 0.97 |
-|  | 64 | 8.4 ns | 8.6 ns | 0.98 |
-|  | 113 | 7.6 ns | 8.5 ns | 0.89 |
-|  | 128 | 7.9 ns | 8.4 ns | 0.94 |
-|  | 256 | 8.2 ns | 8.6 ns | 0.95 |
-|  | 1,000 | 9 ns | 8.3 ns | 1.08 |
-|  | 10,000 | 14.9 ns | 13.3 ns | 1.12 |
-|  | 100,000 | 71.3 ns | 71.1 ns | 1.00 |
-|  | 1,000,000 | 525 ns | 527 ns | 0.99 |
-| `rint_round(p/2)` | 24 | 19 ns | 8.6 ns | 2.22 |
-|  | 53 | 19.1 ns | 8.5 ns | 2.24 |
-|  | 64 | 19 ns | 8.6 ns | 2.21 |
-|  | 113 | 18.5 ns | 8.5 ns | 2.16 |
-|  | 128 | 18.7 ns | 8.4 ns | 2.24 |
-|  | 256 | 18.8 ns | 8.6 ns | 2.19 |
-|  | 1,000 | 18.8 ns | 8.3 ns | 2.26 |
-|  | 10,000 | 34.4 ns | 13.3 ns | 2.59 |
-|  | 100,000 | 103 ns | 71.1 ns | 1.44 |
-|  | 1,000,000 | 630 ns | 527 ns | 1.20 |
-| `to_i64_round` | 53 | 10.8 ns | 23.8 ns | 0.45 |
-|  | 113 | 10.6 ns | 23.3 ns | 0.45 |
-|  | 1,000 | 10.8 ns | 23.6 ns | 0.46 |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `to_f64_round` | 53 | 3.20 ns | MPFR | 5.36 ns | 0.60 |
+|  | 1,000 | 4.38 ns | MPFR | 4.60 ns | 0.95 |
+|  | 100,000 | 4.43 ns | MPFR | 4.57 ns | 0.97 |
+| `set_f64` | 53 | 2.98 ns | rug | 5.69 ns | 0.52 |
+|  | 1,000 | 3.97 ns | MPFR | 7.68 ns | 0.52 |
+|  | 100,000 | 209 ns | MPFR | 132 ns | 1.58 |
+|  | 1,000,000 | 447 ns | MPFR | 574 ns | 0.78 |
+| `from_f64_round` | 53 | 4.48 ns | malachite-float | 14.1 ns | 0.32 |
+|  | 1,000 | 12.6 ns | dashu-float | 16.1 ns | 0.79 |
+|  | 100,000 | 170 ns | dashu-float | 15.3 ns | 11.1 |
+|  | 1,000,000 | 734 ns | dashu-float | 14.6 ns | 50.3 |
+| `set_floor` | 53 | 9.18 ns | MPFR | 8.41 ns | 1.09 |
+|  | 1,000 | 10.9 ns | MPFR | 8.67 ns | 1.26 |
+|  | 100,000 | 138 ns | MPFR | 142 ns | 0.97 |
+| `floor` | 53 | 10.7 ns | MPFR | 18.0 ns | 0.60 |
+|  | 1,000 | 24.5 ns | MPFR | 19.4 ns | 1.26 |
+|  | 100,000 | 235 ns | MPFR | 159 ns | 1.48 |
+|  | 1,000,000 | 1.80 µs | MPFR | 1.14 µs | 1.58 |
+| `set_rint` | 53 | 11.5 ns | MPFR | 10.0 ns | 1.15 |
+|  | 1,000 | 12.2 ns | MPFR | 9.37 ns | 1.30 |
+|  | 100,000 | 129 ns | MPFR | 101 ns | 1.28 |
+| `rint_round(p/2)` | 53 | 11.6 ns | MPFR | 21.6 ns | 0.54 |
+|  | 1,000 | 23.3 ns | MPFR | 22.8 ns | 1.02 |
+|  | 100,000 | 132 ns | MPFR | 121 ns | 1.08 |
+| `prec_round(p/2)` | 53 | 10.5 ns | malachite-float | 8.23 ns | 1.28 |
+|  | 1,000 | 21.7 ns | MPFR | 18.8 ns | 1.15 |
+|  | 100,000 | 123 ns | MPFR | 183 ns | 0.67 |
+| `a < b` | 53 | 2.42 ns | MPFR | 2.06 ns | 1.17 |
+|  | 1,000 | 2.43 ns | MPFR | 2.04 ns | 1.19 |
+|  | 100,000 | 2.64 ns | MPFR | 2.14 ns | 1.23 |
+| `to_i64_round` | 53 | 5.87 ns | malachite-float | 6.58 ns | 0.89 |
+|  | 1,000 | 5.52 ns | malachite-float | 21.2 ns | 0.26 |
+| `to_number_round` | 53 | 17.7 ns | malachite-float | 5.20 ns | 3.41 |
+|  | 1,000 | 40.5 ns | malachite-float | 26.4 ns | 1.53 |
+|  | 10,000 | 98.0 ns | malachite-float | 57.3 ns | 1.71 |
+|  | 100,000 | 533 ns | malachite-float | 198 ns | 2.69 |
+| `from_number` | 53 | 11.6 ns | MPFR | 19.7 ns | 0.59 |
+|  | 1,000 | 41.3 ns | MPFR | 22.1 ns | 1.87 |
+|  | 10,000 | 94.0 ns | MPFR | 55.8 ns | 1.68 |
+|  | 100,000 | 546 ns | MPFR | 204 ns | 2.68 |
+| `from_rational` | 53 | 41.0 ns | MPFR | 56.4 ns | 0.73 |
+|  | 1,000 | 267 ns | MPFR | 274 ns | 0.98 |
+|  | 10,000 | 4.93 µs | MPFR | 5.89 µs | 0.84 |
+| `Rational::try_from` | 53 | 13.9 ns | malachite-float | 7.25 ns | 1.92 |
+|  | 1,000 | 71.2 ns | MPFR | 25.3 ns | 2.82 |
+|  | 10,000 | 189 ns | MPFR | 59.7 ns | 3.16 |
+|  | 100,000 | 1.32 µs | MPFR | 502 ns | 2.63 |
+
+The conversions are where `a` is furthest behind: `to_f64_round`, `set_f64`, `floor` and `rint_round` to 113 bits, `prec_round` from 113 bits and `to_i64_round` from 64 are ahead or at par, but comparisons (1.15 to 1.35), the rounding to integers in place at 14 of its 20 sizes (up to 1.30) and the conversions through `Number` and `Rational` from 1,000 bits (1.53 to 3.16) are behind the fastest reference, and `from_f64_round` from `10^4` bits 1.83 to 50.3 of dashu-float's (see [below](#where-the-references-are-faster)).
 
 ### Text
 
-Writing against `mpfr_get_str`: `to_digits(10, None)` gives `1 + ceil(p·log10 2)` digits, as `mpfr_get_str` with `n = 0`; the exponents are those of the other tables, or up to `±2^60` where marked:
+Writing against `mpfr_get_str` (and freeing its text): `to_digits(10, None)` gives `1 + ceil(p·log10 2)` digits, as `mpfr_get_str` with `n = 0`, and `to_digits(10, Some(20))` twenty; the exponents are those of the other tables, or up to `±2^60` where marked. Reading against `mpfr_strtofr` into an existing variable, texts of the digits given, at their worth of bits, `ceil(n·log2 10)`, or at 53 bits:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR |
-| --- | --- | ---: | ---: | ---: |
-| `to_digits(10, None)` | 24 | 36.2 ns | 207 ns | 0.17 |
-|  | 53 | 46.2 ns | 219 ns | 0.21 |
-|  | 64 | 62.1 ns | 226 ns | 0.27 |
-|  | 113 | 80.3 ns | 261 ns | 0.31 |
-|  | 128 | 159 ns | 271 ns | 0.59 |
-|  | 256 | 193 ns | 354 ns | 0.55 |
-|  | 1,000 | 608 ns | 976 ns | 0.62 |
-|  | 10,000 | 12.1 µs | 16.5 µs | 0.73 |
-|  | 100,000 | 299 µs | 430 µs | 0.69 |
-|  | 1,000,000 | 4.84 ms | 9.56 ms | 0.51 |
-| `to_digits(10, None)`, exponents to `±2^60` | 53 | 299 ns | 1.33 µs | 0.23 |
-|  | 113 | 428 ns | 1.6 µs | 0.27 |
-|  | 1,000 | 4.92 µs | 6.61 µs | 0.75 |
-|  | 10,000 | 129 µs | 151 µs | 0.86 |
-| `to_digits(10, Some(20))` | 1,000 | 117 ns | 185 ns | 0.63 |
-|  | 10,000 | 113 ns | 180 ns | 0.63 |
-|  | 100,000 | 104 ns | 175 ns | 0.60 |
-|  | 1,000,000 | 105 ns | 167 ns | 0.63 |
+| Operation | Size | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `to_digits(10, None)` | 53 | 47.0 ns | MPFR | 207 ns | 0.23 |
+|  | 1,000 | 519 ns | MPFR | 965 ns | 0.54 |
+|  | 10,000 | 11.9 µs | MPFR | 16.1 µs | 0.74 |
+|  | 1,000,000 | 4.76 ms | MPFR | 9.86 ms | 0.48 |
+|  | 53, exponents to `±2^60` | 286 ns | MPFR | 1.27 µs | 0.23 |
+| `to_digits(10, Some(20))` | 1,000 | 106 ns | MPFR | 177 ns | 0.60 |
+|  | 1,000,000 | 114 ns | MPFR | 183 ns | 0.62 |
+| `from_str_radix(10)`, `ceil(n·log2 10)` bits | 20 digits | 49.2 ns | MPFR | 119 ns | 0.41 |
+|  | 1,000 digits | 2.20 µs | MPFR | 3.16 µs | 0.70 |
+|  | 1,000,000 digits | 13.7 ms | malachite-float | 30.8 ms | 0.45 |
+| `from_str_radix(10)`, 53 bits | 20 digits | 44.5 ns | MPFR | 121 ns | 0.37 |
+|  | 1,000 digits | 101 ns | MPFR | 615 ns | 0.17 |
+|  | 1,000,000 digits | 36.9 µs | MPFR | 504 µs | 0.073 |
+| `from_str_radix` | 1 to 19 decimal digits, 53 bits | 31.7 ns | MPFR | 98.6 ns | 0.32 |
+|  | 100 hexadecimal digits, 400 bits | 193 ns | MPFR | 193 ns | 1.00 |
 
-`to_string()`, the shortest digits that read back, against rug's `to_string()`, the digits of `mpfr_get_str`:
+`to_string()`, the shortest digits that read back, against rug's `to_string()`, which writes all the digits of `mpfr_get_str`: not the same work (rug's text is longer and has no search for the shortest), so not counted:
 
 | Operation | Precision | `a` | rug | `a`/rug |
 | --- | --- | ---: | ---: | ---: |
-| `to_string()` | 24 | 97.8 ns | 298 ns | 0.33 |
-|  | 53 | 133 ns | 310 ns | 0.43 |
-|  | 64 | 150 ns | 326 ns | 0.46 |
-|  | 113 | 173 ns | 355 ns | 0.49 |
-|  | 128 | 363 ns | 377 ns | 0.96 |
-|  | 256 | 404 ns | 448 ns | 0.90 |
-|  | 1,000 | 885 ns | 1.09 µs | 0.81 |
-|  | 10,000 | 13 µs | 16.8 µs | 0.77 |
-|  | 100,000 | 309 µs | 426 µs | 0.73 |
-|  | 1,000,000 | 4.91 ms | 9.6 ms | 0.51 |
+| `to_string()` | 53 | 124 ns | 317 ns | 0.39 |
+|  | 128 | 396 ns | 366 ns | 1.08 |
+|  | 1,000 | 882 ns | 1.10 µs | 0.80 |
+|  | 1,000,000 | 4.91 ms | 9.83 ms | 0.50 |
 
-Reading against `mpfr_strtofr`, texts of the digits given: at their worth of bits, `ceil(n·log2 10)`, at 53 bits, at their worth with decimal exponents up to `±10^17`, and short texts and other radices (1 to 19 decimal digits at 53 bits; 20 and 100 digits in radix 3, 7 and 36 at their worth of bits):
-
-| Operation | Digits | `a` | MPFR | `a`/MPFR |
-| --- | --- | ---: | ---: | ---: |
-| `from_str_radix`, `ceil(n·log2 10)` bits | 20 | 58.1 ns | 121 ns | 0.48 |
-|  | 50 | 71.3 ns | 183 ns | 0.39 |
-|  | 100 | 128 ns | 290 ns | 0.44 |
-|  | 1,000 | 2.18 µs | 3.09 µs | 0.71 |
-|  | 10,000 | 66 µs | 89.1 µs | 0.74 |
-|  | 100,000 | 1.05 ms | 2.11 ms | 0.50 |
-|  | 1,000,000 | 14.1 ms | 33.7 ms | 0.42 |
-| `from_str_radix`, 53 bits | 20 | 49.4 ns | 112 ns | 0.44 |
-|  | 50 | 52.3 ns | 132 ns | 0.40 |
-|  | 100 | 56.2 ns | 162 ns | 0.35 |
-|  | 1,000 | 103 ns | 606 ns | 0.17 |
-|  | 10,000 | 433 ns | 4.94 µs | 0.09 |
-|  | 100,000 | 4.1 µs | 49.1 µs | 0.08 |
-|  | 1,000,000 | 40.1 µs | 486 µs | 0.08 |
-| `from_str_radix`, exponents to `±10^17` | 20 | 519 ns | 1.92 µs | 0.27 |
-|  | 100 | 2.02 µs | 3.37 µs | 0.60 |
-|  | 1,000 | 23 µs | 40.2 µs | 0.57 |
-| `from_str_radix`, short and other radices | 1 in radix 10 | 25.7 ns | 77.8 ns | 0.33 |
-|  | 5 in radix 10 | 31.3 ns | 85.8 ns | 0.36 |
-|  | 10 in radix 10 | 30.6 ns | 93 ns | 0.33 |
-|  | 15 in radix 10 | 38 ns | 102 ns | 0.37 |
-|  | 17 in radix 10 | 38.1 ns | 107 ns | 0.35 |
-|  | 19 in radix 10 | 40.3 ns | 108 ns | 0.37 |
-|  | 20 in radix 3 | 50.8 ns | 107 ns | 0.47 |
-|  | 100 in radix 3 | 153 ns | 250 ns | 0.61 |
-|  | 20 in radix 7 | 64.1 ns | 152 ns | 0.42 |
-|  | 100 in radix 7 | 181 ns | 275 ns | 0.66 |
-|  | 20 in radix 36 | 80.8 ns | 120 ns | 0.67 |
-|  | 100 in radix 36 | 276 ns | 355 ns | 0.78 |
+Writing takes 0.18 to 0.74 of the fastest reference's time and reading 0.073 to 1.00, at par only for 100 hexadecimal digits (1.00).
 
 ### Exponentials, logarithms and powers
 
-Against `mpfr_exp`, `mpfr_exp2`, `mpfr_exp10`, `mpfr_expm1`, `mpfr_log`, `mpfr_log2`, `mpfr_log10`, `mpfr_log1p` and `mpfr_pow`, and Arb's `arb_exp` and the others at the precision and the guard bits of Ziv's first attempt:
+Against `mpfr_exp`, `mpfr_exp2`, `mpfr_exp10`, `mpfr_expm1`, `mpfr_log`, `mpfr_log2`, `mpfr_log10`, `mpfr_log1p` and `mpfr_pow` into an existing variable, malachite-float, astro-float and dashu-float; the logarithms of arguments in `[1/4, 4)`, the powers `x^y` of `x` in `[1/4, 4)` and `y` of magnitudes in `[1/4, 4)`:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR | Arb |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `exp` | 24 | 331 ns | 354 ns | 0.93 | 67.4 ns |
-|  | 53 | 334 ns | 508 ns | 0.66 | 84.4 ns |
-|  | 64 | 339 ns | 545 ns | 0.62 | 89.4 ns |
-|  | 113 | 451 ns | 752 ns | 0.60 | 119 ns |
-|  | 128 | 447 ns | 789 ns | 0.57 | 120 ns |
-|  | 256 | 828 ns | 1.21 µs | 0.68 | 223 ns |
-|  | 1,000 | 3.5 µs | 5.18 µs | 0.68 | 1.86 µs |
-|  | 10,000 | 245 µs | 278 µs | 0.88 | 63.4 µs |
-|  | 100,000 | 5.52 ms | 8.32 ms | 0.66 | 3.49 ms |
-|  | 1,000,000 | 94.9 ms | 187 ms | 0.51 | 75.3 ms |
-| `exp2` | 24 | 391 ns | 494 ns | 0.79 | 128 ns |
-|  | 53 | 397 ns | 647 ns | 0.61 | 157 ns |
-|  | 64 | 402 ns | 705 ns | 0.57 | 155 ns |
-|  | 113 | 521 ns | 881 ns | 0.59 | 202 ns |
-|  | 128 | 530 ns | 944 ns | 0.56 | 207 ns |
-|  | 256 | 886 ns | 1.36 µs | 0.65 | 312 ns |
-|  | 1,000 | 3.46 µs | 5.36 µs | 0.65 | 2.03 µs |
-|  | 10,000 | 248 µs | 278 µs | 0.89 | 67.4 µs |
-|  | 100,000 | 5.59 ms | 8.55 ms | 0.65 | 3.58 ms |
-| `exp10` | 24 | 436 ns | 842 ns | 0.52 | 146 ns |
-|  | 53 | 441 ns | 1.03 µs | 0.43 | 179 ns |
-|  | 64 | 442 ns | 1.19 µs | 0.37 | 185 ns |
-|  | 113 | 562 ns | 1.81 µs | 0.31 | 223 ns |
-|  | 128 | 560 ns | 2.11 µs | 0.27 | 227 ns |
-|  | 256 | 973 ns | 3.33 µs | 0.29 | 337 ns |
-|  | 1,000 | 3.57 µs | 11.8 µs | 0.30 | 2.07 µs |
-|  | 10,000 | 249 µs | 448 µs | 0.56 | 67 µs |
-|  | 100,000 | 5.57 ms | 15.1 ms | 0.37 | 3.59 ms |
-| `exp_m1` | 24 | 420 ns | 467 ns | 0.90 | 81.9 ns |
-|  | 53 | 424 ns | 610 ns | 0.69 | 108 ns |
-|  | 64 | 427 ns | 652 ns | 0.66 | 109 ns |
-|  | 113 | 548 ns | 828 ns | 0.66 | 144 ns |
-|  | 128 | 679 ns | 886 ns | 0.77 | 149 ns |
-|  | 256 | 1.07 µs | 1.32 µs | 0.81 | 252 ns |
-|  | 1,000 | 3.53 µs | 5.27 µs | 0.67 | 1.89 µs |
-|  | 10,000 | 245 µs | 278 µs | 0.88 | 63.2 µs |
-|  | 100,000 | 5.55 ms | 8.39 ms | 0.66 | 3.49 ms |
-| `ln` | 24 | 178 ns | 375 ns | 0.47 | 61.3 ns |
-|  | 53 | 186 ns | 431 ns | 0.43 | 103 ns |
-|  | 64 | 187 ns | 469 ns | 0.40 | 107 ns |
-|  | 113 | 269 ns | 1.15 µs | 0.23 | 139 ns |
-|  | 128 | 280 ns | 1.18 µs | 0.24 | 141 ns |
-|  | 256 | 654 ns | 2.15 µs | 0.30 | 214 ns |
-|  | 1,000 | 5.57 µs | 6.96 µs | 0.80 | 1.56 µs |
-|  | 10,000 | 168 µs | 162 µs | 1.04 | 78.5 µs |
-|  | 100,000 | 4.7 ms | 7.08 ms | 0.66 | 3.95 ms |
-|  | 1,000,000 | 70.5 ms | 166 ms | 0.42 | 87 ms |
-| `log2` | 24 | 190 ns | 458 ns | 0.41 | 101 ns |
-|  | 53 | 206 ns | 581 ns | 0.35 | 156 ns |
-|  | 64 | 208 ns | 586 ns | 0.36 | 161 ns |
-|  | 113 | 296 ns | 1.32 µs | 0.22 | 210 ns |
-|  | 128 | 305 ns | 1.3 µs | 0.24 | 212 ns |
-|  | 256 | 681 ns | 2.28 µs | 0.30 | 311 ns |
-|  | 1,000 | 5.79 µs | 7.14 µs | 0.81 | 1.79 µs |
-|  | 10,000 | 173 µs | 167 µs | 1.04 | 84 µs |
-|  | 100,000 | 4.83 ms | 6.83 ms | 0.71 | 4.18 ms |
-| `log10` | 24 | 269 ns | 944 ns | 0.29 | 113 ns |
-|  | 53 | 282 ns | 948 ns | 0.30 | 165 ns |
-|  | 64 | 285 ns | 1.07 µs | 0.27 | 166 ns |
-|  | 113 | 382 ns | 2.21 µs | 0.17 | 215 ns |
-|  | 128 | 391 ns | 2.48 µs | 0.16 | 218 ns |
-|  | 256 | 799 ns | 4.43 µs | 0.18 | 320 ns |
-|  | 1,000 | 6.02 µs | 13.8 µs | 0.44 | 1.79 µs |
-|  | 10,000 | 174 µs | 326 µs | 0.53 | 84 µs |
-|  | 100,000 | 4.85 ms | 13.2 ms | 0.37 | 4.16 ms |
-| `ln_1p` | 24 | 238 ns | 374 ns | 0.64 | 84.1 ns |
-|  | 53 | 239 ns | 410 ns | 0.58 | 121 ns |
-|  | 64 | 239 ns | 430 ns | 0.55 | 126 ns |
-|  | 113 | 322 ns | 1.11 µs | 0.29 | 159 ns |
-|  | 128 | 327 ns | 1.12 µs | 0.29 | 159 ns |
-|  | 256 | 694 ns | 2.04 µs | 0.34 | 229 ns |
-|  | 1,000 | 6.16 µs | 6.88 µs | 0.89 | 1.57 µs |
-|  | 10,000 | 169 µs | 164 µs | 1.03 | 78.2 µs |
-|  | 100,000 | 4.76 ms | 6.49 ms | 0.73 | 3.99 ms |
-| `pow` | 24 | 624 ns | 918 ns | 0.68 | 177 ns |
-|  | 53 | 658 ns | 1.1 µs | 0.60 | 266 ns |
-|  | 64 | 672 ns | 1.28 µs | 0.52 | 276 ns |
-|  | 113 | 870 ns | 2.08 µs | 0.42 | 339 ns |
-|  | 128 | 887 ns | 2.42 µs | 0.37 | 344 ns |
-|  | 256 | 1.66 µs | 3.68 µs | 0.45 | 525 ns |
-|  | 1,000 | 9.06 µs | 12.8 µs | 0.71 | 3.59 µs |
-|  | 10,000 | 415 µs | 443 µs | 0.94 | 146 µs |
-|  | 100,000 | 10.3 ms | 15.3 ms | 0.68 | 7.61 ms |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `exp` | 53 | 352 ns | MPFR | 550 ns | 0.64 | 94.1 ns |
+|  | 113 | 453 ns | MPFR | 780 ns | 0.58 | 125 ns |
+|  | 1,000 | 3.41 µs | MPFR | 5.38 µs | 0.63 | 1.96 µs |
+|  | 10,000 | 252 µs | MPFR | 297 µs | 0.85 | 65.4 µs |
+|  | 100,000 | 5.65 ms | MPFR | 8.67 ms | 0.65 | 3.67 ms |
+|  | 1,000,000 | 95.9 ms | malachite-float | 167 ms | 0.57 | 79.1 ms |
+| `exp2` | 53 | 393 ns | MPFR | 690 ns | 0.57 | 183 ns |
+|  | 113 | 556 ns | MPFR | 954 ns | 0.58 | 233 ns |
+|  | 1,000 | 3.57 µs | MPFR | 5.66 µs | 0.63 | 2.14 µs |
+|  | 10,000 | 253 µs | MPFR | 293 µs | 0.86 | 70.1 µs |
+|  | 100,000 | 5.76 ms | MPFR | 8.85 ms | 0.65 | 3.90 ms |
+| `exp10` | 53 | 441 ns | MPFR | 1.08 µs | 0.41 | 190 ns |
+|  | 113 | 578 ns | MPFR | 1.88 µs | 0.31 | 237 ns |
+|  | 1,000 | 3.71 µs | MPFR | 13.2 µs | 0.28 | 2.14 µs |
+|  | 10,000 | 253 µs | MPFR | 458 µs | 0.55 | 70.7 µs |
+|  | 100,000 | 5.68 ms | MPFR | 15.5 ms | 0.37 | 3.88 ms |
+| `exp_m1` | 53 | 447 ns | MPFR | 653 ns | 0.69 | 116 ns |
+|  | 113 | 603 ns | MPFR | 890 ns | 0.68 | 153 ns |
+|  | 1,000 | 3.62 µs | MPFR | 5.54 µs | 0.65 | 1.96 µs |
+|  | 10,000 | 252 µs | MPFR | 291 µs | 0.87 | 66.2 µs |
+|  | 100,000 | 5.65 ms | MPFR | 8.74 ms | 0.65 | 3.83 ms |
+| `ln` | 53 | 207 ns | MPFR | 390 ns | 0.53 | 114 ns |
+|  | 113 | 311 ns | MPFR | 1.15 µs | 0.27 | 149 ns |
+|  | 1,000 | 5.94 µs | MPFR | 7.35 µs | 0.81 | 1.69 µs |
+|  | 10,000 | 160 µs | MPFR | 168 µs | 0.95 | 83.8 µs |
+|  | 100,000 | 4.91 ms | MPFR | 6.75 ms | 0.73 | 4.22 ms |
+|  | 1,000,000 | 72.5 ms | MPFR | 170 ms | 0.43 | 94.3 ms |
+| `ln_1p` | 53 | 272 ns | MPFR | 439 ns | 0.62 | 135 ns |
+|  | 113 | 378 ns | MPFR | 1.21 µs | 0.31 | 175 ns |
+|  | 1,000 | 6.12 µs | MPFR | 7.15 µs | 0.86 | 1.69 µs |
+|  | 10,000 | 160 µs | MPFR | 167 µs | 0.96 | 81.6 µs |
+|  | 100,000 | 4.92 ms | MPFR | 6.83 ms | 0.72 | 4.31 ms |
+| `log2` | 53 | 225 ns | MPFR | 480 ns | 0.47 | 170 ns |
+|  | 113 | 328 ns | MPFR | 1.21 µs | 0.27 | 221 ns |
+|  | 1,000 | 6.38 µs | MPFR | 7.48 µs | 0.85 | 1.94 µs |
+|  | 10,000 | 172 µs | MPFR | 175 µs | 0.98 | 91.0 µs |
+|  | 100,000 | 5.03 ms | MPFR | 7.03 ms | 0.72 | 4.41 ms |
+| `log10` | 53 | 278 ns | MPFR | 787 ns | 0.35 | 174 ns |
+|  | 113 | 383 ns | MPFR | 2.16 µs | 0.18 | 223 ns |
+|  | 1,000 | 6.32 µs | MPFR | 14.1 µs | 0.45 | 1.92 µs |
+|  | 10,000 | 168 µs | MPFR | 339 µs | 0.50 | 89.2 µs |
+|  | 100,000 | 5.03 ms | MPFR | 13.5 ms | 0.37 | 4.54 ms |
+| `pow` | 53 | 693 ns | MPFR | 1.06 µs | 0.65 | 281 ns |
+|  | 113 | 948 ns | MPFR | 2.03 µs | 0.47 | 347 ns |
+|  | 1,000 | 9.74 µs | MPFR | 12.9 µs | 0.76 | 3.73 µs |
+|  | 10,000 | 414 µs | MPFR | 473 µs | 0.88 | 150 µs |
+|  | 100,000 | 10.6 ms | MPFR | 15.5 ms | 0.69 | 7.95 ms |
 
 ### Hyperbolic functions
 
-Against `mpfr_sinh` and the others, and Arb's:
+Against `mpfr_sinh` and the others; `acosh` of arguments in `[1, 8)` and `atanh` of magnitudes in `[1/16, 1)`:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR | Arb |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `sinh` | 24 | 484 ns | 530 ns | 0.91 | 150 ns |
-|  | 53 | 486 ns | 604 ns | 0.80 | 191 ns |
-|  | 64 | 613 ns | 727 ns | 0.84 | 190 ns |
-|  | 113 | 616 ns | 843 ns | 0.73 | 251 ns |
-|  | 128 | 744 ns | 918 ns | 0.81 | 259 ns |
-|  | 256 | 1.12 µs | 1.36 µs | 0.82 | 383 ns |
-|  | 1,000 | 3.78 µs | 5.54 µs | 0.68 | 2.17 µs |
-|  | 10,000 | 252 µs | 282 µs | 0.89 | 69.5 µs |
-|  | 100,000 | 5.63 ms | 8.58 ms | 0.66 | 3.68 ms |
-| `cosh` | 24 | 488 ns | 544 ns | 0.90 | 136 ns |
-|  | 53 | 490 ns | 653 ns | 0.75 | 169 ns |
-|  | 64 | 617 ns | 711 ns | 0.87 | 171 ns |
-|  | 113 | 620 ns | 874 ns | 0.71 | 230 ns |
-|  | 128 | 744 ns | 902 ns | 0.82 | 235 ns |
-|  | 256 | 1.12 µs | 1.36 µs | 0.82 | 357 ns |
-|  | 1,000 | 3.75 µs | 5.48 µs | 0.68 | 2.13 µs |
-|  | 10,000 | 252 µs | 286 µs | 0.88 | 69.6 µs |
-|  | 100,000 | 5.64 ms | 8.59 ms | 0.66 | 3.67 ms |
-| `tanh` | 24 | 500 ns | 544 ns | 0.92 | 162 ns |
-|  | 53 | 496 ns | 694 ns | 0.71 | 200 ns |
-|  | 64 | 624 ns | 694 ns | 0.90 | 199 ns |
-|  | 113 | 634 ns | 885 ns | 0.72 | 259 ns |
-|  | 128 | 752 ns | 954 ns | 0.79 | 263 ns |
-|  | 256 | 1.14 µs | 1.42 µs | 0.80 | 407 ns |
-|  | 1,000 | 3.98 µs | 5.6 µs | 0.71 | 2.23 µs |
-|  | 10,000 | 252 µs | 283 µs | 0.89 | 69 µs |
-|  | 100,000 | 5.66 ms | 8.63 ms | 0.66 | 3.73 ms |
-| `asinh` | 24 | 392 ns | 896 ns | 0.44 | 193 ns |
-|  | 53 | 423 ns | 746 ns | 0.57 | 278 ns |
-|  | 64 | 422 ns | 1.05 µs | 0.40 | 278 ns |
-|  | 113 | 674 ns | 1.38 µs | 0.49 | 345 ns |
-|  | 128 | 674 ns | 1.53 µs | 0.44 | 348 ns |
-|  | 256 | 1.29 µs | 2.64 µs | 0.49 | 465 ns |
-|  | 1,000 | 6.95 µs | 7.33 µs | 0.95 | 2.16 µs |
-|  | 10,000 | 180 µs | 168 µs | 1.07 | 85 µs |
-|  | 100,000 | 4.98 ms | 6.72 ms | 0.74 | 4.2 ms |
-| `acosh` | 24 | 359 ns | 587 ns | 0.61 | 148 ns |
-|  | 53 | 394 ns | 673 ns | 0.59 | 235 ns |
-|  | 64 | 396 ns | 745 ns | 0.53 | 240 ns |
-|  | 113 | 587 ns | 1.59 µs | 0.37 | 308 ns |
-|  | 128 | 617 ns | 1.53 µs | 0.40 | 310 ns |
-|  | 256 | 1.13 µs | 2.53 µs | 0.45 | 427 ns |
-|  | 1,000 | 6.35 µs | 8.18 µs | 0.78 | 2.11 µs |
-|  | 10,000 | 175 µs | 168 µs | 1.04 | 84.7 µs |
-|  | 100,000 | 4.91 ms | 6.72 ms | 0.73 | 4.18 ms |
-| `atanh` | 24 | 353 ns | 1.11 µs | 0.32 | 159 ns |
-|  | 53 | 362 ns | 1.03 µs | 0.35 | 197 ns |
-|  | 64 | 364 ns | 1.14 µs | 0.32 | 207 ns |
-|  | 113 | 520 ns | 1.57 µs | 0.33 | 246 ns |
-|  | 128 | 535 ns | 1.71 µs | 0.31 | 259 ns |
-|  | 256 | 1.03 µs | 2.61 µs | 0.39 | 370 ns |
-|  | 1,000 | 6.34 µs | 7.54 µs | 0.84 | 1.98 µs |
-|  | 10,000 | 174 µs | 169 µs | 1.03 | 84.5 µs |
-|  | 100,000 | 4.83 ms | 6.71 ms | 0.72 | 4.21 ms |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `sinh` | 53 | 529 ns | MPFR | 749 ns | 0.71 | 193 ns |
+|  | 113 | 651 ns | MPFR | 926 ns | 0.70 | 252 ns |
+|  | 1,000 | 3.81 µs | MPFR | 5.70 µs | 0.67 | 2.23 µs |
+|  | 10,000 | 254 µs | MPFR | 300 µs | 0.85 | 72.4 µs |
+|  | 100,000 | 5.71 ms | MPFR | 9.00 ms | 0.64 | 3.88 ms |
+| `cosh` | 53 | 532 ns | MPFR | 624 ns | 0.85 | 183 ns |
+|  | 113 | 649 ns | MPFR | 902 ns | 0.72 | 243 ns |
+|  | 1,000 | 3.82 µs | MPFR | 5.68 µs | 0.67 | 2.21 µs |
+|  | 10,000 | 254 µs | MPFR | 302 µs | 0.84 | 75.1 µs |
+|  | 100,000 | 5.72 ms | MPFR | 8.81 ms | 0.65 | 3.84 ms |
+| `tanh` | 53 | 531 ns | MPFR | 676 ns | 0.79 | 209 ns |
+|  | 113 | 662 ns | MPFR | 882 ns | 0.75 | 272 ns |
+|  | 1,000 | 3.87 µs | MPFR | 5.75 µs | 0.67 | 2.28 µs |
+|  | 10,000 | 254 µs | MPFR | 297 µs | 0.85 | 71.7 µs |
+|  | 100,000 | 5.69 ms | MPFR | 9.02 ms | 0.63 | 3.83 ms |
+| `sinh_cosh` | 53 | 589 ns | MPFR | 872 ns | 0.68 | 221 ns |
+|  | 113 | 944 ns | MPFR | 947 ns | 1.00 | 284 ns |
+|  | 1,000 | 4.21 µs | MPFR | 5.61 µs | 0.75 | 2.27 µs |
+|  | 10,000 | 254 µs | MPFR | 286 µs | 0.89 | 71.2 µs |
+|  | 100,000 | 5.89 ms | MPFR | 9.16 ms | 0.64 | 3.85 ms |
+| `asinh` | 53 | 379 ns | MPFR | 654 ns | 0.58 | 285 ns |
+|  | 113 | 699 ns | MPFR | 1.46 µs | 0.48 | 351 ns |
+|  | 1,000 | 6.74 µs | MPFR | 7.47 µs | 0.90 | 2.20 µs |
+|  | 10,000 | 171 µs | MPFR | 170 µs | 1.00 | 86.6 µs |
+|  | 100,000 | 5.15 ms | MPFR | 6.84 ms | 0.75 | 4.45 ms |
+| `acosh` | 53 | 363 ns | MPFR | 549 ns | 0.66 | 242 ns |
+|  | 113 | 643 ns | MPFR | 1.32 µs | 0.49 | 316 ns |
+|  | 1,000 | 6.80 µs | MPFR | 7.50 µs | 0.91 | 2.17 µs |
+|  | 10,000 | 171 µs | MPFR | 171 µs | 1.00 | 88.1 µs |
+|  | 100,000 | 5.02 ms | MPFR | 6.86 ms | 0.73 | 4.45 ms |
+| `atanh` | 53 | 332 ns | MPFR | 984 ns | 0.34 | 200 ns |
+|  | 113 | 548 ns | MPFR | 1.49 µs | 0.37 | 256 ns |
+|  | 1,000 | 6.56 µs | MPFR | 7.72 µs | 0.85 | 1.97 µs |
+|  | 10,000 | 169 µs | MPFR | 171 µs | 0.99 | 87.5 µs |
+|  | 100,000 | 4.95 ms | MPFR | 6.84 ms | 0.72 | 4.37 ms |
 
 ### Circular functions
 
-Against `mpfr_sin` and the others, and Arb's; arguments in `[1/4, 4)` for the sine, the cosine, the tangent and their reciprocals, `[1/16, 1)` for `asin` and `acos`, `[1/8, 4)` for `atan` and `atan2`:
+Against `mpfr_sin` and the others; arguments of magnitudes in `[1/4, 4)` for the sine, the cosine, the tangent and their reciprocals, `[1/8, 4)` for `atan` and `atan2`, `[1/16, 1)` for `asin` and `acos`:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR | Arb |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `sin` | 24 | 214 ns | 458 ns | 0.47 | 69.6 ns |
-|  | 53 | 213 ns | 564 ns | 0.38 | 86.6 ns |
-|  | 64 | 211 ns | 573 ns | 0.37 | 101 ns |
-|  | 113 | 283 ns | 740 ns | 0.38 | 114 ns |
-|  | 128 | 280 ns | 757 ns | 0.37 | 134 ns |
-|  | 256 | 520 ns | 1.17 µs | 0.44 | 266 ns |
-|  | 1,000 | 3.82 µs | 4.5 µs | 0.85 | 1.9 µs |
-|  | 10,000 | 185 µs | 280 µs | 0.66 | 85.6 µs |
-|  | 100,000 | 6.96 ms | 13.8 ms | 0.51 | 4.87 ms |
-|  | 1,000,000 | 243 ms | 291 ms | 0.84 | 139 ms |
-| `cos` | 24 | 213 ns | 318 ns | 0.67 | 68.5 ns |
-|  | 53 | 213 ns | 372 ns | 0.57 | 84.9 ns |
-|  | 64 | 212 ns | 387 ns | 0.55 | 97.9 ns |
-|  | 113 | 285 ns | 494 ns | 0.58 | 112 ns |
-|  | 128 | 283 ns | 528 ns | 0.54 | 132 ns |
-|  | 256 | 526 ns | 874 ns | 0.60 | 258 ns |
-|  | 1,000 | 3.68 µs | 3.99 µs | 0.92 | 1.89 µs |
-|  | 10,000 | 181 µs | 276 µs | 0.66 | 84.9 µs |
-|  | 100,000 | 7.03 ms | 13.8 ms | 0.51 | 4.86 ms |
-| `tan` | 24 | 357 ns | 528 ns | 0.68 | 125 ns |
-|  | 53 | 359 ns | 640 ns | 0.56 | 148 ns |
-|  | 64 | 353 ns | 660 ns | 0.53 | 155 ns |
-|  | 113 | 457 ns | 919 ns | 0.50 | 180 ns |
-|  | 128 | 449 ns | 964 ns | 0.47 | 223 ns |
-|  | 256 | 719 ns | 1.38 µs | 0.52 | 376 ns |
-|  | 1,000 | 4.38 µs | 5.35 µs | 0.82 | 2.25 µs |
-|  | 10,000 | 193 µs | 290 µs | 0.66 | 91.6 µs |
-|  | 100,000 | 7.2 ms | 14.1 ms | 0.51 | 5.12 ms |
-| `sin_cos` | 24 | 282 ns | 468 ns | 0.60 | 83 ns |
-|  | 53 | 281 ns | 572 ns | 0.49 | 98.8 ns |
-|  | 64 | 280 ns | 588 ns | 0.48 | 110 ns |
-|  | 113 | 362 ns | 754 ns | 0.48 | 126 ns |
-|  | 128 | 354 ns | 785 ns | 0.45 | 146 ns |
-|  | 256 | 615 ns | 1.21 µs | 0.51 | 286 ns |
-|  | 1,000 | 4.12 µs | 4.59 µs | 0.90 | 2.02 µs |
-|  | 10,000 | 188 µs | 279 µs | 0.67 | 85.4 µs |
-|  | 100,000 | 7.08 ms | 13.7 ms | 0.52 | 4.85 ms |
-| `sec` | 53 | 318 ns | 466 ns | 0.68 | 140 ns |
-|  | 1,000 | 4 µs | 4.29 µs | 0.93 | 2.11 µs |
-| `csc` | 53 | 318 ns | 642 ns | 0.50 | 140 ns |
-|  | 1,000 | 4.15 µs | 5.23 µs | 0.79 | 2.11 µs |
-| `cot` | 53 | 361 ns | 732 ns | 0.49 | 148 ns |
-|  | 1,000 | 4.33 µs | 5.65 µs | 0.77 | 2.23 µs |
-| `atan` | 24 | 520 ns | 710 ns | 0.73 | 57.2 ns |
-|  | 53 | 512 ns | 1.01 µs | 0.51 | 76.2 ns |
-|  | 64 | 511 ns | 1.01 µs | 0.51 | 101 ns |
-|  | 113 | 939 ns | 1.59 µs | 0.59 | 110 ns |
-|  | 128 | 933 ns | 1.87 µs | 0.50 | 137 ns |
-|  | 256 | 1.65 µs | 4.98 µs | 0.33 | 232 ns |
-|  | 1,000 | 8.14 µs | 15.4 µs | 0.53 | 1.9 µs |
-|  | 10,000 | 278 µs | 360 µs | 0.77 | 110 µs |
-|  | 100,000 | 11 ms | 14 ms | 0.79 | 5.65 ms |
-|  | 1,000,000 | 241 ms | 335 ms | 0.72 | 154 ms |
-| `asin` | 24 | 701 ns | 795 ns | 0.88 | 224 ns |
-|  | 53 | 733 ns | 1.15 µs | 0.64 | 248 ns |
-|  | 64 | 737 ns | 1.14 µs | 0.64 | 305 ns |
-|  | 113 | 1.18 µs | 1.98 µs | 0.60 | 332 ns |
-|  | 128 | 1.18 µs | 2.09 µs | 0.57 | 390 ns |
-|  | 256 | 1.98 µs | 5.19 µs | 0.38 | 564 ns |
-|  | 1,000 | 8.7 µs | 18.3 µs | 0.48 | 2.58 µs |
-|  | 10,000 | 290 µs | 373 µs | 0.78 | 124 µs |
-|  | 100,000 | 11.2 ms | 14 ms | 0.80 | 6.14 ms |
-| `acos` | 24 | 795 ns | 848 ns | 0.94 | 246 ns |
-|  | 53 | 806 ns | 1.18 µs | 0.68 | 272 ns |
-|  | 64 | 801 ns | 1.16 µs | 0.69 | 328 ns |
-|  | 113 | 1.27 µs | 2.12 µs | 0.60 | 368 ns |
-|  | 128 | 1.25 µs | 2.12 µs | 0.59 | 422 ns |
-|  | 256 | 2.04 µs | 5.29 µs | 0.39 | 603 ns |
-|  | 1,000 | 8.87 µs | 18.5 µs | 0.48 | 2.63 µs |
-|  | 10,000 | 288 µs | 373 µs | 0.77 | 127 µs |
-|  | 100,000 | 11.3 ms | 13.9 ms | 0.81 | 6.15 ms |
-| `atan2` | 24 | 629 ns | 845 ns | 0.74 | 118 ns |
-|  | 53 | 616 ns | 1.13 µs | 0.54 | 139 ns |
-|  | 64 | 611 ns | 1.17 µs | 0.52 | 161 ns |
-|  | 113 | 1.06 µs | 1.96 µs | 0.54 | 189 ns |
-|  | 128 | 1.06 µs | 2 µs | 0.53 | 214 ns |
-|  | 256 | 1.81 µs | 5.09 µs | 0.36 | 343 ns |
-|  | 1,000 | 8.4 µs | 18.2 µs | 0.46 | 2.18 µs |
-|  | 10,000 | 283 µs | 369 µs | 0.77 | 117 µs |
-|  | 100,000 | 11.1 ms | 14.1 ms | 0.79 | 5.98 ms |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `sin` | 53 | 213 ns | MPFR | 571 ns | 0.37 | 110 ns |
+|  | 113 | 278 ns | MPFR | 716 ns | 0.39 | 140 ns |
+|  | 1,000 | 3.84 µs | MPFR | 4.73 µs | 0.81 | 2.16 µs |
+|  | 10,000 | 184 µs | MPFR | 282 µs | 0.65 | 91.2 µs |
+|  | 100,000 | 7.27 ms | MPFR | 13.9 ms | 0.52 | 5.05 ms |
+|  | 1,000,000 | 243 ms | malachite-float | 248 ms | 0.98 | 142 ms |
+| `cos` | 53 | 209 ns | MPFR | 367 ns | 0.57 | 106 ns |
+|  | 113 | 264 ns | MPFR | 496 ns | 0.53 | 134 ns |
+|  | 1,000 | 3.69 µs | MPFR | 4.02 µs | 0.92 | 2.14 µs |
+|  | 10,000 | 184 µs | MPFR | 276 µs | 0.67 | 88.3 µs |
+|  | 100,000 | 7.19 ms | MPFR | 13.7 ms | 0.53 | 5.11 ms |
+|  | 1,000,000 | 243 ms | malachite-float | 251 ms | 0.97 | 142 ms |
+| `tan` | 53 | 354 ns | MPFR | 652 ns | 0.54 | 167 ns |
+|  | 113 | 450 ns | MPFR | 909 ns | 0.49 | 226 ns |
+|  | 1,000 | 4.43 µs | MPFR | 5.38 µs | 0.82 | 2.51 µs |
+|  | 10,000 | 196 µs | MPFR | 285 µs | 0.69 | 97.2 µs |
+|  | 100,000 | 7.29 ms | MPFR | 14.1 ms | 0.52 | 5.20 ms |
+| `sin_cos` | 53 | 275 ns | MPFR | 558 ns | 0.49 | 124 ns |
+|  | 113 | 336 ns | MPFR | 718 ns | 0.47 | 153 ns |
+|  | 1,000 | 4.14 µs | MPFR | 4.58 µs | 0.90 | 2.26 µs |
+|  | 10,000 | 187 µs | MPFR | 295 µs | 0.63 | 89.6 µs |
+|  | 100,000 | 7.30 ms | MPFR | 13.7 ms | 0.53 | 5.20 ms |
+| `atan` | 53 | 531 ns | MPFR | 1.05 µs | 0.51 | 103 ns |
+|  | 113 | 954 ns | MPFR | 1.57 µs | 0.61 | 144 ns |
+|  | 1,000 | 8.17 µs | MPFR | 16.2 µs | 0.51 | 1.95 µs |
+|  | 10,000 | 288 µs | MPFR | 383 µs | 0.75 | 120 µs |
+|  | 100,000 | 11.1 ms | MPFR | 14.1 ms | 0.79 | 5.87 ms |
+|  | 1,000,000 | 244 ms | MPFR | 346 ms | 0.71 | 153 ms |
+| `atan2` | 53 | 640 ns | MPFR | 1.11 µs | 0.58 | 174 ns |
+|  | 113 | 1.09 µs | MPFR | 1.94 µs | 0.56 | 229 ns |
+|  | 1,000 | 8.45 µs | MPFR | 18.7 µs | 0.45 | 2.30 µs |
+|  | 10,000 | 294 µs | MPFR | 402 µs | 0.73 | 123 µs |
+|  | 100,000 | 11.3 ms | MPFR | 14.4 ms | 0.78 | 6.16 ms |
+| `asin` | 53 | 765 ns | MPFR | 1.12 µs | 0.68 | 335 ns |
+|  | 113 | 1.19 µs | MPFR | 1.93 µs | 0.62 | 412 ns |
+|  | 1,000 | 8.83 µs | MPFR | 18.4 µs | 0.48 | 2.74 µs |
+|  | 10,000 | 296 µs | MPFR | 397 µs | 0.74 | 137 µs |
+|  | 100,000 | 11.3 ms | MPFR | 14.0 ms | 0.81 | 5.96 ms |
+| `acos` | 53 | 834 ns | MPFR | 1.15 µs | 0.72 | 365 ns |
+|  | 113 | 1.29 µs | MPFR | 2.04 µs | 0.63 | 448 ns |
+|  | 1,000 | 8.99 µs | MPFR | 18.7 µs | 0.48 | 2.78 µs |
+|  | 10,000 | 295 µs | MPFR | 399 µs | 0.74 | 137 µs |
+|  | 100,000 | 11.3 ms | MPFR | 14.0 ms | 0.80 | 5.94 ms |
 
-Arguments `m·2^k` of a large exponent, the reduction taking π to `k` bits and more. For `k = 10^6` Arb returns `[−1, 1]` at once, which is not a result:
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `sec` | 24 | 330 ns | malachite-float | 300 ns | 1.10 | 125 ns |
+|  | 53 | 324 ns | MPFR | 412 ns | 0.79 | 156 ns |
+|  | 1,000 | 4.03 µs | MPFR | 4.30 µs | 0.94 | 2.35 µs |
+| `csc` | 24 | 324 ns | MPFR | 535 ns | 0.60 | 122 ns |
+|  | 53 | 317 ns | MPFR | 688 ns | 0.46 | 156 ns |
+|  | 1,000 | 4.28 µs | MPFR | 5.32 µs | 0.81 | 2.35 µs |
+| `cot` | 24 | 378 ns | malachite-float | 601 ns | 0.63 | 131 ns |
+|  | 53 | 361 ns | MPFR | 769 ns | 0.47 | 167 ns |
+|  | 1,000 | 4.48 µs | MPFR | 5.74 µs | 0.78 | 2.54 µs |
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR | Arb |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `sin`, `m·2^100` | 53 | 279 ns | 802 ns | 0.35 | 107 ns |
-|  | 256 | 603 ns | 1.45 µs | 0.42 | 286 ns |
-| `sin`, `m·2^10000` | 53 | 7.15 µs | 9.06 µs | 0.79 | 9.79 µs |
-|  | 256 | 7.63 µs | 10.3 µs | 0.74 | 9.79 µs |
-| `sin`, `m·2^1000000` | 53 | 1.39 ms | 3.88 ms | 0.36 | 9 ns |
-|  | 256 | 1.38 ms | 3.95 ms | 0.35 | 9.2 ns |
-| `cos`, `m·2^100` | 53 | 281 ns | 654 ns | 0.43 | 107 ns |
-|  | 256 | 603 ns | 1.15 µs | 0.52 | 283 ns |
-| `cos`, `m·2^10000` | 53 | 7.14 µs | 9.2 µs | 0.78 | 9.68 µs |
-|  | 256 | 7.62 µs | 9.99 µs | 0.76 | 9.81 µs |
-| `cos`, `m·2^1000000` | 53 | 1.38 ms | 4.05 ms | 0.34 | 9.2 ns |
-|  | 256 | 1.38 ms | 3.94 ms | 0.35 | 8.8 ns |
-| `tan`, `m·2^100` | 53 | 427 ns | 873 ns | 0.49 | 167 ns |
-|  | 256 | 800 ns | 1.64 µs | 0.49 | 408 ns |
-| `tan`, `m·2^10000` | 53 | 7.29 µs | 9.27 µs | 0.79 | 9.27 µs |
-|  | 256 | 7.83 µs | 10.5 µs | 0.74 | 9.78 µs |
-| `tan`, `m·2^1000000` | 53 | 1.38 ms | 3.94 ms | 0.35 | 12.5 ns |
-|  | 256 | 1.38 ms | 3.95 ms | 0.35 | 12.5 ns |
+Arguments `m·2^k` of a large exponent, at 53 bits, the reduction taking π to `k` bits and more. For `k = 10^6` Arb returns `[−1, 1]` at once, which is not a result:
+
+| Operation | Argument | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `sin` | `m·2^100` | 287 ns | MPFR | 795 ns | 0.36 | 131 ns |
+|  | `m·2^10000` | 7.11 µs | MPFR | 10.0 µs | 0.71 | 9.17 µs |
+|  | `m·2^1000000` | 1.37 ms | MPFR | 3.91 ms | 0.35 | 8.09 ns |
+| `cos` | `m·2^100` | 283 ns | MPFR | 605 ns | 0.47 | 133 ns |
+|  | `m·2^10000` | 7.08 µs | MPFR | 9.25 µs | 0.77 | 9.13 µs |
+|  | `m·2^1000000` | 1.37 ms | MPFR | 3.91 ms | 0.35 | 7.81 ns |
+| `tan` | `m·2^100` | 441 ns | MPFR | 850 ns | 0.52 | 189 ns |
+|  | `m·2^10000` | 7.25 µs | MPFR | 8.92 µs | 0.81 | 9.28 µs |
+|  | `m·2^1000000` | 1.38 ms | MPFR | 3.94 ms | 0.35 | 11.3 ns |
+
+The elementary functions take 0.15 to 1.10 of the fastest reference's time, MPFR's at almost every size: `sec` at 24 bits is the one behind (1.10, against malachite-float), and `log2`, `asinh`, `acosh` and `atanh` at `10^4` bits are at par (0.98 to 1.00). Arb, which does less, takes less time at every size but for `ln` at `10^6` bits and the reduction of `m·2^(10^4)`.
 
 ### Constants
 
-The first call in a fresh process, when no library has the constant yet: up to 16,384 bits `a` cuts it from its table, beyond it sums the series; MPFR computes from the first bit (`e` as `mpfr_exp` of 1 and `ln 10` as `mpfr_log` of 10, as it has neither constant), and Arb has tables of a few thousand bits for some constants. At 10⁸ bits one call each; MPFR's γ and `G` would take hours there:
+The first call in a fresh process, each sample a process of its own, when no library has the constant yet: up to 16,384 bits `a` cuts it from its table, beyond it sums the series; MPFR computes from the first bit (`e` as `mpfr_exp` of 1 and `ln 10` as `mpfr_log` of 10, as it has neither constant):
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR | Arb |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `pi` | 53 | 2.58 µs | 5.33 µs | 0.48 | 7.54 µs |
-|  | 64 | 2.25 µs | 4 µs | 0.56 | 6.92 µs |
-|  | 113 | 2.29 µs | 8.08 µs | 0.28 | 6.62 µs |
-|  | 256 | 2.25 µs | 10 µs | 0.23 | 11.2 µs |
-|  | 1,000 | 2.25 µs | 13.4 µs | 0.17 | 11.1 µs |
-|  | 10,000 | 2.42 µs | 91.1 µs | 0.03 | 211 µs |
-|  | 100,000 | 1.4 ms | 3.26 ms | 0.43 | 1.77 ms |
-|  | 1,000,000 | 19.7 ms | 85.8 ms | 0.23 | 28.1 ms |
-|  | 10,000,000 | 304 ms | 1.44 s | 0.21 | 449 ms |
-|  | 100,000,000 | 4.44 s | 26.6 s | 0.17 | 6.48 s |
-| `e` | 53 | 2.29 µs | 14.6 µs | 0.16 | 47 µs |
-|  | 64 | 2.25 µs | 14.5 µs | 0.16 | 42.4 µs |
-|  | 113 | 2.21 µs | 18.1 µs | 0.12 | 48.4 µs |
-|  | 256 | 2.17 µs | 21.9 µs | 0.10 | 52.2 µs |
-|  | 1,000 | 2.12 µs | 42.5 µs | 0.05 | 65.2 µs |
-|  | 10,000 | 2.38 µs | 560 µs | < 0.01 | 133 µs |
-|  | 100,000 | 805 µs | 2.38 ms | 0.34 | 1 ms |
-|  | 1,000,000 | 7.98 ms | 47.4 ms | 0.17 | 12.5 ms |
-|  | 10,000,000 | 101 ms | 674 ms | 0.15 | 164 ms |
-|  | 100,000,000 | 1.19 s | 11.7 s | 0.10 | 2.02 s |
-| `ln2` | 53 | 1.79 µs | 7.75 µs | 0.23 | 11.1 µs |
-|  | 64 | 1.58 µs | 7.08 µs | 0.22 | 10.5 µs |
-|  | 113 | 1.79 µs | 8.83 µs | 0.20 | 10.4 µs |
-|  | 256 | 1.62 µs | 13.1 µs | 0.12 | 14.8 µs |
-|  | 1,000 | 1.71 µs | 28.9 µs | 0.06 | 14.8 µs |
-|  | 10,000 | 1.79 µs | 270 µs | 0.01 | 264 µs |
-|  | 100,000 | 2.49 ms | 6.16 ms | 0.40 | 3.07 ms |
-|  | 1,000,000 | 39 ms | 139 ms | 0.28 | 55.4 ms |
-|  | 10,000,000 | 619 ms | 2.91 s | 0.21 | 946 ms |
-|  | 100,000,000 | 9.41 s | 50.9 s | 0.18 | 13.8 s |
-| `ln10` | 53 | 1.58 µs | 13.4 µs | 0.12 | 51.1 µs |
-|  | 64 | 1.58 µs | 13 µs | 0.12 | 49.3 µs |
-|  | 113 | 1.62 µs | 17.9 µs | 0.09 | 51 µs |
-|  | 256 | 1.58 µs | 22.6 µs | 0.07 | 54.6 µs |
-|  | 1,000 | 1.62 µs | 47.3 µs | 0.03 | 129 µs |
-|  | 10,000 | 1.79 µs | 510 µs | < 0.01 | 456 µs |
-|  | 100,000 | 3.87 ms | 16.4 ms | 0.24 | 6.87 ms |
-|  | 1,000,000 | 61 ms | 391 ms | 0.16 | 123 ms |
-|  | 10,000,000 | 961 ms | 7.08 s | 0.14 | 1.93 s |
-|  | 100,000,000 | 14.5 s | 124 s | 0.12 | 28.4 s |
-| `euler_gamma` | 53 | 1.75 µs | 28.3 µs | 0.06 | 6.54 µs |
-|  | 64 | 1.67 µs | 35 µs | 0.05 | 6.17 µs |
-|  | 113 | 1.62 µs | 42.9 µs | 0.04 | 6.33 µs |
-|  | 256 | 1.62 µs | 72.3 µs | 0.02 | 11.2 µs |
-|  | 1,000 | 1.62 µs | 238 µs | 0.01 | 11.3 µs |
-|  | 10,000 | 1.79 µs | 4.09 ms | < 0.01 | 2.47 ms |
-|  | 100,000 | 32.7 ms | 102 ms | 0.32 | 47.6 ms |
-|  | 1,000,000 | 511 ms | 2.15 s | 0.24 | 950 ms |
-|  | 10,000,000 | 7.62 s | 42.5 s | 0.18 | 16.4 s |
-|  | 100,000,000 | 120 s | – | – | 244 s |
-| `catalan` | 53 | 1.79 µs | 18.3 µs | 0.10 | 110 µs |
-|  | 64 | 1.71 µs | 19.2 µs | 0.09 | 112 µs |
-|  | 113 | 1.67 µs | 23.2 µs | 0.07 | 116 µs |
-|  | 256 | 1.71 µs | 33.7 µs | 0.05 | 120 µs |
-|  | 1,000 | 1.62 µs | 91.7 µs | 0.02 | 143 µs |
-|  | 10,000 | 1.75 µs | 1.56 ms | < 0.01 | 512 µs |
-|  | 100,000 | 6.47 ms | 43.3 ms | 0.15 | 8.76 ms |
-|  | 1,000,000 | 113 ms | 979 ms | 0.12 | 180 ms |
-|  | 10,000,000 | 1.82 s | 18.6 s | 0.10 | 3.05 s |
-|  | 100,000,000 | 28.7 s | – | – | 48.3 s |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `pi` | 53 | 1.75 µs | MPFR | 5.54 µs | 0.32 | 6.08 µs |
+|  | 1,000 | 1.83 µs | MPFR | 14.5 µs | 0.13 | 10.2 µs |
+|  | 10,000 | 1.83 µs | MPFR | 93.0 µs | 0.020 | 191 µs |
+|  | 100,000 | 1.36 ms | MPFR | 3.14 ms | 0.43 | 1.67 ms |
+|  | 1,000,000 | 19.3 ms | MPFR | 84.9 ms | 0.23 | 27.8 ms |
+| `e` | 53 | 1.88 µs | dashu-float | 12.8 µs | 0.15 | 37.2 µs |
+|  | 1,000 | 1.79 µs | dashu-float | 21.7 µs | 0.083 | 49.5 µs |
+|  | 10,000 | 1.83 µs | dashu-float | 84.8 µs | 0.022 | 124 µs |
+|  | 100,000 | 776 µs | dashu-float | 1.38 ms | 0.56 | 941 µs |
+|  | 1,000,000 | 7.92 ms | malachite-float | 38.2 ms | 0.21 | 12.6 ms |
+| `ln2` | 53 | 2.42 µs | MPFR | 7.83 µs | 0.31 | 9.75 µs |
+|  | 1,000 | 2.38 µs | MPFR | 29.4 µs | 0.081 | 13.4 µs |
+|  | 10,000 | 2.42 µs | MPFR | 261 µs | 0.0093 | 253 µs |
+|  | 100,000 | 2.44 ms | MPFR | 5.94 ms | 0.41 | 3.03 ms |
+|  | 1,000,000 | 38.1 ms | malachite-float | 120 ms | 0.32 | 54.5 ms |
+| `ln10` | 53 | 1.75 µs | MPFR | 14.1 µs | 0.12 | 43.0 µs |
+|  | 1,000 | 1.83 µs | MPFR | 48.2 µs | 0.038 | 124 µs |
+|  | 10,000 | 2.25 µs | MPFR | 567 µs | 0.0040 | 509 µs |
+|  | 100,000 | 3.85 ms | MPFR | 15.9 ms | 0.24 | 6.95 ms |
+|  | 1,000,000 | 59.2 ms | MPFR | 383 ms | 0.15 | 122 ms |
+| `euler_gamma` | 53 | 1.75 µs | MPFR | 26.8 µs | 0.065 | 5.50 µs |
+|  | 1,000 | 1.75 µs | MPFR | 237 µs | 0.0074 | 9.46 µs |
+|  | 10,000 | 2.38 µs | MPFR | 3.93 ms | 0.00060 | 2.40 ms |
+|  | 100,000 | 32.4 ms | malachite-float | 81.6 ms | 0.40 | 47.3 ms |
+|  | 1,000,000 | 507 ms | malachite-float | 1.97 s | 0.26 | 938 ms |
+| `catalan` | 53 | 2.04 µs | MPFR | 19.1 µs | 0.11 | 101 µs |
+|  | 1,000 | 1.75 µs | MPFR | 92.9 µs | 0.019 | 127 µs |
+|  | 10,000 | 1.88 µs | MPFR | 1.49 ms | 0.0013 | 509 µs |
+|  | 100,000 | 6.32 ms | MPFR | 42.4 ms | 0.15 | 8.88 ms |
+|  | 1,000,000 | 111 ms | MPFR | 959 ms | 0.12 | 179 ms |
 
-A later call, the constant already computed: `a` copies the limbs of its cached value, as MPFR and Arb copy theirs; MPFR computes `exp(1)` and `log(10)` again at every call:
+A later call, the constant already computed: `a` returns a new number, cut from its table or copied from the value it keeps, against MPFR's cached constants into an existing variable (`mpfr_const_pi (x, rnd)`; MPFR computes `exp(1)` and `log(10)` again at every call) and the Rust crates' caches:
 
-| Operation | Precision | `a` | MPFR | `a`/MPFR | Arb |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `pi`, cached | 53 | 14 ns | 19 ns | 0.74 | 7 ns |
-|  | 64 | 14 ns | 19 ns | 0.74 | 8 ns |
-|  | 113 | 14 ns | 19 ns | 0.74 | 7 ns |
-|  | 256 | 15 ns | 21 ns | 0.71 | 16 ns |
-|  | 1,000 | 16 ns | 19 ns | 0.84 | 22 ns |
-|  | 10,000 | 32 ns | 36 ns | 0.89 | 70 ns |
-|  | 100,000 | 143 ns | 157 ns | 0.91 | 415 ns |
-|  | 1,000,000 | 1.24 µs | 1.18 µs | 1.05 | 3.98 µs |
-|  | 10,000,000 | 14.7 µs | 14.7 µs | 1.00 | 38.4 µs |
-| `e`, cached | 53 | 14 ns | 555 ns | 0.03 | 11 ns |
-|  | 64 | 14 ns | 598 ns | 0.02 | 10 ns |
-|  | 113 | 14 ns | 780 ns | 0.02 | 11 ns |
-|  | 256 | 15 ns | 1.19 µs | 0.01 | 20 ns |
-|  | 1,000 | 15 ns | 5.34 µs | < 0.01 | 25 ns |
-|  | 10,000 | 35 ns | 287 µs | < 0.01 | 68 ns |
-|  | 100,000 | 145 ns | 2.42 ms | < 0.01 | 415 ns |
-|  | 1,000,000 | 1.26 µs | 47 ms | < 0.01 | 3.95 µs |
-|  | 10,000,000 | 14.5 µs | 672 ms | < 0.01 | 37.7 µs |
-| `ln2`, cached | 53 | 14 ns | 18 ns | 0.78 | 7 ns |
-|  | 64 | 14 ns | 19 ns | 0.74 | 8 ns |
-|  | 113 | 14 ns | 21 ns | 0.67 | 8 ns |
-|  | 256 | 15 ns | 20 ns | 0.75 | 17 ns |
-|  | 1,000 | 15 ns | 20 ns | 0.75 | 21 ns |
-|  | 10,000 | 31 ns | 35 ns | 0.89 | 71 ns |
-|  | 100,000 | 175 ns | 174 ns | 1.01 | 412 ns |
-|  | 1,000,000 | 1.21 µs | 1.19 µs | 1.02 | 3.98 µs |
-|  | 10,000,000 | 14.9 µs | 14.7 µs | 1.01 | 38.4 µs |
-| `ln10`, cached | 53 | 14 ns | 364 ns | 0.04 | 11 ns |
-|  | 64 | 14 ns | 390 ns | 0.04 | 10 ns |
-|  | 113 | 14 ns | 1.13 µs | 0.01 | 11 ns |
-|  | 256 | 15 ns | 1.87 µs | 0.01 | 20 ns |
-|  | 1,000 | 16 ns | 6.49 µs | < 0.01 | 25 ns |
-|  | 10,000 | 32 ns | 164 µs | < 0.01 | 70 ns |
-|  | 100,000 | 172 ns | 6.72 ms | < 0.01 | 414 ns |
-|  | 1,000,000 | 1.22 µs | 165 ms | < 0.01 | 3.96 µs |
-|  | 10,000,000 | 14.4 µs | 2.74 s | < 0.01 | 37.8 µs |
-| `euler_gamma`, cached | 53 | 14 ns | 19 ns | 0.74 | 8 ns |
-|  | 64 | 14 ns | 18 ns | 0.78 | 8 ns |
-|  | 113 | 14 ns | 20 ns | 0.70 | 8 ns |
-|  | 256 | 15 ns | 20 ns | 0.75 | 17 ns |
-|  | 1,000 | 16 ns | 19 ns | 0.84 | 21 ns |
-|  | 10,000 | 32 ns | 34 ns | 0.94 | 70 ns |
-|  | 100,000 | 186 ns | 148 ns | 1.26 | 415 ns |
-|  | 1,000,000 | 1.21 µs | 1.17 µs | 1.03 | 3.94 µs |
-|  | 10,000,000 | 14.7 µs | 14.5 µs | 1.01 | 37.5 µs |
-| `catalan`, cached | 53 | 14 ns | 19 ns | 0.74 | 11 ns |
-|  | 64 | 14 ns | 19 ns | 0.74 | 11 ns |
-|  | 113 | 14 ns | 20 ns | 0.70 | 11 ns |
-|  | 256 | 15 ns | 20 ns | 0.75 | 20 ns |
-|  | 1,000 | 15 ns | 19 ns | 0.79 | 25 ns |
-|  | 10,000 | 30 ns | 34 ns | 0.88 | 71 ns |
-|  | 100,000 | 166 ns | 164 ns | 1.01 | 414 ns |
-|  | 1,000,000 | 1.25 µs | 1.2 µs | 1.04 | 3.97 µs |
-|  | 10,000,000 | 14.8 µs | 14.5 µs | 1.02 | 38 µs |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: |
+| `pi` | 53 | 8.77 ns | MPFR | 7.51 ns | 1.17 | 6.34 ns |
+|  | 256 | 17.2 ns | MPFR | 8.23 ns | 2.10 | 6.83 ns |
+|  | 10,000 | 31.5 ns | MPFR | 17.0 ns | 1.85 | 51.8 ns |
+|  | 1,000,000 | 1.19 µs | MPFR | 1.03 µs | 1.16 | 3.73 µs |
+| `e` | 53 | 8.82 ns | astro-float | 31.2 ns | 0.28 | 10.1 ns |
+|  | 256 | 17.8 ns | astro-float | 38.8 ns | 0.46 | 10.6 ns |
+|  | 10,000 | 34.2 ns | astro-float | 133 ns | 0.26 | 51.7 ns |
+|  | 1,000,000 | 1.20 µs | astro-float | 18.7 µs | 0.064 | 3.71 µs |
+| `ln2` | 53 | 8.57 ns | MPFR | 7.34 ns | 1.17 | 5.66 ns |
+|  | 256 | 17.0 ns | MPFR | 6.57 ns | 2.59 | 6.80 ns |
+|  | 10,000 | 31.2 ns | MPFR | 16.9 ns | 1.85 | 52.4 ns |
+|  | 1,000,000 | 1.23 µs | MPFR | 1.03 µs | 1.20 | 3.71 µs |
+| `ln10` | 53 | 8.49 ns | astro-float | 37.1 ns | 0.23 | 9.04 ns |
+|  | 256 | 17.1 ns | astro-float | 98.0 ns | 0.17 | 10.1 ns |
+|  | 10,000 | 32.8 ns | astro-float | 6.23 µs | 0.0053 | 51.7 ns |
+|  | 1,000,000 | 1.21 µs | astro-float | 497 µs | 0.0024 | 3.73 µs |
+| `euler_gamma` | 53 | 8.74 ns | MPFR | 7.72 ns | 1.13 | 6.29 ns |
+|  | 256 | 18.3 ns | MPFR | 8.46 ns | 2.16 | 6.59 ns |
+|  | 10,000 | 31.5 ns | MPFR | 18.0 ns | 1.75 | 51.7 ns |
+|  | 1,000,000 | 1.19 µs | MPFR | 1.04 µs | 1.14 | 3.81 µs |
+| `catalan` | 53 | 8.30 ns | MPFR | 7.26 ns | 1.14 | 9.30 ns |
+|  | 256 | 16.6 ns | MPFR | 8.17 ns | 2.03 | 10.2 ns |
+|  | 10,000 | 31.4 ns | MPFR | 17.7 ns | 1.78 | 51.2 ns |
+|  | 1,000,000 | 1.19 µs | MPFR | 1.03 µs | 1.16 | 3.74 µs |
+
+The first call takes 0.00060 to 0.56 of the fastest reference's time at every size. A cached π, `ln 2`, γ or `G` takes 1.10 to 2.62 of MPFR's time into an existing variable (see [below](#where-the-references-are-faster)); `e` and `ln 10`, which MPFR does not keep, 0.0024 to 0.46 of the fastest reference's.
 
 ### Complex numbers
 
-Against `mpc_add`, `mpc_mul`, `mpc_sqr`, `mpc_div`, `mpc_sqrt`, `mpc_abs` and `mpc_norm` into an existing variable; a precision is that of both parts of the operands and of the result. The column `a` is the form with a new result (`add_round` and the others), `a` into the form into an existing number (`set_add` and the others):
+Into an existing number, at the precisions of its parts: `set_add` and the others against `mpc_add (r, a, b, rnd)` and the others and rug's `assign_round`, a precision being that of both parts of the operands and of the result; `set_add_real`, `set_mul_real` and `set_div_real` against `mpc_add_fr` and the others, and `BigFloat::set_complex_norm` and `set_complex_abs` against `mpc_norm` and `mpc_abs`:
 
-| Operation | Precision | `a` | `a` into | MPC | `a`/MPC | `a` into/MPC |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `add_round` / `set_add` | 24 | 28.4 ns | 10.5 ns | 13.6 ns | 2.09 | 0.77 |
-|  | 53 | 28.4 ns | 10.4 ns | 13.5 ns | 2.10 | 0.77 |
-|  | 64 | 27.1 ns | 9.4 ns | 15.7 ns | 1.73 | 0.60 |
-|  | 113 | 31.6 ns | 13.2 ns | 15.2 ns | 2.08 | 0.87 |
-|  | 128 | 30.3 ns | 11.4 ns | 15.8 ns | 1.92 | 0.72 |
-|  | 256 | 41.3 ns | 24.9 ns | 21.5 ns | 1.92 | 1.16 |
-|  | 1,000 | 56 ns | 31.7 ns | 28.3 ns | 1.98 | 1.12 |
-|  | 10,000 | 143 ns | 98.4 ns | 161 ns | 0.89 | 0.61 |
-|  | 100,000 | 1.14 µs | 850 ns | 1.63 µs | 0.70 | 0.52 |
-| `mul_round` / `set_mul` | 24 | 60.1 ns | 26.1 ns | 64.1 ns | 0.94 | 0.41 |
-|  | 53 | 57.5 ns | 26.6 ns | 53.9 ns | 1.07 | 0.49 |
-|  | 64 | 58 ns | 26.4 ns | 63 ns | 0.92 | 0.42 |
-|  | 113 | 74.6 ns | 39.1 ns | 89.2 ns | 0.84 | 0.44 |
-|  | 128 | 73.4 ns | 37.8 ns | 88.4 ns | 0.83 | 0.43 |
-|  | 256 | 154 ns | 136 ns | 116 ns | 1.33 | 1.17 |
-|  | 1,000 | 429 ns | 409 ns | 459 ns | 0.94 | 0.89 |
-|  | 10,000 | 11.4 µs | 11.4 µs | 12.1 µs | 0.94 | 0.94 |
-|  | 100,000 | 160 µs | 159 µs | 322 µs | 0.50 | 0.50 |
-| `sqr_round` / `set_sqr` | 24 | 55.2 ns | 23.1 ns | 95.4 ns | 0.58 | 0.24 |
-|  | 53 | 55.4 ns | 22.4 ns | 96.3 ns | 0.58 | 0.23 |
-|  | 64 | 55 ns | 22.1 ns | 144 ns | 0.38 | 0.15 |
-|  | 113 | 64.8 ns | 28.2 ns | 141 ns | 0.46 | 0.20 |
-|  | 128 | 62.8 ns | 26.7 ns | 153 ns | 0.41 | 0.17 |
-|  | 256 | 123 ns | 99.7 ns | 183 ns | 0.67 | 0.54 |
-|  | 1,000 | 289 ns | 266 ns | 359 ns | 0.81 | 0.74 |
-|  | 10,000 | 8.52 µs | 8.5 µs | 6.93 µs | 1.23 | 1.23 |
-|  | 100,000 | 127 µs | 127 µs | 183 µs | 0.69 | 0.69 |
-| `div_round` / `set_div` | 24 | 333 ns | 336 ns | 319 ns | 1.05 | 1.05 |
-|  | 53 | 340 ns | 340 ns | 398 ns | 0.85 | 0.85 |
-|  | 64 | 370 ns | 368 ns | 454 ns | 0.81 | 0.81 |
-|  | 113 | 438 ns | 436 ns | 466 ns | 0.94 | 0.94 |
-|  | 128 | 433 ns | 439 ns | 497 ns | 0.87 | 0.88 |
-|  | 256 | 526 ns | 524 ns | 587 ns | 0.90 | 0.89 |
-|  | 1,000 | 1.38 µs | 1.36 µs | 1.37 µs | 1.01 | 1.00 |
-|  | 10,000 | 29.5 µs | 29.5 µs | 31.1 µs | 0.95 | 0.95 |
-|  | 100,000 | 535 µs | 536 µs | 821 µs | 0.65 | 0.65 |
-| `sqrt_round` / `set_sqrt` | 24 | 103 ns | 75.1 ns | 159 ns | 0.65 | 0.47 |
-|  | 53 | 105 ns | 76.2 ns | 157 ns | 0.67 | 0.49 |
-|  | 64 | 105 ns | 76.5 ns | 212 ns | 0.49 | 0.36 |
-|  | 113 | 120 ns | 91.8 ns | 243 ns | 0.50 | 0.38 |
-|  | 128 | 370 ns | 341 ns | 356 ns | 1.04 | 0.96 |
-|  | 256 | 580 ns | 559 ns | 454 ns | 1.28 | 1.23 |
-|  | 1,000 | 1.12 µs | 1.09 µs | 1.09 µs | 1.02 | 1.01 |
-|  | 10,000 | 17.7 µs | 17.6 µs | 17.7 µs | 1.00 | 1.00 |
-|  | 100,000 | 438 µs | 436 µs | 596 µs | 0.73 | 0.73 |
-| `abs_round` / `BigFloat::set_complex_abs` | 24 | 102 ns | 87.3 ns | 99.8 ns | 1.02 | 0.87 |
-|  | 53 | 100 ns | 84 ns | 104 ns | 0.97 | 0.81 |
-|  | 64 | 99.6 ns | 84.7 ns | 117 ns | 0.85 | 0.72 |
-|  | 113 | 116 ns | 98.4 ns | 127 ns | 0.91 | 0.78 |
-|  | 128 | 157 ns | 141 ns | 172 ns | 0.91 | 0.82 |
-|  | 256 | 210 ns | 195 ns | 231 ns | 0.91 | 0.84 |
-|  | 1,000 | 439 ns | 427 ns | 518 ns | 0.85 | 0.82 |
-|  | 10,000 | 9.04 µs | 9 µs | 9.74 µs | 0.93 | 0.92 |
-|  | 100,000 | 193 µs | 193 µs | 306 µs | 0.63 | 0.63 |
-| `norm_round` / `BigFloat::set_complex_norm` | 24 | 25 ns | 9.5 ns | 90.4 ns | 0.28 | 0.11 |
-|  | 53 | 24.9 ns | 9.5 ns | 93.4 ns | 0.27 | 0.10 |
-|  | 64 | 23.4 ns | 9.5 ns | 152 ns | 0.15 | 0.06 |
-|  | 113 | 29.9 ns | 14.6 ns | 156 ns | 0.19 | 0.09 |
-|  | 128 | 28.1 ns | 14 ns | 154 ns | 0.18 | 0.09 |
-|  | 256 | 82.7 ns | 70.9 ns | 171 ns | 0.48 | 0.42 |
-|  | 1,000 | 190 ns | 180 ns | 297 ns | 0.64 | 0.61 |
-|  | 10,000 | 5.09 µs | 5.09 µs | 4.33 µs | 1.18 | 1.17 |
-|  | 100,000 | 78.4 µs | 78.3 µs | 124 µs | 0.63 | 0.63 |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `set_add` | 53 | 6.86 ns | MPC | 9.65 ns | 0.71 |
+|  | 256 | 24.2 ns | MPC | 20.3 ns | 1.20 |
+|  | 1,000 | 34.9 ns | MPC | 29.4 ns | 1.19 |
+|  | 100,000 | 1.06 µs | rug | 2.18 µs | 0.48 |
+| `set_mul` | 53 | 21.6 ns | MPC | 48.9 ns | 0.44 |
+|  | 256 | 142 ns | rug | 117 ns | 1.22 |
+|  | 1,000 | 411 ns | MPC | 456 ns | 0.90 |
+|  | 100,000 | 159 µs | rug | 316 µs | 0.50 |
+| `set_sqr` | 53 | 15.4 ns | MPC | 92.9 ns | 0.17 |
+|  | 256 | 112 ns | MPC | 180 ns | 0.62 |
+|  | 1,000 | 271 ns | rug | 356 ns | 0.76 |
+|  | 100,000 | 129 µs | MPC | 180 µs | 0.71 |
+| `set_div` | 53 | 342 ns | MPC | 379 ns | 0.90 |
+|  | 256 | 591 ns | rug | 621 ns | 0.95 |
+|  | 1,000 | 1.45 µs | MPC | 1.37 µs | 1.06 |
+|  | 100,000 | 534 µs | MPC | 817 µs | 0.65 |
+| `set_sqrt` | 53 | 76.9 ns | MPC | 168 ns | 0.46 |
+|  | 256 | 578 ns | MPC | 479 ns | 1.21 |
+|  | 1,000 | 1.12 µs | MPC | 1.12 µs | 1.00 |
+|  | 100,000 | 435 µs | rug | 596 µs | 0.73 |
+| `set_complex_norm` | 53 | 9.06 ns | MPC | 95.8 ns | 0.095 |
+|  | 256 | 76.6 ns | MPC | 172 ns | 0.45 |
+|  | 1,000 | 184 ns | MPC | 307 ns | 0.60 |
+|  | 100,000 | 85.0 µs | MPC | 132 µs | 0.64 |
+| `set_complex_abs` | 53 | 76.8 ns | MPC | 95.5 ns | 0.80 |
+|  | 256 | 211 ns | MPC | 230 ns | 0.92 |
+|  | 1,000 | 425 ns | MPC | 517 ns | 0.82 |
+|  | 100,000 | 193 µs | MPC | 303 µs | 0.64 |
+| `set_add_real` | 53 | 6.09 ns | MPC | 7.98 ns | 0.76 |
+|  | 256 | 17.2 ns | MPC | 14.4 ns | 1.20 |
+|  | 1,000 | 20.6 ns | MPC | 18.6 ns | 1.11 |
+|  | 100,000 | 709 ns | MPC | 1.36 µs | 0.52 |
+| `set_mul_real` | 53 | 4.52 ns | MPC | 12.7 ns | 0.35 |
+|  | 256 | 24.7 ns | MPC | 47.7 ns | 0.52 |
+|  | 1,000 | 191 ns | MPC | 210 ns | 0.91 |
+|  | 100,000 | 99.1 µs | MPC | 179 µs | 0.55 |
+| `set_div_real` | 53 | 9.23 ns | MPC | 34.0 ns | 0.27 |
+|  | 256 | 105 ns | MPC | 148 ns | 0.71 |
+|  | 1,000 | 372 ns | MPC | 451 ns | 0.82 |
+|  | 100,000 | 238 µs | MPC | 384 µs | 0.62 |
+| `set_conj` | 53 | 4.11 ns | MPC | 6.05 ns | 0.68 |
+|  | 256 | 8.34 ns | MPC | 7.66 ns | 1.09 |
+|  | 1,000 | 6.64 ns | MPC | 6.75 ns | 0.98 |
+|  | 100,000 | 333 ns | MPC | 325 ns | 1.02 |
+
+With a new result, against `mpc_init2`, the operation and `mpc_clear`, and rug's `with_val`:
+
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `add_round` | 53 | 11.6 ns | rug | 32.9 ns | 0.35 |
+|  | 256 | 49.8 ns | MPC | 44.4 ns | 1.12 |
+|  | 1,000 | 65.6 ns | MPC | 55.8 ns | 1.18 |
+|  | 100,000 | 1.41 µs | MPC | 2.30 µs | 0.61 |
+| `mul_round` | 53 | 25.8 ns | MPC | 81.8 ns | 0.32 |
+|  | 256 | 175 ns | rug | 147 ns | 1.19 |
+|  | 1,000 | 450 ns | MPC | 498 ns | 0.90 |
+|  | 100,000 | 161 µs | MPC | 316 µs | 0.51 |
+| `sqr_round` | 53 | 19.4 ns | MPC | 113 ns | 0.17 |
+|  | 256 | 140 ns | MPC | 203 ns | 0.69 |
+|  | 1,000 | 306 ns | MPC | 373 ns | 0.82 |
+|  | 100,000 | 129 µs | MPC | 181 µs | 0.71 |
+| `div_round` | 53 | 346 ns | rug | 427 ns | 0.81 |
+|  | 256 | 579 ns | MPC | 609 ns | 0.95 |
+|  | 1,000 | 1.41 µs | rug | 1.40 µs | 1.00 |
+|  | 100,000 | 532 µs | MPC | 864 µs | 0.62 |
+| `sqrt_round` | 53 | 82.2 ns | MPC | 182 ns | 0.45 |
+|  | 256 | 595 ns | rug | 486 ns | 1.23 |
+|  | 1,000 | 1.14 µs | MPC | 1.13 µs | 1.01 |
+|  | 100,000 | 432 µs | MPC | 592 µs | 0.73 |
+| `norm_round` | 53 | 11.4 ns | MPC | 104 ns | 0.11 |
+|  | 256 | 92.7 ns | MPC | 178 ns | 0.52 |
+|  | 1,000 | 202 ns | rug | 306 ns | 0.66 |
+|  | 100,000 | 78.4 µs | MPC | 123 µs | 0.64 |
+| `abs_round` | 53 | 86.0 ns | MPC | 106 ns | 0.81 |
+|  | 256 | 222 ns | rug | 233 ns | 0.95 |
+|  | 1,000 | 444 ns | MPC | 518 ns | 0.86 |
+|  | 100,000 | 193 µs | MPC | 301 µs | 0.64 |
+| `add_real_round` | 53 | 9.46 ns | MPC | 34.5 ns | 0.28 |
+|  | 256 | 41.8 ns | MPC | 39.9 ns | 1.05 |
+|  | 1,000 | 46.7 ns | MPC | 44.3 ns | 1.05 |
+|  | 100,000 | 894 ns | MPC | 1.53 µs | 0.59 |
+| `mul_int_round` | 53 | 13.9 ns | MPC | 44.2 ns | 0.31 |
+|  | 256 | 58.3 ns | MPC | 49.1 ns | 1.19 |
+|  | 1,000 | 93.0 ns | MPC | 59.4 ns | 1.57 |
+|  | 100,000 | 1.13 µs | MPC | 1.75 µs | 0.65 |
+| `mul_i_round` | 53 | 12.0 ns | MPC | 27.6 ns | 0.43 |
+|  | 256 | 28.0 ns | MPC | 30.6 ns | 0.91 |
+|  | 1,000 | 30.3 ns | MPC | 29.5 ns | 1.03 |
+|  | 100,000 | 360 ns | MPC | 368 ns | 0.98 |
+
+Assigning, `z op= w` (`add_assign_round` and the others), against `mpc_add (z, z, w, rnd)` and rug's `op_assign_round`:
+
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `add_assign_round` | 24 | 12.2 ns | MPC | 9.45 ns | 1.29 |
+|  | 113 | 14.0 ns | MPC | 11.0 ns | 1.28 |
+|  | 256 | 27.6 ns | MPC | 19.1 ns | 1.44 |
+|  | 1,000 | 37.9 ns | MPC | 33.5 ns | 1.13 |
+|  | 100,000 | 1.12 µs | rug | 2.29 µs | 0.49 |
+| `sub_assign_round` | 24 | 11.3 ns | MPC | 10.4 ns | 1.08 |
+|  | 113 | 13.9 ns | MPC | 12.5 ns | 1.12 |
+|  | 256 | 29.0 ns | MPC | 20.9 ns | 1.39 |
+|  | 1,000 | 36.8 ns | rug | 32.7 ns | 1.13 |
+|  | 100,000 | 1.13 µs | rug | 2.30 µs | 0.49 |
+| `mul_assign_round` | 24 | 38.9 ns | MPC | 106 ns | 0.37 |
+|  | 113 | 61.7 ns | rug | 137 ns | 0.45 |
+|  | 256 | 180 ns | MPC | 168 ns | 1.07 |
+|  | 1,000 | 445 ns | MPC | 522 ns | 0.85 |
+|  | 100,000 | 163 µs | MPC | 319 µs | 0.51 |
+| `div_assign_round` | 24 | 361 ns | MPC | 336 ns | 1.08 |
+|  | 113 | 469 ns | MPC | 493 ns | 0.95 |
+|  | 256 | 591 ns | rug | 606 ns | 0.98 |
+|  | 1,000 | 1.42 µs | MPC | 1.40 µs | 1.02 |
+|  | 100,000 | 534 µs | rug | 830 µs | 0.64 |
+
+Products, squares, norms and the operations with a real operand of one and two limbs a part take 0.059 to 0.59 of the fastest reference's time; from `10^5` bits everything is ahead (0.47 to 0.73, the exact copies `set_neg`, `set_conj` and `mul_i_round` at par). Sums at 256 and 1,000 bits and the assigning sums at most sizes to 1,000 bits are behind, as for `BigFloat`.
 
 ### Functions of complex numbers
 
-Against `mpc_exp` and the others; arguments of parts of exponents −2 to 1, the powers' exponents `w = 4u + vi` with `u`, `v` in `[1/2, 1)`, and `n = 17` for `powi`:
+Against `mpc_exp` and the others into an existing variable; arguments of parts of magnitudes in `[1/8, 2)`, the powers' exponents `w` of a real part in `[4, 8)` and an imaginary part in `[1/2, 1)`, and `n = 17` for `powi`:
 
-| Operation | Precision | `a` | MPC | `a`/MPC |
-| --- | --- | ---: | ---: | ---: |
-| `exp` | 53 | 866 ns | 1.46 µs | 0.59 |
-|  | 113 | 1.07 µs | 2.13 µs | 0.50 |
-|  | 256 | 2.14 µs | 3.78 µs | 0.57 |
-|  | 1,000 | 8.35 µs | 18.5 µs | 0.45 |
-|  | 10,000 | 447 µs | 1.27 ms | 0.35 |
-|  | 100,000 | 12.9 ms | 42.1 ms | 0.31 |
-| `ln` | 53 | 1.27 µs | 1.69 µs | 0.75 |
-|  | 113 | 1.95 µs | 3.4 µs | 0.57 |
-|  | 256 | 3.16 µs | 8 µs | 0.40 |
-|  | 1,000 | 15.9 µs | 26.6 µs | 0.60 |
-|  | 10,000 | 467 µs | 543 µs | 0.86 |
-|  | 100,000 | 16.3 ms | 21.3 ms | 0.76 |
-| `log10` | 53 | 1.54 µs | 2.34 µs | 0.66 |
-|  | 113 | 2.24 µs | 4.71 µs | 0.48 |
-|  | 256 | 4.36 µs | 10.5 µs | 0.42 |
-|  | 1,000 | 17.8 µs | 35.1 µs | 0.51 |
-|  | 10,000 | 482 µs | 723 µs | 0.67 |
-|  | 100,000 | 16.5 ms | 28.4 ms | 0.58 |
-| `arg` | 53 | 642 ns | 1.07 µs | 0.60 |
-|  | 113 | 1.12 µs | 1.95 µs | 0.57 |
-|  | 256 | 1.87 µs | 5.32 µs | 0.35 |
-|  | 1,000 | 8.64 µs | 18.7 µs | 0.46 |
-|  | 10,000 | 287 µs | 366 µs | 0.78 |
-|  | 100,000 | 11.4 ms | 14.3 ms | 0.80 |
-| `sin` | 53 | 1.5 µs | 1.77 µs | 0.85 |
-|  | 113 | 1.73 µs | 2.21 µs | 0.78 |
-|  | 256 | 2.84 µs | 3.12 µs | 0.91 |
-|  | 1,000 | 9.47 µs | 11.5 µs | 0.83 |
-|  | 10,000 | 457 µs | 575 µs | 0.79 |
-|  | 100,000 | 13.3 ms | 23.2 ms | 0.57 |
-| `cos` | 53 | 1.49 µs | 1.7 µs | 0.87 |
-|  | 113 | 1.71 µs | 2.23 µs | 0.77 |
-|  | 256 | 2.84 µs | 3.16 µs | 0.90 |
-|  | 1,000 | 9.5 µs | 11.6 µs | 0.82 |
-|  | 10,000 | 470 µs | 585 µs | 0.80 |
-|  | 100,000 | 13.2 ms | 23.1 ms | 0.57 |
-| `tan` | 53 | 1.99 µs | 4.22 µs | 0.47 |
-|  | 113 | 2.28 µs | 4.72 µs | 0.48 |
-|  | 256 | 3.4 µs | 6.01 µs | 0.57 |
-|  | 1,000 | 10.7 µs | 16.8 µs | 0.63 |
-|  | 10,000 | 480 µs | 634 µs | 0.76 |
-|  | 100,000 | 13.7 ms | 24.5 ms | 0.56 |
-| `sin_cos` | 53 | 1.8 µs | 1.86 µs | 0.97 |
-|  | 113 | 2.02 µs | 2.29 µs | 0.88 |
-|  | 256 | 3.18 µs | 3.24 µs | 0.98 |
-|  | 1,000 | 9.99 µs | 11.8 µs | 0.84 |
-|  | 10,000 | 466 µs | 586 µs | 0.80 |
-|  | 100,000 | 13.4 ms | 23.5 ms | 0.57 |
-| `sinh` | 53 | 1.52 µs | 1.78 µs | 0.86 |
-|  | 113 | 1.73 µs | 2.23 µs | 0.78 |
-|  | 256 | 2.84 µs | 3.16 µs | 0.90 |
-|  | 1,000 | 9.57 µs | 11.5 µs | 0.83 |
-|  | 10,000 | 464 µs | 587 µs | 0.79 |
-|  | 100,000 | 13.2 ms | 23.1 ms | 0.57 |
-| `cosh` | 53 | 1.49 µs | 1.75 µs | 0.85 |
-|  | 113 | 1.73 µs | 2.25 µs | 0.77 |
-|  | 256 | 2.83 µs | 3.11 µs | 0.91 |
-|  | 1,000 | 9.6 µs | 11.5 µs | 0.84 |
-|  | 10,000 | 461 µs | 591 µs | 0.78 |
-|  | 100,000 | 13.2 ms | 23 ms | 0.57 |
-| `tanh` | 53 | 2 µs | 4.11 µs | 0.49 |
-|  | 113 | 2.28 µs | 4.42 µs | 0.51 |
-|  | 256 | 3.4 µs | 5.92 µs | 0.57 |
-|  | 1,000 | 10.5 µs | 15.6 µs | 0.68 |
-|  | 10,000 | 477 µs | 623 µs | 0.77 |
-|  | 100,000 | 13.4 ms | 24.1 ms | 0.56 |
-| `asin` | 53 | 3.42 µs | 6.3 µs | 0.54 |
-|  | 113 | 4.39 µs | 11.5 µs | 0.38 |
-|  | 256 | 7.02 µs | 25 µs | 0.28 |
-|  | 1,000 | 19.9 µs | 158 µs | 0.13 |
-|  | 10,000 | 509 µs | 583 µs | 0.87 |
-|  | 100,000 | 17.1 ms | 22.5 ms | 0.76 |
-| `acos` | 53 | 3.41 µs | 7.35 µs | 0.46 |
-|  | 113 | 4.38 µs | 14.4 µs | 0.30 |
-|  | 256 | 7.03 µs | 24.3 µs | 0.29 |
-|  | 1,000 | 19.6 µs | 141 µs | 0.14 |
-|  | 10,000 | 504 µs | 577 µs | 0.87 |
-|  | 100,000 | 17.1 ms | 22.4 ms | 0.76 |
-| `atan` | 53 | 1.71 µs | 4.45 µs | 0.38 |
-|  | 113 | 2.38 µs | 8.19 µs | 0.29 |
-|  | 256 | 4.83 µs | 17.2 µs | 0.28 |
-|  | 1,000 | 17.7 µs | 53.5 µs | 0.33 |
-|  | 10,000 | 480 µs | 1.08 ms | 0.44 |
-|  | 100,000 | 16.5 ms | 42.3 ms | 0.39 |
-| `asinh` | 53 | 3.42 µs | 6.36 µs | 0.54 |
-|  | 113 | 4.27 µs | 11.8 µs | 0.36 |
-|  | 256 | 6.94 µs | 26.2 µs | 0.27 |
-|  | 1,000 | 19.4 µs | 168 µs | 0.12 |
-|  | 10,000 | 506 µs | 577 µs | 0.88 |
-|  | 100,000 | 16.9 ms | 22.5 ms | 0.75 |
-| `acosh` | 53 | 3.4 µs | 7.37 µs | 0.46 |
-|  | 113 | 4.31 µs | 14.5 µs | 0.30 |
-|  | 256 | 7.07 µs | 24.6 µs | 0.29 |
-|  | 1,000 | 19.8 µs | 141 µs | 0.14 |
-|  | 10,000 | 505 µs | 580 µs | 0.87 |
-|  | 100,000 | 17 ms | 22.5 ms | 0.75 |
-| `atanh` | 53 | 1.73 µs | 4.41 µs | 0.39 |
-|  | 113 | 2.4 µs | 7.7 µs | 0.31 |
-|  | 256 | 4.82 µs | 17.3 µs | 0.28 |
-|  | 1,000 | 17.8 µs | 54.1 µs | 0.33 |
-|  | 10,000 | 479 µs | 1.09 ms | 0.44 |
-|  | 100,000 | 16.3 ms | 41.6 ms | 0.39 |
-| `pow` | 53 | 3.45 µs | 6.57 µs | 0.52 |
-|  | 113 | 4.28 µs | 9.4 µs | 0.46 |
-|  | 256 | 7.04 µs | 17.8 µs | 0.40 |
-|  | 1,000 | 26.4 µs | 62.8 µs | 0.42 |
-|  | 10,000 | 929 µs | 2.73 ms | 0.34 |
-|  | 100,000 | 29.2 ms | 65.9 ms | 0.44 |
-| `pow_real` | 53 | 3.26 µs | 6.14 µs | 0.53 |
-|  | 113 | 4.08 µs | 8.63 µs | 0.47 |
-|  | 256 | 6.87 µs | 17.3 µs | 0.40 |
-|  | 1,000 | 26.4 µs | 59.3 µs | 0.45 |
-|  | 10,000 | 923 µs | 1.84 ms | 0.50 |
-|  | 100,000 | 29.2 ms | 66.8 ms | 0.44 |
-| `powi`, `n = 17` | 53 | 315 ns | 791 ns | 0.40 |
-|  | 113 | 830 ns | 810 ns | 1.03 |
-|  | 256 | 943 ns | 992 ns | 0.95 |
-|  | 1,000 | 1.97 µs | 2.1 µs | 0.94 |
-|  | 10,000 | 46 µs | 44.7 µs | 1.03 |
-|  | 100,000 | 679 µs | 1.07 ms | 0.63 |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `exp` | 53 | 801 ns | MPC | 1.43 µs | 0.56 |
+|  | 1,000 | 8.51 µs | MPC | 18.4 µs | 0.46 |
+|  | 100,000 | 12.8 ms | MPC | 42.0 ms | 0.30 |
+| `ln` | 53 | 1.22 µs | MPC | 1.57 µs | 0.78 |
+|  | 1,000 | 15.9 µs | MPC | 27.0 µs | 0.59 |
+|  | 100,000 | 16.3 ms | MPC | 22.3 ms | 0.73 |
+| `log10` | 53 | 1.51 µs | MPC | 2.38 µs | 0.64 |
+|  | 1,000 | 17.6 µs | MPC | 34.9 µs | 0.50 |
+|  | 100,000 | 16.5 ms | MPC | 28.5 ms | 0.58 |
+| `sin` | 53 | 1.41 µs | MPC | 1.76 µs | 0.80 |
+|  | 1,000 | 9.16 µs | MPC | 11.2 µs | 0.82 |
+|  | 100,000 | 12.9 ms | MPC | 21.7 ms | 0.59 |
+| `cos` | 53 | 1.40 µs | MPC | 1.53 µs | 0.92 |
+|  | 1,000 | 9.20 µs | MPC | 11.2 µs | 0.82 |
+|  | 100,000 | 12.9 ms | MPC | 21.7 ms | 0.59 |
+| `tan` | 53 | 1.84 µs | MPC | 3.63 µs | 0.51 |
+|  | 1,000 | 10.2 µs | MPC | 18.0 µs | 0.57 |
+|  | 100,000 | 13.2 ms | MPC | 23.0 ms | 0.57 |
+| `sin_cos` | 53 | 1.76 µs | MPC | 1.83 µs | 0.97 |
+|  | 1,000 | 9.79 µs | MPC | 11.4 µs | 0.86 |
+|  | 100,000 | 13.1 ms | MPC | 22.9 ms | 0.57 |
+| `sinh` | 53 | 1.48 µs | MPC | 1.65 µs | 0.90 |
+|  | 1,000 | 9.24 µs | MPC | 12.3 µs | 0.75 |
+|  | 100,000 | 12.9 ms | MPC | 21.8 ms | 0.59 |
+| `cosh` | 53 | 1.46 µs | MPC | 1.65 µs | 0.89 |
+|  | 1,000 | 9.20 µs | MPC | 12.3 µs | 0.75 |
+|  | 100,000 | 13.0 ms | MPC | 21.8 ms | 0.59 |
+| `tanh` | 53 | 1.93 µs | MPC | 4.48 µs | 0.43 |
+|  | 1,000 | 10.4 µs | MPC | 16.7 µs | 0.62 |
+|  | 100,000 | 13.3 ms | MPC | 23.0 ms | 0.58 |
+| `asin` | 53 | 3.44 µs | MPC | 6.91 µs | 0.50 |
+|  | 1,000 | 19.8 µs | MPC | 141 µs | 0.14 |
+|  | 100,000 | 17.1 ms | MPC | 21.5 ms | 0.79 |
+| `acos` | 53 | 3.54 µs | MPC | 9.34 µs | 0.38 |
+|  | 1,000 | 19.9 µs | MPC | 147 µs | 0.14 |
+|  | 100,000 | 17.1 ms | MPC | 42.8 ms | 0.40 |
+| `atan` | 53 | 1.76 µs | MPC | 4.50 µs | 0.39 |
+|  | 1,000 | 17.5 µs | MPC | 52.1 µs | 0.34 |
+|  | 100,000 | 16.5 ms | MPC | 42.4 ms | 0.39 |
+| `asinh` | 53 | 3.47 µs | MPC | 8.99 µs | 0.39 |
+|  | 1,000 | 19.6 µs | MPC | 121 µs | 0.16 |
+|  | 100,000 | 16.9 ms | MPC | 21.8 ms | 0.78 |
+| `acosh` | 53 | 3.46 µs | MPC | 10.9 µs | 0.32 |
+|  | 1,000 | 20.0 µs | MPC | 102 µs | 0.20 |
+|  | 100,000 | 17.1 ms | MPC | 21.9 ms | 0.78 |
+| `atanh` | 53 | 1.71 µs | MPC | 5.00 µs | 0.34 |
+|  | 1,000 | 17.6 µs | MPC | 52.7 µs | 0.33 |
+|  | 100,000 | 16.4 ms | MPC | 42.4 ms | 0.39 |
+| `arg` | 53 | 611 ns | MPC | 1.16 µs | 0.53 |
+|  | 1,000 | 8.60 µs | MPC | 19.3 µs | 0.45 |
+|  | 100,000 | 11.3 ms | MPC | 14.6 ms | 0.78 |
+| `pow` | 53 | 3.33 µs | MPC | 6.40 µs | 0.52 |
+|  | 1,000 | 26.6 µs | MPC | 68.2 µs | 0.39 |
+|  | 100,000 | 29.6 ms | MPC | 130 ms | 0.23 |
+| `pow_real` | 53 | 3.21 µs | MPC | 6.36 µs | 0.51 |
+|  | 1,000 | 26.5 µs | MPC | 64.1 µs | 0.41 |
+|  | 100,000 | 29.4 ms | MPC | 66.0 ms | 0.45 |
+| `powi(17)` | 53 | 247 ns | MPC | 769 ns | 0.32 |
+|  | 1,000 | 2.00 µs | MPC | 2.09 µs | 0.96 |
+|  | 100,000 | 670 µs | MPC | 1.04 ms | 0.64 |
+| `proj` | 53 | 11.1 ns | MPC | 6.08 ns | 1.83 |
+|  | 1,000 | 29.8 ns | MPC | 6.59 ns | 4.52 |
+|  | 100,000 | 264 ns | MPC | 238 ns | 1.11 |
+
+The functions take 0.0085 to 1.03 of MPC's time (`asin` and `acos` at `10^4` bits 0.0085 and 0.0087); `powi(17)` from 113 to `10^4` bits and `sin_cos` at 256 bits are at par (0.93 to 1.03), and `proj`, a copy of both parts into a new number, is behind (1.11 to 4.52).
 
 ### Matrices of floats
 
-`&a * &b` of `n × n` matrices of `BigFloat`, every element correctly rounded, against a loop of `mpfr_fma` (rounded at each step) and against `mpfr_dot` (correctly rounded); `a.solve(&b)` with one column against Gaussian elimination by `mpfr_fms`:
+`&a * &b` of `n × n` matrices, every element correctly rounded, against `mpfr_dot` (or `mpc_dot`) for each element into an existing variable, which does the same work; the loop of `mpfr_fma` rounded at each step and Arb's `arb_mat_mul` do less, and their columns are their times alone:
 
-| Operation | Precision | `a` | MPFR, `mpfr_fma` loop | `a`/loop | `mpfr_dot` |
-| --- | --- | ---: | ---: | ---: | ---: |
-| `&a * &b`, 4 × 4 | 53 | 938 ns | 640 ns | 1.47 | 2.49 µs |
-|  | 113 | 1.05 µs | 1.26 µs | 0.83 | 2.64 µs |
-|  | 256 | 1.94 µs | 1.86 µs | 1.05 | 3.25 µs |
-|  | 1,000 | 6.87 µs | 7.24 µs | 0.95 | 9.15 µs |
-| `&a * &b`, 8 × 8 | 53 | 5.51 µs | 5.73 µs | 0.96 | 18.7 µs |
-|  | 113 | 6.43 µs | 12.3 µs | 0.52 | 19.3 µs |
-|  | 256 | 13.2 µs | 18.1 µs | 0.72 | 23.1 µs |
-|  | 1,000 | 51.1 µs | 61.8 µs | 0.83 | 69.4 µs |
-| `&a * &b`, 16 × 16 | 53 | 39.5 µs | 53.7 µs | 0.74 | 145 µs |
-|  | 113 | 44.5 µs | 123 µs | 0.36 | 144 µs |
-|  | 256 | 103 µs | 163 µs | 0.63 | 173 µs |
-|  | 1,000 | 395 µs | 507 µs | 0.78 | 548 µs |
-| `a.solve(&b)`, 4 × 4 | 53 | 921 ns | 476 ns | 1.94 | – |
-|  | 113 | 1.04 µs | 800 ns | 1.30 | – |
-|  | 256 | 3.15 µs | 1.57 µs | 2.01 | – |
-|  | 1,000 | 6.66 µs | 5.35 µs | 1.25 | – |
-| `a.solve(&b)`, 8 × 8 | 53 | 3.71 µs | 3.11 µs | 1.19 | – |
-|  | 113 | 4.37 µs | 5.9 µs | 0.74 | – |
-|  | 256 | 13.5 µs | 9.85 µs | 1.37 | – |
-|  | 1,000 | 33.7 µs | 32.1 µs | 1.05 | – |
-| `a.solve(&b)`, 16 × 16 | 53 | 18.7 µs | 23 µs | 0.81 | – |
-|  | 113 | 22.8 µs | 48.4 µs | 0.47 | – |
-|  | 256 | 69.7 µs | 67.6 µs | 1.03 | – |
-|  | 1,000 | 198 µs | 211 µs | 0.94 | – |
+| Operation | Precision | `a` | Fastest | Its time | `a`/fastest | `mpfr_fma` loop (does less) | Arb (does less) |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: |
+| `&a * &b`, 4 × 4 | 53 | 882 ns | MPFR | 2.62 µs | 0.34 | 642 ns | 466 ns |
+|  | 113 | 957 ns | MPFR | 2.79 µs | 0.34 | 1.30 µs | 626 ns |
+|  | 256 | 2.22 µs | MPFR | 3.32 µs | 0.67 | 1.91 µs | 1.29 µs |
+|  | 1,000 | 7.22 µs | MPFR | 9.01 µs | 0.80 | 7.46 µs | 5.35 µs |
+| `&a * &b`, 8 × 8 | 53 | 5.32 µs | MPFR | 18.2 µs | 0.29 | 5.87 µs | 2.71 µs |
+|  | 113 | 6.04 µs | MPFR | 18.5 µs | 0.33 | 13.1 µs | 3.42 µs |
+|  | 256 | 15.0 µs | MPFR | 23.3 µs | 0.64 | 19.0 µs | 9.07 µs |
+|  | 1,000 | 52.4 µs | MPFR | 70.1 µs | 0.75 | 62.8 µs | 41.5 µs |
+| `&a * &b`, 16 × 16 | 53 | 40.2 µs | MPFR | 147 µs | 0.27 | 74.3 µs | 20.9 µs |
+|  | 113 | 45.9 µs | MPFR | 145 µs | 0.32 | 130 µs | 25.5 µs |
+|  | 256 | 111 µs | MPFR | 178 µs | 0.62 | 169 µs | 64.6 µs |
+|  | 1,000 | 404 µs | MPFR | 554 µs | 0.73 | 509 µs | 325 µs |
+| `BigComplex`, 4 × 4 | 53 | 2.96 µs | MPC | 7.12 µs | 0.41 | – | – |
+|  | 256 | 7.70 µs | MPC | 10.0 µs | 0.77 | – | – |
+| `BigComplex`, 8 × 8 | 53 | 20.4 µs | MPC | 60.9 µs | 0.34 | – | – |
+|  | 256 | 53.0 µs | MPC | 74.5 µs | 0.71 | – | – |
+
+`a.solve(&b)` with one column has no reference that does the same work: MPFR's is Gaussian elimination with partial pivoting by `mpfr_fma`, rounded at each step, where `a` rounds each element's exact dot product once. Its times, for what they are worth (the copies of `A` and `b` included on both sides), not counted:
+
+| Operation | Precision | `a` | MPFR elimination | `a`/MPFR elimination |
+| --- | --- | ---: | ---: | ---: |
+| `a.solve(&b)`, 4 × 4 | 53 | 928 ns | 465 ns | 1.99 |
+|  | 113 | 1.04 µs | 844 ns | 1.23 |
+|  | 256 | 2.53 µs | 1.59 µs | 1.59 |
+|  | 1,000 | 6.12 µs | 5.32 µs | 1.15 |
+| `a.solve(&b)`, 8 × 8 | 53 | 3.41 µs | 2.90 µs | 1.18 |
+|  | 113 | 4.04 µs | 5.80 µs | 0.70 |
+|  | 256 | 10.6 µs | 9.76 µs | 1.08 |
+|  | 1,000 | 31.5 µs | 32.3 µs | 0.98 |
+| `a.solve(&b)`, 16 × 16 | 53 | 16.1 µs | 20.8 µs | 0.77 |
+|  | 113 | 19.9 µs | 47.9 µs | 0.41 |
+|  | 256 | 64.6 µs | 72.0 µs | 0.90 |
+|  | 1,000 | 189 µs | 217 µs | 0.87 |
+
+The products take 0.27 to 0.80 of the per-element `mpfr_dot`'s time, and less than the `mpfr_fma` loop's from 8 × 8.
 
 ### Where the references are faster
 
-- **Arb** at every size to 10⁵ bits, and at 10⁶ bits for `exp`, `sin` and `atan` (1.3 to 6.7 times at 53 bits for the elementary functions; `ln` at 10⁶ bits is faster than Arb's, 70.5 against 87 ms): tables of the functions at many points, fixed point on GMP's `mpn` level and no Ziv loop, because its balls only enclose the value. It returns something else, so it is listed for its time.
-- **Sums of two limbs and of three to sixteen into an existing number** (`set_add` and `set_sub` at 113 bits 1.05 to 1.19 times, at 256 bits 1.16 to 1.25, at 1,000 bits 1.18 to 1.21; with a new result 0.86 to 1.07): MPFR's `mpfr_add1sp2` and `mpfr_add1sp` are specialised for operands of the result's precision, whose low bits are zero, where `a`'s kernels take operands of any bits and carry a whole word below the result; past one limb that costs 0.3 to 3.1 ns. At one limb and at 128 bits `a` is at par or faster (0.72 to 1.00), and from 10⁴ bits 0.43 to 0.68 times MPFR's time.
-- **Quotients of two limbs and of four** (`set_div` at 113 bits 1.28 times, at 256 bits 1.13): `a` takes the exact reciprocal of the divisor's top two limbs and two exact divisions of three limbs by two, MPFR's `mpfr_div_2` an approximate quotient from an approximate reciprocal of the top limb, with an error below 21 units and a test of the bits it needs. With a new result `a` is at par or faster (0.90 to 1.00).
-- **Quotients from long operands to 53 bits and of 1,000 bits from short ones** (`53 (operands 1,000)` 1.21 times, `53 (operands 100,000)` 1.22, `1,000 (operands 53)` 1.32; with a new result 1.02): two divisions of a limb, one for each end of the interval of the truncated operands, against MPFR's one; and the 17 limbs of a quotient by one limb, each about 10 cycles waiting for the remainder before it.
-- **`mul_add_round` at 1,000 bits** (1.17 to 1.21 times): operands longer than four limbs take the general path, the exact product of 32 limbs in working memory and the window sum; up to 256 bits `a` is 0.41 to 0.96 times MPFR's time, and `1,000 (operands 53)` 0.58.
-- **`x·x` and `norm` at 10⁴ bits** (`x·x` 1.11 times, `BigComplex`'s `sqr_round` 1.23 and `norm_round` 1.18): MPFR's `mpfr_sqr` and MPC's `a² ± b²` round with short products (`mpfr_mulhigh`), which the crate's integers have not; `a` multiplies exactly. The full product of 157 limbs is itself at par with GMP's (`set_mul` 1.00).
-- **`set_f64` at 10⁶ bits** (1.36 times, 782 against 575 ns): the zeros of the 15,625 limbs below the top one; from 24 to 10⁵ bits `set_f64` takes 2.5 to 113 ns, 0.31 to 0.99 times MPFR's `mpfr_set_d`.
-- **`set_floor` at 10⁵ bits and `set_rint` at 1,000 and 10⁴ bits** (1.10, 1.08 and 1.12 times, 0.7 to 11 ns): the same copy of the limbs and scan of the fraction as MPFR's; at the other sizes `set_floor` is 0.85 to 1.00 times `mpfr_floor` and `set_rint` 0.89 to 1.00 times `mpfr_rint`. The forms with a new result (`from_f64_round`, `floor`, `rint_round`) allocate and stay 1.2 to 2.6 times MPFR's into an existing number (and faster than rug's, which allocate too). Division at 1,000 and 10⁴ bits is no longer behind (0.82 and 0.84 times).
-- **Square root into an existing number at 24 to 113 bits** (1.15 to 1.87 times, 0.9 to 5.9 ns of 6.2 to 11.8; the 64-bit figure, 12.7 ns, is 9.9 ns in another build of the same machine code at other addresses), **and at 10⁴ bits** (1.19 times; at par from 256 to 1,000 bits, 0.97 to 1.02): the roots of one and two limbs take about 4 and 10 ns in registers, and the rest is the fixed cost of `set_sqrt` over the `Kind` and the vector of the mantissa; with a new result both allocate, and the gap is 1.17 to 1.55 times, the allocation and the release of a vector costing about 1.5 to 2 times MPFR's `mpfr_init2` and `mpfr_clear`. From 256 bits both take the integer root of Zimmermann's Karatsuba square root, GMP's `mpn_sqrtrem` faster than the crate's at 10⁴ bits. At 128 bits `a` is 3 times faster, MPFR having no form for it.
-- **`rec_sqrt_round` at 1,000 bits** (1.02 times): the square root of the crate's integers and a division, where MPFR's Newton's iteration takes short products, which the crate's integers have not; at 24 to 113 bits `a` is 1.9 to 2.5 times faster, at 128 and 256 bits 1.04 to 1.08 times, from 10⁴ bits 1.1 to 1.6 times.
-- **`cbrt_round` at 10⁴ bits** (1.06 times): the integer root of the crate's numbers against GMP's `mpz_root`, both Newton's method on integers; to 113 bits `a` is 2 to 3.2 times faster, at 128 and 256 bits 1.09 to 1.11 times, at 1,000 bits at par, at 10⁵ bits 1.27 times.
-- **`powi_round(7)` at 10⁴ bits** (1.04 times): both are the cost of three products of 157 limbs; at every other size to 10⁵ bits `powi_round` is faster than MPFR's `mpfr_pow_si`.
-- **The logarithms and the inverse hyperbolic functions at 10⁴ bits** (`ln`, `log2`, `ln_1p`, `asinh`, `acosh` and `atanh` 1.03 to 1.07 times; `log10` 0.53, MPFR's being slower): the AGM on limbs takes 21 steps of a product and a square root of 159 limbs, about 7.4 µs a step here (a product 3.4 µs and a root 4.0 µs, measured alone), where MPFR takes 23 steps of GMP's, about 6.2 µs a step; the first step's root alone, the correction that stands for the last two and the division of `4/s` saved do not make up the difference of the kernels. Newton's iteration on the exponential would cost more than one exponential of 10⁴ bits (0.88 times MPFR's, against MPFR's logarithm at 0.58 of its exponential). From 3,400 bits the AGM is ahead of Newton's iteration; from 24 to 256 bits the tables make the logarithms 0.16 to 0.64 times MPFR's.
-- **Complex numbers**: `set_add` at 256 and 1,000 bits (1.16 and 1.12 times) and `add_round` to 1,000 bits (1.73 to 2.10): two `BigFloat` additions of three to sixteen limbs (see above), and the allocating form two new numbers against MPC's into variables. `set_mul` at 256 bits (1.17 times, `mul_round` 1.33): the window addition's fixed cost, twice. `set_sqrt` at 256 bits (1.23 times, `sqrt_round` 1.28; at par from 128 to 10⁴ bits, 0.96 to 1.01): the real square roots and quotients of four limbs at the working precision (see the square root above). Among the functions only `powi_round` is behind, at 113 and 10⁴ bits (1.03 times both): its products at the working precision, which with the guard bits is past two limbs at 113 bits, take the exact window path; `ln_round`, `log10_round`, `sin_cos_round` and the inverse functions are faster than MPC's at every size (0.12 to 0.98). From 10⁵ bits `a` is faster everywhere (0.39 to 0.80).
-- **Matrices**: the solves of 4 × 4 matrices at every size (1.25 to 2.01 times), of 8 × 8 at 53, 256 and 1,000 bits (1.19, 1.37 and 1.05) and of 16 × 16 at 256 bits (1.03), and the 4 × 4 products at 53 and 256 bits (1.47 and 1.05): every element of a new matrix is a new vector (about 20 ns each, `n²` of them for a product and `n` a column for a solve), where the MPFR loops write into variables that exist; and every element is the exact dot product rounded once, against `mpfr_fma` and `mpfr_fms` rounded at each step: elements of one and two limbs take their products in registers (`short_dot`), longer ones the general exact path, which is why 256 bits are further behind than 113 (the solve of 4 × 4 at 113 bits went from 2.75 to 1.30 times in this pass, at 256 bits it did not move). From 8 × 8 the products are faster at every size, 0.36 to 0.96 times the `mpfr_fma` loop.
-- **Cached constants below 256 bits**: Arb copies 7 to 11 ns, `a` 14 ns (an allocation). From 10⁵ bits `a` and MPFR copy at the same speed (0.9 to 1.26, the noise of a copy).
+Every case above 1.05 times the fastest same-work reference's time, by cause: 180 of the 1305 cases of the scoreboard that have one. The causes are those found in the speed pass, or say that none was established.
+
+- **Sums and differences of four and sixteen limbs** (256 and 1,000 bits), in every form: `set_add` and `set_sub` 1.22 to 1.34, `add_round`, `sub_round` and `&a + &b` at 1,000 bits 1.12 to 1.21, the assigning forms 1.22 to 1.43, and the complex sums built on them 1.09 to 1.44. Four limbs take `small::add_short` and sixteen `same::add`, which writes into the result's limbs in place after MPFR's `mpfr_add1sp`: 12.5 ns against 9.49 ns at 256 bits and 18.6 ns against 13.9 ns at 1,000. The cause of the rest was not established.
+- **`x op= y` of one and two limbs** (1.08 to 1.31: `add_assign_round` at 24 and 113 bits, `mul_assign_round` at 24, 53, 64 and 113, `div_assign_round` at 24 and 53, and the complex `+=`, `-=` and `/=` there): the same register kernels as `set_add`, after the match on both operands' forms and a copy of the first one, against MPFR's `mpfr_add (x, x, y, rnd)`, its plain call; `set_add` at 24 bits takes 3.90 ns and `add_assign_round` 5.61 ns.
+- **Quotients of two limbs and of operands of other lengths** (1.15 to 1.37): `set_div` at 113 bits (1.30) divides exactly where MPFR's `mpfr_div_2` takes an approximate quotient and a test of the bits it needs; a result of 53 bits from operands of 1,000 or `10^5` (1.32 and 1.34) takes two divisions of a limb, one for each end of the interval of the truncated operands, against MPFR's one; and 1,000 bits from operands of 53 (1.37, with a new result 1.15 against malachite-float) a quotient of 17 limbs by one, each limb waiting for the remainder before it.
+- **`mul_add_round` and `set_mul_add` at 1,000 bits** (1.18 to 1.19): operands past four limbs take the general exact path, the whole product in working memory and then the sum; the cause of the difference was not established.
+- **Square roots at 64 and 256 bits** (`set_sqrt` 1.10 and 1.12), and the complex roots at 128 and 256 bits that run on them (1.06 to 1.23): from 256 bits both take the integer root by Zimmermann's method (GMP's `mpn_sqrtrem` for MPFR); the cause of the difference at four limbs was not established, nor at 64 bits, where the root is of one full limb.
+- **Exact sums of few terms** (`sum_round` 1.06 to 1.47, `dot_round` of four terms at 256 and 1,000 bits 1.09): the window sum, after Lefèvre's algorithm as `mpfr_sum` has it, has fixed costs (its two buffers made zero, every term shifted into them); that they are the difference was not measured.
+- **Primitive and `Number` operands from 1,000 bits** (`&a + i64` 1.11 and 1.52, `&a * f64` 1.12, `&a / &Number` 1.44): the operand is made a float in the one each thread keeps and the general path follows, where `mpfr_add_si` and `mpfr_mul_d` take the word directly; `mpfr_div_z` reads the integer's limbs, `a` converts the `Number`'s bytes first.
+- **`rec_sqrt_round` at 1,000 bits** (1.15): below 2,000 bits `a` takes a square root and a division, which it found faster there than its Newton's iteration, where MPFR runs Newton's iteration; **`pow_number_round(2^64 + 13)` at `10^4` bits** (1.17): the 65 squarings of about 160 limbs at the working precision; the cause of the difference was not established.
+- **Comparisons**, `a < b` at every size (1.15 to 1.35, 2.42 ns against 2.06 ns at 53 bits): the tests of both numbers' kinds and of the mantissa's form before the exponents; not narrowed further.
+- **Rounding to an integer or to another precision** (`set_floor` and `set_rint` 1.08 to 1.30 from 24 bits to `10^5`, `floor` with a new result from 256 bits 1.15 to 1.58, `rint_round` at `10^4` and `10^5` bits 1.08, `prec_round` at 24 to 64 bits against malachite-float and at 1,000 bits 1.15 to 1.28): the copy of the limbs, the scan of the fraction and the rounding, as MPFR's; the cause of the difference was not established.
+- **Conversions through `Number` and `Rational`** (`to_number_round` 1.53 to 3.41, `from_number` 1.21 to 2.68, `from_rational` 1.24 to 1.45, `Rational::try_from` 1.33 to 3.16): a `Number` is a vector of bytes, so each conversion makes a vector of limbs from them, or writes the limbs back as bytes, besides the result's own vector; malachite-float's `Integer` keeps a word in place (17.7 ns against 5.20 ns at 53 bits), and MPFR's `mpfr_get_z`, `mpfr_set_z` and `mpfr_get_q` read and write GMP's limbs directly (`mpfr_get_z` and `mpfr_get_q` into variables that exist).
+- **`from_f64_round` from `10^4` bits against dashu-float** (1.83 to 50.3, 734 ns against 14.6 ns at `10^6` bits): dashu-float keeps the 53 significant bits of a value whose precision is a bound, so nothing grows with the precision, where `a` writes a mantissa of all `p` bits, as MPFR does; it would take mantissas trimmed of their trailing zeros. `set_f64` at `10^5` bits (1.58) makes the limbs below the top one zero, as `mpfr_set_d` does, and is ahead at `10^6` (0.78): not explained; `to_f64_round` at `10^4` bits (1.07): not established.
+- **Cached constants** (π, `ln 2`, γ and `G`, 1.10 to 2.62 against MPFR into an existing variable; 17.8 ns against 7.56 ns for π at 1,000 bits): each call makes a new number (a vector allocated from three limbs; one or two limbs are held in the number) and rounds the bits of the table, or from 16,384 bits copies the kept value from behind the cache's `Mutex`, where MPFR copies its cached value into a variable that exists. The forms into an existing number, `set_pi` and the others, have no rows in this run.
+- **Complex numbers**, besides the sums and roots above: `set_mul` and `mul_round` at 256 bits (1.22 and 1.19, `*=` 1.07), four products and two sums of four limbs; `set_div` at 24 and 1,000 bits (1.09 and 1.06, `/=` at 24 bits 1.08); `set_conj` at 256 bits (1.09), an exact copy; `mul_int_round` at 256 and 1,000 bits (1.19 and 1.57); and `proj` (1.11 to 4.52), for a finite number a copy of both parts into a new number against `mpc_proj` into a variable, 29.8 ns against 6.59 ns at 1,000 bits. For all but `proj` the cause was not established. **`sec` at 24 bits** (1.10 against malachite-float): not established.
+
+Not counted, as the references do less:
+
+- **Arb**, at almost every size of the elementary functions (`a` takes 0.77 to 7.29 times its time, below 1 only for `ln` at `10^6` bits): tables of the functions at many points, fixed point on GMP's `mpn` level and no Ziv loop, its balls only enclosing the value. It is slower than `a` for the constants' first call and for the reduction of `m·2^(10^4)`.
+- **MPFR's Gaussian elimination**, for the solves of 4 × 4 at every size and of 8 × 8 at 53 and 256 bits (1.08 to 1.99): it rounds at each step, where every element of `a`'s factorisation is an exact dot product rounded once, each a new vector.
+- **rug's `to_string`** at 128 bits (1.08), which writes all the digits of `mpfr_get_str` with no search for the shortest.
+

@@ -231,12 +231,17 @@ pub(super) fn in_type<T: Real>(
 
 /// The integrand of a one-dimensional rule, called at the point of its own type nearest the
 /// node, and counted.
-struct Integrand<'a, T> {
-    f: &'a mut dyn FnMut(T) -> T,
+///
+/// The integrand's type `F` is the caller's closure, so that every rule is compiled for it and the
+/// integrand inlined into the rule's loop, as a template library would; a `dyn` call per
+/// evaluation cost the cheap integrands half their time.
+struct Integrand<'a, T, F: ?Sized> {
+    f: &'a mut F,
     evaluations: usize,
+    _type: core::marker::PhantomData<fn(T) -> T>,
 }
 
-impl<T: Real> Integrand<'_, T> {
+impl<T: Real, F: FnMut(T) -> T + ?Sized> Integrand<'_, T, F> {
     /// The value at `x`, in `f64`.
     fn at(&mut self, x: f64) -> f64 {
         self.evaluations += 1;
@@ -299,12 +304,12 @@ fn range<T: Real>(a: T, b: T) -> Option<(Range, f64)> {
 
 /// A one-dimensional rule: the range and the settings checked, the empty range answered, the
 /// rule run (`None` from it: a range it does not take), and the result signed and converted.
-fn one_dimensional<T: Real>(
-    f: &mut dyn FnMut(T) -> T,
+fn one_dimensional<T: Real, F: FnMut(T) -> T>(
+    f: &mut F,
     a: T,
     b: T,
     opts: &QuadOptions<T>,
-    rule: impl FnOnce(&mut Integrand<'_, T>, Range, &Settings) -> Option<Outcome>,
+    rule: impl FnOnce(&mut Integrand<'_, T, F>, Range, &Settings) -> Option<Outcome>,
 ) -> Option<QuadResult<T>> {
     let (range, sign) = range(a, b)?;
     let settings = Settings::of(opts)?;
@@ -316,7 +321,11 @@ fn one_dimensional<T: Real>(
             converged: true,
         });
     }
-    let mut integrand = Integrand { f, evaluations: 0 };
+    let mut integrand = Integrand {
+        f,
+        evaluations: 0,
+        _type: core::marker::PhantomData,
+    };
     let outcome = rule(&mut integrand, range, &settings)?;
     Some(in_type(
         sign * outcome.value,
@@ -329,13 +338,13 @@ fn one_dimensional<T: Real>(
 /// The Kronrod rules on any range, through QAGI's maps for the infinite ones, where the rule is
 /// QAGI's 15-point pair whichever was asked for (as in QUADPACK, whose QAGI has no other); `None`
 /// when the budget does not allow one application of the rule.
-fn kronrod_rule<T: Real>(
-    f: &mut Integrand<'_, T>,
+fn kronrod_rule<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
     range: Range,
     s: &Settings,
-    table: &kronrod::Table,
+    table: &'static kronrod::Table,
 ) -> Option<Outcome> {
-    let (map, a, b, table): (_, _, _, &kronrod::Table) = match range {
+    let (map, a, b, table): (_, _, _, &'static kronrod::Table) = match range {
         Range::Finite(a, b) => (Map::Identity, a, b, table),
         Range::Upper(a) => (Map::Upper(a), 0.0, 1.0, &kronrod::G7K15),
         Range::Lower(b) => (Map::Lower(b), 0.0, 1.0, &kronrod::G7K15),

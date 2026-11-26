@@ -44,6 +44,52 @@
 //! to its reciprocal (times √2), and in exchange keeps the pivots on the diagonal, where a
 //! fill-reducing ordering of a matrix with a symmetric pattern expects them.
 //!
+//! # Strategies
+//!
+//! [`SparseLu::new`] chooses the ordering and the pivoting by the pattern, by the rule UMFPACK
+//! uses to choose between its symmetric and unsymmetric strategies (T. A. Davis, *Algorithm 832:
+//! UMFPACK V4.3, an unsymmetric-pattern multifrontal method*, ACM Trans. Math. Softw. 30, 2004).
+//! A pattern that is nearly symmetric — at least half of the elements off the diagonal have their
+//! mirror image stored, where UMFPACK 6.3 (SuiteSparse 7.14) asks three tenths
+//! (`STRATEGY_THRESH_SYM`, one half in its earlier versions) — with at least nine tenths of its
+//! diagonal stored (`STRATEGY_THRESH_NNZDIAG`) takes the *symmetric*
+//! strategy: the columns in the order [`amd`](super::amd) gives the pattern of `A + Aᵀ`, and the
+//! pivots chosen to keep the diagonal that order expects. The diagonal element is the pivot when
+//! it is nonzero and at least 10⁻⁴ of the largest element of its column (a tenth of UMFPACK's
+//! `SYM_PIVOT_TOLERANCE`, 0.001); otherwise the pivot is an element of at least 0.1 of the largest
+//! (UMFPACK's `PIVOT_TOLERANCE`): of those the largest in a row whose own column is eliminated
+//! already, if there is one, and the largest of all if not. A row whose column is eliminated is
+//! one whose diagonal an earlier step passed over, which no later column can take on its
+//! diagonal, so taking it leaves the later diagonals in place; the row of the column that took
+//! this column's diagonal is one, and a pivot there is what UMFPACK makes by taking the mirror
+//! of an off-diagonal pivot as the next diagonal, its likeness of a pivot of two rows and two
+//! columns. UMFPACK chooses among its acceptable rows by their sparsity, which a left-looking
+//! elimination does not know, and it refines the solutions (two steps by default), which this
+//! does not. Other patterns take the *unsymmetric* strategy: [`Ordering::Colamd`] and partial
+//! pivoting.
+//!
+//! The order of the symmetric strategy bounds the fill only while the pivots stay on the diagonal,
+//! and diagonal pivots of a ten-thousandth of their column make multipliers of up to ten thousand.
+//! So [`SparseLu::new`] watches its symmetric elimination: after every step it compares the
+//! elements of the factors so far with what the elimination with every pivot on the diagonal makes
+//! in as many steps — the pattern of the Cholesky factor of `A + Aᵀ` in that order, counted by the
+//! elimination tree and the row and column counts of Gilbert, Ng and Peyton (*An efficient
+//! algorithm to compute row and column counts for sparse Cholesky factorization*, SIAM J. Matrix
+//! Anal. Appl. 15, 1994) once a pivot has left the diagonal — and the largest element of `U` with
+//! the largest of `A`. When the elements are more than twice the prediction and the elements of `A`
+//! more, or an element of `U` is more than 16 times the largest of `A`, the elimination stops and
+//! `A` is factored again, from the start, by the unsymmetric strategy: the result is then that of
+//! [`LuStrategy::Unsymmetric`], element for element. So it is when the symmetric elimination ends
+//! with factors that are singular — a pivot of zero, an element that is not finite, or a condition
+//! beyond the bound of the test of singularity to working precision, which its growth raises —
+//! unless the pattern alone makes the matrix singular: the verdict on such a matrix is that of
+//! partial pivoting. The tests are functions of the pattern, the values and the order of the
+//! operations alone, so a matrix always takes the same path. On grids whose diagonal is weak —
+//! shifted Laplacians and Helmholtz operators, and `A − σI` for a shift inside the spectrum — the
+//! symmetric elimination keeps its pivots on the diagonal and its fill, but grows by hundreds to
+//! tens of thousands, and the refactorisation is what keeps the accuracy of partial pivoting; on
+//! the matrices of grids and meshes with a strong diagonal the symmetric strategy runs to its end.
+//!
 //! # Singular matrices
 //!
 //! A column in which no row is left to choose, or none but zeros, has no pivot: the matrix is
@@ -102,21 +148,89 @@
 //! [`is_singular`](SparseLu::is_singular) reports each of these, and the solves of a singular
 //! matrix return `None`.
 //!
+//! # Supernodes
+//!
+//! The elimination begins a column at a time, which is the faster while the factors stay sparse.
+//! In a matrix of order 64 or more, once a step has made 96 elements of `L` and `U` together in
+//! its column (the pivot not counted), the steps after it are those of Demmel, Eisenstat,
+//! Gilbert, Li and Liu, *A supernodal approach to sparse partial pivoting* (SIAM J. Matrix Anal.
+//! Appl. 20, 1999): the columns of `L` that share their rows are held together as dense blocks
+//! while it runs, the columns of the matrix are taken sixteen at a time, and most of the
+//! arithmetic is that of dense triangular solves and products; the columns made before become
+//! blocks of one column each. The search, its pruning and the choice of the pivots are those
+//! above, made over the blocks instead of the columns, and a pivot is chosen from the whole
+//! column once every update of it is in: the factors have the same elements in the same places
+//! and are those of the same pivots, but for the rounding of the sums, which the blocks group
+//! otherwise, and through it, rarely, the choice between two elements within rounding of each
+//! other. A matrix of order below 64, and one whose factors never have a column of 96 elements —
+//! a tridiagonal matrix of any order — is eliminated a column at a time to the end.
+//!
 //! # What is not done
 //!
-//! The columns are eliminated one at a time: there are no supernodes and no dense blocks, the
-//! matrix is not permuted to block triangular form first, its rows and columns are not scaled
-//! for the elimination (only for the test of its condition), and a solution is not refined. The
-//! elimination is sequential.
+//! The matrix is not permuted to block triangular form first, its rows and columns are not
+//! scaled for the elimination (only for the test of its condition), and a solution is not
+//! refined. The elimination is sequential.
 //!
 //! The limits measured, of the test of singularity and of pivoting on unscaled rows and
 //! columns among them, are listed in the documentation of [`SparseLu`].
 //!
 //! [`pivot_threshold`]: SparseLuOptions::pivot_threshold
 
+use super::amd::amd_of;
+use super::graph::Graph;
 use super::{Ordering, SparseMatrix};
 use crate::math::complex::Float;
 use crate::math::matrix::{Matrix, Scalar};
+use watch::Watch;
+
+mod supernodes;
+mod watch;
+
+/// The order from which the elimination can go by supernodes and panels ([`supernodes`]) rather
+/// than a column at a time.
+// Measured on an Apple M4 Max (`SparseLu::new`, orders 144 to 1728; sweep 64 to 2048): below
+// order 97 no column reaches [`DENSE_COLUMN`] elements, so every value up to 97 is the same, and
+// above it the small matrices that fill need the supernodes: a random one of order 200 took 1.28
+// times as long at 256, one of order 500 1.73 times at 512, an elasticity mesh of order 648 1.84
+// times at 1024.
+const SUPERNODAL: usize = 64;
+
+/// The elements of a column of `L` and `U` together from which the rest of the elimination goes
+/// by supernodes: the column method is the faster while the factors stay this sparse.
+// Measured on an Apple M4 Max (`SparseLu::new`; sweep 8 to 256 on 2-D and 3-D grids, elasticity
+// meshes, circuits, random and tridiagonal matrices of orders 400 to 100 000, `f64` and
+// `Complex<f64>`, both strategies): 96 against 32 takes 4 to 24 % off the 2-D grids and circuits of
+// orders 400 to 2000, which the column method finishes the faster, and costs the 3-D grids and
+// meshes of orders 600 to 2000 at most 1 %; from 128 on these lose 2 to 44 %. Orders from 10 000
+// on move by less than 1 % between 8 and 128.
+const DENSE_COLUMN: usize = 96;
+
+/// The fraction of the largest element of its column down to which the symmetric strategy keeps
+/// the diagonal element as the pivot: a tenth of UMFPACK's `SYM_PIVOT_TOLERANCE` (0.001, KLU's
+/// default too).
+// The owner's choice, with the growth watch (`watch::GROWTH`) at 16, from the quiet sweep on an
+// Apple M4 Max (sweep 10⁻⁴ to 0.1, the watch at 64): `SparseLu::new` on the weak-diagonal 5-point
+// grids of 100² and 200² (with and without convection) as fast from 10⁻⁴ to 10⁻³ (within 0.3 %),
+// and up to 2 % slower at 0.003, 5 % at 0.01 and 31 % at 0.03 and 0.1, the pivots leaving the
+// diagonal earlier and the elimination running further before the watch stops it; the
+// scoreboard's convection–diffusion, upwind and circuit matrices the same at every value. On the
+// 450 random systems of the review every value refuses master's 64; the nearly symmetric ones are
+// refactored 116 times at 10⁻⁴, 104 at 10⁻³, 64 at 0.01 and 33 at 0.1, with the worst backward
+// error per family 23 to 63, 34 to 197, 34 to 388 and 5 to 96 `ε·‖A‖∞·‖x‖∞`. Measured again with
+// both of the owner's values: master's 64 refused, 135 refactored, worst backward errors 0.8 to
+// 23 (master 0.8 to 14.5) and forward errors at most master's per family; `SparseLu::new` gives
+// the decompositions of 10⁻³ and 64, bit for bit, on the 27 weak-diagonal grids of 50² to 200²
+// (in 0.87 to 1.01 of their time, two alternated runs), on the scoreboard's matrices and on the
+// shifted Laplacians of the shift-and-invert timings.
+const SYMMETRIC_DIAGONAL: f64 = 1e-4;
+
+/// The fraction of the largest element of its column that an element off the diagonal must reach
+/// to be the pivot under the symmetric strategy: UMFPACK's `PIVOT_TOLERANCE`.
+// Measured on an Apple M4 Max (the matrices of [`SYMMETRIC_DIAGONAL`]; sweep 0.01 to 1): the time
+// is the same at every value (within 0.5 %); on the 450 systems every value refuses master's 64,
+// and the worst backward error per nearly symmetric family is 103 `ε·‖A‖∞·‖x‖∞` at 0.01 and 0.03,
+// 197 at 0.1, 397 at 0.3 and 486 at 1.
+const SYMMETRIC_OFF_DIAGONAL: f64 = 0.1;
 
 /// The step of a row that no column has taken as its pivot yet, and the row of a search that has
 /// found none.
@@ -124,6 +238,9 @@ const NONE: usize = usize::MAX;
 
 /// How often the estimate of [`SparseLu::rcond`] may move to a better unit vector, as in LAPACK.
 const ESTIMATE_CYCLES: usize = 5;
+
+/// The vectors the searches of the estimate of [`SparseLu::rcond`] start from.
+const STARTS: usize = 3;
 
 /// How far above the bound `τ` of the test of singularity to working precision the reciprocal
 /// condition number of the scaled matrix may be while that of the matrix as it is still
@@ -149,7 +266,69 @@ fn split_mix(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// How [`SparseLu`] orders the columns of a matrix and how it chooses its pivots.
+/// How [`SparseLu`] chooses the order of the columns and the pivot threshold: by the pattern of
+/// the matrix, which is the default and what [`SparseLu::new`] does, by one of the two strategies
+/// it chooses between, or by the [`SparseLuOptions`]' own ordering and threshold.
+///
+/// # Examples
+///
+/// ```
+/// use a::math::sparse::{LuStrategy, SparseLu, SparseLuOptions, SparseMatrix};
+///
+/// let a = SparseMatrix::tridiagonal(&[-1.0; 4], &[2.0; 5], &[-1.0; 4]);
+/// let auto = SparseLu::with_options(&a, &SparseLuOptions::new()).unwrap();
+/// assert_eq!(auto, SparseLu::new(&a));
+/// // A symmetric pattern takes the symmetric strategy.
+/// let symmetric = SparseLuOptions::new().with_strategy(LuStrategy::Symmetric);
+/// assert_eq!(auto, SparseLu::with_options(&a, &symmetric).unwrap());
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LuStrategy {
+    /// [`Symmetric`](Self::Symmetric) when the pattern is nearly symmetric — at least half of
+    /// the elements off the diagonal have their mirror image stored — and at least nine tenths of
+    /// the diagonal is stored, [`Unsymmetric`](Self::Unsymmetric) otherwise: UMFPACK's rule,
+    /// with the symmetry threshold of its earlier versions (UMFPACK 6.3 has three tenths). The
+    /// symmetric elimination is watched, and when its factors hold more than twice the elements
+    /// that its order predicts with every pivot on the diagonal, and as many as `A` more, or an
+    /// element of `U` grows beyond 16 times the largest of `A`, it stops and the matrix is
+    /// factored again from the start by the unsymmetric strategy; so it is when it ends with
+    /// factors that are singular, unless the pattern alone made them so (see
+    /// [`SparseLu::new`]). The default, and what [`SparseLu::new`] does; [`SparseLuOptions`]
+    /// whose ordering or threshold is not its default factor as [`Explicit`](Self::Explicit)
+    /// instead.
+    #[default]
+    Auto,
+    /// The columns in the order [`amd`](super::amd) gives the pattern of `A + Aᵀ`, the diagonal
+    /// element the pivot when it is nonzero and at least 10⁻⁴ of the largest element of its
+    /// column (UMFPACK's symmetric strategy has 0.001), and otherwise an element of at least 0.1
+    /// of the largest, the largest such in a row whose own column is eliminated already if there
+    /// is one: multipliers up to 10 000 on the diagonal and 10 off it (`√2` times those for
+    /// complex elements). Unlike [`Auto`](Self::Auto), it runs to its end whatever it fills and
+    /// however much it grows; [`growth`](SparseLu::growth) and [`nnz`](SparseLu::nnz) say what
+    /// it did.
+    Symmetric,
+    /// The columns by [`Ordering::Colamd`] and partial pivoting (the threshold 1): multipliers
+    /// up to 1 (`√2`).
+    Unsymmetric,
+    /// The options' own [`ordering`](SparseLuOptions::ordering) and
+    /// [`pivot_threshold`](SparseLuOptions::pivot_threshold), which the other strategies leave
+    /// aside. [`SparseLuOptions::with_ordering`] and [`SparseLuOptions::with_pivot_threshold`]
+    /// choose it.
+    Explicit,
+}
+
+/// How [`SparseLu`] orders the columns of a matrix and how it chooses its pivots: a
+/// [`LuStrategy`], and the ordering and threshold that [`LuStrategy::Explicit`] uses.
+///
+/// The strategy the options factor by is [`strategy`](Self::strategy), with one exception:
+/// [`LuStrategy::Auto`] holds only while [`ordering`](Self::ordering) is [`Ordering::Colamd`]
+/// and [`pivot_threshold`](Self::pivot_threshold) is 1, their defaults, and options whose
+/// ordering or threshold is anything else factor as [`LuStrategy::Explicit`]. So options built
+/// field by field, or by struct update syntax from [`SparseLuOptions::new`], get the ordering and
+/// the threshold they name; a field set to its default cannot be told from one left alone, and
+/// [`with_ordering`](Self::with_ordering) or [`with_pivot_threshold`](Self::with_pivot_threshold)
+/// make the strategy `Explicit` whatever the value. [`LuStrategy::Symmetric`] and
+/// [`LuStrategy::Unsymmetric`] leave both fields aside.
 ///
 /// # Examples
 ///
@@ -167,13 +346,27 @@ fn split_mix(state: &mut u64) -> u64 {
 /// let lu = SparseLu::with_options(&a, &options).unwrap();
 /// assert_eq!(lu.permutation(), [0, 1]);
 /// assert_eq!(lu.det(), 5.0);
+/// // Options written field by field get the ordering they name, not the automatic choice.
+/// let by_field = SparseLuOptions { ordering: Ordering::Natural, ..SparseLuOptions::new() };
+/// let natural = SparseLu::with_ordering(&a, &Ordering::Natural);
+/// assert_eq!(SparseLu::with_options(&a, &by_field).unwrap(), natural);
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct SparseLuOptions {
-    /// The ordering of the columns: [`Ordering::Colamd`] unless set.
+    /// How the ordering and the threshold are chosen: [`LuStrategy::Auto`] unless set, and
+    /// [`LuStrategy::Explicit`] once an ordering or a threshold is set by
+    /// [`with_ordering`](Self::with_ordering) or
+    /// [`with_pivot_threshold`](Self::with_pivot_threshold). `Auto` with an ordering or a threshold
+    /// that is not the default factors as `Explicit`.
+    pub strategy: LuStrategy,
+    /// The ordering of the columns under [`LuStrategy::Explicit`], and under
+    /// [`LuStrategy::Auto`] when it or the threshold is not its default: [`Ordering::Colamd`]
+    /// unless set.
     pub ordering: Ordering,
     /// The fraction of the largest element of its column the diagonal element must reach to be
-    /// taken as the pivot, in `(0, 1]`: 1 unless set, which is partial pivoting.
+    /// taken as the pivot, in `(0, 1]`, under [`LuStrategy::Explicit`] and under
+    /// [`LuStrategy::Auto`] when it or the ordering is not its default: 1 unless set, which is
+    /// partial pivoting. [`SparseLu::with_options`] checks its range whatever the strategy.
     pub pivot_threshold: f64,
 }
 
@@ -184,57 +377,93 @@ impl Default for SparseLuOptions {
 }
 
 impl SparseLuOptions {
-    /// The defaults: the columns ordered by [`Ordering::Colamd`], and a pivot threshold of 1.
+    /// The defaults: the strategy [`LuStrategy::Auto`], which is what [`SparseLu::new`] does;
+    /// for [`LuStrategy::Explicit`], the columns ordered by [`Ordering::Colamd`] and a pivot
+    /// threshold of 1.
     ///
     /// # Examples
     ///
     /// ```
-    /// use a::math::sparse::{Ordering, SparseLuOptions};
+    /// use a::math::sparse::{LuStrategy, Ordering, SparseLuOptions};
     ///
     /// let options = SparseLuOptions::new();
+    /// assert_eq!(options.strategy, LuStrategy::Auto);
     /// assert_eq!(options.ordering, Ordering::Colamd);
     /// assert_eq!(options.pivot_threshold, 1.0);
     /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
+            strategy: LuStrategy::Auto,
             ordering: Ordering::Colamd,
             pivot_threshold: 1.0,
         }
     }
 
-    /// Sets the ordering of the columns.
+    /// Sets the strategy, leaving the ordering and the threshold as they are.
     ///
     /// # Examples
     ///
     /// ```
-    /// use a::math::sparse::{Ordering, SparseLuOptions};
+    /// use a::math::sparse::{LuStrategy, SparseLuOptions};
+    ///
+    /// let options = SparseLuOptions::new().with_strategy(LuStrategy::Unsymmetric);
+    /// assert_eq!(options.strategy, LuStrategy::Unsymmetric);
+    /// ```
+    #[must_use]
+    pub fn with_strategy(mut self, strategy: LuStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Sets the ordering of the columns, and the strategy to [`LuStrategy::Explicit`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::sparse::{LuStrategy, Ordering, SparseLuOptions};
     ///
     /// let options = SparseLuOptions::new().with_ordering(Ordering::Given(vec![1, 0]));
     /// assert_eq!(options.ordering, Ordering::Given(vec![1, 0]));
+    /// assert_eq!(options.strategy, LuStrategy::Explicit);
     /// ```
     #[must_use]
     pub fn with_ordering(mut self, ordering: Ordering) -> Self {
         self.ordering = ordering;
+        self.strategy = LuStrategy::Explicit;
         self
     }
 
-    /// Sets the pivot threshold: the diagonal element of a column is its pivot when it is at
-    /// least this fraction of the largest element the column offers. It must lie in `(0, 1]`,
-    /// which [`SparseLu::with_options`] checks.
+    /// Sets the pivot threshold, and the strategy to [`LuStrategy::Explicit`]: the diagonal
+    /// element of a column is its pivot when it is at least this fraction of the largest element
+    /// the column offers. It must lie in `(0, 1]`, which [`SparseLu::with_options`] checks.
     ///
     /// # Examples
     ///
     /// ```
-    /// use a::math::sparse::SparseLuOptions;
+    /// use a::math::sparse::{LuStrategy, SparseLuOptions};
     ///
     /// let options = SparseLuOptions::new().with_pivot_threshold(0.1);
     /// assert_eq!(options.pivot_threshold, 0.1);
+    /// assert_eq!(options.strategy, LuStrategy::Explicit);
     /// ```
     #[must_use]
     pub fn with_pivot_threshold(mut self, pivot_threshold: f64) -> Self {
         self.pivot_threshold = pivot_threshold;
+        self.strategy = LuStrategy::Explicit;
         self
+    }
+
+    /// The strategy these options factor by: [`strategy`](Self::strategy), except that
+    /// [`LuStrategy::Auto`] is [`LuStrategy::Explicit`] once the ordering or the threshold is
+    /// not its default.
+    fn chosen_strategy(&self) -> LuStrategy {
+        let defaults = self.ordering == Ordering::Colamd && self.pivot_threshold == 1.0;
+        if self.strategy == LuStrategy::Auto && !defaults {
+            LuStrategy::Explicit
+        } else {
+            self.strategy
+        }
     }
 }
 
@@ -358,9 +587,49 @@ pub struct SparseLu<T: Scalar> {
     norm_one: T::Real,
 }
 
+/// Whether [`SparseLu::new`] takes the symmetric strategy for the square `a`: at least half of the
+/// stored elements off the diagonal have their mirror image stored, and at least nine tenths of
+/// the diagonal is stored (UMFPACK's test, with its thresholds 0.3 and 0.9 — here 0.5 and 0.9).
+fn symmetric_strategy<T: Scalar>(a: &SparseMatrix<T>, t: &SparseMatrix<T>) -> bool {
+    let n = a.rows();
+    if n == 0 {
+        return false;
+    }
+    let (ptrs, cols) = (a.row_pointers(), a.col_indices());
+    let (tptrs, tcols) = (t.row_pointers(), t.col_indices());
+    let (mut diagonal, mut off, mut matched) = (0usize, 0usize, 0usize);
+    for i in 0..n {
+        // Row i of A and row i of Aᵀ (column i of A), both ascending: a merge.
+        let (row, mirror) = (&cols[ptrs[i]..ptrs[i + 1]], &tcols[tptrs[i]..tptrs[i + 1]]);
+        let mut q = 0;
+        for &j in row {
+            if j == i {
+                diagonal += 1;
+                continue;
+            }
+            off += 1;
+            while q < mirror.len() && mirror[q] < j {
+                q += 1;
+            }
+            if q < mirror.len() && mirror[q] == j {
+                matched += 1;
+            }
+        }
+    }
+    // The thresholds (UMFPACK 6.3 asks 0.3 for the symmetry): measured on an Apple M4 Max,
+    // `SparseLu::new` by either strategy on 2-D and 3-D grids with a fraction of their edges
+    // stored one way only. With a strong diagonal the symmetric strategy is the faster at every
+    // symmetry from 0.2 to 0.7 (0.31 to 0.74 of the time), but with a weak one (a fifth of it or
+    // less) at 0.3 and 0.4 it is stopped by its watch and costs 3 to 10 % more than partial
+    // pivoting alone, so the symmetry asked stays at a half. With 5 % of the diagonal missing it
+    // is 0.81 of the time on a symmetric grid and 2.1 times at a symmetry of 0.6, from 10 % on
+    // 1.03 to 1.5 times: no value of the diagonal fraction is the better for both.
+    2 * matched >= off && 10 * diagonal >= 9 * n
+}
+
 impl<T: Scalar> SparseLu<T> {
-    /// The decomposition of the square `a`, with its columns ordered by [`Ordering::Colamd`] and
-    /// its pivots chosen by partial pivoting. Every square matrix has one; one that is singular,
+    /// The decomposition of the square `a` by the strategy that suits its pattern, chosen by
+    /// UMFPACK's rule. Every square matrix has one; one that is singular,
     /// or singular to working precision by the estimate of its condition that
     /// [`is_singular`](Self::is_singular) describes, is reported by it and refused by
     /// [`solve`](Self::solve).
@@ -372,6 +641,39 @@ impl<T: Scalar> SparseLu<T> {
     /// for a matrix whose condition is close to the bound. When some pivot is
     /// not an element of `a` itself, the check of the pattern for structural singularity adds a
     /// matching that costs `O(√n·(n + nnz(a)))` at worst and is as a rule far cheaper.
+    ///
+    /// The strategy:
+    ///
+    /// - **Symmetric**, when the pattern is nearly symmetric — at least half of the elements off
+    ///   the diagonal have their mirror image stored — and at least nine tenths of the diagonal
+    ///   is stored: the columns in the order [`amd`](super::amd) gives the pattern of `A + Aᵀ`,
+    ///   the diagonal element the pivot as long as it is 10⁻⁴ of the largest element of its
+    ///   column (a tenth of UMFPACK's `SYM_PIVOT_TOLERANCE`), and otherwise an element of at least
+    ///   a tenth of the largest (its `PIVOT_TOLERANCE`), from a row whose diagonal an earlier step
+    ///   passed over if there is one. The multipliers are then at most 10 000 on the diagonal and
+    ///   10 off it (`√2` times those for complex elements). On the matrices of grids and meshes
+    ///   with a strong diagonal this fills in 0.4 to 0.85 of what COLAMD with partial pivoting
+    ///   does: 0.5 to 0.7 on two-dimensional grids, 0.4 to 0.5 on three-dimensional seven-point
+    ///   ones of 10³ to 30³ points, 0.7 to 0.85 on three-dimensional elasticity meshes (three
+    ///   unknowns a point) of 648 to 12 288 unknowns.
+    /// - **Unsymmetric** otherwise: the columns by [`Ordering::Colamd`] and partial pivoting,
+    ///   the threshold 1, every multiplier at most 1 (`√2`).
+    ///
+    /// The symmetric elimination is watched: when its factors hold more than twice the elements
+    /// that its order predicts with every pivot on the diagonal, and as many as `a` more, or an
+    /// element of `U` grows beyond 16 times the largest of `a`, it stops, and `a` is factored again
+    /// from the start by the unsymmetric strategy, whose decomposition is then the result. So it is
+    /// when the symmetric factors are singular, unless the pattern of `a` alone makes them so: the
+    /// verdict on a singular matrix, and its time, are those of partial pivoting, plus the
+    /// symmetric elimination. A diagonal that is weak, as in shifted Laplacians, Helmholtz
+    /// operators and `A − σI` for a shift inside the spectrum, keeps its pivots on the diagonal but
+    /// grows the elements by hundreds to tens of thousands, and takes that second factorisation:
+    /// its time is that of partial pivoting and the part of the symmetric one made before it
+    /// stopped.
+    ///
+    /// This is [`LuStrategy::Auto`]; [`with_options`](Self::with_options) gives either strategy
+    /// without the watch, or any ordering and threshold; [`with_ordering`](Self::with_ordering)
+    /// any ordering with partial pivoting.
     ///
     /// # Panics
     ///
@@ -392,7 +694,47 @@ impl<T: Scalar> SparseLu<T> {
     #[must_use]
     #[track_caller]
     pub fn new(a: &SparseMatrix<T>) -> Self {
-        Self::with_ordering(a, &Ordering::Colamd)
+        assert!(a.rows() == a.cols(), "the matrix isn't square");
+        Self::by_strategy(a, LuStrategy::Auto)
+    }
+
+    /// The decomposition of the square `a` by one of the three strategies that choose their own
+    /// ordering and threshold.
+    #[track_caller]
+    fn by_strategy(a: &SparseMatrix<T>, strategy: LuStrategy) -> Self {
+        // The transpose is the matrix by columns, which the elimination reads too.
+        let by_columns = a.transpose();
+        let symmetric = match strategy {
+            LuStrategy::Auto => symmetric_strategy(a, &by_columns),
+            LuStrategy::Symmetric => true,
+            LuStrategy::Unsymmetric | LuStrategy::Explicit => false,
+        };
+        if symmetric {
+            // `amd(a)`, with the graph of `A + Aᵀ` kept for the watch.
+            let graph = Graph::of_symmetric_pattern(a);
+            let order = amd_of(&graph);
+            let rule = Rule::symmetric();
+            if strategy != LuStrategy::Auto {
+                return Self::eliminate(a, &by_columns, order, rule, None)
+                    .expect("an elimination without a watch runs to its end");
+            }
+            let mut watch = Watch::new(&graph, a.nnz());
+            if let Some(lu) = Self::eliminate(a, &by_columns, order, rule, Some(&mut watch)) {
+                // A matrix the symmetric elimination finds singular is left to partial pivoting
+                // to judge, unless its pattern decided it: a pivot of zero, an overflow or an
+                // estimated condition beyond the bound, which its growth raises, can be those of
+                // the pivots rather than of the matrix.
+                let by_pattern = lu.deficient && lu.pivots.iter().all(|p| !p.is_zero());
+                if !lu.is_singular() || by_pattern {
+                    return lu;
+                }
+            }
+            // The symmetric elimination filled or grew beyond its watch, or found the matrix
+            // singular: it is factored again, from the start, by the unsymmetric strategy.
+        }
+        let columns = Ordering::Colamd.columns(a);
+        Self::eliminate(a, &by_columns, columns, Rule::partial(1.0), None)
+            .expect("an elimination without a watch runs to its end")
     }
 
     /// The decomposition of the square `a` with its columns in the order `ordering` gives them,
@@ -433,11 +775,14 @@ impl<T: Scalar> SparseLu<T> {
     #[track_caller]
     pub fn with_ordering(a: &SparseMatrix<T>, ordering: &Ordering) -> Self {
         assert!(a.rows() == a.cols(), "the matrix isn't square");
-        Self::factor(a, ordering.columns(a), T::Real::ONE)
+        Self::factor(a, ordering.columns(a), 1.0)
     }
 
-    /// The decomposition of the square `a` with the column ordering and the pivot threshold of
-    /// `options`, or `None` if the threshold isn't in `(0, 1]`.
+    /// The decomposition of the square `a` by the strategy of `options` — with its column
+    /// ordering and pivot threshold under [`LuStrategy::Explicit`], and under
+    /// [`LuStrategy::Auto`] when either of them is not its default (see [`SparseLuOptions`]) —
+    /// or `None` if the threshold isn't in `(0, 1]`. The default options give what
+    /// [`new`](Self::new) gives.
     ///
     /// With a threshold `t` below 1 the diagonal element of a column is its pivot whenever it is
     /// nonzero and at least `t` times the largest element the column offers, so the elements of
@@ -485,34 +830,96 @@ impl<T: Scalar> SparseLu<T> {
         if !(threshold > 0.0 && threshold <= 1.0) {
             return None;
         }
+        if options.chosen_strategy() != LuStrategy::Explicit {
+            return Some(Self::by_strategy(a, options.strategy));
+        }
         let columns = options.ordering.columns(a);
-        Some(Self::factor(a, columns, T::Real::from_f64(threshold)))
+        Some(Self::factor(a, columns, threshold))
     }
 
-    /// Factors `a` with its columns in the order `col_perm`, `col_perm[new] = old`.
+    /// Factors `a` with its columns in the order `col_perm`, `col_perm[new] = old`, and threshold
+    /// partial pivoting with the threshold `threshold`.
     #[track_caller]
-    fn factor(a: &SparseMatrix<T>, col_perm: Vec<usize>, threshold: T::Real) -> Self {
+    fn factor(a: &SparseMatrix<T>, col_perm: Vec<usize>, threshold: f64) -> Self {
+        Self::eliminate(a, &a.transpose(), col_perm, Rule::partial(threshold), None)
+            .expect("an elimination without a watch runs to its end")
+    }
+
+    /// Factors `a`, whose transpose is `by_columns`, with its columns in the order `col_perm` and
+    /// its pivots by `rule`; `None` if `watch` stopped the elimination.
+    #[track_caller]
+    fn eliminate(
+        a: &SparseMatrix<T>,
+        by_columns: &SparseMatrix<T>,
+        col_perm: Vec<usize>,
+        rule: Rule,
+        mut watch: Option<&mut Watch<'_>>,
+    ) -> Option<Self> {
         let n = a.rows();
         assert_permutation(&col_perm, n);
         // The matrix by columns: the rows of its transpose.
-        let by_columns = a.transpose();
         let starts = by_columns.row_pointers();
         let rows = by_columns.col_indices();
         let values = by_columns.values();
-        let mut work = Elimination::new(n, a.nnz());
         let mut largest_a = T::Real::ZERO;
         let mut norm_one = T::Real::ZERO;
-        for (j, &column) in col_perm.iter().enumerate() {
-            let (begin, end) = (starts[column], starts[column + 1]);
+        for column in 0..n {
             let mut sum = T::Real::ZERO;
-            for x in &values[begin..end] {
+            for x in &values[starts[column]..starts[column + 1]] {
                 let size = x.abs();
                 largest_a = largest_a.max(size);
                 sum += size;
             }
             norm_one = norm_one.max(sum);
-            work.step(j, column, &rows[begin..end], &values[begin..end], threshold);
         }
+        // The step of each column of `A`, which the choice of a pivot off the diagonal asks.
+        let mut step_of_column = Vec::new();
+        if rule.off < 1.0 {
+            step_of_column = vec![0; n];
+            for (step, &column) in col_perm.iter().enumerate() {
+                step_of_column[column] = step;
+            }
+        }
+        let pivoting = Pivoting {
+            diagonal: T::Real::from_f64(rule.diagonal),
+            off: T::Real::from_f64(rule.off),
+            step_of_column: &step_of_column,
+        };
+        // A column at a time while the columns stay sparse, then by supernodes.
+        let supernodal = n >= SUPERNODAL;
+        let mut work = Elimination::new(n, a.nnz());
+        let mut off_diagonal = false;
+        let mut j = 0;
+        while j < n {
+            let column = col_perm[j];
+            let (begin, end) = (starts[column], starts[column + 1]);
+            work.step(j, column, &rows[begin..end], &values[begin..end], &pivoting);
+            if let Some(watch) = watch.as_deref_mut() {
+                off_diagonal |= work.row_perm[j] != column;
+                let made = work.l_rows.len() + work.u_rows.len() + j + 1;
+                if watch.exceeded(&col_perm, j, off_diagonal, made, work.largest_u, largest_a) {
+                    return None;
+                }
+            }
+            j += 1;
+            let elements =
+                work.l_ptrs[j] - work.l_ptrs[j - 1] + work.u_ptrs[j] - work.u_ptrs[j - 1];
+            if supernodal && elements >= DENSE_COLUMN {
+                break;
+            }
+        }
+        let mut work = if j < n {
+            let watched = watch.map(|watch| (watch, off_diagonal, largest_a));
+            let columns = supernodes::Columns {
+                col_perm: &col_perm,
+                starts,
+                rows,
+                values,
+            };
+            supernodes::eliminate(&columns, &pivoting, work, j, watched)?
+        } else {
+            work.into()
+        };
         // The rows of `L` are known by their place in `P·A` only now that every row has one.
         for row in &mut work.l_rows {
             *row = work.step_of_row[*row];
@@ -520,7 +927,7 @@ impl<T: Scalar> SparseLu<T> {
         // A pivot that rounding alone kept from zero must not hide a matrix whose pattern makes it
         // singular. A matrix already found singular needs no more evidence.
         let deficient = work.deficient
-            || (work.finite && !has_perfect_matching(a, &by_columns, &work.row_perm, &col_perm));
+            || (work.finite && !has_perfect_matching(a, by_columns, &work.row_perm, &col_perm));
         let odd = is_odd(&work.row_perm) != is_odd(&col_perm);
         let mut lu = Self {
             n,
@@ -544,9 +951,9 @@ impl<T: Scalar> SparseLu<T> {
         // Every pivot is finite and none is zero, but that alone says little: see the module's
         // documentation.
         if n > 0 && !deficient && lu.finite {
-            lu.near_singular = !lu.is_regular_to_working_precision(a, &by_columns);
+            lu.near_singular = !lu.is_regular_to_working_precision(a, by_columns);
         }
-        lu
+        Some(lu)
     }
 
     /// Whether the matrix, with factors that are finite and no pivot of zero, is regular to
@@ -1158,60 +1565,137 @@ impl<T: Scalar> SparseLu<T> {
         let zero = T::Real::ZERO;
         let norm = |v: &[T]| v.iter().fold(zero, |sum, x| sum + x.abs());
         let order = T::Real::from_f64(n as f64);
-        let mut x = vec![T::from_real(T::Real::ONE / order); n];
-        let mut v = vec![T::zero(); n];
-        let mut work = vec![T::zero(); n];
-        self.scaled_solve(System::Direct, scales, &mut x, &mut v, &mut work);
-        let mut estimate = norm(&v);
-        if n == 1 {
-            return estimate;
-        }
-        let mut last = NONE;
-        for _ in 0..ESTIMATE_CYCLES {
-            let (steepest, largest) = self.steepest(scales, &mut x, &mut v, &mut work);
-            // The vector tried last is still as steep as any: there is nothing better to try.
-            if last != NONE && v[last].abs() >= largest {
-                break;
-            }
-            last = steepest;
-            x.fill(T::zero());
-            x[steepest] = T::one();
-            self.scaled_solve(System::Direct, scales, &mut x, &mut v, &mut work);
-            let next = norm(&v);
-            if next <= estimate {
-                break;
-            }
-            estimate = next;
-        }
-        // Elements of alternating signs that grow from 1 to 2, whose 1-norm is 3n/2.
-        for (i, element) in x.iter_mut().enumerate() {
+        // The three searches are independent until the first ends its first step, so they run
+        // side by side, three vectors to a solve, which reads the factors once for all three:
+        // the vector of equal elements, the one of alternating signs that grow from 1 to 2,
+        // whose 1-norm is 3n/2, and the one of pseudo-random signs and sizes in `[1, 2)`, the
+        // same for every matrix. Each vector gets the arithmetic it would get alone.
+        let mut x = vec![T::zero(); STARTS * n];
+        let mut v = vec![T::zero(); STARTS * n];
+        let mut work = vec![T::zero(); STARTS * n];
+        let (equal, rest) = x.split_at_mut(n);
+        let (alternating, random) = rest.split_at_mut(n);
+        equal.fill(T::from_real(T::Real::ONE / order));
+        for (i, element) in alternating.iter_mut().enumerate() {
             let size = T::Real::ONE + T::Real::from_f64(i as f64) / (order - T::Real::ONE);
             *element = T::from_real(if i % 2 == 0 { size } else { -size });
         }
-        self.scaled_solve(System::Direct, scales, &mut x, &mut v, &mut work);
-        let alternating = T::Real::TWO * norm(&v) / (T::Real::from_f64(3.0) * order);
-        let (steepest, _) = self.steepest(scales, &mut x, &mut v, &mut work);
-        x.fill(T::zero());
-        x[steepest] = T::one();
-        self.scaled_solve(System::Direct, scales, &mut x, &mut v, &mut work);
-        let estimate = estimate.max(alternating).max(norm(&v));
-        // Elements of pseudo-random signs and sizes in `[1, 2)`, the same for every matrix.
         let mut state = RANDOM_START;
         let mut total = zero;
-        for element in x.iter_mut() {
+        for element in random.iter_mut() {
             let bits = split_mix(&mut state);
             // The size from the 53 high bits, the sign from the lowest.
             let size = T::Real::ONE + T::Real::from_f64((bits >> 11) as f64 / (1u64 << 53) as f64);
             total += size;
             *element = T::from_real(if bits & 1 == 0 { size } else { -size });
         }
-        self.scaled_solve(System::Direct, scales, &mut x, &mut v, &mut work);
-        let random = norm(&v) / total;
-        let (steepest, _) = self.steepest(scales, &mut x, &mut v, &mut work);
-        x.fill(T::zero());
-        x[steepest] = T::one();
-        self.scaled_solve(System::Direct, scales, &mut x, &mut v, &mut work);
-        estimate.max(random).max(norm(&v))
+        self.scaled_solve_starts(System::Direct, scales, &mut x, &mut v, &mut work);
+        let mut estimate = norm(&v[..n]);
+        if n == 1 {
+            return estimate;
+        }
+        let alternating = T::Real::TWO * norm(&v[n..2 * n]) / (T::Real::from_f64(3.0) * order);
+        let random = norm(&v[2 * n..]) / total;
+        // The first step of each search: to the unit vector where its norm rises fastest.
+        let steepest = self.steepest_starts(scales, &mut x, &mut v, &mut work);
+        for (start, &(place, _)) in steepest.iter().enumerate() {
+            let x = &mut x[start * n..(start + 1) * n];
+            x.fill(T::zero());
+            x[place] = T::one();
+        }
+        self.scaled_solve_starts(System::Direct, scales, &mut x, &mut v, &mut work);
+        let after_alternating = norm(&v[n..2 * n]);
+        let after_random = norm(&v[2 * n..]);
+        // The search from the vector of equal elements goes on alone while it rises.
+        let (x, v, work) = (&mut x[..n], &mut v[..n], &mut work[..n]);
+        let next = norm(v);
+        // Not `next <= estimate`, as the search alone has it: one that is not a number goes on.
+        if next > estimate || next.is_nan() || estimate.is_nan() {
+            estimate = next;
+            let mut last = steepest[0].0;
+            for _ in 1..ESTIMATE_CYCLES {
+                let (steepest, largest) = self.steepest(scales, x, v, work);
+                // The vector tried last is still as steep as any: there is nothing better to try.
+                if v[last].abs() >= largest {
+                    break;
+                }
+                last = steepest;
+                x.fill(T::zero());
+                x[steepest] = T::one();
+                self.scaled_solve(System::Direct, scales, x, v, work);
+                let next = norm(v);
+                if next <= estimate {
+                    break;
+                }
+                estimate = next;
+            }
+        }
+        estimate
+            .max(alternating)
+            .max(after_alternating)
+            .max(random)
+            .max(after_random)
+    }
+
+    /// [`steepest`](Self::steepest) for the [`STARTS`] vectors of `v`, one after the other,
+    /// at once.
+    fn steepest_starts(
+        &self,
+        scales: (&[T::Real], &[T::Real]),
+        x: &mut [T],
+        v: &mut [T],
+        work: &mut [T],
+    ) -> [(usize, T::Real); STARTS] {
+        let zero = T::Real::ZERO;
+        for (sign, &element) in x.iter_mut().zip(v.iter()) {
+            let size = element.abs();
+            *sign = if size > zero {
+                T::from_parts(element.re() / size, element.im() / size)
+            } else {
+                T::one()
+            };
+        }
+        self.scaled_solve_starts(System::ConjugateTranspose, scales, x, v, work);
+        core::array::from_fn(|start| {
+            let mut steepest = 0;
+            let mut largest = -T::Real::ONE;
+            for (i, element) in v[start * self.n..(start + 1) * self.n].iter().enumerate() {
+                let size = element.abs();
+                if size > largest {
+                    largest = size;
+                    steepest = i;
+                }
+            }
+            (steepest, largest)
+        })
+    }
+
+    /// [`scaled_solve`](Self::scaled_solve) for the [`STARTS`] vectors of `x`, one after the
+    /// other, at once; `work` is as long as they are.
+    fn scaled_solve_starts(
+        &self,
+        system: System,
+        (inner, outer): (&[T::Real], &[T::Real]),
+        x: &mut [T],
+        v: &mut [T],
+        work: &mut [T],
+    ) {
+        let n = self.n;
+        let (first, then) = match system {
+            System::Direct => (inner, outer),
+            System::Transpose | System::ConjugateTranspose => (outer, inner),
+        };
+        for x in x.chunks_exact_mut(n) {
+            for (element, &scale) in x.iter_mut().zip(first) {
+                *element = element.scale(scale);
+            }
+        }
+        self.solve_many_into::<STARTS>(system, x, v, work);
+        for v in v.chunks_exact_mut(n) {
+            for (element, &scale) in v.iter_mut().zip(then) {
+                *element = element.scale(scale);
+            }
+        }
     }
 
     /// One step of the search of [`inverse_norm_estimate`](Self::inverse_norm_estimate): with
@@ -1382,6 +1866,114 @@ impl<T: Scalar> SparseLu<T> {
     }
 }
 
+impl<T: Scalar> SparseLu<T> {
+    /// [`solve_into`](Self::solve_into) for `K` right-hand sides at once, one after the other in
+    /// `b` and in `x`, with `work` as long as they are: one pass over the factors for all of
+    /// them, each solution getting the arithmetic, operation for operation, that it gets alone.
+    fn solve_many_into<const K: usize>(
+        &self,
+        system: System,
+        b: &[T],
+        x: &mut [T],
+        work: &mut [T],
+    ) {
+        let n = self.n;
+        debug_assert!(b.len() == K * n && x.len() == K * n && work.len() == K * n);
+        // `work` holds the `K` elements of a row side by side.
+        let gather = |work: &mut [T], perm: &[usize]| {
+            for (i, &old) in perm.iter().enumerate() {
+                for k in 0..K {
+                    work[i * K + k] = b[k * n + old];
+                }
+            }
+        };
+        let scatter = |work: &[T], perm: &[usize], x: &mut [T]| {
+            for (i, &old) in perm.iter().enumerate() {
+                for k in 0..K {
+                    x[k * n + old] = work[i * K + k];
+                }
+            }
+        };
+        match system {
+            System::Direct => {
+                gather(work, &self.row_perm);
+                for j in 0..n {
+                    let y: [T; K] = core::array::from_fn(|k| work[j * K + k]);
+                    let nonzero = y.iter().filter(|y| !y.is_zero()).count();
+                    if nonzero == 0 {
+                        continue;
+                    }
+                    let (rows, values) = (
+                        &self.l_rows[self.l_ptrs[j]..self.l_ptrs[j + 1]],
+                        &self.l_values[self.l_ptrs[j]..self.l_ptrs[j + 1]],
+                    );
+                    for (&i, &l) in rows.iter().zip(values) {
+                        let row = &mut work[i * K..(i + 1) * K];
+                        for k in 0..K {
+                            // A zero is skipped, as the solve of one vector skips it.
+                            if nonzero == K || !y[k].is_zero() {
+                                row[k] = row[k].mul_sub(l, y[k]);
+                            }
+                        }
+                    }
+                }
+                for j in (0..n).rev() {
+                    let z: [T; K] = core::array::from_fn(|k| work[j * K + k] / self.pivots[j]);
+                    work[j * K..(j + 1) * K].copy_from_slice(&z);
+                    let nonzero = z.iter().filter(|z| !z.is_zero()).count();
+                    if nonzero == 0 {
+                        continue;
+                    }
+                    let (rows, values) = (
+                        &self.u_rows[self.u_ptrs[j]..self.u_ptrs[j + 1]],
+                        &self.u_values[self.u_ptrs[j]..self.u_ptrs[j + 1]],
+                    );
+                    for (&i, &u) in rows.iter().zip(values) {
+                        let row = &mut work[i * K..(i + 1) * K];
+                        for k in 0..K {
+                            if nonzero == K || !z[k].is_zero() {
+                                row[k] = row[k].mul_sub(u, z[k]);
+                            }
+                        }
+                    }
+                }
+                scatter(work, &self.col_perm, x);
+            }
+            System::Transpose | System::ConjugateTranspose => {
+                let conjugate = T::IS_COMPLEX && system == System::ConjugateTranspose;
+                let of = |element: T| {
+                    if conjugate { element.conj() } else { element }
+                };
+                gather(work, &self.col_perm);
+                for j in 0..n {
+                    let mut sum: [T; K] = core::array::from_fn(|k| work[j * K + k]);
+                    for at in self.u_ptrs[j]..self.u_ptrs[j + 1] {
+                        let (u, i) = (of(self.u_values[at]), self.u_rows[at]);
+                        for k in 0..K {
+                            sum[k] = sum[k].mul_sub(u, work[i * K + k]);
+                        }
+                    }
+                    let pivot = of(self.pivots[j]);
+                    for k in 0..K {
+                        work[j * K + k] = sum[k] / pivot;
+                    }
+                }
+                for j in (0..n).rev() {
+                    let mut sum: [T; K] = core::array::from_fn(|k| work[j * K + k]);
+                    for at in self.l_ptrs[j]..self.l_ptrs[j + 1] {
+                        let (l, i) = (of(self.l_values[at]), self.l_rows[at]);
+                        for k in 0..K {
+                            sum[k] = sum[k].mul_sub(l, work[i * K + k]);
+                        }
+                    }
+                    work[j * K..(j + 1) * K].copy_from_slice(&sum);
+                }
+                scatter(work, &self.row_perm, x);
+            }
+        }
+    }
+}
+
 /// Which system a solve is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum System {
@@ -1391,6 +1983,135 @@ enum System {
     Transpose,
     /// `Aᴴ·x = b`.
     ConjugateTranspose,
+}
+
+/// What an elimination leaves: the factors, with the rows of `L` still rows of `A`, and what it
+/// found of them.
+struct Eliminated<T: Scalar> {
+    /// Where each column of `L` begins in `l_rows` and `l_values`, and where the last ends.
+    l_ptrs: Vec<usize>,
+    /// The rows of `A` of the elements of `L` below its diagonal.
+    l_rows: Vec<usize>,
+    /// The elements of `L` below its diagonal.
+    l_values: Vec<T>,
+    /// Where each column of `U` begins in `u_rows` and `u_values`, and where the last ends.
+    u_ptrs: Vec<usize>,
+    /// The steps of the pivotal rows of the elements of `U` above its diagonal.
+    u_rows: Vec<usize>,
+    /// The elements of `U` above its diagonal.
+    u_values: Vec<T>,
+    /// The pivots: the diagonal of `U`.
+    pivots: Vec<T>,
+    /// The step at which each row of `A` became the pivotal one.
+    step_of_row: Vec<usize>,
+    /// The pivotal row of each step.
+    row_perm: Vec<usize>,
+    /// Whether a column was left without a pivot.
+    deficient: bool,
+    /// Whether every element of the factors is finite.
+    finite: bool,
+    /// The largest absolute value of an element of `U`.
+    largest_u: T::Real,
+}
+
+impl<T: Scalar> From<Elimination<T>> for Eliminated<T> {
+    fn from(work: Elimination<T>) -> Self {
+        Self {
+            l_ptrs: work.l_ptrs,
+            l_rows: work.l_rows,
+            l_values: work.l_values,
+            u_ptrs: work.u_ptrs,
+            u_rows: work.u_rows,
+            u_values: work.u_values,
+            pivots: work.pivots,
+            step_of_row: work.step_of_row,
+            row_perm: work.row_perm,
+            deficient: work.deficient,
+            finite: work.finite,
+            largest_u: work.largest_u,
+        }
+    }
+}
+
+/// How the pivots of an elimination are chosen, as the strategy gives it, before its fractions are
+/// rounded to the real type of the elements.
+#[derive(Clone, Copy, Debug)]
+struct Rule {
+    /// The fraction of the largest element of its column the diagonal element must reach to be
+    /// the pivot.
+    diagonal: f64,
+    /// Below 1, the fraction of the largest an element off the diagonal must reach to be the
+    /// pivot, which [`Pivoting::off_diagonal`] then chooses among; at 1, the largest element is
+    /// the pivot, the lowest row of several.
+    off: f64,
+}
+
+impl Rule {
+    /// Threshold partial pivoting with the threshold `threshold`.
+    fn partial(threshold: f64) -> Self {
+        Self {
+            diagonal: threshold,
+            off: 1.0,
+        }
+    }
+
+    /// The rule of the symmetric strategy: the diagonal down to [`SYMMETRIC_DIAGONAL`], else an
+    /// element of at least [`SYMMETRIC_OFF_DIAGONAL`] of the largest.
+    fn symmetric() -> Self {
+        Self {
+            diagonal: SYMMETRIC_DIAGONAL,
+            off: SYMMETRIC_OFF_DIAGONAL,
+        }
+    }
+}
+
+/// A [`Rule`] in the real type `R` of the elements, with what its choice off the diagonal reads.
+pub(super) struct Pivoting<'p, R> {
+    /// The fraction of the largest element of its column the diagonal element must reach.
+    pub(super) diagonal: R,
+    /// The fraction of the largest an element off the diagonal must reach, below 1; at 1 the
+    /// largest is taken.
+    pub(super) off: R,
+    /// The step of each column of `A` when `off` is below 1, else empty.
+    step_of_column: &'p [usize],
+}
+
+impl<R: Float> Pivoting<'_, R> {
+    /// The pivotal row of step `j` when its diagonal element is not taken: `lowest`, the lowest
+    /// row of the largest size `largest`, if `off` is 1; else, of the rows in `free` — the rows
+    /// of the column that are not pivotal yet, with the sizes of their elements — whose element
+    /// is at least `off` times the largest, one whose own column of `A` is eliminated already,
+    /// if there is one, the largest of those (the lowest row of several); else `lowest`.
+    ///
+    /// A row whose column is eliminated already is one whose diagonal element some earlier step
+    /// passed over, and it can be the pivot of no later column on the diagonal: taking it leaves
+    /// the diagonal of every later column where the ordering expects its pivot, and the pivot it
+    /// takes, of the row of the column of step `j`, is what a pivot of two rows and two columns
+    /// on the diagonal would give.
+    pub(super) fn off_diagonal(
+        &self,
+        j: usize,
+        largest: R,
+        lowest: usize,
+        free: impl Iterator<Item = (usize, R)>,
+    ) -> usize {
+        if self.off >= R::ONE {
+            return lowest;
+        }
+        let bar = self.off * largest;
+        let mut best = NONE;
+        let mut best_size = R::ZERO;
+        for (row, size) in free {
+            if size >= bar
+                && self.step_of_column[row] < j
+                && (best == NONE || size > best_size || (size == best_size && row < best))
+            {
+                best = row;
+                best_size = size;
+            }
+        }
+        if best == NONE { lowest } else { best }
+    }
 }
 
 /// The elimination while it runs: the factors as far as they are found, and the working memory of
@@ -1477,15 +2198,15 @@ impl<T: Scalar> Elimination<T> {
 
     /// Step `j` of the elimination: column `j` of the factors from the column of `A` whose
     /// elements are `values`, in the rows `rows`. `diagonal` is the row whose element is on the
-    /// diagonal of `A` in that column, and `threshold` the fraction of the largest element it
-    /// must reach to be the pivot.
+    /// diagonal of `A` in that column, and `pivoting` says what it must reach to be the pivot and
+    /// which row is the pivot when it does not.
     fn step(
         &mut self,
         j: usize,
         diagonal: usize,
         rows: &[usize],
         values: &[T],
-        threshold: T::Real,
+        pivoting: &Pivoting<'_, T::Real>,
     ) {
         let top = self.reach(rows, j);
         for (&i, &value) in rows.iter().zip(values) {
@@ -1493,15 +2214,26 @@ impl<T: Scalar> Elimination<T> {
         }
         // The triangular solve with the columns of `L` so far, over the rows reached alone and in
         // an order that has every row settled before it is used.
+        let n = self.x.len();
+        debug_assert!(self.l_rows.iter().all(|&row| row < n));
+        let x = &mut self.x;
         for &i in &self.order[top..] {
             let k = self.step_of_row[i];
             if k == NONE {
                 continue;
             }
-            let u = self.x[i];
-            for at in self.l_ptrs[k]..self.l_ptrs[k + 1] {
-                let row = self.l_rows[at];
-                self.x[row] = self.x[row].mul_sub(self.l_values[at], u);
+            let u = x[i];
+            let (begin, end) = (self.l_ptrs[k], self.l_ptrs[k + 1]);
+            for (&row, &l) in self.l_rows[begin..end]
+                .iter()
+                .zip(&self.l_values[begin..end])
+            {
+                // SAFETY: every row of `L` is a row of the matrix, below `n`, the length of
+                // `x`: the rows come from the column of `A` and from earlier columns of `L`.
+                unsafe {
+                    let target = x.get_unchecked_mut(row);
+                    *target = target.mul_sub(l, u);
+                }
             }
         }
         // The largest of the rows that are not pivotal yet, the lowest row of that size. A size
@@ -1523,10 +2255,15 @@ impl<T: Scalar> Elimination<T> {
         let pivot_row = if largest > zero {
             // A row of `x` outside the reach is zero, so the diagonal passes only from within.
             let size = self.x[diagonal].abs1();
-            if diagonal_is_free && size > zero && size >= threshold * largest {
+            if diagonal_is_free && size > zero && size >= pivoting.diagonal * largest {
                 diagonal
             } else {
-                lowest
+                let (x, step_of_row) = (&self.x, &self.step_of_row);
+                let free = self.order[top..]
+                    .iter()
+                    .filter(|&&i| step_of_row[i] == NONE)
+                    .map(|&i| (i, x[i].abs1()));
+                pivoting.off_diagonal(j, largest, lowest, free)
             }
         } else {
             // Nothing to divide by: the matrix is singular. Some row must still take the step,

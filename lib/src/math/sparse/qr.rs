@@ -22,9 +22,20 @@
 //! * A front belongs to a chain of columns of the tree whose rows of `R` have the same pattern
 //!   but for their leading columns, a fundamental supernode: its pivot columns. Its columns are
 //!   those and the others its rows reach; its rows are the rows of the matrix that begin in a
-//!   pivot column, and the contribution blocks of its children.
-//! * The front is reduced to an upper triangle by Householder reflections, the dense
-//!   [`reflector`] and [`reflect_left`] of the matrix module. Its first rows, one for each
+//!   pivot column, and the contribution blocks of its children. In a matrix of 128 columns or
+//!   more, small fronts are then merged into their parents, the relaxed amalgamation of Ashcraft
+//!   and Grimes ("The influence of relaxed supernode partitions on the multifrontal method", ACM
+//!   Trans. Math. Softw. 15, 1989) by the rule of the Cholesky factorisation's supernodes on the
+//!   explicit zeros that adds to `R`: any merge into a front of at most 4 pivot columns, and up
+//!   to 30 % zeros for 16, 10 % for 48 and 5 % for more. A merged child's rows of `R` take all
+//!   the columns of its parent, zeros where its own rows do not reach.
+//! * The front is reduced to an upper triangle by Householder reflections, LAPACK's `larfg`: a
+//!   front of at most 64 columns one reflection after another, each applied to the columns
+//!   after it, and a wider one in panels of 16 columns ([`front`]). A front of 128 reflections
+//!   or more whose staircase fills at least half of its rectangle is held dense, and the columns
+//!   right of each panel take the panel's reflections as one block, `I − V·T·Vᴴ` (the compact
+//!   WY form of Schreiber and Van Loan, SIAM J. Sci. Stat. Comput. 10, 1989), by products of
+//!   dense blocks; the others take them one reflection at a time, four columns at a time. Its first rows, one for each
 //!   pivot column, are rows of `R`; the rest of the triangle is its contribution block, which
 //!   its parent takes in; the rows below the triangle are zero and are dropped.
 //! * The rows of a front are sorted by their first columns, so that the reflection of a column
@@ -66,11 +77,10 @@
 //!
 //! # What is not done
 //!
-//! A matrix with fewer rows than columns is refused. The fronts are reduced one reflection at a
-//! time; blocks of reflections, and fronts merged beyond the fundamental supernodes, are left to
-//! a later pass.
+//! A matrix with fewer rows than columns is refused.
 
 mod condition;
+mod front;
 mod symbolic;
 
 use super::{Ordering, SparseMatrix};
@@ -574,7 +584,11 @@ impl<T: Scalar> SparseQr<T> {
     /// The number of elements the factors store: those of the pattern of `R`, and those of the
     /// Householder vectors that stand for `Q`, each counted with its leading 1. This is what a
     /// column ordering is judged on. An element of a pattern that came out zero counts, so the
-    /// part of `R` can be above the count of [`r`](Self::r)'s nonzeros.
+    /// part of `R` can be above the count of [`r`](Self::r)'s nonzeros; and the patterns are
+    /// those of the fronts after small ones were merged into their parents, which adds explicit
+    /// zeros: a merged child's rows of `R` take all its parent's columns, and its rows are
+    /// reflected with the parent's pivot columns rather than reduced to its own triangle first,
+    /// which lengthens the parent's vectors (see the module's documentation).
     ///
     /// # Examples
     ///
@@ -723,12 +737,17 @@ fn factor<T: Scalar>(
     let mut r_values = vec![T::zero(); s.r_cols.len()];
     let mut vectors = vec![T::zero(); s.vector_ptr[reflections]];
     let mut taus = vec![T::zero(); reflections];
-    // The front being reduced, column after column, each column as long as its step of the
-    // staircase; and the stack of the contribution blocks not yet taken in.
+    // The front being reduced, each column as long as its step of the staircase or, for a
+    // front held dense, as the front is tall; and the stack of the contribution blocks not yet
+    // taken in.
     let mut work = vec![T::zero(); s.work];
     let mut stack = vec![T::zero(); s.stack];
-    // Where each column of the front begins in `work`.
+    // Where each column of the front begins in `work`, and where its step of the staircase
+    // ends: the rows above it are those it holds.
     let mut start = vec![0usize; s.widest + 1];
+    let mut end = vec![0usize; s.widest];
+    // The vectors of a block of reflections.
+    let mut scratch: Vec<T> = Vec::new();
     // The place in the front of each of its columns and of each of its rows.
     let mut local = vec![0usize; n];
     let mut slot = vec![0usize; m];
@@ -743,6 +762,7 @@ fn factor<T: Scalar>(
         let count = s.reflection_ptr[f + 1] - first;
         // Column `t` holds the rows above its step: those its reflection works on and the
         // finished ones above them, and all the rows of a front that has run out of reflections.
+        // Held by its staircase, the front has each column as long as its step.
         for t in 0..width {
             let end = if t < count {
                 t + s.vector_ptr[first + t + 1] - s.vector_ptr[first + t]
@@ -751,8 +771,39 @@ fn factor<T: Scalar>(
             };
             start[t + 1] = start[t] + end;
         }
+        // A front held dense has its columns `height` apart instead, the elements below each
+        // step unused; and a front reduced by panels is told where the steps end.
+        let dense = front::dense(height, width, count, start[width]);
+        // No front held dense is small: it has a hundred reflections or more.
+        let small = width <= front::SMALL;
+        debug_assert!(!(small && dense), "a small front is held dense");
+        if dense || !small {
+            for t in 0..width {
+                end[t] = start[t + 1] - start[t];
+            }
+        }
+        let end = &end[..width];
+        if dense {
+            for t in 0..width {
+                start[t + 1] = (t + 1) * height;
+            }
+        }
+        // The rows above its step of column `l`.
+        let step = |l: usize| {
+            if dense {
+                end[l]
+            } else {
+                start[l + 1] - start[l]
+            }
+        };
         let front = &mut work[..start[width]];
-        front.fill(T::zero());
+        if dense {
+            for (t, &e) in end.iter().enumerate() {
+                front[start[t]..start[t] + e].fill(T::zero());
+            }
+        } else {
+            front.fill(T::zero());
+        }
         for (l, &col) in cols.iter().enumerate() {
             local[col] = l;
         }
@@ -767,7 +818,7 @@ fn factor<T: Scalar>(
             }
             for p in pointers[row]..pointers[row + 1] {
                 let l = local[s.position[indices[p]]];
-                debug_assert!(at < start[l + 1] - start[l], "a row is below its staircase");
+                debug_assert!(at < step(l), "a row is below its staircase");
                 front[start[l] + at] = elements[p];
             }
         }
@@ -785,10 +836,7 @@ fn factor<T: Scalar>(
                 let l = local[col];
                 let (column, rest) = block.split_at((v + 1).min(passed_rows.len()));
                 for (&element, &row) in column.iter().zip(passed_rows) {
-                    debug_assert!(
-                        slot[row] < start[l + 1] - start[l],
-                        "a row is below its staircase"
-                    );
+                    debug_assert!(slot[row] < step(l), "a row is below its staircase");
                     front[start[l] + slot[row]] = element;
                 }
                 block = rest;
@@ -798,32 +846,49 @@ fn factor<T: Scalar>(
         // The reflections: that of column `t` takes the column's elements from row `t` down to
         // its step to `(β, 0, …)` and is applied to the columns after it, which are all at
         // least as long.
-        for t in 0..count {
-            let g = first + t;
-            let vector = &mut vectors[s.vector_ptr[g]..s.vector_ptr[g + 1]];
-            let length = vector.len();
-            let (reduced, rest) = front.split_at_mut(start[t + 1]);
-            let column = &mut reduced[start[t] + t..start[t] + t + length];
-            let (tau, beta) = reflector(column[0], &mut column[1..]);
-            vector[0] = T::one();
-            vector[1..].copy_from_slice(&column[1..]);
-            column[0] = beta;
-            taus[g] = tau;
-            if tau == T::zero() {
-                continue;
+        if small {
+            // A front of a few columns: each reflection applied to the columns after it one at a
+            // time, as they come, which spares it the panels' bookkeeping. The fronts of a curve
+            // fit or a band are mostly such.
+            for t in 0..count {
+                let g = first + t;
+                let vector = &mut vectors[s.vector_ptr[g]..s.vector_ptr[g + 1]];
+                let length = vector.len();
+                let (reduced, rest) = front.split_at_mut(start[t + 1]);
+                let column = &mut reduced[start[t] + t..start[t] + t + length];
+                let (tau, beta) = reflector(column[0], &mut column[1..]);
+                vector[0] = T::one();
+                vector[1..].copy_from_slice(&column[1..]);
+                column[0] = beta;
+                taus[g] = tau;
+                if tau == T::zero() {
+                    continue;
+                }
+                for u in t + 1..width {
+                    let at = start[u] - start[t + 1] + t;
+                    reflect_left(
+                        tau,
+                        true,
+                        vector,
+                        length,
+                        1,
+                        &mut rest[at..at + length],
+                        length,
+                    );
+                }
             }
-            for u in t + 1..width {
-                let at = start[u] - start[t + 1] + t;
-                reflect_left(
-                    tau,
-                    true,
-                    vector,
-                    length,
-                    1,
-                    &mut rest[at..at + length],
-                    length,
-                );
-            }
+        } else {
+            front::reduce(
+                front,
+                &start[..=width],
+                end,
+                dense.then_some(height),
+                count,
+                &mut vectors,
+                &s.vector_ptr[first..=first + count],
+                &mut taus[first..first + count],
+                &mut scratch,
+            );
         }
 
         // The first rows of the triangle are the rows of `R` of the pivot columns.

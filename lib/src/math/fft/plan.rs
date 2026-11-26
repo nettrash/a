@@ -1,7 +1,7 @@
 //! The plan of a complex transform.
 
-use super::complex::{Algo, Isa};
-use super::{FftFloat, check_batch};
+use super::complex::{Algo, Isa, Short};
+use super::{FftFloat, check_batch, with_work};
 use crate::math::complex::Complex;
 use std::sync::Arc;
 
@@ -43,18 +43,29 @@ pub struct Fft<T> {
     scratch: usize,
     isa: Isa,
     algo: Arc<Algo<T>>,
+    /// The direct kernel of a length of one butterfly, its pass inside `algo`.
+    short: Option<Short<T>>,
 }
+
+// SAFETY: `short` points into the plan `algo` holds (kept alive by the `Arc`, never changed);
+// the rest is a shared immutable plan, `Send` and `Sync` as `Algo` is.
+unsafe impl<T: Send + Sync> Send for Fft<T> {}
+// SAFETY: as above; nothing is mutated through a shared plan.
+unsafe impl<T: Send + Sync> Sync for Fft<T> {}
 
 impl<T: FftFloat> Fft<T> {
     /// The plan for the length `n` (0 and 1 give the identity).
     pub fn new(n: usize) -> Fft<T> {
         let isa = Isa::detect();
-        let algo = Algo::new(n, isa);
+        let algo = Arc::new(Algo::new(n, isa));
+        // The pass the direct kernel points to is in the `Arc`'s allocation, which does not move.
+        let short = algo.short();
         Fft {
             n,
             scratch: algo.scratch(),
             isa,
-            algo: Arc::new(algo),
+            algo,
+            short,
         }
     }
 
@@ -90,77 +101,219 @@ impl<T: FftFloat> Fft<T> {
     /// The forward transform of each run of `n` values of `data`, in place.
     #[track_caller]
     pub fn forward(&self, data: &mut [Complex<T>]) {
-        let mut scratch = vec![Complex::ZERO; self.work(data.len())];
-        self.forward_with_scratch(data, &mut scratch);
+        if self.one(data, false) {
+            return;
+        }
+        with_work(self.work(data.len()), |s| {
+            self.forward_with_scratch(data, s)
+        });
     }
 
     /// The inverse transform of each run of `n` values of `data`, in place, unscaled.
     #[track_caller]
     pub fn inverse(&self, data: &mut [Complex<T>]) {
-        let mut scratch = vec![Complex::ZERO; self.work(data.len())];
-        self.inverse_with_scratch(data, &mut scratch);
+        if self.one(data, true) {
+            return;
+        }
+        with_work(self.work(data.len()), |s| {
+            self.inverse_with_scratch(data, s)
+        });
     }
 
     /// [`forward`](Self::forward) with the working memory `scratch` of at least
     /// [`scratch_len`](Self::scratch_len) values.
     #[track_caller]
+    #[inline]
     pub fn forward_with_scratch(&self, data: &mut [Complex<T>], scratch: &mut [Complex<T>]) {
-        self.in_place(data, scratch, false);
+        if !self.one(data, false) {
+            self.in_place(data, scratch, false);
+        }
     }
 
     /// [`inverse`](Self::inverse) with the working memory `scratch` of at least
     /// [`scratch_len`](Self::scratch_len) values.
     #[track_caller]
+    #[inline]
     pub fn inverse_with_scratch(&self, data: &mut [Complex<T>], scratch: &mut [Complex<T>]) {
-        self.in_place(data, scratch, true);
+        if !self.one(data, true) {
+            self.in_place(data, scratch, true);
+        }
     }
 
     /// The forward transform of each run of `n` values of `input` into the same place in
     /// `output`, of the same length.
     #[track_caller]
+    #[inline]
     pub fn forward_to(&self, input: &[Complex<T>], output: &mut [Complex<T>]) {
-        self.out_of_place(input, output, false);
+        if !self.one_to(input, output, false) {
+            self.out_of_place(input, output, false);
+        }
     }
 
     /// The inverse transform of each run of `n` values of `input` into the same place in
     /// `output`, of the same length, unscaled.
     #[track_caller]
+    #[inline]
     pub fn inverse_to(&self, input: &[Complex<T>], output: &mut [Complex<T>]) {
-        self.out_of_place(input, output, true);
+        if !self.one_to(input, output, true) {
+            self.out_of_place(input, output, true);
+        }
+    }
+
+    /// One run of a length of one butterfly, by its kernel directly; whether it was.
+    #[inline(always)]
+    fn one(&self, data: &mut [Complex<T>], inverse: bool) -> bool {
+        match &self.short {
+            Some(short) if data.len() == self.n => {
+                let p = data.as_mut_ptr();
+                // SAFETY: `data` holds the run, transformed in place; the plan is alive in
+                // `self`.
+                unsafe { short.run(p, p, inverse) };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// [`one`](Self::one) out of place.
+    #[inline(always)]
+    fn one_to(&self, input: &[Complex<T>], output: &mut [Complex<T>], inverse: bool) -> bool {
+        match &self.short {
+            Some(short) if input.len() == self.n && output.len() == self.n => {
+                // SAFETY: distinct slices of the run; the plan is alive in `self`.
+                unsafe { short.run(input.as_ptr(), output.as_mut_ptr(), inverse) };
+                true
+            }
+            _ => false,
+        }
     }
 
     #[track_caller]
+    #[inline(never)]
     fn in_place(&self, data: &mut [Complex<T>], scratch: &mut [Complex<T>], inverse: bool) {
         let need = self.scratch;
-        if data.len() == self.n && self.n > 1 && scratch.len() >= need {
-            // One run: no divisions for the batch.
-            let p = data.as_mut_ptr();
-            // SAFETY: `data` holds the n values, transformed in place; the scratch, a distinct
-            // slice, the plan's working memory.
-            unsafe { self.algo.run(p, p, scratch.as_mut_ptr(), inverse) };
+        if data.len() != self.n || scratch.len() < need {
+            check_batch(data.len(), self.n, "Fft");
+            assert!(
+                scratch.len() >= need,
+                "Fft: scratch of {} values, {} needed",
+                scratch.len(),
+                need
+            );
+        }
+        // SAFETY: `data` holds whole runs, the scratch is a distinct slice of enough values.
+        unsafe {
+            self.run_raw(
+                data.as_mut_ptr(),
+                data.len(),
+                scratch.as_mut_ptr(),
+                scratch.len(),
+                inverse,
+            )
+        }
+    }
+
+    /// The values of working memory that let a call on `len` values run its short runs
+    /// together: one run's, or the room of a whole batch of short runs.
+    pub(crate) fn batch_work(&self, len: usize) -> usize {
+        self.work(len)
+    }
+
+    /// The fused last pass for the even real transform of `2n` (see [`Algo::half_last`]).
+    pub(crate) fn half_last(&self) -> Option<crate::math::fft::complex::HKern<T>> {
+        if self.short.is_some() {
+            return None;
+        }
+        self.algo.half_last(self.isa)
+    }
+
+    /// One run from `x` into `y` (`n + 1` values) with the last pass by `k`, the factors `tw`;
+    /// `scr` the working memory of [`scratch_len`](Self::scratch_len) values, not initialised.
+    ///
+    /// # Safety
+    /// `x` valid for reading `n` values, `y` for writing `n + 1` (the same as `x` or apart),
+    /// `scr` apart from both; `k` from [`half_last`](Self::half_last), `tw` its factors.
+    #[inline]
+    pub(crate) unsafe fn run_half_last(
+        &self,
+        x: *const Complex<T>,
+        y: *mut Complex<T>,
+        scr: *mut Complex<T>,
+        k: crate::math::fft::complex::HKern<T>,
+        tw: *const T,
+    ) {
+        // SAFETY: the caller's contract.
+        unsafe { self.algo.run_half_last(x, y, scr, k, tw) }
+    }
+
+    /// One run from `x` into `y`, with the working memory `scr` of
+    /// [`scratch_len`](Self::scratch_len) values that need not be initialised.
+    ///
+    /// # Safety
+    /// `x` must be valid for reading and `y` for writing `n` values, not overlapping; `scr` for
+    /// reading and writing the working memory, apart from both.
+    #[inline]
+    pub(crate) unsafe fn run_to_raw(
+        &self,
+        x: *const Complex<T>,
+        y: *mut Complex<T>,
+        scr: *mut Complex<T>,
+        inverse: bool,
+    ) {
+        if self.n == 0 {
             return;
         }
-        check_batch(data.len(), self.n, "Fft");
-        assert!(
-            scratch.len() >= need,
-            "Fft: scratch of {} values, {} needed",
-            scratch.len(),
-            need
-        );
-        if self.n <= 1 {
+        // SAFETY: the caller's contract; the algorithms write their working memory before they
+        // read it.
+        unsafe {
+            match &self.short {
+                Some(short) => short.run(x, y, inverse),
+                None => self.algo.run(x, y, scr, inverse),
+            }
+        }
+    }
+
+    /// The transform of each run of `n` values of the `len` at `data`, in place, with the
+    /// working memory at `scr` of `scr_len` values (at least [`scratch_len`](Self::scratch_len);
+    /// more lets the short runs of a batch go through the passes together).
+    ///
+    /// # Safety
+    /// `len` must be a multiple of `n`; `data` must be valid for reading and writing `len`
+    /// values and `scr` for `scr_len` (which need not be initialised: every value is written
+    /// before it is read), not overlapping `data`.
+    pub(crate) unsafe fn run_raw(
+        &self,
+        data: *mut Complex<T>,
+        len: usize,
+        scr: *mut Complex<T>,
+        scr_len: usize,
+        inverse: bool,
+    ) {
+        if self.n <= 1 || len == 0 {
             return;
         }
-        let (per, _) = self.algo.batch(scratch.len());
-        let scr = scratch.as_mut_ptr();
-        for runs in data.chunks_mut(per * self.n) {
-            let p = runs.as_mut_ptr();
-            // SAFETY: `runs` holds whole runs of n values, at most the batch the scratch has
-            // room for, transformed in place; the scratch, a distinct slice.
-            unsafe { self.algo.run_batch(p, p, scr, runs.len() / self.n, inverse) };
+        // SAFETY: the caller's contract.
+        unsafe {
+            if len == self.n {
+                match &self.short {
+                    Some(short) => short.run(data, data, inverse),
+                    None => self.algo.run(data, data, scr, inverse),
+                }
+                return;
+            }
+            let (per, _) = self.algo.batch(scr_len);
+            let mut c = 0;
+            while c < len {
+                let runs = (per * self.n).min(len - c);
+                let p = data.add(c);
+                self.algo.run_batch(p, p, scr, runs / self.n, inverse);
+                c += runs;
+            }
         }
     }
 
     #[track_caller]
+    #[inline(never)]
     fn out_of_place(&self, input: &[Complex<T>], output: &mut [Complex<T>], inverse: bool) {
         check_batch(input.len(), self.n, "Fft");
         assert_eq!(
@@ -171,18 +324,35 @@ impl<T: FftFloat> Fft<T> {
         if self.n == 0 || input.is_empty() {
             return;
         }
-        let mut scratch = vec![Complex::ZERO; self.work(input.len())];
-        let (per, _) = self.algo.batch(scratch.len());
-        let per = per * self.n;
-        let scr = scratch.as_mut_ptr();
-        for (x, y) in input.chunks(per).zip(output.chunks_mut(per)) {
-            // SAFETY: `x` and `y` are distinct slices of the same whole runs, at most the
-            // plan's batch; the scratch, the plan's working memory.
-            unsafe {
-                self.algo
-                    .run_batch(x.as_ptr(), y.as_mut_ptr(), scr, x.len() / self.n, inverse)
-            };
+        if input.len() == self.n {
+            // One run: straight from the input into the output, no division into batches.
+            with_work(self.scratch, |scr| {
+                // SAFETY: `input` and `output` hold the n values and are distinct slices; the
+                // scratch, a third one, the plan's working memory for one run.
+                unsafe {
+                    self.algo.run(
+                        input.as_ptr(),
+                        output.as_mut_ptr(),
+                        scr.as_mut_ptr(),
+                        inverse,
+                    )
+                }
+            });
+            return;
         }
+        with_work(self.work(input.len()), |scratch| {
+            let (per, _) = self.algo.batch(scratch.len());
+            let per = per * self.n;
+            let scr = scratch.as_mut_ptr();
+            for (x, y) in input.chunks(per).zip(output.chunks_mut(per)) {
+                // SAFETY: `x` and `y` are distinct slices of the same whole runs, at most the
+                // plan's batch; the scratch, the plan's working memory.
+                unsafe {
+                    self.algo
+                        .run_batch(x.as_ptr(), y.as_mut_ptr(), scr, x.len() / self.n, inverse)
+                };
+            }
+        });
     }
 }
 

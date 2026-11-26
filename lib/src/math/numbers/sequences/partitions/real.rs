@@ -7,8 +7,9 @@
 //! relative, in units of `2^-w`, for floating ones; each truncation adds one unit and each product
 //! the sum of its factors' errors, so the bounds follow the computation step by step.
 //!
-//! `π` and `ln 2` come from tables of 16,384 bits ([`PI_LIMBS`], [`LN2_LIMBS`]), `π` beyond from
-//! the Chudnovskys' series; the cosines of angles with small denominators from closed forms and the
+//! `π` and `ln 2` come from tables of 16,384 bits ([`PI_LIMBS`], [`LN2_LIMBS`]), and beyond from
+//! the floating numbers' constants (the Chudnovskys' series and that of `ln 2`, kept for the
+//! process); the cosines of angles with small denominators from closed forms and the
 //! half- and triple-angle formulas ([`cos_pi_algebraic`]), the others from Newton's method on
 //! Chebyshev polynomials ([`cos_pi_newton`]) or from their series ([`cos_pi`]).
 
@@ -775,20 +776,27 @@ pub(super) fn reduction(w: u64) -> u64 {
 }
 
 /// `e^x` for `x = X 2^-fx > 0` within `ex` units of `2^-fx`, to a relative error below
-/// `err 2^-w`, as a floating number of `w` bits and `err`; reduced by `ln 2` first up to the
-/// precision of the table [`LN2_LIMBS`].
+/// `err 2^-w`, as a floating number of `w` bits and `err`; reduced by `ln 2` first, from the table
+/// [`LN2_LIMBS`] up to its precision and from the floating numbers' kept constant beyond.
 ///
 /// `x = 2^s r` with `r < 2^-s0`; `e^r - 1 = r Σ r^j / (j + 1)!` by [`series`], then `s` doublings
 /// `e^(2y) - 1 = (e^y - 1)(e^y - 1 + 2)`, in floating numbers, each of which multiplies the
 /// relative error by `1 + (e^y - 1)/(e^y + 1) < 2` and adds two units; then 1 is added.
 pub(super) fn exp(x: &Number, fx: u64, ex: f64, w: u64) -> (Float, f64) {
     debug_assert!(!x.is_negative());
-    if fx > PI_BITS || (x >> shift_count(fx)).bits() < 2 {
+    if (x >> shift_count(fx)).bits() < 2 {
         return exp_reduced(x, fx, ex, w);
     }
-    // `x = q ln 2 + r` with `0 <= r < ln 2`, `ln 2` from the table within a unit of `2^-fx`: `r`
-    // within `ex + q` units, and `e^x = 2^q e^r` with the doublings of `x`'s integer bits saved.
-    let ln2 = of_limbs(&LN2_LIMBS) >> shift_count(PI_BITS - fx);
+    // `x = q ln 2 + r` with `0 <= r < ln 2`, `ln 2` below it within `ln2_err` units of `2^-fx`:
+    // from the table up to its bits (its floor, a unit), and beyond from the floating numbers'
+    // constants, which keep the longest value computed for the process (within two units); `r`
+    // within `ex + ln2_err q` units, and `e^x = 2^q e^r` with the doublings of `x`'s integer bits
+    // saved.
+    let (ln2, ln2_err) = if fx <= PI_BITS {
+        (of_limbs(&LN2_LIMBS) >> shift_count(PI_BITS - fx), 1.0)
+    } else {
+        (ln2_below(fx), 2.0)
+    };
     let xf = Float::of_fixed(x.clone(), fx).to_f64();
     let mut q = (xf / core::f64::consts::LN_2).floor().max(0.0) as u64;
     let mut r = x - &(&ln2 * &Number::new_from_u64(q, LE));
@@ -800,9 +808,20 @@ pub(super) fn exp(x: &Number, fx: u64, ex: f64, w: u64) -> (Float, f64) {
         q += 1;
         r -= &ln2;
     }
-    let (mut v, rel) = exp_reduced(&r, fx, ex + q as f64 + 1.0, w);
+    let (mut v, rel) = exp_reduced(&r, fx, ex + ln2_err * q as f64 + 1.0, w);
     v.e += q as i64;
     (v, rel)
+}
+
+/// `ln 2` to `f` bits after the point, below it within two units of `2^-f`: from `X` at `f + 2`
+/// bits, `|ln 2 2^(f+2) - X| < 2` (the floating numbers' constant, kept for the process up to
+/// `2^27` bits), `(X - 2) / 4` lies in `(ln 2 2^f - 1, ln 2 2^f)`, so its floor in
+/// `[ln 2 2^f - 2, ln 2 2^f)`.
+fn ln2_below(f: u64) -> Number {
+    use crate::math::float::consts::{Constant, fixed};
+    let (x, k) = fixed(Constant::Ln2, f + 2);
+    debug_assert!(k <= 1);
+    &(&of_limbs(&x) - &Number::new_from_u8(2, LE)) >> 2usize
 }
 
 /// [`exp`] without the reduction by `ln 2`.

@@ -6,7 +6,7 @@ use super::block::Blocks;
 
 /// The round constants: the first 32 bits of the fractional parts of the cube roots of the first
 /// 64 primes (FIPS 180-4, section 4.2.2).
-const K: [u32; 64] = [
+pub(super) const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -51,6 +51,14 @@ impl Core {
         }
     }
 
+    /// A core that has taken one block of zeros, from the state `zero` after it.
+    const fn after_zero_block(zero: [u32; 8]) -> Core {
+        Core {
+            state: zero,
+            blocks: Blocks::after_one_block(LIMIT),
+        }
+    }
+
     /// Takes the next piece of the message.
     #[track_caller]
     fn update(&mut self, data: &[u8]) {
@@ -66,47 +74,139 @@ impl Core {
     }
 }
 
-/// The compression function of section 6.2.2 on each block of 64 bytes in `blocks`.
+/// The compression function of section 6.2.2 on each block of 64 bytes in `blocks`: on the
+/// SHA-256 instructions of ARMv8 or x86_64 where the CPU has them, else in portable Rust.
 fn compress(state: &mut [u32; 8], blocks: &[u8]) {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    if super::aarch64::has_sha256() {
+        // SAFETY: the CPU has FEAT_SHA256.
+        unsafe { super::aarch64::sha256(state, blocks, &K) };
+        return;
+    }
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    if super::x86_64::has_sha() {
+        // SAFETY: the CPU has the SHA extensions and SSE4.1.
+        unsafe { super::x86_64::sha256(state, blocks, &K) };
+        return;
+    }
+    portable(state, blocks);
+}
+
+/// The compression function in portable Rust: the schedule kept as its last sixteen words, the
+/// rounds unrolled eight at a time with the working words renamed rather than moved.
+fn portable(state: &mut [u32; 8], blocks: &[u8]) {
     for block in blocks.as_chunks::<64>().0 {
-        // The message schedule.
-        let mut w = [0u32; 64];
+        let mut w = [0u32; 16];
         for (t, word) in block.as_chunks::<4>().0.iter().enumerate() {
             w[t] = u32::from_be_bytes(*word);
         }
-        for t in 16..64 {
-            let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
-            let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
-            w[t] = w[t - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[t - 7])
-                .wrapping_add(s1);
-        }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-        for t in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[t])
-                .wrapping_add(w[t]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
+        // Round `t`: `t1` from `e, f, g, h` and the word, `t2` from `a, b, c`; `d += t1` and
+        // `h = t1 + t2`, the other words keeping their places for the next round's names.
+        macro_rules! round {
+            ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $t:expr, $wt:expr) => {{
+                let s1 = $e.rotate_right(6) ^ $e.rotate_right(11) ^ $e.rotate_right(25);
+                let ch = ($e & $f) ^ (!$e & $g);
+                let t1 = $h
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[$t])
+                    .wrapping_add($wt);
+                let s0 = $a.rotate_right(2) ^ $a.rotate_right(13) ^ $a.rotate_right(22);
+                let maj = ($a & $b) ^ ($c & ($a ^ $b));
+                $d = $d.wrapping_add(t1);
+                $h = t1.wrapping_add(s0.wrapping_add(maj));
+            }};
+        }
+        // The word of round `t < 16`, and of round `t >= 16`, computed in place from the sixteen
+        // before it.
+        macro_rules! given {
+            ($t:expr) => {
+                w[$t & 15]
+            };
+        }
+        macro_rules! scheduled {
+            ($t:expr) => {{
+                let t = $t;
+                let w15 = w[(t + 1) & 15];
+                let w2 = w[(t + 14) & 15];
+                let s0 = w15.rotate_right(7) ^ w15.rotate_right(18) ^ (w15 >> 3);
+                let s1 = w2.rotate_right(17) ^ w2.rotate_right(19) ^ (w2 >> 10);
+                w[t & 15] = w[t & 15]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[(t + 9) & 15])
+                    .wrapping_add(s1);
+                w[t & 15]
+            }};
+        }
+        macro_rules! eight {
+            ($t:expr, $word:ident) => {{
+                let t = $t;
+                round!(a, b, c, d, e, f, g, h, t, $word!(t));
+                round!(h, a, b, c, d, e, f, g, t + 1, $word!(t + 1));
+                round!(g, h, a, b, c, d, e, f, t + 2, $word!(t + 2));
+                round!(f, g, h, a, b, c, d, e, t + 3, $word!(t + 3));
+                round!(e, f, g, h, a, b, c, d, t + 4, $word!(t + 4));
+                round!(d, e, f, g, h, a, b, c, t + 5, $word!(t + 5));
+                round!(c, d, e, f, g, h, a, b, t + 6, $word!(t + 6));
+                round!(b, c, d, e, f, g, h, a, t + 7, $word!(t + 7));
+            }};
+        }
+        eight!(0, given);
+        eight!(8, given);
+        for t in [16, 24, 32, 40, 48, 56] {
+            eight!(t, scheduled);
         }
         for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *s = s.wrapping_add(v);
         }
     }
+}
+
+/// The state after one block of zeros from `iv`, computed when the crate is built: the
+/// `Z_pad` with which `expand_message_xmd` starts.
+const fn after_zero_block(iv: [u32; 8]) -> [u32; 8] {
+    let mut w = [0u32; 64];
+    let mut t = 16;
+    while t < 64 {
+        let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
+        let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
+        w[t] = w[t - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[t - 7])
+            .wrapping_add(s1);
+        t += 1;
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = iv;
+    let mut t = 0;
+    while t < 64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ (!e & g);
+        let t1 = h
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(K[t])
+            .wrapping_add(w[t]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(t1);
+        d = c;
+        c = b;
+        b = a;
+        a = t1.wrapping_add(s0.wrapping_add(maj));
+        t += 1;
+    }
+    let v = [a, b, c, d, e, f, g, h];
+    let mut out = iv;
+    let mut i = 0;
+    while i < 8 {
+        out[i] = out[i].wrapping_add(v[i]);
+        i += 1;
+    }
+    out
 }
 
 /// The first `N` bytes of the words, each in big-endian order.
@@ -187,6 +287,11 @@ impl Digest for Sha256 {
     fn finalize(self) -> [u8; 32] {
         Sha256::finalize(self)
     }
+
+    fn after_zero_block() -> Sha256 {
+        const ZERO: [u32; 8] = after_zero_block(IV256);
+        Sha256(Core::after_zero_block(ZERO))
+    }
 }
 
 /// SHA-224 of FIPS 180-4: SHA-256 from another initial value, its digest cut to 28 bytes.
@@ -256,6 +361,11 @@ impl Digest for Sha224 {
 
     fn finalize(self) -> [u8; 28] {
         Sha224::finalize(self)
+    }
+
+    fn after_zero_block() -> Sha224 {
+        const ZERO: [u32; 8] = after_zero_block(IV224);
+        Sha224(Core::after_zero_block(ZERO))
     }
 }
 

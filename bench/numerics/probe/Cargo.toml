@@ -1,0 +1,25 @@
+[package]
+name = "numprobe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../../lib" }
+argmin = { version = "0.11", default-features = false }
+argmin-math = { version = "0.5", default-features = false, features = ["vec"] }
+ode_solvers = "0.6"
+roots = "0.0.8"
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+debug = false
+
+[profile.fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

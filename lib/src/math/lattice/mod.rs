@@ -10,6 +10,17 @@
 //! A reduction returns a [`Reduced`]: the reduced basis `B'`, the unimodular transformation `U`
 //! with `U·B = B'`, and the rank of the lattice.
 //!
+//! A lattice has many reduced bases, and which one a reduction returns is not promised. What is
+//! promised is what each function states — the reduction to the given `δ` and `η` (and BKZ's
+//! blocks), `U` unimodular with `U·B = B'`, the zero rows first, the rank — and that the same
+//! input and options give the same result with the same version of the crate on the same
+//! platform (no randomness, threads or timing take part; a few choices go through the
+//! platform's `log2`). The basis is not promised to equal another implementation's (fplll's,
+//! FLINT's, NTL's, PARI's) or another version's of this crate: since the speed pass of 0.2, for
+//! instance, [`lll`] starts from the basis of [`lll_fp`] and returns another reduced basis than
+//! 0.2.45 did for about half of the inputs, and with it [`deep_lll`] and [`bkz`] where they
+//! build on it. The same holds of PSLQ's relations "to the precision" (see [`pslq`]).
+//!
 //! * [`lll`]: LLL reduction exactly, on integers (the integral LLL of de Weger and Cohen: the
 //!   Gram–Schmidt coefficients held as integers `dⱼ·μᵢⱼ`, with no fraction and no rounding).
 //! * [`lll_fp`]: the L² algorithm of Nguyen and Stehlé, the Gram–Schmidt orthogonalisation in
@@ -52,6 +63,7 @@ mod deep;
 mod enum_exact;
 mod enum_float;
 mod enum_gso;
+mod enum_residues;
 mod enum_search;
 mod enumerate;
 mod exact;
@@ -59,8 +71,10 @@ mod l2;
 mod l2_certify;
 mod l2_core;
 mod l2_float;
+mod l2_small;
 mod pslq;
 mod pslq_bound;
+mod zint;
 
 pub use bkz::{BkzOptions, bkz};
 pub use deep::{DeepLllOptions, deep_lll};
@@ -128,6 +142,11 @@ impl LllOptions {
 /// A reduced basis: the basis `B'` (zero rows first, one for each linear dependency among the
 /// rows given, then the reduced basis of the lattice), the unimodular `U` with `U·B = B'`, and
 /// the rank of the lattice.
+///
+/// Which of the lattice's reduced bases `B'` is, is not promised beyond what the reduction
+/// states: the same input and options give the same `B'` with the same version of the crate
+/// (see the [module documentation](self)), but not necessarily the basis of another
+/// implementation or of another version.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reduced {
     pub(crate) basis: Matrix<Number>,

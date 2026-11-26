@@ -7,7 +7,7 @@
 use super::common::{Rng, size};
 use a::math::ec::binary::named;
 use a::math::ec::{BinaryCurve, BinaryDomain, BinaryPoint, CurveError, NotOnCurve};
-use a::math::field::{BinaryField, F2m};
+use a::math::field::{BinaryField, Clmul, F2m};
 use a::math::numbers::{ByteOrder, Number};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -1090,5 +1090,114 @@ fn koblitz_curves_with_cofactor_four_multiply_their_points_of_order_four() {
         }
         assert!((&u * &count).is_identity() && curve.x_mul(&f.one(), &count).is_none());
         assert_eq!(&u * &n(4), curve.identity());
+    }
+}
+
+/// Moduli of at most 256 bits, whose products by scalars run on inline words, with the second
+/// term close to `xᵐ` (many small chunks for the sparse reduction, so that Barrett's takes them
+/// under the instruction), 8 bits below it (Barrett's under the instruction, the sparse one in
+/// chunks of 8 bits under the portable kernel), many terms, and the standards' pentanomial of
+/// `sect163k1` (the sparse one in chunks of 64 bits under the portable kernel and `PCLMULQDQ`,
+/// Barrett's under `PMULL`) and trinomial of `sect233k1` (the sparse one under every kernel): of 1
+/// to 4 words, `m` a multiple of 64 among them.
+const NARROW: [&[u32]; 10] = [
+    &[61, 59, 9, 2, 0],
+    &[127, 126, 0],
+    &[153, 152, 0],
+    &[233, 232, 208, 207, 0],
+    &[256, 255, 58, 16, 0],
+    &[233, 225, 96, 12, 0],
+    &[256, 248, 214, 81, 0],
+    &[
+        127, 62, 61, 60, 58, 57, 55, 54, 52, 51, 49, 48, 47, 45, 44, 43, 42, 41, 40, 39, 36, 32,
+        31, 26, 24, 23, 22, 21, 20, 19, 17, 10, 9, 8, 7, 6, 5, 3, 2, 1, 0,
+    ],
+    &[163, 7, 6, 3, 0],
+    &[233, 74, 0],
+];
+
+#[test]
+fn fields_of_every_reduction_multiply_as_the_textbook_does() {
+    // Each field under the CPU's kernel and the portable one (whose squares spread the bits and
+    // whose costs choose the reductions otherwise), on both Koblitz curves (τ-adic products) and a
+    // random one: k·P, x_mul and multi_mul against the textbook's affine law.
+    let mut rng = Rng(0x0b1a_5ed0);
+    for e in NARROW.iter().take(size(10, 2)) {
+        let m = e[0] as usize;
+        for f in [
+            BinaryField::new(e),
+            BinaryField::with_clmul(e, Clmul::Portable),
+        ] {
+            let random: Vec<u64> = (0..m.div_ceil(64)).map(|_| rng.next()).collect();
+            let coefficients = [
+                (f.zero(), f.one()),
+                (f.one(), f.one()),
+                (f.element(&random), f.element(&[0x1234_5677, 9])),
+            ];
+            for (a, b) in coefficients.iter().take(size(3, 1)) {
+                let curve = BinaryCurve::new(a, b).unwrap();
+                let p = any_point(&curve, &mut rng);
+                let q = any_point(&curve, &mut rng);
+                let (pa, qa) = (p.coordinates(), q.coordinates());
+                let (x, _) = pa.clone().unwrap();
+                let k = random_bits(&mut rng, m);
+                let l = random_bits(&mut rng, m + 5);
+                for k in [k.clone(), -&k, n(7)].iter().take(size(3, 1)) {
+                    let want = mul_ref(a, &pa, k);
+                    assert_eq!(
+                        &p * k,
+                        on(&curve, &want),
+                        "{e:?}, {:?}, {k} times",
+                        f.clmul()
+                    );
+                    assert_eq!(curve.x_mul(&x, k), want.map(|c| c.0), "{e:?}, x_mul");
+                }
+                let want = add_ref(a, &mul_ref(a, &pa, &k), &mul_ref(a, &qa, &l));
+                assert_eq!(
+                    curve.multi_mul(&[(&k, &p), (&l, &q)]),
+                    on(&curve, &want),
+                    "{e:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Four products `k·P` on a curve over the field of the exponents `e`, as bytes.
+fn products_over(e: &[u32]) -> Vec<Vec<u8>> {
+    let f = BinaryField::new(e);
+    let c = BinaryCurve::new(&f.one(), &f.element(&[0x1234_5677, 9, 77, 1])).unwrap();
+    let k = Number::from(0xffff_ffff_ffff_fff1u64);
+    let mut out = Vec::new();
+    let mut x = 5u64;
+    while out.len() < 4 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        if let Some(p) = c.lift(&f.element(&[x, x >> 3, x ^ 99, x >> 40]), false) {
+            out.push((&p * &k).to_bytes());
+        }
+    }
+    out
+}
+
+/// The narrow arithmetic keeps the reduction it chose for the last field of a thread (the sparse
+/// one or Barrett's), keyed by the degree, the other exponents and the kernel: two fields of one
+/// degree taken in turn on one thread must each get their own, as on a fresh thread.
+#[test]
+fn two_fields_of_one_degree_in_turn_on_one_thread_keep_their_own_reductions() {
+    const SPARSE: &[u32] = &[233, 74, 0];
+    const BARRETT: &[u32] = &[233, 232, 208, 207, 0];
+    let fresh = |e: &'static [u32]| std::thread::spawn(move || products_over(e)).join().unwrap();
+    let (a, b) = (fresh(SPARSE), fresh(BARRETT));
+    for _ in 0..2 {
+        assert_eq!(
+            products_over(SPARSE),
+            a,
+            "x²³³ + x⁷⁴ + 1 after the other field"
+        );
+        assert_eq!(
+            products_over(BARRETT),
+            b,
+            "x²³³ + x²³² + x²⁰⁸ + x²⁰⁷ + 1 after the other field"
+        );
     }
 }

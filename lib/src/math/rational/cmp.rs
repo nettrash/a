@@ -24,11 +24,40 @@ impl PartialEq for Rational {
             (Some(x), Some(y)) => (x.num == y.num) & (x.den == y.den) & (x.negative == y.negative),
             (None, None) => {
                 let ((a, b), (c, d)) = (big(self), big(other));
+                // Long numerators straight from their bytes; short parts as numbers, in registers.
+                if let Some(x) = same_form(a, c) {
+                    return x && b == d;
+                }
                 a == c && b == d
             }
             _ => false,
         }
     }
+}
+
+/// Whether two parts are equal, when one is longer than 16 bytes and both are in one byte order
+/// and in the shortest form, as the parts of rationals in numbers are: the lengths first, then
+/// the bytes, with no reading of magnitudes; `None` otherwise.
+#[inline(always)]
+fn same_form(x: &Number, y: &Number) -> Option<bool> {
+    let (u, v) = (&x.value, &y.value);
+    // Parts of up to 16 bytes compare faster as numbers, in registers.
+    if (u.len() <= 16 && v.len() <= 16) || x.byte_order != y.byte_order {
+        return None;
+    }
+    let big_endian = x.byte_order == ByteOrder::BigEndian;
+    let top = |w: &[u8]| {
+        if big_endian {
+            w.first().copied()
+        } else {
+            w.last().copied()
+        }
+    };
+    // Both shortest: a top byte that is not zero.
+    if top(u).is_none_or(|b| b == 0) || top(v).is_none_or(|b| b == 0) {
+        return None;
+    }
+    Some(u.len() == v.len() && x.negative == y.negative && u == v)
 }
 
 /// The numbers of a rational not in words.
@@ -41,7 +70,9 @@ impl Eq for Rational {}
 
 impl Hash for Rational {
     /// Hashes the number by value, so that equal rationals hash alike whatever their byte orders:
-    /// the numerator, then the denominator, as [`Number`] hashes them.
+    /// the numerator, then the denominator, as [`Number`] hashes them. A rational in words feeds
+    /// the hasher what the numbers of its parts would, from the words in place, with nothing made.
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self.word() {
             Some(x) => {
@@ -57,12 +88,13 @@ impl Hash for Rational {
     }
 }
 
-/// Hashes the magnitude `m` with the sign `negative` as [`Number`] hashes a number of that value:
-/// the sign, the significant length, then the significant bytes, the least significant first.
+/// Hashes the magnitude `m` with the sign `negative` as [`Number`] hashes a number of that value,
+/// call for call: the sign, the significant length, then the significant bytes, the least
+/// significant first, in one write (none for zero).
 #[inline(always)]
 fn hash_word<H: Hasher>(state: &mut H, negative: bool, m: u64) {
     let len = 8 - (m.leading_zeros() / 8) as usize;
-    state.write_u8(u8::from(negative));
+    state.write_u8(u8::from(negative && m != 0));
     state.write_usize(len);
     if len > 0 {
         state.write(&m.to_le_bytes()[..len]);
@@ -88,6 +120,7 @@ impl Ord for Rational {
     /// v.sort();
     /// assert_eq!(v.iter().map(|r| r.to_string()).collect::<Vec<_>>(), ["-1/2", "1/4", "1/3"]);
     /// ```
+    #[inline]
     fn cmp(&self, other: &Rational) -> Ordering {
         match (&self.repr, &other.repr) {
             (Repr::Big(x), Repr::Big(y)) => cross(

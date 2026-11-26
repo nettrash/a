@@ -124,14 +124,17 @@ const MULTIMODULAR: usize = if cfg!(miri) { 4 } else { 48 };
 fn small(a: &[Number]) -> Vec<i128> {
     a.iter()
         .map(|c| {
-            // The bytes from the most significant; zeros above the value shift out harmlessly.
+            // At most 16 significant bytes, loaded at once: the low 16 of a little-endian
+            // vector (zeros above the value are harmless), the last 16 of a big-endian one.
+            let v = &c.value;
+            let k = v.len().min(16);
+            let mut b = [0u8; 16];
             let m = if c.byte_order == ByteOrder::LittleEndian {
-                c.value
-                    .iter()
-                    .rev()
-                    .fold(0u128, |t, &b| (t << 8) | u128::from(b))
+                b[..k].copy_from_slice(&v[..k]);
+                u128::from_le_bytes(b)
             } else {
-                c.value.iter().fold(0u128, |t, &b| (t << 8) | u128::from(b))
+                b[16 - k..].copy_from_slice(&v[v.len() - k..]);
+                u128::from_be_bytes(b)
             };
             if c.is_negative() {
                 -(m as i128)

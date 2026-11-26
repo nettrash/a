@@ -705,6 +705,29 @@ fn power_pays(p: &[u64], e: u32) -> bool {
     s.saturating_mul(s).saturating_mul(l) / 2 <= 200
 }
 
+/// The number a factorisation makes, `prod p^e`, in limbs on the stack while each product has room
+/// (the product so far and the factor together of at most [`LIMBS`] limbs, checked before each
+/// product; each factor read once from its bytes, a word's powers in pieces of a word, the number
+/// written once at the end), or `None` when one has not: [`Factorization::value`] then takes
+/// products of numbers up a balanced tree, so a value of [`LIMBS`] limbs may take either.
+pub(in crate::math::numbers) fn value_limbs(
+    f: &[(Number, u32)],
+    order: ByteOrder,
+) -> Option<Number> {
+    let mut acc = Product::one();
+    let mut x = Limbs::new();
+    for (p, e) in f {
+        if !x.read(p) {
+            return None;
+        }
+        // `mul_power` checks the room before each product and gives up when it passes.
+        if !acc.mul_power(x.as_slice(), *e) {
+            return None;
+        }
+    }
+    Some(acc.number(order))
+}
+
 /// The radical in limbs, when it fits, in the byte order `order`: a product of a factor a prime,
 /// which fails early when it does not fit.
 fn radical_limbs(f: &[(Number, u32)], order: ByteOrder) -> Option<Number> {

@@ -1,9 +1,9 @@
 //! Evaluation at many points and interpolation of [`ModPolynomial`]s.
 
 use super::modtree::{self, Ctx};
-use super::mont::{MAX_LIMBS, MontCtx};
+use super::mont::MAX_LIMBS;
 use super::word;
-use crate::math::numbers::{ByteOrder, Number, from_limbs};
+use crate::math::numbers::Number;
 use crate::math::poly::ModPolynomial;
 use crate::math::poly::modular::{Modulus, Work};
 use std::sync::Arc;
@@ -74,7 +74,8 @@ pub(crate) fn eval_packed(m: &Arc<Modulus>, f: &[u64], mut xs: Vec<u64>) -> Vec<
 }
 
 /// Horner's rule at each point: modulo a word by [`word::horner_many`], modulo an odd `n` of
-/// several limbs by Montgomery's products ([`MontCtx::horner_many`]), otherwise on the residues'
+/// several limbs by Montgomery's products
+/// ([`MontCtx::horner_many`](super::mont::MontCtx::horner_many)), otherwise on the residues'
 /// products.
 fn horner(m: &Modulus, f: &[u64], xs: &[u64]) -> Vec<u64> {
     if let Some(wm) = m.word_mod() {
@@ -83,7 +84,7 @@ fn horner(m: &Modulus, f: &[u64], xs: &[u64]) -> Vec<u64> {
         return v;
     }
     let mut out = vec![0u64; xs.len()];
-    if let Some(mc) = MontCtx::new(m) {
+    if let Some(mc) = m.mont() {
         mc.horner_many(f, xs, &mut out);
         return out;
     }
@@ -268,6 +269,17 @@ fn interp_lagrange(ctx: &mut Ctx<'_>, xs: &[u64], ys: &[u64]) -> Vec<u64> {
 
 /// The residues of the numbers `xs` modulo `m`, packed.
 fn residues(m: &Modulus, xs: &[Number]) -> Vec<u64> {
+    if m.word().is_some() {
+        // Without the limbs of each point unless one is longer than a word.
+        let mut v = Vec::with_capacity(xs.len());
+        for x in xs {
+            v.push(match m.word_residue(x) {
+                Some(r) => r,
+                None => m.residue(x)[0],
+            });
+        }
+        return v;
+    }
     let k = m.k();
     let mut v = vec![0u64; xs.len() * k];
     let mut l = Vec::new();
@@ -310,12 +322,7 @@ fn numbers(m: &Modulus, v: &[u64]) -> Vec<Number> {
 #[track_caller]
 fn word_modulus(n: u64) -> Arc<Modulus> {
     assert!(n >= 2, "the modulus must be at least 2");
-    Arc::new(Modulus {
-        n: from_limbs(&[n], ByteOrder::LittleEndian),
-        d: vec![n],
-        w: Some(crate::math::poly::arith::nmod::WordMod::new(n)),
-        l: None,
-    })
+    crate::math::poly::modular::cached_word_modulus(n)
 }
 
 /// Which interpolation.
@@ -328,18 +335,21 @@ enum Interp {
 
 /// The interpolating polynomial of the packed `xs` and `ys` modulo `m`, by `how`.
 #[track_caller]
-fn interpolate_packed(m: Arc<Modulus>, xs: &[u64], ys: &[u64], how: Interp) -> ModPolynomial {
+fn interpolate_packed(m: Arc<Modulus>, xs: &[u64], ys: Vec<u64>, how: Interp) -> ModPolynomial {
     assert_eq!(
         xs.len(),
         ys.len(),
         "as many values as points are needed to interpolate"
     );
     if xs.is_empty() {
-        return ModPolynomial { m, c: Vec::new() };
+        return ModPolynomial {
+            m,
+            c: Vec::new().into(),
+        };
     }
     if xs.len() == m.k() {
         // One point: the constant.
-        return ModPolynomial::of(m, ys.to_vec());
+        return ModPolynomial::of(m, ys);
     }
     let mut ctx = Ctx::new(&m);
     let npts = xs.len() / ctx.k;
@@ -352,12 +362,12 @@ fn interpolate_packed(m: Arc<Modulus>, xs: &[u64], ys: &[u64], how: Interp) -> M
         None => MULTI_INTERP_NEWTON[2],
     };
     let c = match how {
-        Interp::Fast if npts > small => interp_tree(&mut ctx, xs, ys),
+        Interp::Fast if npts > small => interp_tree(&mut ctx, xs, &ys),
         // Modulo a word Lagrange's form on Horner's rule at eight points is the fastest of the
         // quadratic ones; modulo several limbs Newton's.
-        Interp::Fast if ctx.word.is_some() => interp_lagrange(&mut ctx, xs, ys),
-        Interp::Fast | Interp::Newton => interp_newton(&mut ctx, xs, ys),
-        Interp::Lagrange => interp_lagrange(&mut ctx, xs, ys),
+        Interp::Fast if ctx.word.is_some() => interp_lagrange(&mut ctx, xs, &ys),
+        Interp::Fast | Interp::Newton => interp_newton(&mut ctx, xs, &ys),
+        Interp::Lagrange => interp_lagrange(&mut ctx, xs, &ys),
     };
     drop(ctx);
     ModPolynomial::of(m, c)
@@ -382,6 +392,10 @@ impl ModPolynomial {
     /// assert_eq!(p.eval_many(&xs), v);
     /// ```
     pub fn eval_many(&self, xs: &[Number]) -> Vec<Number> {
+        if self.length() <= 1 {
+            // A constant: its value at every point, the points not read.
+            return vec![self.coeff(0); xs.len()];
+        }
         let pts = residues(&self.m, xs);
         numbers(&self.m, &eval_packed(&self.m, &self.c, pts))
     }
@@ -431,7 +445,15 @@ impl ModPolynomial {
     /// ```
     #[track_caller]
     pub fn from_roots(roots: &[Number], modulus: &Number) -> ModPolynomial {
-        let m = Arc::new(Modulus::new(modulus));
+        let m = crate::math::poly::modular::cached_modulus(modulus);
+        if let [r] = roots {
+            // x - r, without the tree's context.
+            let mut c = m.residue(r);
+            m.neg(&mut c);
+            c.resize(2 * m.k(), 0);
+            c[m.k()] = 1;
+            return ModPolynomial::of(m, c);
+        }
         let pts = residues(&m, roots);
         let c = modtree::from_roots(&mut Ctx::new(&m), &pts);
         ModPolynomial::of(m, c)
@@ -446,6 +468,11 @@ impl ModPolynomial {
     #[track_caller]
     pub fn from_roots_u64(roots: &[u64], modulus: u64) -> ModPolynomial {
         let m = word_modulus(modulus);
+        if let [r] = roots {
+            // x - r, without the tree's context.
+            let r = r % modulus;
+            return ModPolynomial::of(m, vec![if r == 0 { 0 } else { modulus - r }, 1]);
+        }
         let pts: Vec<u64> = roots.iter().map(|&x| x % modulus).collect();
         let c = modtree::from_roots(&mut Ctx::new(&m), &pts);
         ModPolynomial::of(m, c)
@@ -476,9 +503,14 @@ impl ModPolynomial {
     /// ```
     #[track_caller]
     pub fn interpolate(xs: &[Number], ys: &[Number], modulus: &Number) -> ModPolynomial {
-        let m = Arc::new(Modulus::new(modulus));
+        let m = crate::math::poly::modular::cached_modulus(modulus);
+        if let ([_], [y]) = (xs, ys) {
+            // One point: the constant.
+            let c = m.residue(y);
+            return ModPolynomial::of(m, c);
+        }
         let (px, py) = (residues(&m, xs), residues(&m, ys));
-        interpolate_packed(m, &px, &py, Interp::Fast)
+        interpolate_packed(m, &px, py, Interp::Fast)
     }
 
     /// [`interpolate`](ModPolynomial::interpolate) on words: the points and values reduced modulo
@@ -500,9 +532,13 @@ impl ModPolynomial {
     #[track_caller]
     pub fn interpolate_u64(xs: &[u64], ys: &[u64], modulus: u64) -> ModPolynomial {
         let m = word_modulus(modulus);
+        if let ([_], [y]) = (xs, ys) {
+            // One point: the constant.
+            return ModPolynomial::of(m, vec![y % modulus]);
+        }
         let px: Vec<u64> = xs.iter().map(|&x| x % modulus).collect();
         let py: Vec<u64> = ys.iter().map(|&x| x % modulus).collect();
-        interpolate_packed(m, &px, &py, Interp::Fast)
+        interpolate_packed(m, &px, py, Interp::Fast)
     }
 
     /// [`interpolate`](ModPolynomial::interpolate) by Lagrange's form, `Σ yᵢ · Π_{j≠i} (x - xⱼ) /
@@ -525,9 +561,14 @@ impl ModPolynomial {
     /// ```
     #[track_caller]
     pub fn interpolate_lagrange(xs: &[Number], ys: &[Number], modulus: &Number) -> ModPolynomial {
-        let m = Arc::new(Modulus::new(modulus));
+        let m = crate::math::poly::modular::cached_modulus(modulus);
+        if let ([_], [y]) = (xs, ys) {
+            // One point: the constant.
+            let c = m.residue(y);
+            return ModPolynomial::of(m, c);
+        }
         let (px, py) = (residues(&m, xs), residues(&m, ys));
-        interpolate_packed(m, &px, &py, Interp::Lagrange)
+        interpolate_packed(m, &px, py, Interp::Lagrange)
     }
 
     /// [`interpolate`](ModPolynomial::interpolate) by Newton's divided differences and the
@@ -550,8 +591,13 @@ impl ModPolynomial {
     /// ```
     #[track_caller]
     pub fn interpolate_newton(xs: &[Number], ys: &[Number], modulus: &Number) -> ModPolynomial {
-        let m = Arc::new(Modulus::new(modulus));
+        let m = crate::math::poly::modular::cached_modulus(modulus);
+        if let ([_], [y]) = (xs, ys) {
+            // One point: the constant.
+            let c = m.residue(y);
+            return ModPolynomial::of(m, c);
+        }
         let (px, py) = (residues(&m, xs), residues(&m, ys));
-        interpolate_packed(m, &px, &py, Interp::Newton)
+        interpolate_packed(m, &px, py, Interp::Newton)
     }
 }

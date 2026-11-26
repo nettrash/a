@@ -11,6 +11,10 @@
 
 use crate::math::numbers::Number;
 
+mod limbs;
+mod multimod;
+mod words;
+
 /// A ring for the recursion: its zero, sums and differences, and the classical product.
 pub(super) trait Ring {
     /// The elements.
@@ -219,26 +223,10 @@ impl Ring for Numbers {
         lda: usize,
         b: &[Number],
         ldb: usize,
-        (m, k, n): (usize, usize, usize),
+        shape: (usize, usize, usize),
         accumulate: bool,
     ) {
-        for i in 0..m {
-            let cr = &mut c[i * ldc..i * ldc + n];
-            if !accumulate {
-                cr.fill(Number::default());
-            }
-            for p in 0..k {
-                let x = &a[i * lda + p];
-                if x.is_zero() {
-                    continue;
-                }
-                for (c, y) in cr.iter_mut().zip(&b[p * ldb..p * ldb + n]) {
-                    if !y.is_zero() {
-                        *c += x * y;
-                    }
-                }
-            }
-        }
+        limbs::classical(c, ldc, a, lda, b, ldb, shape, accumulate);
     }
 
     fn split(&self, m: usize, k: usize, n: usize) -> bool {
@@ -251,44 +239,51 @@ impl Ring for Numbers {
 /// costs about as much as a product while they are short, so the seven products save less than
 /// the eighth of the work they save for long ones, and the sums lengthen the elements by a few
 /// bits, past a limb for some lengths. Measured on an Apple M4 Max in the release profile,
-/// `n × n` products, the recursion at `n` and `n / 2` against the classical product: for
-/// elements of 8 to 62 bits, 0.97 to 1.03 of its time at 64 and 128 for one level, 0.82 to 0.87
-/// at 256 for two; for 128 to 512 bits, 0.99 to 1.07 at 128, 0.94 to 0.96 at 256; for 1024 bits,
-/// 0.85 at 16 and 0.77 from 32; for 2048 bits 0.90 to 0.92 from 16, and for 4096 bits 0.92 from 8.
+/// `n × n` products of elements of the length, the residues of [`multimod`] off, one level of the
+/// recursion at `n` against the classical product, whose leaves sum in limbs (sweep 8 to 256):
+/// 0.92 to 0.98 of its time from 72 rows for elements of 2 to 6 limbs, 0.97 and 0.92 at 64 for 7
+/// and 8 limbs, 1.00 and 0.99 at 48 for 12 and 16 limbs (1.02 for 9), 0.98 at 32 for 24 and 32,
+/// 0.97 at 24 for 48 and 64, and 0.97 and 0.95 at 12 for 128 and 256 limbs; for 2 limbs, whose
+/// sums pass a limb, a second level at 72 to 88 took 1.02 to 1.07 of one level's time, and for 3
+/// and 4 limbs 0.96 to 1.00. Against the earlier 128, 32 and 16, whole products took 0.87 to 0.97
+/// of the time where the choice differs, and none more than 1.011.
 fn crossover(bytes: usize) -> usize {
     match bytes {
-        0..=64 => 128,
-        65..=256 => 32,
-        _ => 16,
+        0..=16 => 96,
+        17..=48 => 72,
+        49..=64 => 64,
+        65..=128 => 48,
+        129..=256 => 32,
+        257..=1024 => 16,
+        _ => 12,
     }
 }
 
 /// `c = a · b` for column-major matrices of numbers, `a` of `m × k`, `b` of `k × n` and `c` of
-/// `m × n`, which holds zeros: classically, column after column, below the crossover of the
-/// operands' length ([`crossover`]), and by Strassen–Winograd's recursion above it, which gives
-/// the same numbers, little-endian as the classical product leaves them.
+/// `m × n`, which holds zeros. When every element fits in a word, the sums of products are
+/// computed in machine arithmetic ([`words`]): in doubles while every sum is below `2^53`, in
+/// `i128`s or three words beyond. Longer elements go by their residues modulo word primes and
+/// the Chinese remainder theorem ([`multimod`]) when the order is large beside their length;
+/// otherwise classically below the crossover of the operands' length ([`crossover`]), each sum
+/// accumulated in limbs ([`limbs`]), and by Strassen–Winograd's recursion above it. The numbers
+/// are those of the classical product, little-endian.
 pub(super) fn numbers(c: &mut [Number], a: &[Number], b: &[Number], m: usize, k: usize, n: usize) {
+    if m == 0 || n == 0 || k == 0 {
+        return;
+    }
+    // Elements of a word each: the sums in machine arithmetic.
+    if words::product(c, a, b, m, k, n) {
+        return;
+    }
+    // Long elements and a large order beside their length: by residues.
+    if multimod::product_by_residues(c, a, b, m, k, n) {
+        return;
+    }
     let bytes = a.iter().chain(b).map(|x| x.value.len()).max().unwrap_or(0);
     let r = Numbers {
         from: crossover(bytes),
     };
-    // Column-major `C = A·B` is row-major `Cᵀ = Bᵀ·Aᵀ`.
-    if m.min(k).min(n) >= r.from {
-        product(&r, c, m, b, k, a, m, (n, k, m));
-        return;
-    }
-    for j in 0..n {
-        let c = &mut c[j * m..(j + 1) * m];
-        for p in 0..k {
-            let x = &b[p + j * k];
-            if x.is_zero() {
-                continue;
-            }
-            for (c, a) in c.iter_mut().zip(&a[p * m..(p + 1) * m]) {
-                if !a.is_zero() {
-                    *c += a * x;
-                }
-            }
-        }
-    }
+    // Column-major `C = A·B` is row-major `Cᵀ = Bᵀ·Aᵀ`; below the crossover the recursion is
+    // the classical product of its leaves.
+    product(&r, c, m, b, k, a, m, (n, k, m));
 }

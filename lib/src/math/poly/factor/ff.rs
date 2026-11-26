@@ -135,6 +135,9 @@ fn sqf(fp: &Fp, f: P, mult: u32, out: &mut Vec<(P, u32)>) {
 ///
 /// Also `x^p mod f`, which the equal-degree splitting takes.
 pub(crate) fn ddf(fp: &Fp, f: &[u64]) -> (Vec<(P, u32)>, P) {
+    if fp.m.is_two() {
+        return ddf_gf2(f);
+    }
     // Frobenius powers one after another cost the bits of p in squarings each: for a small p
     // and a short f, fewer than the compositions of the baby steps and giant steps.
     if fp.deg(f) * fp.m.n.bits() as usize <= DDF_NAIVE {
@@ -142,6 +145,72 @@ pub(crate) fn ddf(fp: &Fp, f: &[u64]) -> (Vec<(P, u32)>, P) {
     } else {
         ddf_bsgs(fp, f)
     }
+}
+
+/// The Frobenius steps of [`ddf_gf2`] whose greatest common divisors are taken at once: measured
+/// on an Apple M4 Max (4 to 64, degrees 200 to 8,000, 24 random square-free polynomials and 24
+/// products of small irreducibles a degree), flat from 12 to 16: 8 up to 1.2 times faster below
+/// 1,000 on random ones but 1.1 to 1.2 times slower from 4,000, 14 2 to 7% faster below 4,000 but
+/// 1 to 3% slower at 8,000 (and the inputs move these by 3 to 8%), 4 and 48 or more 1.3 to 2
+/// times slower.
+const GF2_DDF_BLOCK: usize = 16;
+
+/// The distinct-degree factorisation over GF(2), packed throughout: `h = x^(2^i) mod f` one
+/// square after another (a square over GF(2) spreads bits), and the product of `h - x` over a
+/// block of steps modulo `f` taken into one greatest common divisor with `f`; a block whose
+/// gcd is not 1 is gone through again a step at a time. Also `x² mod f`.
+fn ddf_gf2(f: &[u64]) -> (Vec<(P, u32)>, P) {
+    use super::super::arith::gf2;
+    let deg = |a: &[u64]| gf2::degree(a).unwrap_or(0);
+    let mut frem = gf2::pack(f);
+    gf2::trim(&mut frem);
+    let mut div = gf2::Div::reused(&frem);
+    let minus_x = |h: &[u64]| {
+        let mut t = h.to_vec();
+        if t.is_empty() {
+            t.push(0);
+        }
+        t[0] ^= 2;
+        gf2::trim(&mut t);
+        t
+    };
+    let mut h = div.sqr_mod(&div.rem(&[2]));
+    let sigma = gf2::unpack(&h);
+    let mut out = Vec::new();
+    let mut i = 1usize;
+    while 2 * i <= deg(&frem) {
+        let mut hs = Vec::with_capacity(GF2_DDF_BLOCK);
+        let mut prod = vec![1u64];
+        let mut j = i;
+        while j < i + GF2_DDF_BLOCK && 2 * j <= deg(&frem) {
+            prod = div.mul_mod(&prod, &minus_x(&h));
+            hs.push(h.clone());
+            h = div.sqr_mod(&h);
+            j += 1;
+        }
+        let g = gf2::gcd(&frem, &prod);
+        if deg(&g) > 0 {
+            for (t, hj) in hs.iter().enumerate() {
+                // Past half the degree what is left is irreducible (pushed below with its
+                // degree): every factor of a degree below i + t has been taken out.
+                if 2 * (i + t) > deg(&frem) {
+                    break;
+                }
+                let gj = gf2::gcd(&frem, &minus_x(&div.rem(hj)));
+                if deg(&gj) > 0 {
+                    frem = gf2::Div::new(&gj).div_rem(&frem).0;
+                    out.push((gf2::unpack(&gj), (i + t) as u32));
+                    div = gf2::Div::reused(&frem);
+                }
+            }
+            h = div.rem(&h);
+        }
+        i = j;
+    }
+    if deg(&frem) > 0 {
+        out.push((gf2::unpack(&frem), deg(&frem) as u32));
+    }
+    (out, sigma)
 }
 
 /// The distinct-degree factorisation by `x^(p^i) mod f` for `i = 1, 2, …`, each the `p`-th power
@@ -272,7 +341,7 @@ pub(crate) fn edf(
         return;
     }
     let mf = fp.mf(f);
-    let two = fp.m.word() == Some(2);
+    let two = fp.m.is_two();
     let bits = fp.m.n.bits() as usize;
     // For a large p, a^((p^d - 1)/2) = N^((p - 1)/2) with the norm N = a·a^p·…·a^(p^(d-1)), the
     // powers a^(p^i) by compositions with x^p: d - 1 compositions and the bits of p in squarings,
@@ -316,13 +385,23 @@ pub(crate) fn edf(
             assert!(tries <= 256, "{NOT_EQUAL_DEGREE}");
             let a = fp.random(state, n);
             let s = if two {
-                let mut t = a.clone();
-                let mut s = a;
+                // The trace a + a² + … + a^(2^(d-1)) mod g, packed throughout.
+                use super::super::arith::gf2;
+                let gp = gf2::pack(&g);
+                let dv = gf2::Div::reused(&gp);
+                let mut sp = dv.rem(&gf2::pack(&a));
+                let mut tp = sp.clone();
                 for _ in 1..d {
-                    s = fp.sqrmod(&s, mfg_ref);
-                    t = fp.add(&t, &s);
+                    sp = dv.sqr_mod(&sp);
+                    if tp.len() < sp.len() {
+                        tp.resize(sp.len(), 0);
+                    }
+                    for (x, y) in tp.iter_mut().zip(&sp) {
+                        *x ^= y;
+                    }
                 }
-                fp.gcd(&g, &t)
+                gf2::trim(&mut tp);
+                gf2::unpack(&gf2::gcd(&gp, &tp))
             } else {
                 let base = match &pw {
                     Some(pw) => {
@@ -367,9 +446,9 @@ pub(crate) fn factor_squarefree(fp: &Fp, f: &[u64], state: &mut u64) -> Vec<P> {
 pub(crate) fn factor(fp: &Fp, f: &[u64], berlekamp: bool) -> Vec<(P, u32)> {
     let mut out = Vec::new();
     let mut state = SEED;
-    let bits = fp.m.n.bits();
+    let most = berlekamp_max(fp);
     for (g, e) in squarefree(fp, f) {
-        let parts = if berlekamp || fp.deg(&g) <= berlekamp_max(bits) {
+        let parts = if berlekamp || fp.deg(&g) <= most {
             berlekamp_squarefree(fp, &g, &mut state)
         } else {
             factor_squarefree(fp, &g, &mut state)
@@ -447,11 +526,20 @@ fn kernel_word<A: Acc>(w: &Wm, q: &[Vec<u64>], n: usize) -> Vec<P> {
     basis
 }
 
-/// Up to this degree the factorisation modulo a `p` of `bits` bits takes Berlekamp's method (its
-/// elimination costs `n³/3` products of residues, which for a small `p` sum in a word, against
-/// the distinct-degree factorisation's products modulo `f`): measured on an Apple M4.
-fn berlekamp_max(bits: u64) -> usize {
-    match bits {
+/// Up to this degree the factorisation modulo `p` takes Berlekamp's method (its elimination
+/// costs `n³/3` products of residues, which for a small `p` sum in a word, against the
+/// distinct-degree factorisation's products modulo `f`): measured on an Apple M4. For `p = 2`
+/// both sides are packed ([`berlekamp_gf2`] against [`ddf_gf2`] and the packed equal-degree
+/// splitting): measured on an Apple M4 Max (degrees 50 to 2,000, 32 random square-free
+/// polynomials and 32 products of distinct irreducibles of degrees 1 to 12 each), Berlekamp's
+/// method faster up to about 165 on random ones (1.5 times at 100) and 70 on products of small
+/// factors; at 175 the distinct-degree factorisation 1.06 to 1.25 times faster from 176 to 250
+/// on random ones and 1.8 times at 600, 2.6 to 6.5 times on the products of small factors.
+fn berlekamp_max(fp: &Fp) -> usize {
+    if fp.m.is_two() {
+        return 175;
+    }
+    match fp.m.n.bits() {
         0..=2 => 600,
         3 => 300,
         _ => 0,
@@ -549,6 +637,91 @@ fn kernel(fp: &Fp, q: &mut [Vec<u64>], n: usize) -> Vec<P> {
     basis
 }
 
+/// Berlekamp's method modulo 2 on packed bits (64 coefficients a word) for the square-free `f`
+/// of degree at least 2, one word a coefficient: the rows `x^(2i) mod f` of `Q`, each the last
+/// shifted by two with at most two subtractions of `f`; the left kernel of `Q - I` by
+/// elimination of its rows with the identity beside them (the rows that end at zero carry it);
+/// and each element `v` of the kernel splits a part `u` into `gcd(u, v)` and the quotient, which
+/// is `gcd(u, v + 1)` (`v² ≡ v` modulo `u`, so `u` divides `v(v + 1)`, of coprime factors).
+fn berlekamp_gf2(f: &[u64]) -> Vec<P> {
+    use super::super::arith::gf2;
+    let fb = gf2::pack(f);
+    let n = f.len() - 1;
+    let w = n.div_ceil(64);
+    let bit = |v: &[u64], i: usize| (v[i / 64] >> (i % 64)) & 1 == 1;
+    // Row i: the bits of x^(2i) mod f - x^i in words 0..w, the identity's bit i in w..2w.
+    let mut rows = vec![0u64; 2 * w * n];
+    let mut r = vec![0u64; (n + 2).div_ceil(64)];
+    r[0] = 1;
+    for (i, row) in rows.chunks_exact_mut(2 * w).enumerate() {
+        row[..w].copy_from_slice(&r[..w]);
+        row[i / 64] ^= 1 << (i % 64);
+        row[w + i / 64] |= 1 << (i % 64);
+        // r·x² mod f: below x^(n + 2) after the shift, then the bits n + 1 and n cleared.
+        let mut carry = 0u64;
+        for x in r.iter_mut() {
+            let nx = (*x << 2) | carry;
+            carry = *x >> 62;
+            *x = nx;
+        }
+        for b in [n + 1, n] {
+            if bit(&r, b) {
+                gf2::xor_shifted(&mut r, &fb, b - n);
+            }
+        }
+    }
+    // Forward elimination over the rows that are not yet pivots: those left at the end are zero
+    // in the first half, and their second halves, independent, span the kernel.
+    let mut live: Vec<usize> = (0..n).collect();
+    let mut prow = vec![0u64; 2 * w];
+    for col in 0..n {
+        let cw = col / 64;
+        let Some(at) = live.iter().position(|&i| bit(&rows[2 * w * i..], col)) else {
+            continue;
+        };
+        let p = live.swap_remove(at);
+        prow.copy_from_slice(&rows[2 * w * p..2 * w * (p + 1)]);
+        for &i in &live {
+            let row = &mut rows[2 * w * i..2 * w * (i + 1)];
+            if bit(row, col) {
+                for (x, y) in row[cw..].iter_mut().zip(&prow[cw..]) {
+                    *x ^= y;
+                }
+            }
+        }
+    }
+    let r = live.len();
+    if r == 1 {
+        return vec![f.to_vec()];
+    }
+    let mut factors = vec![fb];
+    gf2::trim(&mut factors[0]);
+    'outer: for &i in &live {
+        let mut v = rows[2 * w * i + w..2 * w * (i + 1)].to_vec();
+        gf2::trim(&mut v);
+        if gf2::degree(&v).is_none_or(|d| d == 0) {
+            continue;
+        }
+        for j in 0..factors.len() {
+            let du = gf2::degree(&factors[j]).unwrap_or(0);
+            if du <= 1 {
+                continue;
+            }
+            let g = gf2::gcd(&factors[j], &v);
+            let dg = gf2::degree(&g).unwrap_or(0);
+            if dg > 0 && dg < du {
+                let q = gf2::Div::new(&g).div_rem(&factors[j]).0;
+                factors[j] = g;
+                factors.push(q);
+                if factors.len() == r {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    factors.iter().map(|u| gf2::unpack(u)).collect()
+}
+
 /// The irreducible factors of the monic square-free `f` of degree at least 1 by Berlekamp's
 /// method: the kernel of `Q - I`, `Q` the matrix of the Frobenius map on `F_p[x]/(f)`, has the
 /// dimension `r` of the number of factors, and its elements split `f` by greatest common
@@ -558,6 +731,9 @@ pub(crate) fn berlekamp_squarefree(fp: &Fp, f: &[u64], state: &mut u64) -> Vec<P
     let n = fp.deg(f);
     if n <= 1 {
         return vec![f.to_vec()];
+    }
+    if fp.m.is_two() {
+        return berlekamp_gf2(f);
     }
     let k = fp.k();
     let mf = fp.mf(f);
@@ -806,8 +982,9 @@ pub(crate) fn is_irreducible(fp: &Fp, f: &[u64]) -> bool {
 
 /// The roots of the monic `f` of degree at least 1 with their multiplicities, in increasing
 /// order: for each square-free part, its greatest common divisor with `x^p - x` split into
-/// factors of degree 1; for `p` up to 64 or the degree, every residue tried by synthetic division
-/// instead, each root divided out as often as it divides.
+/// factors of degree 1; for a word `p` up to 64 or the degree, every residue tried by synthetic
+/// division instead, each root divided out as often as it divides. (`ModPolynomial::roots`
+/// takes the primes below 64 to `small_p_roots` first.)
 pub(crate) fn roots(fp: &Fp, f: &[u64]) -> Vec<(Number, u32)> {
     let k = fp.k();
     let mut out: Vec<(Vec<u64>, u32)> = Vec::new();

@@ -118,6 +118,35 @@ And longer ones, `a *= &b` for one pair of operands at a time with room in `a`, 
 - The x86_64 kernels have been tested for correctness under emulation only; their speed has not been measured, nor that of the portable transforms there, which take over from 16,384 limbs: measured on the Apple M4 Max, the same code took 4.67 million cycles against 4.02 million by Toom-4 for a product of 8192 limbs each, and 9.52 million against 11.3 million for 16,384.
 - From 64 bytes to a few KiB, a call moves by a few percent between builds, and some sizes by much more, with where the code and the working memory land: loads that wait for stores to addresses that agree in their low 12 bits, and pairs of limbs that straddle 16 bytes. The layout of the working memory avoids the cases measured, which took up to 2.5 times as long.
 
+## Short products
+
+The high half of the product of two numbers of `n` limbs, or of a square, to within `n − 1` units of its last limb, for about the cost of a whole product of fewer limbs (Mulders, "On short multiplications and divisions", 2000; Hanrot and Zimmermann, "A long note on Mulders' short product", 2004): an internal kernel, which the [powers](pow.md)' REDC by products and the [floating numbers](float.md) take for the high halves they need. With `B = 2^64`, it computes an integer `P` between the sum of the limb products `x_i·y_j·B^(i+j)` with `i + j >= n − 1`, whose low limbs land at position `n − 1` or above, and the whole product `x·y`: so the high half `H = ⌊x·y / B^n⌋` lies between the `n` limbs `A` it gives and `A + n − 1`, never above.
+
+- Below 9 limbs, the whole product or square, by the schoolbook kernels.
+- Below 74 limbs (12 for a square), by rows: the limb products with `i + j >= n − 1` exactly, about half of those of the whole product, and about a quarter of the square's, whose products of two different limbs are taken once and doubled.
+- Beyond, Mulders' method: the top `k` limbs of each operand, about 0.7 of them (0.55 for a square), multiplied whole, and the two short products of the rest of one operand by the top limbs of the other, by the same method, so that `P` stays between the two bounds.
+- From 450 limbs (665 for a square), past the transforms' thresholds on aarch64, the whole product, whose transforms cost about as much as Mulders' parts there.
+
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harness in the repository's `bench/numbers` (its method in `bench/README.md`): a probe that compiles the crate's source, so as to reach the internal kernel, by rustc 1.100 stable in cargo's release profile, against GMP 6.3.0 as Homebrew builds it; the median of 21 samples of at least a millisecond, the contenders alternating sample by sample in one process, after a check of the bound above on 4000 cases. The short product against the crate's whole product and GMP's `mpn_mul_n` and `mpn_sqr`, which compute all `2n` limbs, the products a caller would otherwise take: they do more, so these ratios, the short product's time over theirs, are not counted as wins:
+
+| Limbs | short product | whole product | ratio | GMP `mpn_mul_n` | ratio | short square | whole square | ratio | GMP `mpn_sqr` | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12 | 32 ns | 38 ns | 0.849 | 42 ns | 0.771 | 28 ns | 33 ns | 0.851 | 34 ns | 0.812 |
+| 16 | 51 ns | 66 ns | 0.779 | 75 ns | 0.682 | 41 ns | 53 ns | 0.776 | 61 ns | 0.676 |
+| 24 | 100 ns | 137 ns | 0.735 | 146 ns | 0.687 | 77 ns | 101 ns | 0.760 | 123 ns | 0.619 |
+| 32 | 155 ns | 221 ns | 0.699 | 255 ns | 0.605 | 113 ns | 162 ns | 0.699 | 201 ns | 0.563 |
+| 48 | 316 ns | 443 ns | 0.713 | 471 ns | 0.669 | 215 ns | 329 ns | 0.654 | 407 ns | 0.526 |
+| 64 | 543 ns | 708 ns | 0.766 | 764 ns | 0.713 | 334 ns | 520 ns | 0.642 | 642 ns | 0.517 |
+| 96 | 1.10 µs | 1.41 µs | 0.775 | 1.57 µs | 0.699 | 833 ns | 1.02 µs | 0.815 | 1.19 µs | 0.696 |
+| 128 | 2.12 µs | 2.17 µs | 0.976 | 2.62 µs | 0.811 | 1.42 µs | 1.63 µs | 0.876 | 2.04 µs | 0.688 |
+| 200 | 3.57 µs | 4.58 µs | 0.780 | 5.29 µs | 0.668 | 2.31 µs | 3.20 µs | 0.721 | 4.07 µs | 0.563 |
+| 256 | 5.27 µs | 6.31 µs | 0.834 | 7.90 µs | 0.674 | 3.55 µs | 4.65 µs | 0.764 | 6.09 µs | 0.577 |
+| 360 | 8.84 µs | 9.88 µs | 0.895 | 11.7 µs | 0.754 | 5.72 µs | 7.78 µs | 0.735 | 9.84 µs | 0.577 |
+| 400 | 10.6 µs | 11.2 µs | 0.946 | 13.6 µs | 0.770 | 6.89 µs | 8.65 µs | 0.797 | 11.3 µs | 0.605 |
+| 512 | 13.2 µs | 13.1 µs | 1.001 | 18.9 µs | 0.687 | 10.1 µs | 10.1 µs | 0.995 | 16.0 µs | 0.620 |
+
+The short product takes 0.699 to 0.976 of the whole product's time from 12 to 400 limbs, and the short square 0.642 to 0.876 of the whole square's; at 512 limbs, from the whole product's threshold, the same time (1.001 and 0.995).
+
 ## Examples
 
 Rust usage: `1000 * -1500` is `-1500000`, the bytes `[0x16, 0xE3, 0x60]` with `negative` set:

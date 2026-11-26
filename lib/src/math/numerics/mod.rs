@@ -1,9 +1,9 @@
 //! Numerical methods on `f32` and `f64`: roots, integration, ordinary differential equations,
 //! optimisation, interpolation and differentiation.
 //!
-//! * Roots: the zeros of a function of one real variable — [`bisect`], [`brent`], [`secant`],
-//!   [`newton`] and [`halley`] — and of a system of equations, by Newton's method with a Jacobian
-//!   ([`newton_system`]) and by Broyden's method ([`broyden`]).
+//! * Roots: the zeros of a function of one real variable — [`bisect`], [`brent`], [`toms748`],
+//!   [`secant`], [`newton`] and [`halley`] — and of a system of equations, by Newton's method
+//!   with a Jacobian ([`newton_system`]) and by Broyden's method ([`broyden`]).
 //! * Quadrature: the integral of a function of one real variable, by adaptive Gauss–Kronrod
 //!   quadrature as QUADPACK's QAGS and QAGI do it ([`quad`] on G10–K21, [`quad_g10k21`],
 //!   [`quad_g7k15`]), by Clenshaw–Curtis ([`clenshaw_curtis`]), and by the tanh-sinh double
@@ -76,8 +76,9 @@ pub(crate) mod sealed {
 use crate::math::complex::Float;
 
 /// `f32` or `f64`: the float type of a numerical method's arguments, unknowns and results. On top
-/// of [`Float`] it adds the elementary functions the methods need. The trait is sealed.
-pub trait Real: Float + sealed::Real {
+/// of [`Float`] it adds the elementary functions the methods need, and it is a float the
+/// transforms of [`a::math::fft`](crate::math::fft) are planned for. The trait is sealed.
+pub trait Real: Float + crate::math::fft::FftFloat + sealed::Real {
     /// The sine.
     fn sin(self) -> Self;
     /// The cosine.
@@ -287,7 +288,7 @@ pub use quad::{
 };
 pub use root::{
     RootOptions, bisect, bisect_with, brent, brent_with, halley, halley_with, newton, newton_with,
-    secant, secant_with,
+    secant, secant_with, toms748, toms748_with,
 };
 pub use system::{
     SystemOptions, SystemResult, SystemStop, broyden, broyden_with, broyden_with_jacobian,

@@ -9,7 +9,7 @@
 
 use a::math::numerics::{
     RootOptions, bisect, bisect_with, brent, brent_with, halley, halley_with, newton, newton_with,
-    secant, secant_with,
+    secant, secant_with, toms748, toms748_with,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -2480,4 +2480,213 @@ fn a_root_near_the_origin_is_found_to_its_relative_accuracy() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Algorithm 748 of Alefeld, Potra and Shi
+// ---------------------------------------------------------------------------------------------
+
+/// The functions of the random batteries: ten families with a root at `r`, of slope `s` there.
+fn family(k: usize, r: f64, s: f64) -> Box<dyn Fn(f64) -> f64> {
+    match k {
+        0 => Box::new(move |x| (x - r) * s),
+        1 => Box::new(move |x| {
+            let t = (x - r) * s;
+            t * (t * t + 0.5)
+        }),
+        2 => Box::new(move |x: f64| ((x - r) * s).tanh()),
+        3 => Box::new(move |x: f64| ((x - r) * s).exp() - 1.0),
+        4 => Box::new(move |x| pw((x - r) * s, 3)),
+        5 => Box::new(move |x: f64| ((x - r) * s).abs().sqrt().copysign(x - r)),
+        6 => Box::new(move |x| {
+            let t = (x - r) * s;
+            t / (1.0 + t * t)
+        }),
+        7 => Box::new(move |x| {
+            let t = (x - r) * s;
+            if t < 0.0 { 3.0 * t } else { 0.01 * t }
+        }),
+        8 => Box::new(move |x: f64| ((x - r) * s / 10.5).sin()),
+        _ => Box::new(move |x| pw((x - r) * s, 5) + (x - r) * s * 1e-3),
+    }
+}
+
+#[test]
+fn toms748_answers_the_battery_within_its_tolerance_of_a_sign_change() {
+    // Every bracket of the battery, at the defaults and at SciPy's tolerances: an answer inside
+    // the bracket, within its tolerance of a sign change (by a scan of every float there), within
+    // the bound of 414 evaluations at the defaults and the limit of 512 at SciPy's tolerances. On
+    // the 32 brackets of the problems of Alefeld, Potra and Shi it takes about as many evaluations
+    // as Brent's method (376 against 365 at the defaults, 445 against 425 at SciPy's tolerances,
+    // no more on 21 of them), and on ∛x with its root at zero 5 against 62.
+    for (opts, most) in [
+        (RootOptions::new(), 414),
+        (RootOptions::new().with_xtol(2e-12), 512),
+    ] {
+        let (mut ours, mut brents, mut no_more) = (0, 0, 0);
+        for (name, a, b, f) in battery() {
+            let (lo, hi) = (a.min(b), a.max(b));
+            let n = Cell::new(0);
+            let r = toms748_with(a, b, counted(&*f, &n), &opts)
+                .unwrap_or_else(|| panic!("toms748 {name}: no answer"));
+            assert!((lo..=hi).contains(&r), "{name}: {r} outside the bracket");
+            let tol = opts
+                .tol_at(r)
+                .max((r.abs() * f64::EPSILON).max(f64::MIN_POSITIVE * f64::EPSILON));
+            assert!(
+                sign_change_near(&*f, r, tol, lo, hi),
+                "{name}: {r} is not a root"
+            );
+            assert!(n.get() <= most, "{name}: {} evaluations", n.get());
+            if name.starts_with("aps") {
+                let m = Cell::new(0);
+                brent_with(a, b, counted(&*f, &m), &opts).unwrap();
+                ours += n.get();
+                brents += m.get();
+                no_more += usize::from(n.get() <= m.get());
+            }
+        }
+        assert!(
+            10 * ours <= 11 * brents && no_more >= 18,
+            "toms748 {ours} evaluations against brent {brents}, no more on {no_more}"
+        );
+    }
+    let n = Cell::new(0);
+    let r = toms748(-1.0, 2.0, counted(&|x: f64| x.cbrt(), &n)).unwrap();
+    assert!(
+        r.abs() < 1e-300 && n.get() <= 6,
+        "{r} in {} evaluations",
+        n.get()
+    );
+}
+
+#[test]
+fn toms748_converges_on_every_random_bracket() {
+    // The random battery of the bracketing methods: every call answers, inside its bracket,
+    // within its tolerance of a sign change, within the bound of 414 evaluations. On the smooth
+    // simple roots (linear, tanh, exponential, rational, sine) it averages within a quarter of
+    // Brent's evaluations, on the cubic fewer; at the triple root the interpolation is lost in the
+    // rounding of f near the root, and the iterations end in bisections three evaluations late:
+    // about 134 against bisection's 48 (Brent: 100).
+    let mut rng = Rng(0x0123_4567_89ab_cdef);
+    let n = if cfg!(miri) { 40 } else { 4000 };
+    let mut sums = [[0usize; 2]; 10];
+    let mut worst = 0;
+    for k in 0..n {
+        let fam = k % 10;
+        let scale = 10f64.powf(rng.range(-20.0, 20.0));
+        let r = if k % 7 == 0 {
+            0.0
+        } else {
+            rng.range(-1.0, 1.0) * scale
+        };
+        let (left, right) = (rng.range(0.01, 3.0) * scale, rng.range(0.01, 3.0) * scale);
+        let (a, b) = if k % 2 == 0 {
+            (r - left, r + right)
+        } else {
+            (r + right, r - left)
+        };
+        let s = rng.range(0.1, 10.0) / scale;
+        let f = family(fam, r, s);
+        let (lo, hi) = (a.min(b), a.max(b));
+        let count = Cell::new(0);
+        let x = toms748(a, b, counted(&*f, &count))
+            .unwrap_or_else(|| panic!("case {k}: nothing on [{a}, {b}]"));
+        assert!((lo..=hi).contains(&x), "case {k}");
+        let tol = (RTOL * x.abs()).max(f64::MIN_POSITIVE * f64::EPSILON);
+        assert!(
+            sign_change_near(&*f, x, tol, lo, hi),
+            "case {k}: {x} for {r}"
+        );
+        sums[fam][0] += count.get();
+        worst = worst.max(count.get());
+        let c = Cell::new(0);
+        brent(a, b, counted(&*f, &c)).unwrap();
+        sums[fam][1] += c.get();
+    }
+    assert!(worst <= 414, "toms748: {worst} evaluations");
+    if !cfg!(miri) {
+        for fam in [0, 2, 3, 6, 8] {
+            assert!(
+                4 * sums[fam][0] <= 5 * sums[fam][1],
+                "family {fam}: toms748 {} against brent {}",
+                sums[fam][0],
+                sums[fam][1]
+            );
+        }
+        assert!(sums[1][0] < sums[1][1], "{:?}", sums[1]);
+    }
+}
+
+#[test]
+fn toms748_in_f32_converges_to_f32_tolerance() {
+    let mut rng = Rng(0xfeed_beef_dead_cafe);
+    let n = if cfg!(miri) { 20 } else { 2000 };
+    let tol32 = |x: f32| (4.0 * f32::EPSILON * x.abs()).max(f32::MIN_POSITIVE * f32::EPSILON);
+    for k in 0..n {
+        let scale = 10f64.powf(rng.range(-10.0, 10.0));
+        let r = if k % 5 == 0 {
+            0.0
+        } else {
+            (rng.range(-1.0, 1.0) * scale) as f32
+        };
+        let a = r - (rng.range(0.01, 3.0) * scale) as f32;
+        let b = r + (rng.range(0.01, 3.0) * scale) as f32;
+        let s = (1.0 / scale) as f32;
+        let f = move |x: f32| {
+            let t = (x - r) * s;
+            t * (t * t + 0.5)
+        };
+        let count = Cell::new(0);
+        let x = toms748(b, a, counted(&f, &count)).unwrap();
+        assert!((a..=b).contains(&x));
+        assert!(
+            sign_change_near32(&f, x, tol32(x), a, b),
+            "case {k}: {x} for {r}"
+        );
+        assert!(count.get() <= 203, "case {k}: {} evaluations", count.get());
+    }
+    let x = toms748(1.0f32, 2.0, |x: f32| x * x - 2.0).unwrap();
+    assert!((f64::from(x) - SQRT_2).abs() <= 4.0 * f64::from(f32::EPSILON) * SQRT_2);
+}
+
+#[test]
+fn toms748_keeps_the_rules_of_the_bracketing_methods() {
+    // The ends in either order; a root at an end exactly; no bracket, an end that is not finite,
+    // a NaN and an invalid tolerance give nothing; an infinite value counts by its sign; a pole
+    // only without a tolerance on the value; with one, the value decides.
+    let f = |x: f64| x * x - 2.0;
+    for (a, b) in [(1.0, 2.0), (2.0, 1.0), (0.0, 100.0)] {
+        let r = toms748(a, b, f).unwrap();
+        assert!((r - SQRT_2).abs() <= RTOL * SQRT_2, "{r}");
+    }
+    assert_eq!(toms748(SQRT_2, 2.0, |x: f64| x - SQRT_2), Some(SQRT_2));
+    assert_eq!(toms748(0.0, 1.0, |x: f64| x * x + 1.0), None);
+    assert_eq!(toms748(0.0, f64::INFINITY, |x: f64| x.atan() - 1.0), None);
+    assert_eq!(toms748(f64::NAN, 2.0, f), None);
+    assert_eq!(toms748(0.0, 2.0, |_x: f64| f64::NAN), None);
+    assert_eq!(
+        toms748_with(1.0, 2.0, f, &RootOptions::new().with_xtol(-1.0)),
+        None
+    );
+    assert_eq!(
+        toms748_with(1.0, 2.0, f, &RootOptions::new().with_max_iter(2)),
+        None
+    );
+    let r = toms748(0.0, 2.0, |x: f64| x.ln()).unwrap();
+    assert!((r - 1.0).abs() <= RTOL);
+    let pole = |x: f64| 1.0 / (x - 0.3);
+    assert!((toms748(0.0, 1.0, pole).unwrap() - 0.3).abs() <= 2.0 * RTOL * 0.3);
+    let by_value = RootOptions::new().with_ftol(1e-6);
+    assert_eq!(toms748_with(0.0, 1.0, pole, &by_value), None);
+    let r = toms748_with(1.0, 2.0, f, &RootOptions::new().with_ftol(1e-3)).unwrap();
+    assert!(f(r).abs() <= 1e-3);
+    // A root at zero, where only the count of floats can be halved to a relative tolerance; the
+    // largest bracket there is; and two neighbouring floats.
+    assert!(toms748(-1.0, 2.0, |x: f64| x.cbrt()).unwrap().abs() < 1e-300);
+    let big = toms748(-f64::MAX, f64::MAX, |x: f64| x - 1.0).unwrap();
+    assert!((big - 1.0).abs() <= RTOL);
+    let (lo, hi) = (1.0, 1.0f64.next_up());
+    let r = toms748(lo, hi, |x: f64| if x < hi { -1.0 } else { 1.0 }).unwrap();
+    assert!(r == lo || r == hi);
 }

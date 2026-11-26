@@ -38,6 +38,9 @@ mod arith;
 mod cmp;
 mod convert;
 mod iter;
+mod lehmer;
+mod mixed;
+mod power;
 mod round;
 mod sequences;
 mod small;
@@ -94,6 +97,16 @@ struct Big {
     num: Number,
     /// The denominator: positive and prime to the numerator.
     den: Number,
+}
+
+impl Big {
+    /// The absolute value, in new vectors.
+    #[inline(never)]
+    fn abs(&self) -> Rational {
+        let mut num = self.num.clone();
+        num.negative = false;
+        Rational::big(num, self.den.clone())
+    }
 }
 
 /// A rational in words.
@@ -154,6 +167,34 @@ impl Clone for Rational {
                     den: b.den.clone(),
                 }),
             },
+        }
+    }
+
+    /// Copies `source` into `self`, in the vectors of `self` when both are long: a copy made
+    /// again and again into one rational allocates only when it grows.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::rational::Rational;
+    ///
+    /// let a: Rational = "123456789012345678901234567890/7".parse().unwrap();
+    /// let mut b: Rational = "98765432109876543210987654321/11".parse().unwrap();
+    /// b.clone_from(&a);
+    /// assert_eq!(b, a);
+    /// ```
+    #[inline]
+    fn clone_from(&mut self, source: &Rational) {
+        match (&mut self.repr, &source.repr) {
+            (Repr::Big(t), Repr::Big(s)) => {
+                t.num.value.clone_from(&s.num.value);
+                t.num.negative = s.num.negative;
+                t.num.byte_order = s.num.byte_order;
+                t.den.value.clone_from(&s.den.value);
+                t.den.negative = s.den.negative;
+                t.den.byte_order = s.den.byte_order;
+            }
+            _ => *self = source.clone(),
         }
     }
 }
@@ -299,7 +340,11 @@ impl Rational {
     pub fn is_integer(&self) -> bool {
         match &self.repr {
             Repr::Word(w) => w.den == 1,
-            Repr::Big(b) => is_one(&b.den),
+            // A denominator of one byte is its value; a longer vector is read by `is_one`.
+            Repr::Big(b) => match b.den.value.as_slice() {
+                [d] => *d == 1,
+                _ => is_one(&b.den),
+            },
         }
     }
 
@@ -312,18 +357,16 @@ impl Rational {
     ///
     /// assert_eq!((Rational::from(-3) / 4u32).abs().to_string(), "3/4");
     /// ```
+    #[inline]
     pub fn abs(&self) -> Rational {
         match &self.repr {
             Repr::Word(w) => Rational::from_word(false, w.num, w.den, w.order),
-            Repr::Big(b) => {
-                let mut num = b.num.clone();
-                num.negative = false;
-                Rational::big(num, b.den.clone())
-            }
+            Repr::Big(b) => b.abs(),
         }
     }
 
     /// `-1`, `0` or `1`, as the number is below zero, zero or above it, in its byte order.
+    #[inline]
     pub fn signum(&self) -> Rational {
         let order = self.byte_order();
         let m = u64::from(!self.is_zero());
@@ -344,6 +387,7 @@ impl Rational {
     /// let r = Rational::from(-3) / 4u32;
     /// assert_eq!(r.recip().to_string(), "-4/3");
     /// ```
+    #[inline]
     #[track_caller]
     pub fn recip(&self) -> Rational {
         if let Repr::Word(w) = &self.repr
@@ -395,6 +439,11 @@ impl Rational {
                 if short(bn) && short(bd) {
                     let (n, d) = (w.num.wrapping_pow(k), w.den.wrapping_pow(k));
                     Rational::from_word(negative, n, d, w.order)
+                } else if let Some(r) = (k <= power::MAX_EXP)
+                    .then(|| power::powers(negative, w.num.into(), w.den.into(), k, w.order))
+                    .flatten()
+                {
+                    r
                 } else {
                     // Straight from the words when the powers take up to 512 bits.
                     let power = |m: u64, negative: bool| {
@@ -410,7 +459,19 @@ impl Rational {
                     }
                 }
             }
-            Repr::Big(b) => Rational::from_reduced(b.num.pow(k), b.den.pow(k)),
+            Repr::Big(b) => {
+                let (x, y) = (Magnitude::of(&b.num), Magnitude::of(&b.den));
+                let wide = x.bytes.len() <= 16 && y.bytes.len() <= 16;
+                let negative = x.negative && k % 2 == 1;
+                if let Some(r) = (wide && (2..=power::MAX_EXP).contains(&k))
+                    .then(|| power::powers(negative, x.small(), y.small(), k, b.num.byte_order))
+                    .flatten()
+                {
+                    r
+                } else {
+                    Rational::from_reduced(b.num.pow(k), b.den.pow(k))
+                }
+            }
         };
         if exp < 0 { r.into_recip() } else { r }
     }

@@ -164,6 +164,7 @@ fn m_prime(m: f64) -> (Dd, Dd) {
 }
 
 /// `K(m)` of a finite `m < 1`, as a double-double (about 0.6 ulp).
+#[inline]
 pub(super) fn k_dd(m: f64) -> Dd {
     if m >= 0.8 {
         let m1 = 1.0 - m;
@@ -192,6 +193,7 @@ pub(super) fn k_dd_at(m: f64, dm: f64) -> Dd {
 }
 
 /// `E(m)` of a finite `m ≤ 1`, as a double-double.
+#[inline]
 fn e_dd(m: f64) -> Dd {
     if m >= 0.8 {
         let m1 = 1.0 - m;
@@ -215,6 +217,7 @@ fn e_dd(m: f64) -> Dd {
 }
 
 /// `K(m)` of an `f64`.
+#[inline]
 pub(crate) fn ellip_k_f64(m: f64) -> f64 {
     if m.is_nan() || m > 1.0 {
         return f64::NAN;
@@ -229,6 +232,7 @@ pub(crate) fn ellip_k_f64(m: f64) -> f64 {
 }
 
 /// `E(m)` of an `f64`.
+#[inline]
 pub(crate) fn ellip_e_f64(m: f64) -> f64 {
     if m.is_nan() || m > 1.0 {
         return f64::NAN;
@@ -956,6 +960,7 @@ pub(crate) fn carlson_rj_f64(x: f64, y: f64, z: f64, p: f64) -> f64 {
 }
 
 /// `R_C(x, y)` of `f64`s.
+#[inline]
 pub(crate) fn carlson_rc_f64(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() || x < 0.0 {
         return f64::NAN;

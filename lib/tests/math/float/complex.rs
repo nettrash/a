@@ -5,7 +5,9 @@
 //! parts of products, quotients, norms and absolute values against the exact rationals rounded
 //! by integers, at random precisions up to 10^4 bits.
 
-use super::common::{MODES, below, float, mode, one, pow2, rational, reference, same, size};
+use super::common::{
+    MODES, below, float, low_bits, mode, one, pow2, rational, reference, same, size, sqrt_mod_pow2,
+};
 use a::math::float::{BigComplex, BigFloat, Round};
 use a::math::numbers::{ByteOrder, Number};
 use a::math::rational::Rational;
@@ -340,6 +342,86 @@ pub(super) fn sqrt_reference(q: &Rational, prec: u64, round: Round) -> (BigFloat
         (&(&root << 1usize) + &one(), h + t + 1)
     };
     reference(&Rational::new(m, pow2(k)), prec, round)
+}
+
+/// Products, squares and norms of parts of the result's precision from 450 to 8,200 bits (the
+/// short products of the operands padded with two limbs, rounded by the window), into new numbers
+/// and existing ones, every mode, part by part against the exact rationals: random parts, and
+/// parts whose terms cancel nearly (`a·c` within a few units of `b·d`), which the window must
+/// leave to the exact products.
+#[test]
+fn long_products_squares_and_norms_round_part_by_part() {
+    let mut s = 0x5EED_C0DE_7000_0011u64;
+    for i in 0..size(160, 4) {
+        let prec = 64 * (8 + below(&mut s, if i % 2 == 0 { 120 } else { 40 })) - below(&mut s, 64);
+        let full = |s: &mut u64| {
+            let m = super::common::mantissa(s, prec);
+            let m = if super::common::xorshift(s) & 1 == 1 {
+                -m
+            } else {
+                m
+            };
+            BigFloat::from_parts(
+                &m,
+                below(s, 9) as i64 - 4 - prec as i64,
+                prec,
+                Round::Nearest,
+            )
+            .0
+        };
+        let (a, b, c) = (full(&mut s), full(&mut s), full(&mut s));
+        // `d` near `a·c/b` at the precision: `b·d` within a few units of `a·c`.
+        let d = if i % 3 == 0 {
+            a.mul_round(&c, prec, Round::Nearest)
+                .0
+                .div_round(&b, prec, Round::Nearest)
+                .0
+        } else {
+            full(&mut s)
+        };
+        let (z, w) = (
+            BigComplex::new(a.clone(), b.clone()),
+            BigComplex::new(c.clone(), d.clone()),
+        );
+        let (ra, rb, rc, rd) = (rational(&a), rational(&b), rational(&c), rational(&d));
+        for round in MODES {
+            let what = format!("{prec} bits {round:?}");
+            let (p, (o1, o2)) = z.mul_round(&w, prec, round);
+            part(
+                (p.re().clone(), o1),
+                &(&ra * &rc - &rb * &rd),
+                prec,
+                round,
+                &what,
+            );
+            part(
+                (p.im().clone(), o2),
+                &(&ra * &rd + &rb * &rc),
+                prec,
+                round,
+                &what,
+            );
+            let mut q = BigComplex::zero(prec);
+            let (o1, o2) = q.set_sqr(&z, round);
+            part(
+                (q.re().clone(), o1),
+                &(&ra * &ra - &rb * &rb),
+                prec,
+                round,
+                &what,
+            );
+            part(
+                (q.im().clone(), o2),
+                &(Rational::from(2) * &ra * &rb),
+                prec,
+                round,
+                &what,
+            );
+            let mut r = BigFloat::zero(prec);
+            let o = r.set_complex_norm(&z, round);
+            part((r, o), &(&ra * &ra + &rb * &rb), prec, round, &what);
+        }
+    }
 }
 
 #[test]
@@ -1705,4 +1787,128 @@ fn roots_of_real_parts_astronomically_below_the_imaginary_end_and_round() {
             &format!("im of {what}"),
         );
     }
+}
+
+/// Squares and norms of parts of `n` limbs, on both sides of the short products' thresholds
+/// (padded to `n + 2` limbs: short from 27 to 399), whose real parts and norms lie a few units of
+/// the window's last bit `2^lo` (`lo = -prec - 67`) from a number of the precision or a point
+/// halfway. At `prec = 64n` the last place of `a²` (`a` of `64n` bits in `[1/2, 1)`) is its bit
+/// `64n - 1`, which `a ≡ √T (mod 2^(64n-1))` (Newton's iteration on the 2-adic square root, the
+/// top bit set) leaves free while its bits from `lo` up to it are `T`'s: zeros, or the point
+/// halfway, over random bits, or a unit of `2^lo` below them (where the cuts of `a²` and `b²`
+/// together pass the boundary); a sparse `a = 2^(64n-1) + c·2^(32n+31) + 2^u (+ 2^(32n-1+s))` of
+/// `prec = 64n - 2s` bits (`u = 2s`, `c` of 20 bits) does the same at other precisions. `b` of
+/// `prec` bits with `b² ≈ 2^(lo + δ)`, `δ` from -4 to 6, puts `a² + b²` just above and `a² - b²`
+/// just below: the window decides, or leaves it to the exact products. Both orders of the parts,
+/// every mode, part by part against the exact rationals.
+#[test]
+fn squares_and_norms_next_to_a_boundary_round_part_by_part() {
+    let mut s = 0x5EED_C0DE_7000_0013u64;
+    let one = one();
+    // Under Miri one size, the first that the short products take, and fewer cases.
+    let edges: &[u64] = if cfg!(miri) {
+        &[25]
+    } else {
+        &[23, 24, 25, 26, 47, 120, 397, 398]
+    };
+    let mut checked = 0;
+    for &n in edges {
+        // Fewer cases at the upper edge, where the exact rationals cost the most.
+        let wide = n < 300 && !cfg!(miri);
+        let halves: &[u64] = if wide {
+            &[0, 1, 13, 31]
+        } else {
+            &[0, 31][..size(2, 1)]
+        };
+        let ds: &[i64] = if wide {
+            &[-4, -2, -1, 0, 1, 2, 3, 4, 6]
+        } else {
+            &[-2, 0, 1, 3]
+        };
+        for &half in halves {
+            let prec = 64 * n - 2 * half;
+            // Sparse (just above), or dense just above or a unit of `2^lo` below.
+            let kinds = [(false, false, false), (true, false, false)];
+            let dense_kinds = [
+                (false, true, false),
+                (true, true, false),
+                (false, true, true),
+                (true, true, true),
+            ];
+            let kinds = if half == 0 {
+                [&kinds[..], &dense_kinds[..]].concat()
+            } else {
+                kinds.to_vec()
+            };
+            for (mid, dense, under) in kinds {
+                let am = if dense {
+                    let k = 64 * n - 1;
+                    let lo = 64 * n - 67;
+                    let m = &one << k as usize;
+                    loop {
+                        // `T`: random below `2^lo`, `≡ 1 (mod 8)`, over zeros (or ones, a unit
+                        // below) up to bit `64n - 2`, which is set for the point halfway.
+                        let r = low_bits(&super::common::mantissa(&mut s, lo), lo);
+                        let mut t = &(&(&r >> 3usize) << 3usize) + &one;
+                        if mid {
+                            t = &t + &(&one << (k - 1) as usize);
+                        }
+                        if under {
+                            t = (&t - &(&one << lo as usize)).rem_euclid(&m);
+                        }
+                        let a = &sqrt_mod_pow2(&t, k) + &(&one << k as usize);
+                        if (&a * &a).bits() == 128 * n - 1 {
+                            break a;
+                        }
+                    }
+                } else {
+                    // `c` short: `2c·2^(32n+31)·2^u` lies far below `2^lo`.
+                    let c = super::common::mantissa(&mut s, 20);
+                    let mut am = &(&(&one << (64 * n - 1) as usize)
+                        + &(&c << (32 * n + 31) as usize))
+                        + &(&one << (2 * half) as usize);
+                    if mid {
+                        am = &am + &(&one << (32 * n - 1 + half) as usize);
+                    }
+                    am
+                };
+                let (a, o) = BigFloat::from_parts(&am, -(64 * n as i64), prec, Round::Nearest);
+                assert_eq!(o, Ordering::Equal);
+                for &d in ds {
+                    // `b` in `[2^(eb-1), 2^eb)`, `b² ≈ 2^(lo + d)`; odd, so its last limb is not
+                    // zero.
+                    let eb = (-(prec as i64) - 67 + d).div_euclid(2) + 1;
+                    let bm = super::common::mantissa(&mut s, prec);
+                    let bm = &(&(&bm >> 1usize) << 1usize) + &one;
+                    let (b, o) = BigFloat::from_parts(&bm, eb - prec as i64, prec, Round::Nearest);
+                    assert_eq!(o, Ordering::Equal);
+                    let (ra, rb) = (rational(&a), rational(&b));
+                    for (x, y, rx, ry) in [(&a, &b, &ra, &rb), (&b, &a, &rb, &ra)] {
+                        let z = BigComplex::new(x.clone(), y.clone());
+                        let (re, im) = (rx * rx - ry * ry, Rational::from(2) * rx * ry);
+                        let norm = rx * rx + ry * ry;
+                        for round in MODES {
+                            let what = format!(
+                                "{n} limbs at {prec}, {mid} {dense} {under}, {d} {round:?}"
+                            );
+                            let (q, (o1, o2)) = z.sqr_round(prec, round);
+                            part((q.re().clone(), o1), &re, prec, round, &what);
+                            part((q.im().clone(), o2), &im, prec, round, &what);
+                            let mut w = BigComplex::zero(prec);
+                            let (o1, o2) = w.set_sqr(&z, round);
+                            part((w.re().clone(), o1), &re, prec, round, &what);
+                            part((w.im().clone(), o2), &im, prec, round, &what);
+                            let mut r = BigFloat::zero(prec);
+                            let o = r.set_complex_norm(&z, round);
+                            part((r, o), &norm, prec, round, &what);
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Six sizes of 12 kinds of `a` (6 at half 0, 2 at the others), 9 offsets, 2 orders and 4
+    // modes; two of 8 kinds, 4 offsets; under Miri 6 kinds, 4 offsets.
+    assert_eq!(checked, size(6 * 12 * 9 * 8 + 2 * 8 * 4 * 8, 6 * 4 * 8));
 }

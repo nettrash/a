@@ -55,10 +55,12 @@ pub struct DenseStep<T> {
     t1: T,
     /// The number of components of the state.
     n: usize,
-    /// The nodes of the Newton form, in units of `θ`: one fewer than there are coefficients.
-    nodes: Vec<T>,
-    /// The coefficients `c₀ … cₖ`, each of `n` numbers, one after the other.
-    coefficients: Vec<T>,
+    /// The number of nodes `k` of the Newton form, in units of `θ`: one fewer than there are
+    /// coefficients.
+    degree: usize,
+    /// The `k` nodes, then the coefficients `c₀ … cₖ`, each of `n` numbers, one after the other:
+    /// one allocation, so that a step's polynomial is one place in memory.
+    data: Vec<T>,
 }
 
 impl<T: Real> Default for DenseStep<T> {
@@ -86,8 +88,8 @@ impl<T: Real> DenseStep<T> {
             t0: T::ZERO,
             t1: T::ZERO,
             n: 0,
-            nodes: Vec::new(),
-            coefficients: Vec::new(),
+            degree: 0,
+            data: Vec::new(),
         }
     }
 
@@ -111,10 +113,11 @@ impl<T: Real> DenseStep<T> {
         self.t0 = t0;
         self.t1 = t1;
         self.n = n;
-        self.nodes.clear();
-        self.nodes.extend_from_slice(nodes);
-        self.coefficients.clear();
-        self.coefficients.resize(n * (nodes.len() + 1), T::ZERO);
+        self.degree = nodes.len();
+        self.data.clear();
+        self.data.extend_from_slice(nodes);
+        self.data
+            .resize(nodes.len() + n * (nodes.len() + 1), T::ZERO);
     }
 
     /// The time the step starts at.
@@ -134,12 +137,12 @@ impl<T: Real> DenseStep<T> {
 
     /// The degree of the polynomial: the number of its nodes.
     pub fn degree(&self) -> usize {
-        self.nodes.len()
+        self.degree
     }
 
     /// The nodes of the Newton form, in units of `θ`.
     pub fn nodes(&self) -> &[T] {
-        &self.nodes
+        &self.data[..self.degree]
     }
 
     /// The coefficient `cₖ`, one number for each component of the state.
@@ -149,8 +152,9 @@ impl<T: Real> DenseStep<T> {
     /// Panics if `k` is above the degree.
     #[track_caller]
     pub fn coefficient(&self, k: usize) -> &[T] {
-        assert!(k <= self.nodes.len(), "the coefficient is above the degree");
-        &self.coefficients[k * self.n..(k + 1) * self.n]
+        assert!(k <= self.degree, "the coefficient is above the degree");
+        let start = self.degree + k * self.n;
+        &self.data[start..start + self.n]
     }
 
     /// The coefficient `cₖ`, to write.
@@ -160,8 +164,9 @@ impl<T: Real> DenseStep<T> {
     /// Panics if `k` is above the degree.
     #[track_caller]
     pub fn coefficient_mut(&mut self, k: usize) -> &mut [T] {
-        assert!(k <= self.nodes.len(), "the coefficient is above the degree");
-        &mut self.coefficients[k * self.n..(k + 1) * self.n]
+        assert!(k <= self.degree, "the coefficient is above the degree");
+        let start = self.degree + k * self.n;
+        &mut self.data[start..start + self.n]
     }
 
     /// The polynomial at the time `t`, as a column.
@@ -226,16 +231,45 @@ impl<T: Real> DenseStep<T> {
         } else {
             (t - self.t0) / h
         };
-        // Horner's rule on the Newton form, from the innermost coefficient outwards.
-        let k = self.nodes.len();
-        out.copy_from_slice(&self.coefficients[k * n..(k + 1) * n]);
-        for j in (0..k).rev() {
-            let factor = theta - self.nodes[j];
-            let c = &self.coefficients[j * n..(j + 1) * n];
-            for (o, &cj) in out.iter_mut().zip(c) {
-                *o = cj + factor * *o;
+        // Horner's rule on the Newton form, from the innermost coefficient outwards. The degrees
+        // of the methods here (4 for DOPRI5, 7 for DOP853, 3 for RK4 and RADAU IIA) are unrolled,
+        // a component at a time; each component sees the same operations in the same order.
+        let k = self.degree;
+        let (nodes, coefficients) = self.data.split_at(k);
+        match k {
+            3 => horner::<T, 3>(theta, nodes, coefficients, n, out),
+            4 => horner::<T, 4>(theta, nodes, coefficients, n, out),
+            7 => horner::<T, 7>(theta, nodes, coefficients, n, out),
+            _ => {
+                out.copy_from_slice(&coefficients[k * n..(k + 1) * n]);
+                for j in (0..k).rev() {
+                    let factor = theta - nodes[j];
+                    let c = &coefficients[j * n..(j + 1) * n];
+                    for (o, &cj) in out.iter_mut().zip(c) {
+                        *o = cj + factor * *o;
+                    }
+                }
             }
         }
+    }
+}
+
+/// The Newton form of degree `K` at `theta`, component by component: `c_K`, then
+/// `c_j + (θ − node_j)·(…)` for `j = K − 1, …, 0`, as [`DenseStep::eval_into`] forms it.
+#[inline(always)]
+fn horner<T: Real, const K: usize>(theta: T, nodes: &[T], c: &[T], n: usize, out: &mut [T]) {
+    let nodes: &[T; K] = nodes.try_into().expect("the nodes of the degree");
+    let mut factor = [T::ZERO; K];
+    for (f, &node) in factor.iter_mut().zip(nodes) {
+        *f = theta - node;
+    }
+    let c = &c[..(K + 1) * n];
+    for (r, o) in out.iter_mut().enumerate() {
+        let mut v = c[K * n + r];
+        for j in (0..K).rev() {
+            v = c[j * n + r] + factor[j] * v;
+        }
+        *o = v;
     }
 }
 
@@ -285,6 +319,9 @@ pub struct DenseOutput<T> {
     initial: Vec<T>,
     /// The steps, in the order they were taken.
     steps: Vec<DenseStep<T>>,
+    /// The end of each step, beside the steps, so that the search for the step of a time reads a
+    /// compact array rather than one field of each step.
+    ends: Vec<T>,
 }
 
 impl<T: Real> DenseOutput<T> {
@@ -296,12 +333,14 @@ impl<T: Real> DenseOutput<T> {
             end: start,
             initial: initial.to_vec(),
             steps: Vec::new(),
+            ends: Vec::new(),
         }
     }
 
     /// Adds the next step of the integration.
     pub(super) fn push(&mut self, step: DenseStep<T>) {
         self.end = step.t1();
+        self.ends.push(step.t1());
         self.steps.push(step);
     }
 
@@ -392,13 +431,11 @@ impl<T: Real> DenseOutput<T> {
             return true;
         }
         // The first step that does not end before `t`, in the direction of the integration.
-        let found = self.steps.partition_point(|step| {
-            if ascending {
-                step.t1() < t
-            } else {
-                step.t1() > t
-            }
-        });
+        let found = if ascending {
+            self.ends.partition_point(|&end| end < t)
+        } else {
+            self.ends.partition_point(|&end| end > t)
+        };
         self.steps[found.min(self.steps.len() - 1)].eval_into(t, out);
         true
     }

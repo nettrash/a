@@ -15,7 +15,7 @@
 //! normalized `n 2^s` with its reciprocal, the constants taken times `2^s` so that the sum needs
 //! no shift.
 //!
-//! The transforms are cyclic: [`mul_cyclic`] gives the product modulo `x^(2^k) - 1` for operands
+//! The transforms are cyclic: [`mul_cyclic_range`] gives the product modulo `x^(2^k) - 1` for operands
 //! of up to `2^k` coefficients, for the divisions that know the coefficients that wrap around.
 //!
 //! Polynomials over the integers of coefficients of at most 112 bits ([`mul_int`]) take the same
@@ -29,6 +29,37 @@ use super::{
     Lanes, MAX_K, MIN_K, PRIME_DATA, PRIMES, V, barrett, centred, finish, forward, inverse,
     pointwise, pow_mod, split, twiddles,
 };
+
+/// Up to transforms of `2^TWIDDLE_K` points, the twiddles of a prime are read from a table built
+/// once for it, of `2^(TWIDDLE_K + 1)` values (128 KiB): the table of `2^k` points begins with the
+/// one of `2^(k-1)`, for the roots as for their inverses, so every shorter transform takes its
+/// beginning. Longer transforms build their own, a small part of their work.
+// Measured on an Apple M4 Max (sweep 10..=16, moduli of 16, 32 and 62 bits): building the twiddles
+// took 5 to 8 % of a product's time at every length from 2^7 to 2^16 points, so that a table to
+// 2^16 points made the products of 2^15 and 2^16 points 0.94 to 0.97 of their time; but the first
+// product of a process builds the table whatever its length, and a table to 2^16 points took the
+// first product of 200 coefficients in a process from 33-36 µs to 86-102 µs modulo 65,521 and from
+// 63-75 µs to 200-237 µs modulo a prime of 62 bits (the next product 4.5 µs and 8.3 µs), so 14
+// stays.
+const TWIDDLE_K: u32 = 14;
+
+/// The tables of [`TWIDDLE_K`], built at the first product that takes each prime.
+static TWIDDLE_TABLES: [std::sync::OnceLock<Box<[i32]>>; 8] =
+    [const { std::sync::OnceLock::new() }; 8];
+
+/// The roots and the inverse roots of the prime `i` for transforms of `2^k <= 2^TWIDDLE_K`
+/// points.
+fn cached_twiddles(i: usize) -> (*const i32, *const i32) {
+    let table = TWIDDLE_TABLES[i].get_or_init(|| {
+        let mut t = vec![0i32; 2 << TWIDDLE_K].into_boxed_slice();
+        // SAFETY: the table holds `2^(TWIDDLE_K + 1)` values, `MIN_K <= TWIDDLE_K`.
+        unsafe { twiddles::<V>(t.as_mut_ptr(), TWIDDLE_K, &PRIME_DATA[i]) };
+        t
+    });
+    let fw = table.as_ptr();
+    // SAFETY: the inverses start at `2^TWIDDLE_K`, inside the table.
+    (fw, unsafe { fw.add(1 << TWIDDLE_K) })
+}
 
 /// The most coefficients of a product the transforms take: `2^21`.
 pub(crate) const MAX_LEN: usize = 1 << MAX_K;
@@ -124,6 +155,13 @@ unsafe fn digits(d: *mut i32, stride: usize, x: &[u64], dn: usize, b: usize) {
 /// `b` is empty, a square) modulo `n`, all coefficients below `n`, by the plan `p` of
 /// [`plan`]`(a.len(), b.len(), bits(n))`.
 ///
+/// A product whose length passes a power of two `2^j` by at most a quarter of it, `len - 2^j =
+/// d <= 2^(j-2)`, with both operands of at most `2^j` coefficients, takes the transforms of
+/// `2^j` points instead of `2^(j+1)`: the product modulo `x^(2^j) - 1` ([`mul_cyclic_range`]) holds
+/// `c_i + c_(i + 2^j)` at `i < d` and `c_i` above, and the low `d` coefficients `c_i`, which only
+/// the low `d` coefficients of the operands make, come from their product of `2 d - 1`
+/// coefficients, at most `2^(j-1)`: about three quarters of the transforms' work.
+///
 /// # Panics
 ///
 /// Panics if `r` is not as long as the product, or `a` is empty.
@@ -131,7 +169,93 @@ pub(crate) fn mul(r: &mut [u64], a: &[u64], b: &[u64], n: u64, p: Plan) {
     let (la, lb, square) = (a.len(), b.len(), b.is_empty());
     let len = if square { 2 * la - 1 } else { la + lb - 1 };
     assert!(la >= 1 && r.len() == len && len <= 1 << p.k);
+    if p.k > MIN_K {
+        let half = 1usize << (p.k - 1);
+        let d = len - half.min(len);
+        if d > 0 && d <= half / WRAP_SHARE && la <= half && lb <= half {
+            wrapped(r, a, b, n, Plan { k: p.k - 1, ..p }, d);
+            return;
+        }
+    }
     convolve(r, a, b, n, p, 0);
+}
+
+/// A product wraps around a transform of half the length when it passes it by at most this share
+/// of it, `1 / WRAP_SHARE` ([`mul`]).
+// Measured on an Apple M4 Max (sweep 2..=8, products of `2^j + d` coefficients for j = 7 to 16,
+// moduli of 16 and 62 bits, against the transforms of `2^(j+1)` points): wrapped around, they took
+// 0.73 to 0.97 of the time for `d` up to a quarter of `2^j`, 0.79 to 1.03 at 0.28 of it, 0.83 to
+// 1.10 at 0.3, 0.91 to 1.14 at a third (the share 3) and 0.95 to 1.36 from 0.4 on.
+const WRAP_SHARE: usize = 4;
+
+/// Below this many coefficients, the low product of [`wrapped`] is the schoolbook one.
+// Measured on an Apple M4 Max in products of `2^10 + d` coefficients (sweep 16..=256): with the
+// low product by the schoolbook they took 0.95 to 0.97 of their time by the transforms for `d`
+// from 16 to 44 modulo 65,521, 0.98 to 1.00 from 48 to 54 and 1.01 to 1.04 from 56 to 60, and the
+// schoolbook stays ahead up to about 56 to 60 coefficients modulo a prime of 32 bits, 64 of 50
+// bits and 90 of 62 bits.
+const WRAP_SCHOOLBOOK: usize = 56;
+
+/// [`mul`] by the transforms of `2^k` points of the plan `p` for a product of `2^k + d`
+/// coefficients, as [`mul`] describes.
+fn wrapped(r: &mut [u64], a: &[u64], b: &[u64], n: u64, p: Plan, d: usize) {
+    let l = 1usize << p.k;
+    let square = b.is_empty();
+    convolve(&mut r[..l], a, b, n, p, 0);
+    // The low `d` coefficients of the product: of the operands' low `d` coefficients alone.
+    let (al, bl) = (
+        &a[..d.min(a.len())],
+        if square {
+            &[][..]
+        } else {
+            &b[..d.min(b.len())]
+        },
+    );
+    let low = low_product(al, bl, n, d);
+    for i in 0..d {
+        // c_(i + 2^k) = (c_i + c_(i + 2^k)) - c_i.
+        let w = r[i];
+        r[l + i] = if w >= low[i] {
+            w - low[i]
+        } else {
+            n - (low[i] - w)
+        };
+        r[i] = low[i];
+    }
+}
+
+/// The low `d` coefficients of the product of `a` and `b` (a square when `b` is empty) modulo
+/// `n`, operands of at most `d` coefficients.
+fn low_product(a: &[u64], b: &[u64], n: u64, d: usize) -> Vec<u64> {
+    let square = b.is_empty();
+    let b = if square { a } else { b };
+    let (la, lb) = (a.len(), b.len());
+    let len = la + lb - 1;
+    if la.min(lb) < WRAP_SCHOOLBOOK {
+        // Sums of at most `WRAP_SCHOOLBOOK` products below `n^2`, in 128 bits and a count of the
+        // carries out of them, each worth `2^128 mod n`.
+        let mut out = vec![0u64; d];
+        let nn = u128::from(n);
+        let wrap = (u128::MAX % nn + 1) % nn;
+        for (i, o) in out.iter_mut().enumerate() {
+            let (mut acc, mut carries) = (0u128, 0u128);
+            let lo = i.saturating_sub(lb - 1);
+            for j in lo..=i.min(la - 1) {
+                let (s, over) = acc.overflowing_add(u128::from(a[j]) * u128::from(b[i - j]));
+                acc = s;
+                carries += u128::from(over);
+            }
+            *o = ((acc % nn + carries * wrap) % nn) as u64;
+        }
+        return out;
+    }
+    let bits = 64 - n.leading_zeros();
+    let plan = plan(la, if square { 0 } else { lb }, bits).expect("within the transforms");
+    let mut full = vec![0u64; len];
+    mul(&mut full, a, if square { &[] } else { b }, n, plan);
+    full.truncate(d);
+    full.resize(d, 0);
+    full
 }
 
 /// The plan of a product modulo `x^(2^k) - 1` of operands of at most `2^k` coefficients, the
@@ -153,22 +277,11 @@ pub(crate) fn plan_cyclic(m: usize, k: u32, bits: u32) -> Option<Plan> {
     })
 }
 
-/// Sets the `2^k` coefficients `r` to the product of `a` and `b` (of `a` and `a` when `b` is
-/// empty) modulo `x^(2^k) - 1` and `n`, for operands of at most `2^k` coefficients and the plan
-/// `p` of [`plan_cyclic`]: the transforms' cyclic convolution as it is, every coefficient past
-/// the `2^k`-th wrapped around to the bottom.
-///
-/// # Panics
-///
-/// Panics if `r` does not have `2^k` coefficients, `a` is empty, or an operand is longer.
-pub(crate) fn mul_cyclic(r: &mut [u64], a: &[u64], b: &[u64], n: u64, p: Plan) {
-    let l = 1usize << p.k;
-    assert!(!a.is_empty() && a.len() <= l && b.len() <= l && r.len() == l);
-    convolve(r, a, b, n, p, 0);
-}
-
-/// Sets `r` to the coefficients `lo..lo + r.len()` of the product modulo `x^(2^k) - 1` of
-/// [`mul_cyclic`], the Chinese remainder theorem taken for those alone (a middle product).
+/// Sets `r` to the coefficients `lo..lo + r.len()` of the product of `a` and `b` (of `a` and `a`
+/// when `b` is empty) modulo `x^(2^k) - 1` and `n`, for operands of at most `2^k` coefficients and
+/// the plan `p` of [`plan_cyclic`] — the transforms' cyclic convolution as it is, every
+/// coefficient past the `2^k`-th wrapped around to the bottom — the Chinese remainder theorem
+/// taken for those coefficients alone (a middle product; `lo = 0` and `2^k` of them for the whole).
 ///
 /// # Panics
 ///
@@ -179,7 +292,39 @@ pub(crate) fn mul_cyclic_range(r: &mut [u64], a: &[u64], b: &[u64], n: u64, p: P
     convolve(r, a, b, n, p, lo);
 }
 
-/// The convolution of [`mul`] and [`mul_cyclic`], its coefficients `lo..lo + r.len() <= 2^k`.
+/// Sets `r` to the coefficients `lo..lo + r.len()` of the product of `a` and `b` (of `a` and `a`
+/// when `b` is empty) modulo `n`, by the transforms of the fewest `2^k` points that keep them
+/// exact: at least the operands' lengths and the end of the coefficients asked for inside the
+/// product, `top = min(lo + r.len(), la + lb - 1)` (those past the product are zero, and cost
+/// nothing), and enough that the coefficients past `2^k`, which wrap around to the bottom, land
+/// below `lo`, `la + lb - 1 - 2^k <= lo`. For the middle product of Newton's division, `lo = lb - 1`
+/// and `r.len() = la - lb + 1`, that is a transform of `la` points where the whole product takes
+/// `la + lb`. `None` when that is past the transforms; never when no coefficient asked for is
+/// inside the product (they are all zero).
+///
+/// # Panics
+///
+/// Panics if `a` is empty.
+pub(crate) fn mul_middle(r: &mut [u64], a: &[u64], b: &[u64], n: u64, lo: usize) -> Option<()> {
+    let (la, lb) = (a.len(), b.len());
+    assert!(la >= 1);
+    let lbb = if b.is_empty() { la } else { lb };
+    let len = la + lbb - 1;
+    // The coefficients from `top` on are past the product: zero.
+    let top = lo.saturating_add(r.len()).min(len);
+    if top <= lo {
+        r.fill(0);
+        return Some(());
+    }
+    let need = la.max(lbb).max(top).max(len - lo);
+    let k = (usize::BITS - (need - 1).leading_zeros()).max(MIN_K);
+    let p = plan_cyclic(la.min(lbb), k, 64 - n.leading_zeros())?;
+    r[top - lo..].fill(0);
+    convolve(&mut r[..top - lo], a, b, n, p, lo);
+    Some(())
+}
+
+/// The convolution of [`mul`] and [`mul_cyclic_range`], its coefficients `lo..lo + r.len() <= 2^k`.
 fn convolve(r: &mut [u64], a: &[u64], b: &[u64], n: u64, p: Plan, lo: usize) {
     let (la, lb) = (a.len(), b.len());
     let len = lo + r.len();
@@ -288,19 +433,24 @@ fn residues(
         }
         for (i, data) in PRIME_DATA.iter().enumerate().take(np) {
             let c = V::consts(&data.prime);
-            twiddles::<V>(t, k, data);
+            let (fw, inv) = if k <= TWIDDLE_K {
+                cached_twiddles(i)
+            } else {
+                twiddles::<V>(t, k, data);
+                (t.cast_const(), t.add(l).cast_const())
+            };
             let r_t: [(i32, i32); 4] = core::array::from_fn(|t| data.pow2[t * b_bits]);
             let x = res.add(i * l);
-            split::<V>(x, k, dpa, sa, la, dn, &r_t, t, c);
-            forward::<V>(x, k, t, c);
+            split::<V>(x, k, dpa, sa, la, dn, &r_t, fw, c);
+            forward::<V>(x, k, fw, c);
             if square {
                 pointwise::<V>(x, x, l, c);
             } else {
-                split::<V>(bt, k, dpb, sb, lb, dn, &r_t, t, c);
-                forward::<V>(bt, k, t, c);
+                split::<V>(bt, k, dpb, sb, lb, dn, &r_t, fw, c);
+                forward::<V>(bt, k, fw, c);
                 pointwise::<V>(x, bt, l, c);
             }
-            inverse::<V>(x, k, t.add(l), c);
+            inverse::<V>(x, k, inv, c);
             // 2^32 L^-1 (P / q_i)^-1 mod q_i.
             let q = data.prime.q as u64;
             let rem = PRIMES[..np]
@@ -311,7 +461,7 @@ fn residues(
             let mu = pow_mod(rem, q - 2, q) * ((1u64 << 32) % q) % q;
             let mu = mu * (data.inv2k[k as usize] as i64).rem_euclid(q as i64) as u64 % q;
             let mu = centred(mu, q);
-            finish::<V>(x, k, len, (mu, barrett(mu, q as u32)), t.add(l), c);
+            finish::<V>(x, k, len, (mu, barrett(mu, q as u32)), inv, c);
             // The values past `len` of the row were not written: zero them for the slice.
             for j in len..l {
                 *x.add(j) = 0;
@@ -713,12 +863,17 @@ pub(crate) fn split_transform(b: &[u64], kl: usize, p: &SplitPlan) -> SplitTrans
         }
         for (i, data) in PRIME_DATA.iter().enumerate().take(np) {
             let c = V::consts(&data.prime);
-            twiddles::<V>(tw, k, data);
+            let fw = if k <= TWIDDLE_K {
+                cached_twiddles(i).0
+            } else {
+                twiddles::<V>(tw, k, data);
+                tw.cast_const()
+            };
             let r_t: [(i32, i32); 4] = core::array::from_fn(|t| data.pow2[t * p.b]);
             for s in 0..pc {
                 let x = t.as_mut_ptr().add((i * pc + s) * l);
-                split::<V>(x, k, db.add(s * p.dn * sb), sb, nb, p.dn, &r_t, tw, c);
-                forward::<V>(x, k, tw, c);
+                split::<V>(x, k, db.add(s * p.dn * sb), sb, nb, p.dn, &r_t, fw, c);
+                forward::<V>(x, k, fw, c);
             }
         }
         t.set_len(np * pc * l);
@@ -806,17 +961,22 @@ fn split_core(out: &mut [u64], ow: usize, a: &[u64], kl: usize, other: Other, p:
         let rp = res.as_mut_ptr();
         for (i, data) in PRIME_DATA.iter().enumerate().take(np) {
             let c = V::consts(&data.prime);
-            twiddles::<V>(t, k, data);
+            let (fw, inv) = if k <= TWIDDLE_K {
+                cached_twiddles(i)
+            } else {
+                twiddles::<V>(t, k, data);
+                (t.cast_const(), t.add(l).cast_const())
+            };
             let r_t: [(i32, i32); 4] = core::array::from_fn(|t| data.pow2[t * p.b]);
             for s in 0..fa {
                 let x = wa.add(s * l);
-                split::<V>(x, k, da.add(s * p.dn * sa), sa, la, p.dn, &r_t, t, c);
-                forward::<V>(x, k, t, c);
+                split::<V>(x, k, da.add(s * p.dn * sa), sa, la, p.dn, &r_t, fw, c);
+                forward::<V>(x, k, fw, c);
             }
             for s in 0..fb {
                 let x = wb.add(s * l);
-                split::<V>(x, k, db.add(s * p.dn * sb), sb, lb, p.dn, &r_t, t, c);
-                forward::<V>(x, k, t, c);
+                split::<V>(x, k, db.add(s * p.dn * sb), sb, lb, p.dn, &r_t, fw, c);
+                forward::<V>(x, k, fw, c);
             }
             let bt: *const i32 = match other {
                 Other::Square => wa,
@@ -849,8 +1009,8 @@ fn split_core(out: &mut [u64], ow: usize, a: &[u64], kl: usize, other: Other, p:
                     }
                     acc.reduce(c).store(x.add(j));
                 }
-                inverse::<V>(x, k, t.add(l), c);
-                finish::<V>(x, k, n_out, (mu, barrett(mu, q as u32)), t.add(l), c);
+                inverse::<V>(x, k, inv, c);
+                finish::<V>(x, k, n_out, (mu, barrett(mu, q as u32)), inv, c);
                 for j in n_out..l {
                     *x.add(j) = 0;
                 }

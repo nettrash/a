@@ -32,6 +32,8 @@ pub(crate) trait Blk<T: Float>: Copy {
     unsafe fn st(self, p: *mut Complex<T>);
     /// The zero block.
     fn zero() -> Self;
+    /// The complex conjugate, lane by lane.
+    fn conj(self) -> Self;
     /// `self + b`.
     fn add(self, b: Self) -> Self;
     /// `self − b`.
@@ -44,6 +46,28 @@ pub(crate) trait Blk<T: Float>: Copy {
     fn add_rot<const INV: bool>(self, b: Self) -> Self;
     /// `self − w₄·b`.
     fn sub_rot<const INV: bool>(self, b: Self) -> Self;
+    /// [`add_rot`](Self::add_rot) by the CPU's complex addition where it has one (FCADD): for the
+    /// written-out butterflies only, as inline assembly keeps the compiler from unrolling the
+    /// loops of the others.
+    #[inline(always)]
+    fn add_rot_f<const INV: bool>(self, b: Self) -> Self {
+        self.add_rot::<INV>(b)
+    }
+    /// [`sub_rot`](Self::sub_rot) as [`add_rot_f`](Self::add_rot_f).
+    #[inline(always)]
+    fn sub_rot_f<const INV: bool>(self, b: Self) -> Self {
+        self.sub_rot::<INV>(b)
+    }
+    /// `w₄·self` alone (`zero().add_rot(self)`): a block may do it without the addition.
+    #[inline(always)]
+    fn rot<const INV: bool>(self) -> Self {
+        Self::zero().add_rot::<INV>(self)
+    }
+    /// `−w₄·self` alone (`zero().sub_rot(self)`).
+    #[inline(always)]
+    fn rot_neg<const INV: bool>(self) -> Self {
+        Self::zero().sub_rot::<INV>(self)
+    }
     /// The twiddle at `p` in compact form, the same factor for every lane.
     ///
     /// # Safety
@@ -54,6 +78,11 @@ pub(crate) trait Blk<T: Float>: Copy {
     /// # Safety
     /// `p` must be valid for reading `4K` reals.
     unsafe fn tw_l(p: *const T) -> Self::Tw;
+    /// The twiddle at `p` stored as `[wr, wi]`, the same factor for every lane.
+    ///
+    /// # Safety
+    /// `p` must be valid for reading 2 reals.
+    unsafe fn tw_c(p: *const T) -> Self::Tw;
     /// `self · w` (forward) or `self · conj(w)` (inverse), lane by lane.
     fn mul_tw<const INV: bool>(self, w: Self::Tw) -> Self;
     /// Loads `o[j]` with lane `l` from `p + l·stride + j`, for every `j` and lane `l`.
@@ -89,6 +118,10 @@ impl<T: Float> Blk<T> for Sc<T> {
     #[inline(always)]
     fn zero() -> Self {
         Sc(Complex::ZERO)
+    }
+    #[inline(always)]
+    fn conj(self) -> Self {
+        Sc(Complex::new(self.0.re, T::ZERO - self.0.im))
     }
     #[inline(always)]
     fn add(self, b: Self) -> Self {
@@ -133,6 +166,11 @@ impl<T: Float> Blk<T> for Sc<T> {
     unsafe fn tw_l(p: *const T) -> (T, T) {
         // SAFETY: the caller's contract; one lane, the forms agree.
         unsafe { Self::tw_b(p) }
+    }
+    #[inline(always)]
+    unsafe fn tw_c(p: *const T) -> (T, T) {
+        // SAFETY: the caller's contract.
+        unsafe { (p.read(), p.add(1).read()) }
     }
     #[inline(always)]
     fn mul_tw<const INV: bool>(self, (wr, wi): (T, T)) -> Self {

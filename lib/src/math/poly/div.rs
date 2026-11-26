@@ -4,7 +4,7 @@
 use super::Polynomial;
 use super::basic::trim;
 use super::coeff::Field;
-use crate::math::numbers::Number;
+use crate::math::numbers::{ByteOrder, Number};
 use crate::math::rational::Rational;
 use core::ops::{Div, DivAssign, Rem, RemAssign};
 
@@ -278,8 +278,39 @@ impl Polynomial<Number> {
     /// The content: the greatest common divisor of the coefficients, not negative; 0 for the zero
     /// polynomial.
     pub fn content(&self) -> Number {
-        let mut g = Number::default();
-        for c in &self.c {
+        // In a word while the gcd fits one (from the first coefficient that does): Stein's
+        // algorithm on words, a longer coefficient first reduced modulo the gcd.
+        let mut w = 0u64;
+        let mut i = 0;
+        while i < self.c.len() {
+            let c = &self.c[i];
+            let v = match magnitude_u64(c) {
+                Some(v) => v,
+                None if w != 0 => match magnitude_u64(&(c % w)) {
+                    Some(v) => v,
+                    None => break,
+                },
+                None => break,
+            };
+            // A coefficient the gcd divides, as most are once it has settled, costs one division.
+            w = if w == 0 {
+                v
+            } else {
+                match v % w {
+                    0 => w,
+                    r => gcd_u64(w, r),
+                }
+            };
+            if w == 1 {
+                return Number::from(1u8);
+            }
+            i += 1;
+        }
+        if i == self.c.len() {
+            return Number::from(w);
+        }
+        let mut g = Number::from(w);
+        for c in &self.c[i..] {
             g = g.gcd(c);
             if crate::math::rational::is_one(&g) {
                 break;
@@ -349,6 +380,61 @@ impl From<Polynomial<Number>> for Polynomial<Rational> {
     fn from(p: Polynomial<Number>) -> Self {
         Polynomial {
             c: p.c.into_iter().map(Rational::from).collect(),
+        }
+    }
+}
+
+/// The magnitude of `x` when it fits a word.
+#[inline]
+pub(crate) fn magnitude_u64(x: &Number) -> Option<u64> {
+    let v = &x.value;
+    let mut r = 0u64;
+    let mut seen = 0;
+    match x.byte_order {
+        ByteOrder::LittleEndian => {
+            for (j, &b) in v.iter().enumerate() {
+                if b != 0 {
+                    if j >= 8 {
+                        return None;
+                    }
+                    r |= u64::from(b) << (8 * j);
+                }
+            }
+        }
+        ByteOrder::BigEndian => {
+            for &b in v {
+                if b != 0 || seen > 0 {
+                    seen += 1;
+                    if seen > 8 {
+                        return None;
+                    }
+                    r = (r << 8) | u64::from(b);
+                }
+            }
+        }
+    }
+    Some(r)
+}
+
+/// The greatest common divisor of two words, by Stein's binary algorithm; `gcd(0, v) = v`.
+#[inline]
+pub(crate) fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    if a == 0 {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let s = (a | b).trailing_zeros();
+    a >>= a.trailing_zeros();
+    loop {
+        b >>= b.trailing_zeros();
+        if a > b {
+            core::mem::swap(&mut a, &mut b);
+        }
+        b -= a;
+        if b == 0 {
+            return a << s;
         }
     }
 }

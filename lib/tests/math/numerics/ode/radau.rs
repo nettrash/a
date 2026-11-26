@@ -854,3 +854,48 @@ fn the_stiff_method_works_in_f32() {
     }
     assert_eq!(RadauIia::<f32>::new().order(), 5);
 }
+
+#[test]
+fn a_stiff_step_allocates_nothing_up_to_100_equations() {
+    // A stiff chain of n equations, integrated to t = 1 and to t = 100: what each run allocates
+    // is the setting up (the states, the stages, the Jacobian, the first decompositions), the
+    // same for both, so the steps between — with their Jacobians, decompositions and Newton
+    // solves — allocate nothing. RADAU IIA and BDF alike, past the 32 rows whose row swaps a
+    // decomposition keeps on the stack.
+    use a::math::numerics::Bdf;
+    for n in miri_or(vec![2, 40], vec![2, 40, 100]) {
+        let f = move |_t: f64, y: &Matrix<f64>, dy: &mut Matrix<f64>| {
+            for i in 0..n {
+                let left = if i > 0 { y[(i - 1, 0)] } else { 0.0 };
+                let right = if i + 1 < n { y[(i + 1, 0)] } else { 0.0 };
+                dy[(i, 0)] =
+                    -1000.0 * (i as f64 + 1.0) * y[(i, 0)] + left + right + y[(i, 0)].sin();
+            }
+        };
+        let y0 = Matrix::from_column_major(n, 1, vec![1.0; n]);
+        let o = OdeOptions::new()
+            .with_tolerances(1e-6, 1e-9)
+            .with_dense_output(false);
+        for radau in [true, false] {
+            let run = |t1: f64| {
+                let (r, allocations) = crate::allocations::count(|| {
+                    if radau {
+                        integrate_with(f, &y0, 0.0, t1, RadauIia::new(), &o).unwrap()
+                    } else {
+                        integrate_with(f, &y0, 0.0, t1, Bdf::new(), &o).unwrap()
+                    }
+                });
+                (r.steps, r.nlu, allocations)
+            };
+            let (short, long) = (run(1.0), run(100.0));
+            assert!(
+                long.0 > short.0 && long.1 > short.1,
+                "{n}: {short:?} {long:?}"
+            );
+            assert_eq!(
+                short.2, long.2,
+                "n = {n}, radau {radau}: {short:?} {long:?}"
+            );
+        }
+    }
+}

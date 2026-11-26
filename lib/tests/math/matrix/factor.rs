@@ -256,3 +256,154 @@ fn exact_small_cases() {
     );
     let _ = size(1, 1);
 }
+
+/// Whether two matrices have the same shape and the same elements to the last bit, the signs
+/// of zeros included.
+fn same_bits<T: Num>(a: &Matrix<T>, b: &Matrix<T>) -> bool {
+    a.shape() == b.shape()
+        && a.as_slice().iter().zip(b.as_slice()).all(|(x, y)| {
+            let (x, y) = (x.c64(), y.c64());
+            x.re.to_bits() == y.re.to_bits() && x.im.to_bits() == y.im.to_bits()
+        })
+}
+
+fn solve_into_of<T: Num>() {
+    let mut r = Rng(0x5EED_0011);
+    for n in sizes() {
+        let lu = well_conditioned::<T>(&mut r, n).lu();
+        for cols in [0, 1, 3] {
+            let b = random::<T>(&mut r, n, cols);
+            // Into a matrix holding something else: every element is written, and nothing is
+            // allocated (at most 128 rows and 1,024 elements here).
+            let mut x = random::<T>(&mut r, n, cols);
+            let (solved, allocations) = crate::allocations::count(|| lu.solve_into(&b, &mut x));
+            assert!(solved);
+            assert_eq!(allocations, 0, "{n} rows, {cols} columns");
+            assert!(same_bits(&x, &lu.solve(&b).unwrap()), "{n} {cols}");
+        }
+    }
+    // The edges of what the documentation promises: 16 rows of any width, and 128 rows and
+    // 1,024 elements.
+    for (n, cols) in [(16, 128), (128, 8), (64, 16), (32, 32)] {
+        let lu = well_conditioned::<T>(&mut r, n).lu();
+        let b = random::<T>(&mut r, n, cols);
+        let mut x = random::<T>(&mut r, n, cols);
+        let (solved, allocations) = crate::allocations::count(|| lu.solve_into(&b, &mut x));
+        assert!(
+            solved && allocations == 0,
+            "{n} rows, {cols} columns: {allocations}"
+        );
+    }
+    // A singular matrix: `false`, and the output as it was.
+    let mut a = random::<T>(&mut r, 5, 5);
+    for i in 0..5 {
+        a[(i, 3)] = T::real(0.0);
+    }
+    let lu = a.lu();
+    let b = random::<T>(&mut r, 5, 2);
+    let before = random::<T>(&mut r, 5, 2);
+    let mut x = before.clone();
+    assert!(!lu.solve_into(&b, &mut x));
+    assert!(same_bits(&x, &before));
+}
+
+#[test]
+fn solve_into_is_solve_without_allocating() {
+    each_type!(solve_into_of);
+}
+
+fn refactor_of<T: Num>() {
+    let mut r = Rng(0x5EED_0012);
+    let mut lu = Matrix::<T>::zeros(0, 0).lu();
+    // Shapes that grow, shrink and change from square to tall and wide, across the paths of the
+    // decomposition.
+    let mut shapes = Vec::new();
+    for n in sizes() {
+        shapes.extend([(n, n), (n + 3, n), (n / 2, n)]);
+    }
+    let reversed: Vec<_> = shapes.iter().rev().copied().collect();
+    shapes.extend(reversed);
+    for (m, n) in shapes {
+        let a = random::<T>(&mut r, m, n);
+        lu.refactor(&a);
+        let fresh = a.lu();
+        assert_eq!(lu.permutation(), fresh.permutation(), "{m} × {n}");
+        assert!(same_bits(&lu.l(), &fresh.l()), "{m} × {n}");
+        assert!(same_bits(&lu.u(), &fresh.u()), "{m} × {n}");
+        assert_eq!(lu.is_singular(), fresh.is_singular());
+        if m == n {
+            let (d, e) = (lu.det().c64(), fresh.det().c64());
+            assert_eq!(
+                (d.re.to_bits(), d.im.to_bits()),
+                (e.re.to_bits(), e.im.to_bits())
+            );
+        }
+    }
+    // A singular matrix after a regular one, and a regular one again.
+    let mut s = random::<T>(&mut r, 4, 4);
+    for j in 0..4 {
+        s[(1, j)] = T::real(0.0);
+    }
+    lu.refactor(&s);
+    assert!(lu.is_singular());
+    assert_eq!(lu.det(), T::real(0.0));
+    let a = well_conditioned::<T>(&mut r, 4);
+    lu.refactor(&a);
+    assert!(!lu.is_singular());
+    let b = random::<T>(&mut r, 4, 1);
+    assert!(same_bits(
+        &lu.solve(&b).unwrap(),
+        &a.lu().solve(&b).unwrap()
+    ));
+}
+
+#[test]
+fn refactor_is_lu_in_the_same_memory() {
+    each_type!(refactor_of);
+}
+
+#[test]
+#[should_panic(expected = "the output has not the shape of the right-hand side")]
+fn solve_into_panics_on_a_wrong_output_shape() {
+    let lu = Matrix::from_rows(&[[2.0, 1.0], [4.0, 3.0]]).lu();
+    let mut x = Matrix::zeros(2, 2);
+    let _ = lu.solve_into(&Matrix::zeros(2, 1), &mut x);
+}
+
+#[test]
+#[should_panic(expected = "the right-hand side has not as many rows")]
+fn solve_into_panics_on_a_wrong_right_hand_side() {
+    let lu = Matrix::from_rows(&[[2.0, 1.0], [4.0, 3.0]]).lu();
+    let mut x = Matrix::zeros(3, 1);
+    let _ = lu.solve_into(&Matrix::zeros(3, 1), &mut x);
+}
+
+#[test]
+#[should_panic(expected = "the matrix is not square")]
+fn solve_into_panics_on_a_rectangular_matrix() {
+    let lu = Matrix::from_rows(&[[2.0, 1.0, 0.0], [4.0, 3.0, 1.0]]).lu();
+    let mut x = Matrix::zeros(2, 1);
+    let _ = lu.solve_into(&Matrix::zeros(2, 1), &mut x);
+}
+
+fn refactor_allocations_of<T: Num>() {
+    // A decomposition used again for a square matrix of the same order allocates nothing up to
+    // 100 rows, at every order: the row swaps beyond the 32 kept on the stack by `lu()` and the
+    // working memory of the recursion beyond 24 columns are the decomposition's own.
+    let mut r = Rng(0x5EED_0013);
+    let top = if cfg!(miri) { 34 } else { 100 };
+    for n in 0..=top {
+        let a = well_conditioned::<T>(&mut r, n);
+        let b = random::<T>(&mut r, n, n);
+        let mut lu = a.lu();
+        lu.refactor(&b);
+        let ((), allocations) = crate::allocations::count(|| lu.refactor(&a));
+        assert_eq!(allocations, 0, "order {n}");
+        assert!(same_bits(&lu.u(), &a.lu().u()), "order {n}");
+    }
+}
+
+#[test]
+fn refactor_allocates_nothing_up_to_100_rows() {
+    each_type!(refactor_allocations_of);
+}

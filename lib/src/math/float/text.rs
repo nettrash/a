@@ -7,7 +7,7 @@
 use super::limbs;
 use super::round::{round_mag, signed};
 use super::scale::{self, Dir, round_int, round_value};
-use super::{BigFloat, Kind, Round};
+use super::{BigFloat, Kind, Mant, Round};
 use crate::math::numbers::{ByteOrder, Number, nat};
 use core::cmp::Ordering;
 use core::fmt;
@@ -1507,7 +1507,7 @@ fn small_value(
             kind: Kind::Finite {
                 negative,
                 exp: e as i64,
-                mant: vec![mant],
+                mant: Mant::One(mant),
             },
         },
         o,

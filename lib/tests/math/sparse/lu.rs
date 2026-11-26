@@ -6,7 +6,7 @@
 use super::common::{Num, Rng, assert_csr, each_type, magnitude, random_sparse, size};
 use a::math::complex::{Complex, Float};
 use a::math::matrix::{Matrix, Norm};
-use a::math::sparse::{Ordering, SparseLu, SparseLuOptions, SparseMatrix};
+use a::math::sparse::{LuStrategy, Ordering, SparseLu, SparseLuOptions, SparseMatrix};
 
 /// A system that SciPy and NumPy have solved: `data/gen_lu.py` writes them to
 /// `data/lu_reference.rs`.
@@ -582,6 +582,117 @@ fn the_factors_are_those_of_a_plain_elimination_with_the_same_pivots() {
     each_type!(agrees_with_dense_elimination);
 }
 
+fn supernodes_agree_with_dense_elimination<T: Num>() {
+    // From the order 64 on, once a column of the factors holds 96 elements, the elimination goes
+    // by supernodes and panels of columns. The same checks as above, on matrices of orders 200 to
+    // 625 whose patterns make wide supernodes (grids, dense blocks on the diagonal) and narrow
+    // ones (random patterns), at every threshold and in four kinds of order: every kind switches
+    // in some of its trials in every type, and other trials run a column at a time to the end.
+    let mut r = Rng(0x5EED_0050);
+    for trial in 0..size(24, 1) {
+        let n = size(200, 64) + r.below(size(200, 4));
+        let a: SparseMatrix<T> = match trial % 4 {
+            0 => {
+                let per_row = 1 + r.below(3);
+                well_conditioned(&mut r, n, per_row, 1e3)
+            }
+            1 => {
+                let per_row = 1 + r.below(4);
+                random_sparse(&mut r, n, n, n * per_row)
+            }
+            2 => {
+                let k = size(22, 8) + r.below(size(4, 4));
+                convection_diffusion(k, [0.0, 0.5, 3.0][r.below(3)], 0.25)
+            }
+            _ => {
+                let width = 4 + r.below(24);
+                let mut entries = Vec::new();
+                for i in 0..n {
+                    let first = i / width * width;
+                    for j in first..(first + width).min(n) {
+                        if r.below(4) > 0 {
+                            entries.push((i, j, T::random(&mut r)));
+                        }
+                    }
+                }
+                for _ in 0..n / 4 {
+                    entries.push((r.below(n), r.below(n), T::random(&mut r)));
+                }
+                // A diagonal that dominates keeps it regular and well-conditioned.
+                for i in 0..n {
+                    entries.push((i, i, T::real(2.0 * width as f64 + 2.0)));
+                }
+                SparseMatrix::from_coo(n, n, &entries)
+            }
+        };
+        let n = a.rows();
+        let ordering = match r.below(4) {
+            0 => Ordering::Natural,
+            1 => Ordering::Given(shuffled(&mut r, n)),
+            2 => Ordering::Colamd,
+            _ => Ordering::Amd,
+        };
+        let threshold = [1.0, 1.0, 0.5, 0.1, 0.01][r.below(5)];
+        let options = SparseLuOptions::new()
+            .with_ordering(ordering)
+            .with_pivot_threshold(threshold);
+        let lu = SparseLu::with_options(&a, &options).unwrap();
+        let error = factor_error(&lu, &a);
+        assert!(error < 4.0, "P·A·Q differs from L·U by {error} units");
+        let oracle = follow(&a, lu.permutation(), lu.column_permutation(), threshold);
+        assert_eq!(lu.nnz(), oracle.nnz, "the factors hold other elements");
+        assert!(
+            oracle.miss == 0.0,
+            "a pivot misses the rule by {} of the largest element",
+            oracle.miss
+        );
+        if !oracle.fragile && trial % 4 == 1 {
+            assert_eq!(lu.is_singular(), oracle.deficient);
+        }
+        if trial % 4 != 1 {
+            assert!(!lu.is_singular(), "a regular matrix was found singular");
+            let dense = a.to_matrix();
+            let b = Matrix::from_fn(n, 2, |_, _| T::random(&mut r));
+            let x = lu.solve(&b).unwrap();
+            let error = backward_error(&dense, &x, &b);
+            assert!(error < 8.0, "a backward error of {error}");
+        }
+        if trial % 4 == 0 && oracle.different == 0 && T::EPS < 1e-10 {
+            let (l, u) = (lu.l().to_matrix(), lu.u().to_matrix());
+            let difference = largest(&(&l - &oracle.l)).max(largest(&(&u - &oracle.u)));
+            assert!(
+                difference <= 1e-9 * largest(&oracle.u).max(1.0),
+                "the factors differ from those of the dense elimination by {difference}"
+            );
+        }
+    }
+    // A grid with one row the sum of two others is singular, however its pivots come out.
+    let k = 9;
+    let grid: SparseMatrix<T> = convection_diffusion(k, 0.5, 0.25);
+    let mut entries: Vec<(usize, usize, T)> = Vec::new();
+    for i in 0..k * k {
+        if i != 40 {
+            entries.extend(grid.row(i).map(|(j, x)| (i, j, x)));
+        }
+    }
+    for i in [10, 70] {
+        entries.extend(grid.row(i).map(|(j, x)| (40, j, x)));
+    }
+    let singular = SparseMatrix::from_coo(k * k, k * k, &entries);
+    for lu in [
+        SparseLu::new(&singular),
+        SparseLu::with_ordering(&singular, &Ordering::Natural),
+    ] {
+        assert!(lu.is_singular() && lu.rcond().to_f64() == 0.0);
+        assert!(lu.solve_vec(&vec![T::one(); k * k]).is_none());
+    }
+}
+
+#[test]
+fn the_supernodal_elimination_keeps_the_pivots_and_the_factors_of_the_column_one() {
+    each_type!(supernodes_agree_with_dense_elimination);
+}
+
 #[test]
 fn the_pivot_is_the_largest_element_and_ties_go_to_the_diagonal_then_the_lowest_row() {
     // The largest element of the column, wherever it is.
@@ -815,18 +926,362 @@ fn a_pivot_threshold_outside_its_range_gives_none() {
 }
 
 #[test]
-fn the_default_options_are_colamd_and_partial_pivoting() {
+fn the_default_options_are_the_automatic_strategy_of_new() {
     let options = SparseLuOptions::new();
     assert_eq!(options, SparseLuOptions::default());
+    assert_eq!(options.strategy, LuStrategy::Auto);
+    assert_eq!(LuStrategy::default(), LuStrategy::Auto);
     assert_eq!(options.ordering, Ordering::Colamd);
     assert_eq!(options.pivot_threshold, 1.0);
+    // Setting an ordering or a threshold makes the options explicit; the strategy alone leaves
+    // them as they are.
+    let explicit = SparseLuOptions::new().with_ordering(Ordering::Natural);
+    assert_eq!(explicit.strategy, LuStrategy::Explicit);
+    let threshold = SparseLuOptions::new().with_pivot_threshold(0.5);
+    assert_eq!(threshold.strategy, LuStrategy::Explicit);
+    let symmetric = threshold.clone().with_strategy(LuStrategy::Symmetric);
+    assert_eq!(
+        (symmetric.ordering, symmetric.pivot_threshold),
+        (Ordering::Colamd, 0.5)
+    );
     let mut r = Rng(0x5EED_0006);
-    let a: SparseMatrix<f64> = well_conditioned(&mut r, size(20, 5), 2, 100.0);
-    // The three ways to ask for the defaults give one decomposition.
-    let lu = SparseLu::new(&a);
-    assert_eq!(lu, SparseLu::with_ordering(&a, &Ordering::Colamd));
-    assert_eq!(lu, SparseLu::with_options(&a, &options).unwrap());
-    assert_eq!(lu.clone(), lu);
+    let unsymmetric: SparseMatrix<f64> = well_conditioned(&mut r, size(20, 5), 2, 100.0);
+    let grid = grid_laplacian(size(12, 5));
+    let with = |a: &SparseMatrix<f64>, s: LuStrategy| {
+        SparseLu::with_options(a, &SparseLuOptions::new().with_strategy(s)).unwrap()
+    };
+    for (a, takes) in [
+        (&unsymmetric, LuStrategy::Unsymmetric),
+        (&grid, LuStrategy::Symmetric),
+    ] {
+        // `new` and the default options give one decomposition: the strategy the pattern takes.
+        let lu = SparseLu::new(a);
+        assert_eq!(lu, SparseLu::with_options(a, &options).unwrap());
+        assert_eq!(lu, with(a, LuStrategy::Auto));
+        assert_eq!(lu, with(a, takes));
+        assert_eq!(lu.clone(), lu);
+    }
+    // The unsymmetric strategy is COLAMD with partial pivoting, which the explicit defaults are.
+    let explicit = SparseLuOptions::new().with_strategy(LuStrategy::Explicit);
+    for a in [&unsymmetric, &grid] {
+        let colamd = with(a, LuStrategy::Unsymmetric);
+        assert_eq!(colamd, SparseLu::with_ordering(a, &Ordering::Colamd));
+        assert_eq!(colamd, SparseLu::with_options(a, &explicit).unwrap());
+    }
+    // The symmetric strategy keeps the diagonal of the grid: no row leaves its column's place,
+    // and the fill is below COLAMD's with partial pivoting.
+    let symmetric = with(&grid, LuStrategy::Symmetric);
+    let q = symmetric.column_permutation();
+    assert_eq!(symmetric.permutation(), q);
+    assert!(symmetric.nnz() <= with(&grid, LuStrategy::Unsymmetric).nnz());
+    // A threshold outside its range is refused whatever the strategy.
+    for s in [
+        LuStrategy::Auto,
+        LuStrategy::Symmetric,
+        LuStrategy::Unsymmetric,
+    ] {
+        let bad = SparseLuOptions::new()
+            .with_pivot_threshold(0.0)
+            .with_strategy(s);
+        assert!(SparseLu::with_options(&grid, &bad).is_none());
+    }
+}
+
+/// The five-point operator of the `k × k` grid with `delta` on the diagonal, `−1 ± c` to the
+/// east and the west and `−1 ± c/2` to the north and the south: a symmetric pattern with a full
+/// diagonal, indefinite and with a weak diagonal for small `delta` (a shifted Laplacian, or a
+/// Helmholtz operator, with convection for `c` other than 0).
+fn weak_grid<T: Num>(k: usize, delta: f64, c: f64) -> SparseMatrix<T> {
+    let mut t = Vec::new();
+    for i in 0..k {
+        for j in 0..k {
+            let v = i * k + j;
+            t.push((v, v, T::real(delta)));
+            if j + 1 < k {
+                t.push((v, v + 1, T::real(-1.0 + c)));
+                t.push((v + 1, v, T::real(-1.0 - c)));
+            }
+            if i + 1 < k {
+                t.push((v, v + k, T::real(-1.0 + 0.5 * c)));
+                t.push((v + k, v, T::real(-1.0 - 0.5 * c)));
+            }
+        }
+    }
+    SparseMatrix::from_coo(k * k, k * k, &t)
+}
+
+/// The decomposition by one of the strategies that choose their own ordering and threshold.
+fn by_strategy<T: Num>(a: &SparseMatrix<T>, strategy: LuStrategy) -> SparseLu<T> {
+    SparseLu::with_options(a, &SparseLuOptions::new().with_strategy(strategy)).unwrap()
+}
+
+/// `‖A·x − b‖∞ / (‖A‖∞·‖x‖∞·n·ε)`, from the sparse matrix.
+fn sparse_backward_error<T: Num>(a: &SparseMatrix<T>, x: &[T], b: &[T]) -> f64 {
+    let r = a.mul_vec(x);
+    let residual = r
+        .iter()
+        .zip(b)
+        .fold(0.0f64, |m, (&p, &q)| m.max(magnitude(p - q)));
+    let norm = (0..a.rows())
+        .map(|i| a.row(i).map(|(_, v)| magnitude(v)).sum::<f64>())
+        .fold(0.0, f64::max);
+    let size = x.iter().fold(0.0f64, |m, &v| m.max(magnitude(v)));
+    residual / (norm * size * a.rows() as f64 * T::EPS)
+}
+
+fn weak_diagonals<T: Num>() {
+    let k = size(40, 5);
+    let n = k * k;
+    for (delta, c) in [
+        (4.0, 0.0),
+        (0.5, 0.0),
+        (0.2, 0.0),
+        (0.09, 0.0),
+        (0.05, 0.0),
+        (0.01, 0.0),
+        (0.5, 3.0),
+        (0.01, 1.5),
+    ] {
+        let a: SparseMatrix<T> = weak_grid(k, delta, c);
+        let what = format!("{k} × {k}, δ = {delta}, c = {c}");
+        let auto = SparseLu::new(&a);
+        let symmetric = by_strategy(&a, LuStrategy::Symmetric);
+        let unsymmetric = by_strategy(&a, LuStrategy::Unsymmetric);
+        // The symmetric elimination, or the decomposition by partial pivoting.
+        assert!(auto == symmetric || auto == unsymmetric, "{what}");
+        assert!(
+            auto.nnz() <= unsymmetric.nnz(),
+            "{what}: {} elements against {} by partial pivoting",
+            auto.nnz(),
+            unsymmetric.nnz()
+        );
+        assert!(
+            auto == unsymmetric || auto.growth().to_f64() <= 16.0,
+            "{what}: growth {:?}",
+            auto.growth()
+        );
+        let x: Vec<T> = (0..n).map(|i| T::real(1.0 + (i % 5) as f64)).collect();
+        let b = a.mul_vec(&x);
+        match (auto.solve_vec(&b), unsymmetric.solve_vec(&b)) {
+            (Some(y), _) => {
+                let error = sparse_backward_error(&a, &y, &b);
+                assert!(error <= 1.0, "{what}: backward error {error} n·ε");
+            }
+            (None, None) => {}
+            (None, Some(_)) => panic!("{what}: refused where partial pivoting solves"),
+        }
+    }
+}
+
+#[test]
+fn a_weak_diagonal_fills_no_more_than_partial_pivoting() {
+    // Grids whose diagonal is weak have the pattern of the symmetric strategy and values that
+    // move its pivots off the diagonal, or make them grow. With the diagonal kept down to a tenth
+    // of its column and the largest element taken otherwise, `new` filled 3.0 times what COLAMD
+    // with partial pivoting does on the 40 × 40 grid at δ = 0.09, 3.9 times at 50 × 50, 5.7 at
+    // 100 × 100 and 8.7 at 200 × 200, and six of the eight cases below failed. Now the diagonal
+    // is kept down to a ten-thousandth, and the symmetric elimination is refactored by partial
+    // pivoting when it fills or grows beyond its watch (16 times the largest element of `A`).
+    each_type!(weak_diagonals);
+}
+
+fn watched<T: Num>() {
+    let k = size(30, 5);
+    // A strong diagonal: the symmetric elimination runs to its end.
+    for a in [weak_grid::<T>(k, 4.0, 0.0), weak_grid::<T>(k, 4.0, 0.5)] {
+        let auto = SparseLu::new(&a);
+        assert_eq!(auto, by_strategy(&a, LuStrategy::Symmetric));
+        assert_ne!(auto, by_strategy(&a, LuStrategy::Unsymmetric));
+        assert_eq!(auto.permutation(), auto.column_permutation());
+    }
+    // A weak one: every pivot stays on the diagonal, but the elements grow beyond the watch, and
+    // the matrix is factored again by partial pivoting, the same each time.
+    let a = weak_grid::<T>(k, 0.5, 0.0);
+    let symmetric = by_strategy(&a, LuStrategy::Symmetric);
+    assert_eq!(symmetric.permutation(), symmetric.column_permutation());
+    assert!(
+        symmetric.growth().to_f64() > 16.0,
+        "{:?}",
+        symmetric.growth()
+    );
+    let auto = SparseLu::new(&a);
+    assert_eq!(auto, by_strategy(&a, LuStrategy::Unsymmetric));
+    assert_eq!(auto, SparseLu::new(&a));
+    assert!(auto.growth().to_f64() <= 16.0);
+    // Convection and a weak diagonal: the pivots leave the diagonal, the factors fill and grow.
+    let a = weak_grid::<T>(k, 0.01, 1.5);
+    let symmetric = by_strategy(&a, LuStrategy::Symmetric);
+    assert_ne!(symmetric.permutation(), symmetric.column_permutation());
+    assert_eq!(SparseLu::new(&a), by_strategy(&a, LuStrategy::Unsymmetric));
+}
+
+#[test]
+fn the_automatic_strategy_factors_again_by_partial_pivoting_when_the_watch_stops_it() {
+    each_type!(watched);
+}
+
+fn the_two_bounds<T: Num>() {
+    // `[[d, 1], [1, d]]`: the diagonal of the first column is `d` of its largest element, and
+    // kept, the second pivot is `d − 1/d`, a growth of about `1/d`.
+    let pair = |d: f64| {
+        SparseMatrix::<T>::from_coo(
+            2,
+            2,
+            &[
+                (0, 0, T::real(d)),
+                (0, 1, T::real(1.0)),
+                (1, 0, T::real(1.0)),
+                (1, 1, T::real(d)),
+            ],
+        )
+    };
+    // The symmetric strategy keeps a diagonal down to 10⁻⁴ of its column, and no smaller one.
+    for (d, kept) in [(2e-4, true), (5e-5, false)] {
+        let lu = by_strategy(&pair(d), LuStrategy::Symmetric);
+        assert_eq!(lu.permutation() == lu.column_permutation(), kept, "d = {d}");
+    }
+    // The automatic strategy keeps a growth of 9.9 and refactors one of 25 by partial pivoting.
+    for (d, kept) in [(0.1, true), (0.04, false)] {
+        let a = pair(d);
+        let auto = SparseLu::new(&a);
+        let symmetric = by_strategy(&a, LuStrategy::Symmetric);
+        assert_eq!(symmetric.permutation(), symmetric.column_permutation());
+        assert_eq!(
+            auto == symmetric,
+            kept,
+            "d = {d}: growth {:?}",
+            symmetric.growth()
+        );
+        if !kept {
+            assert_eq!(auto, by_strategy(&a, LuStrategy::Unsymmetric));
+        }
+    }
+}
+
+#[test]
+fn the_symmetric_strategy_keeps_a_ten_thousandth_on_the_diagonal_and_stops_at_sixteenfold_growth() {
+    each_type!(the_two_bounds);
+}
+
+#[test]
+fn options_set_through_their_fields_get_the_ordering_and_the_threshold_they_name() {
+    let grid = grid_laplacian(size(12, 5));
+    let n = grid.rows();
+    let mut r = Rng(0x5EED_0012);
+    let q = shuffled(&mut r, n);
+    let natural = SparseLu::with_ordering(&grid, &Ordering::Natural);
+    assert_ne!(natural, SparseLu::new(&grid));
+    // A field set directly, the strategy left at `Auto`.
+    let mut by_field = SparseLuOptions::new();
+    by_field.ordering = Ordering::Natural;
+    assert_eq!(by_field.strategy, LuStrategy::Auto);
+    assert_eq!(SparseLu::with_options(&grid, &by_field).unwrap(), natural);
+    by_field.ordering = Ordering::Given(q.clone());
+    assert_eq!(
+        SparseLu::with_options(&grid, &by_field).unwrap(),
+        SparseLu::with_ordering(&grid, &Ordering::Given(q.clone()))
+    );
+    // By struct update syntax, and by a literal of every field.
+    let update = SparseLuOptions {
+        pivot_threshold: 0.1,
+        ..SparseLuOptions::new()
+    };
+    let colamd = SparseLuOptions::new()
+        .with_ordering(Ordering::Colamd)
+        .with_pivot_threshold(0.1);
+    let expected = SparseLu::with_options(&grid, &colamd).unwrap();
+    assert_eq!(SparseLu::with_options(&grid, &update).unwrap(), expected);
+    let literal = SparseLuOptions {
+        strategy: LuStrategy::Auto,
+        ordering: Ordering::Given(q.clone()),
+        pivot_threshold: 0.5,
+    };
+    let given = SparseLuOptions::new()
+        .with_ordering(Ordering::Given(q))
+        .with_pivot_threshold(0.5);
+    assert_eq!(
+        SparseLu::with_options(&grid, &literal).unwrap(),
+        SparseLu::with_options(&grid, &given).unwrap()
+    );
+    // The fields at their defaults leave `Auto` the automatic strategy, and the two strategies
+    // it chooses between leave the fields aside.
+    let defaults = SparseLuOptions {
+        strategy: LuStrategy::Auto,
+        ordering: Ordering::Colamd,
+        pivot_threshold: 1.0,
+    };
+    assert_eq!(
+        SparseLu::with_options(&grid, &defaults).unwrap(),
+        SparseLu::new(&grid)
+    );
+    for strategy in [LuStrategy::Symmetric, LuStrategy::Unsymmetric] {
+        let set = SparseLuOptions {
+            strategy,
+            ordering: Ordering::Natural,
+            pivot_threshold: 0.5,
+        };
+        assert_eq!(
+            SparseLu::with_options(&grid, &set).unwrap(),
+            by_strategy(&grid, strategy)
+        );
+    }
+    // A threshold out of range is refused, whichever way it was set.
+    let mut bad = SparseLuOptions::new();
+    bad.pivot_threshold = 0.0;
+    assert!(SparseLu::with_options(&grid, &bad).is_none());
+}
+
+fn new_and_default_options<T: Num>() {
+    let mut r = Rng(0x5EED_0013);
+    let k = size(24, 5);
+    let matrices: Vec<SparseMatrix<T>> = vec![
+        random_sparse(&mut r, size(80, 9), size(80, 9), size(320, 30)),
+        weak_grid(k, 4.0, 0.0),
+        weak_grid(k, 0.5, 0.0),
+        weak_grid(k, 0.01, 1.5),
+        weak_grid(size(7, 4), 0.09, 0.0),
+    ];
+    for a in &matrices {
+        let lu = SparseLu::new(a);
+        assert_eq!(
+            lu,
+            SparseLu::with_options(a, &SparseLuOptions::default()).unwrap()
+        );
+        assert_eq!(
+            lu,
+            SparseLu::with_options(a, &SparseLuOptions::new()).unwrap()
+        );
+        assert_eq!(lu, by_strategy(a, LuStrategy::Auto));
+    }
+}
+
+#[test]
+fn new_is_with_options_of_the_default_options() {
+    each_type!(new_and_default_options);
+}
+
+/// The 5-point Laplacian of the `k × k` grid: a symmetric pattern with a full diagonal.
+fn grid_laplacian(k: usize) -> SparseMatrix<f64> {
+    let mut t = Vec::new();
+    for i in 0..k {
+        for j in 0..k {
+            let v = i * k + j;
+            t.push((v, v, 4.0));
+            if i > 0 {
+                t.push((v, v - k, -1.0));
+            }
+            if i + 1 < k {
+                t.push((v, v + k, -1.0));
+            }
+            if j > 0 {
+                t.push((v, v - 1, -1.0));
+            }
+            if j + 1 < k {
+                t.push((v, v + 1, -1.0));
+            }
+        }
+    }
+    SparseMatrix::from_coo(k * k, k * k, &t)
 }
 
 fn agrees_with_the_dense_decomposition<T: Num>() {

@@ -11,23 +11,31 @@
 //! operations.
 //! As in the paper, several tables (here `TABLES`) are built at once, so that each row of `C`
 //! is visited once for all of them, and the columns of `B` and `C` are taken in blocks narrow
-//! enough that the tables stay in the caches.
+//! enough that the tables stay in the caches (here the M4's, 4 MiB of tables).
 
 use super::BitMatrix;
 
 /// Strassen–Winograd from this many rows, inner columns and columns, all three, so that no half
-/// is below 1536; below it M4RM alone. Measured on an Apple M4 with the M4RM of this file:
-/// halves of 1024 cost more than they save, halves of 1536 and 2048 about break even, and from
-/// 6144 the halves take a fifth less time, at 16384 nearly half. The halves are taken at
+/// is below 4096; below it M4RM alone. Measured on an Apple M4 Max with the M4RM of this file:
+/// one level took 1.36 of M4RM's time at 2048, 1.13 at 3072 and 4096, 0.99 at 6144 and 0.91 at
+/// 8192; whole products from 4096 to 16384 rows, square and not, with the recursion from 3072,
+/// 6144, 7168, 8192 and 10240, twice: 6144 to 8192 alike (0.86 to 0.91 of the time from 3072,
+/// 1.00 for 8192 × 16384 · 16384 × 8192), 8192 the best by a little. The halves are taken at
 /// multiples of 64 columns so that no word is shifted.
-const STRASSEN_FROM: usize = 3072;
+const STRASSEN_FROM: usize = 8192;
 
-/// The tables built at once.
+/// The tables built at once. Measured on an Apple M4 Max with the group size below, against 4 and
+/// 16 tables (each with a loop over them in place of `combine8`): 4 took 0.86 to 0.89 of the time
+/// of 8 at 64 and 128 rows but 1.07 to 1.12 from 512 to 2048, 16 took 1.09 to 1.36.
 const TABLES: usize = 8;
 
-/// The words of all the tables together, about half a megabyte, which sets the width of the
-/// blocks of columns.
-const TABLE_WORDS: usize = 1 << 16;
+/// The words of all the tables together, 4 MiB, which sets the width of the blocks of columns.
+/// Measured on an Apple M4 Max, `2^13` to `2^21` words: a block fewer costs more than the tables'
+/// leaving the caches, as the bits of `A` are read and the rows of `C` visited once a block;
+/// against `2^16`, `2^19` took 0.88 of the time at 4096 rows and columns, 0.78 at 8192, 0.44 at
+/// 16384 and 0.74 to 0.75 for 32768 and 65536 columns, where `2^20` and `2^21` took 0.80 to 0.82;
+/// `2^15` and less took up to 2.05 times as long; it changes nothing below 2048 columns.
+const TABLE_WORDS: usize = 1 << 19;
 
 /// `a · b`, by Strassen–Winograd from `STRASSEN_FROM`.
 pub(super) fn product(a: &BitMatrix, b: &BitMatrix) -> BitMatrix {
@@ -48,7 +56,10 @@ pub(super) fn product_from(a: &BitMatrix, b: &BitMatrix, cutoff: usize) -> BitMa
 }
 
 /// The group size for `m` rows of `A`: `⌊log₂ m⌋ − 1`, from 1 to 8, so that building a table
-/// costs about half the additions that use it.
+/// costs about half the additions that use it. Measured on an Apple M4 Max with the offsets 0
+/// to 3 and the caps 6 to 10: smaller groups take 0.63 to 0.80 of the time from 128 to 1024 rows,
+/// but every other offset or cap is slower somewhere by more than 2 % (1.18 at 32 rows for an
+/// offset of 2, 1.08 at 64 for 3, 1.06 to 1.18 for a cap of 6 or 7 on 4096 rows by 256 columns).
 fn group_size(m: usize) -> usize {
     (m.max(1).ilog2() as usize).saturating_sub(1).clamp(1, 8)
 }
@@ -136,6 +147,18 @@ fn m4rm(c: &mut BitMatrix, a: &BitMatrix, b: &BitMatrix, k: usize) {
             }
             for i in 0..m {
                 let crow = &mut c.data[i * sb + w0..i * sb + w0 + width];
+                if count == TABLES {
+                    // The eight entries the row selects (entry 0, of zeros, where its bits are
+                    // zero), added to the row in one pass: one load and store of the row a word
+                    // for the eight, the sums of words in vector registers.
+                    let e: [&[u64]; TABLES] = core::array::from_fn(|t| {
+                        let (start, kk) = groups[t];
+                        let v = bits(&a.data, i * sa, start, kk);
+                        &tables[t * size + v * width..t * size + (v + 1) * width]
+                    });
+                    combine8(crow, &e);
+                    continue;
+                }
                 for (t, &(start, kk)) in groups[..count].iter().enumerate() {
                     let v = bits(&a.data, i * sa, start, kk);
                     if v != 0 {
@@ -147,6 +170,17 @@ fn m4rm(c: &mut BitMatrix, a: &BitMatrix, b: &BitMatrix, k: usize) {
                 }
             }
         }
+    }
+}
+
+/// `row ^= e₀ ^ e₁ ^ … ^ e₇` for eight rows of the row's length.
+#[inline(always)]
+fn combine8(row: &mut [u64], e: &[&[u64]; TABLES]) {
+    let w = row.len();
+    let (e0, e1, e2, e3) = (&e[0][..w], &e[1][..w], &e[2][..w], &e[3][..w]);
+    let (e4, e5, e6, e7) = (&e[4][..w], &e[5][..w], &e[6][..w], &e[7][..w]);
+    for x in 0..w {
+        row[x] ^= (e0[x] ^ e1[x]) ^ (e2[x] ^ e3[x]) ^ ((e4[x] ^ e5[x]) ^ (e6[x] ^ e7[x]));
     }
 }
 

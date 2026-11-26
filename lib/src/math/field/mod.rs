@@ -49,6 +49,7 @@
 
 mod binary;
 mod binary_clmul;
+mod binary_inv;
 mod binary_normal;
 mod binary_poly;
 mod ext;
@@ -56,16 +57,24 @@ mod ext_arith;
 mod ext_find;
 mod ext_maps;
 mod ext_roots;
+mod ext_zech;
 mod gf2_128;
+#[cfg(all(target_arch = "aarch64", target_feature = "aes", not(miri)))]
+mod gf2_128_pmull;
 mod gf2_8;
+pub mod named;
 mod prime;
+mod prime_chains;
 mod prime_form;
 mod prime_inv;
 mod prime_sqrt;
+mod prime_wide;
 mod tower;
+mod tower_fast;
 mod tower_fp12;
 mod tower_fp2;
 mod tower_fp6;
+mod typed;
 
 pub use binary::{BinaryField, Clmul, F2m};
 pub use binary_normal::{BasisConversion, NormalBasis, NormalElement};
@@ -77,3 +86,7 @@ pub use tower::Tower;
 pub use tower_fp2::Fp2;
 pub use tower_fp6::Fp6;
 pub use tower_fp12::Fp12;
+pub(crate) use typed::TypedKernel;
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+pub(crate) use typed::TypedSpecial;
+pub use typed::{TypedFp, TypedPrime, limbs_from_hex};

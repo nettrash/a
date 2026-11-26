@@ -271,6 +271,7 @@ fn zeta_reflect(s: f64) -> f64 {
 }
 
 /// `ζ(s)` of an `f64`.
+#[inline]
 pub(crate) fn zeta_f64(s: f64) -> f64 {
     if s >= -0.5 {
         zeta_right(s)

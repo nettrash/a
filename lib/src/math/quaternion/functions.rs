@@ -8,7 +8,7 @@
 //! [`Complex`](crate::math::complex::Complex) does.
 
 use super::Quaternion;
-use super::scale::{direction, exponent, ldexp};
+use super::scale::{direction, exponent, ldexp, length};
 use crate::math::complex::Float;
 
 impl<T: Float> Quaternion<T> {
@@ -34,7 +34,7 @@ impl<T: Float> Quaternion<T> {
     /// ```
     pub fn exp(self) -> Self {
         let e = self.w.exp();
-        let Some((_, r)) = direction(self.vector()) else {
+        let Some(r) = length(self.vector()) else {
             return Quaternion::new(e, self.x, self.y, self.z);
         };
         let (sin, cos) = r.sin_cos();
@@ -143,6 +143,20 @@ impl<T: Float> Quaternion<T> {
         let [vx, vy, vz] = v;
         if vx == T::ZERO && vy == T::ZERO && vz == T::ZERO {
             return [vx.atan2(q.w), vy, vz];
+        }
+        // Where the squares are in range, unscaled. That is the scaled computation below but for
+        // the parts that scaling down would take into the subnormals: there the scaled path loses
+        // digits and this one keeps them, so where a part of the vector lies far below the
+        // largest, near the bottom of the range, the two can differ in that part, by about a step
+        // of the subnormals.
+        let s = vx * vx + vy * vy + vz * vz;
+        if super::scale::in_range(s) && super::scale::in_range(q.w * q.w) {
+            let r = s.sqrt();
+            if q.w > T::ZERO && r < q.w * (T::EPSILON.sqrt() * T::HALF) {
+                return [vx / q.w, vy / q.w, vz / q.w];
+            }
+            let f = r.atan2(q.w) / r;
+            return [vx * f, vy * f, vz * f];
         }
         let k = exponent(vx.abs().max(vy.abs()).max(vz.abs()));
         let (sx, sy, sz) = (ldexp(vx, -k), ldexp(vy, -k), ldexp(vz, -k));

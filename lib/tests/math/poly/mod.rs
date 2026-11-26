@@ -15,6 +15,7 @@ mod eval_mod;
 mod factor;
 mod factor_paths;
 mod factor_z;
+mod fast_paths;
 mod gcd_int;
 mod gcd_mod;
 mod modular;

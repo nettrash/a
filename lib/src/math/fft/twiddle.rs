@@ -64,6 +64,14 @@ pub(crate) fn root(k: usize, n: usize) -> (f64, f64) {
     rotate(q, reduced(num, n))
 }
 
+/// The entries from which a table of [`Roots`] is made by products of two short tables rather
+/// than a sine and a cosine each. Measured on an Apple M4 Max (`Fft::new` of lengths with
+/// tables of 32 to 1025 entries, the three kinds of `n`): the products cost 1.5 to 1.9 times the
+/// sines and cosines at 32 entries, 1.12 to 1.23 at 128, within 1 % at 400 to 520 and 0.96 to
+/// 0.99 at 560 to 1025. (The real transforms' tables, `real::roots`'s `SHORT`, pay off from
+/// about 125 roots: `RealFft::new` of 256 and 500 values took 1.17 and 0.99 times by products.)
+const TABLE_PRODUCTS: usize = 512;
+
 /// The roots `e^(−2πi·k/n)` of one `n`, any `k`, from a table of the angles of at most π/4:
 /// `(cos, sin)` of `2π·u/(4n)` for `0 ≤ u ≤ n/2`, `u` a multiple of `gcd(4, n)` (the offsets
 /// from the quarter turns are), so `n/8 + 1` entries for a multiple of 4, `⌊n/4⌋ + 1` for twice
@@ -83,7 +91,17 @@ impl Roots {
     pub(crate) fn new(n: usize) -> Roots {
         let shift = n.trailing_zeros().min(2);
         let len = ((n / 2) >> shift) + 1;
-        let tab = (0..len).map(|u| reduced((u << shift) as i64, n)).collect();
+        // (cos, sin) of 2π·u/(4n) is the conjugate of the root e^(−2πi·u/(4n)): from the
+        // products of a coarse and a fine table of the real transforms' generator for a long
+        // table (correctly rounded, no sine or cosine an entry), one by one for a short one.
+        let tab = if len >= TABLE_PRODUCTS {
+            super::real::roots::affine::<f64>(4 * n, 0, 1 << shift, len)
+                .into_iter()
+                .map(|w| (w.re, -w.im))
+                .collect()
+        } else {
+            (0..len).map(|u| reduced((u << shift) as i64, n)).collect()
+        };
         let m = (n as u64).min(1 << 60);
         Roots {
             n,
@@ -136,7 +154,37 @@ pub(crate) fn root_t<T: Float>(k: usize, n: usize) -> Complex<T> {
     Complex::new(T::from_f64(c), T::from_f64(s))
 }
 
-/// The table `e^(−2πi·k/n)` for `k` in `0..len`.
-pub(crate) fn table<T: Float>(n: usize, len: usize) -> Vec<Complex<T>> {
-    (0..len).map(|k| root_t(k, n)).collect()
+/// The roots of one `n` for the tables of the complex passes: [`Roots`] for `f64` (and short
+/// `f32` tables), the products of [`Grid`](super::real::roots::Grid) for long `f32` ones.
+pub(crate) enum Gen {
+    Exact(Roots),
+    Grid(super::real::roots::Grid),
+}
+
+/// The shortest `f32` lengths whose tables come from products. Measured on an Apple M4 Max
+/// (`Fft::<f32>::new`, 256 to 2²⁰ values): the products cost 1.20 times `Roots` at 256 and 1.08
+/// at 384, 0.94 at 512, 0.65 at 1024 and 0.40 at 2²⁰.
+const GRID_F32: usize = 1 << 9;
+
+impl Gen {
+    /// The roots of `n` for tables in `T`.
+    pub(crate) fn new<T: Float>(n: usize) -> Gen {
+        if T::MANTISSA_DIGITS < 53 && n >= GRID_F32 {
+            Gen::Grid(super::real::roots::Grid::new(n))
+        } else {
+            Gen::Exact(Roots::new(n))
+        }
+    }
+
+    /// `e^(−2πi·k/n)` in `T`, for `k < n`.
+    #[inline(always)]
+    pub(crate) fn get_t<T: Float>(&self, k: usize) -> Complex<T> {
+        match self {
+            Gen::Exact(r) => r.get_t(k),
+            Gen::Grid(g) => {
+                let w = g.get(k);
+                Complex::new(T::from_f64(w.re as f64), T::from_f64(w.im as f64))
+            }
+        }
+    }
 }

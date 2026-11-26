@@ -18,7 +18,8 @@ The Kronecker symbol takes the factors of two of `n` and its sign out, by the ru
 
 - Words: the binary method, the factors of two of the numerator taken out (each turns the sign when the denominator is 3 or 5 modulo 8, bit 1 of `n ^ n/2`), then the larger of two odd numbers less the smaller, swapped by reciprocity (which turns the sign when both are 3 modulo 4, bit 1 of their `and`). The swap is a select, and the shift is counted on the difference before its sign is made positive, which has the same zero bits, so that a step is four instructions deep.
 - Two limbs to six: the same steps on all the limbs at once, until both numbers fit in one limb less, then on one less, down to a word. The magnitude of a negative difference is the complement of its limbs above the lowest and the negation of the lowest (which is not zero but once in `2^64`, taken apart), so the steps do not wait for a carry across the limbs; on aarch64 they are in assembly, the greatest common divisor's `gcd_22` steps widened to the numbers' limbs, with the sign carried beside them, off the critical path (on fresh numbers of three and four limbs 2.4 and 3 times as fast as the same steps in Rust). Each step reduces about 1.4 bits in 7 to 10 cycles, which beats Lehmer's steps up to six limbs.
-- Seven limbs and more: Lehmer's method with the symbol carried through the quotients, after Möller ("Efficient computation of the Jacobi symbol", 2008), whose algorithm GMP's `mpn_jacobi_n` takes. Euclid's algorithm reduces one number by a multiple of the other at each step; the symbol is `(−1)^e·(x/y)` for the current pair, `y` the one that plays the denominator, which is always odd: reducing the numerator by multiples of the denominator leaves it as it is; reducing the denominator by an odd numerator first swaps their parts by reciprocity; and reducing it by an even numerator `n` takes, for each subtraction, `(n/d) = (−1)^((d−1)/2)·s(d − n, d)·(n/(d − n))`, `s` the sign of reciprocity. All of that depends only on the quotient modulo 4 and on both numbers modulo 4, a state of six bits whose 512 transitions are a table built at compile time, so the symbol follows the quotients that the [greatest common divisor](gcd.md)'s hgcd2 finds from the top two limbs, applied to the whole numbers as a matrix in one pass; the steps hgcd2 cannot take are a subtraction and a division. The quotients below 8 are three conditional subtractions, whatever the size of the divisor, and the larger ones the hardware's division of the top 64 bits, corrected by at most two subtractions. When the numbers are down to six limbs, the binary steps take them.
+- Seven limbs to 23: Lehmer's method with the symbol carried through the quotients, after Möller ("Efficient computation of the Jacobi symbol", 2008), whose algorithm GMP's `mpn_jacobi_n` takes. Euclid's algorithm reduces one number by a multiple of the other at each step; the symbol is `(−1)^e·(x/y)` for the current pair, `y` the one that plays the denominator, which is always odd: reducing the numerator by multiples of the denominator leaves it as it is; reducing the denominator by an odd numerator first swaps their parts by reciprocity; and reducing it by an even numerator `n` takes, for each subtraction, `(n/d) = (−1)^((d−1)/2)·s(d − n, d)·(n/(d − n))`, `s` the sign of reciprocity. All of that depends only on the quotient modulo 4 and on both numbers modulo 4, a state of six bits whose 512 transitions are a table built at compile time, so the symbol follows the quotients that the [greatest common divisor](gcd.md)'s hgcd2 finds from the top two limbs, applied to the whole numbers as a matrix in one pass; the steps hgcd2 cannot take are a subtraction and a division. The quotients below 8 are three conditional subtractions, whatever the size of the divisor, and the larger ones the hardware's division of the top 64 bits, corrected by at most two subtractions. When the numbers are down to six limbs, the binary steps take them.
+- From 24 limbs: the same symbol carried through the [greatest common divisor](gcd.md)'s own reductions, which tell each quotient to the state: hgcd2's matrices applied by its kernels, and from 800 limbs its subquadratic half gcd of the top third of the numbers, its matrix applied to the whole numbers, over and over, `O(M(n) log n)`, as GMP's `mpn_jacobi_n` does from its gcd's threshold. Below 24 limbs Lehmer's steps are the faster (see the measurements below), which is why these start there.
 - Up to 16 limbs the numbers are read into limbs on the stack, and a numerator below twice the modulus is reduced by one subtraction; longer ones are in vectors.
 
 ## Square roots
@@ -33,76 +34,83 @@ The Kronecker symbol takes the factors of two of `n` and its sign out, by the ru
 
 Cornacchia (1908): a primitive solution of `x² + d·y² = m` has `x = r·y (mod m)` for a square root `r` of `−d` modulo `m`, and Euclid's algorithm on `m` and `r` stops at the first remainder `x` with `x² <= m`; `(m − x²)/d` is then `y²` when there is a solution for `r` at all. Every root `r <= m/2` is taken (`r` and `m − r` give the same solution), from `sqrt_mod_all`, so that a composite `m` has all its solutions. The first steps of Euclid's algorithm are Lehmer's, while the remainders are 128 bits above the bound, by the hgcd2 of the Jacobi symbol: every step it takes leaves both numbers above the bound. Below `2^64`, all in words.
 
-Measured on 2026-11-11 on an Apple M4 Max on the quiet machine (the load average at 3.4 to 5.2 of its 16 cores, from the system's own services; the clock at 4.45 to 4.51 GHz; one thread, PARI's too, every process with `MallocNanoZone` unset, under the system's default allocator, the harness built with fat LTO and one codegen unit), in cycles per call by the harness's estimate of the clock: interleaved with the previous version (0.2.32) and the references, in three passes of seven rounds, each cell the median of the 21, each round on fresh inputs of each contender's own, in an order that turns with the round. The Kronecker symbol of random numbers of the bits given, the bottom one odd, against GMP 6.3's `mpz_kronecker` and FLINT 3.6's `fmpz_kronecker`, first on pools of up to 256 inputs that each measurement goes over again and again, as the earlier measurements did, then on pools of up to 16,384, too many for the processor's branch predictors to learn:
+## Measured
 
-| Bits | a | 0.2.32 | GMP | FLINT |
-| --- | --- | --- | --- | --- |
-| 64 | 272 | 272 | 312 | 314 |
-| 128 | 643 | 865 | 656 | 662 |
-| 192 | 1252 | 2190 | 1774 | 1766 |
-| 256 | 1715 | 2968 | 2630 | 2779 |
-| 384 | 2827 | 4761 | 4665 | 4874 |
-| 512 | 4753 | 6662 | 6959 | 7400 |
-| 640 | 6515 | 8722 | 9623 | 9792 |
-| 768 | 8452 | 11,008 | 11,956 | 12,071 |
-| 1024 | 12,427 | 15,023 | 16,359 | 16,596 |
-| 2048 | 30,530 | 32,406 | 35,010 | 35,723 |
-| 4096 | 72,089 | 72,787 | 77,152 | 78,309 |
-| 16,384 | 470,010 | 469,889 | 465,040 | 466,434 |
+Measured on 2026-11-26 on an Apple M4 Max with nothing else running, by the harnesses in the repository's `bench/nt` and `bench/numbers` (their method in `bench/README.md`), on one thread: this crate as a user builds it, by rustc 1.100 stable in cargo's release profile (no LTO, 16 codegen units, no `target-cpu`); malachite 0.15.0 in the same profile; GMP 6.3.0, FLINT 3.6.0 and PARI 2.19.1 as Homebrew builds them, called through shims compiled with `-O3 -mcpu=native`. Each figure is the median of 15 samples of at least a millisecond (21 for the symbols by limbs), in time per call, this crate and every reference alternating sample by sample in one process, each sample on the same inputs for all, after a check that all give the same symbols and roots. A ratio is this crate's time over that of the fastest reference that does the same work: below 1, this crate is faster.
 
-On fresh inputs, in the same passes:
+The Kronecker and Jacobi symbols of random numbers of the bits given, the bottom one odd, against GMP's `mpz_kronecker` and `mpz_jacobi`, FLINT's `fmpz_kronecker` and `fmpz_jacobi`, malachite's and PARI's `kronecker`, on pools of fresh inputs (16,384 pairs up to 1024 bits, 2048 to 4096 bits and 256 at 16,384), too many for the processor's branch predictors to learn:
 
-| Bits | a | 0.2.32 | GMP | FLINT |
-| --- | --- | --- | --- | --- |
-| 64 | 295 | 291 | 324 | 331 |
-| 128 | 670 | 875 | 989 | 1000 |
-| 192 | 1263 | 2525 | 2495 | 2508 |
-| 256 | 1711 | 3469 | 3566 | 3565 |
-| 384 | 2837 | 5429 | 5807 | 5749 |
-| 512 | 5099 | 7365 | 7998 | 8009 |
-| 1024 | 13,115 | 15,594 | 17,090 | 17,048 |
-| 4096 | 73,163 | 74,493 | 80,376 | 80,355 |
-| 16,384 | 468,461 | 476,204 | 476,523 | 476,436 |
+| Bits | `kronecker` | GMP | FLINT | malachite | PARI | ratio | `jacobi` | ratio |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 64 | 59.5 ns | 64.6 ns | 66.6 ns | 166 ns | 185 ns | 0.922 | 56.1 ns | 0.869 |
+| 128 | 133 ns | 201 ns | 197 ns | 311 ns | 1.03 µs | 0.672 |  |  |
+| 192 | 250 ns | 500 ns | 488 ns | 542 ns | 1.90 µs | 0.512 |  |  |
+| 256 | 346 ns | 712 ns | 707 ns | 733 ns | 2.81 µs | 0.490 | 310 ns | 0.439 |
+| 384 | 569 ns | 1.17 µs | 1.16 µs | 1.12 µs | 4.67 µs | 0.511 |  |  |
+| 512 | 1.02 µs | 1.59 µs | 1.57 µs | 1.47 µs | 6.50 µs | 0.696 |  |  |
+| 640 | 1.38 µs | 2.04 µs | 2.03 µs | 1.84 µs | 8.35 µs | 0.751 |  |  |
+| 768 | 1.77 µs | 2.50 µs | 2.47 µs | 2.21 µs | 10.3 µs | 0.804 |  |  |
+| 1,024 | 2.56 µs | 3.40 µs | 3.37 µs | 3.00 µs | 14.0 µs | 0.853 | 2.53 µs | 0.853 |
+| 2,048 | 6.22 µs | 7.36 µs | 7.33 µs | 6.38 µs | 31.4 µs | 0.975 |  |  |
+| 4,096 | 13.1 µs | 16.2 µs | 16.0 µs | 14.2 µs | 74.8 µs | 0.926 | 12.8 µs | 0.923 |
+| 16,384 | 73.8 µs | 96.0 µs | 94.4 µs | 88.0 µs | 617 µs | 0.839 |  |  |
 
-Faster than GMP and FLINT at every size but 16,384 bits on the inputs gone over again (1 % behind both there, and 0.98 of their time on fresh inputs, where all are Lehmer's method): 0.61 to 0.76 of the best one's time from 192 to 1024 bits, where the binary steps in assembly replaced Lehmer's up to six limbs and take its numbers below them (1.21 to 1.75 times as fast as the previous version), and at 128 bits 0.98 of GMP's time (1.35 times as fast as the previous version). On fresh inputs GMP's and FLINT's branches, which their predictors no longer learn, cost them up to a half more (1.28 to 1.51 times their time on the inputs gone over again from 128 to 256 bits, 1.03 and 1.04 at 1024): 0.48 to 0.51 of their time from 192 to 384 bits, 0.68 at 128, 0.64 to 0.77 from 512 to 1024.
+And by limbs, against GMP's `mpz_jacobi`: `jacobi`, and the gcd's reductions with the symbol carried through them alone, which `jacobi` takes from 24 limbs, both timed by a probe that compiles the crate's source, so as to reach the internal kernel:
 
-Square roots modulo primes, the factorisation's `sqrt_mod`, which does not factor the modulus, and `sqrt_mod`, which does (the primality test is most of its time), against FLINT's `fmpz_sqrtmod` and PARI's `Fp_sqrt`, which take the modulus as prime; for words also FLINT's `n_sqrtmod` (at 63 bits for the row of 64):
+| Limbs | `jacobi` | GMP | ratio | the steps alone | ratio |
+| --- | --- | --- | --- | --- | --- |
+| 8 (512 bits) | 803 ns | 1.04 µs | 0.774 | 980 ns | 0.946 |
+| 16 (1,024 bits) | 2.07 µs | 2.22 µs | 0.931 | 2.15 µs | 0.950 |
+| 32 (2,048 bits) | 4.69 µs | 4.91 µs | 0.954 | 4.49 µs | 0.915 |
+| 64 (4,096 bits) | 10.2 µs | 10.8 µs | 0.946 | 9.98 µs | 0.923 |
+| 128 (8,192 bits) | 24.0 µs | 26.9 µs | 0.894 | 23.7 µs | 0.879 |
+| 256 (16,384 bits) | 64.1 µs | 74.8 µs | 0.856 | 62.8 µs | 0.838 |
+| 512 (32,768 bits) | 187 µs | 222 µs | 0.843 | 184 µs | 0.828 |
+| 1024 (65,536 bits) | 563 µs | 670 µs | 0.839 | 555 µs | 0.827 |
+| 2048 (131,072 bits) | 1.60 ms | 2.03 ms | 0.788 | 1.58 ms | 0.780 |
 
-| Prime | a, factored | 0.2.32, factored | a | 0.2.32 | FLINT | PARI |
+- 0.439 to 0.975 of the fastest reference's time at every size: the binary steps in assembly up to six limbs, Lehmer's steps to 23, and from 24 limbs the gcd's reductions, from 800 limbs its half gcd, where GMP's `mpn_jacobi_n` takes its own from its gcd's threshold (0.788 of its time at 2048 limbs). Below 24 limbs Lehmer's steps are the faster: at 8 and 16 limbs the gcd's reductions take 980 ns and 2.15 µs where `jacobi` takes 803 ns and 2.07 µs.
+
+Square roots modulo primes: the factorisation's `sqrt_mod`, which takes the prime as given, against FLINT's `fmpz_sqrtmod` (and `n_sqrtmod` for a word) and PARI's `Fp_sqrt`, which take the modulus as prime; and `sqrt_mod`, which tests the modulus by Baillie–PSW and factors it, against the same, which then do less: its ratio, in parentheses, is not counted:
+
+| Prime | factored | FLINT | PARI | ratio | `sqrt_mod` | (ratio) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 32 bits | 553 | 892 | 1503 | 2658 | 1304 (`n_sqrtmod` 1275) | 660 |
-| 64 bits | 1009 | 1664 | 4308 | 4926 | 3219 (`n_sqrtmod` 2587) | 2781 |
-| 128 bits | 7905 | 11,276 | 27,302 | 33,164 | 21,487 | 21,853 |
-| 256 bits | 22,022 | 35,338 | 86,287 | 123,396 | 65,840 | 81,901 |
-| 1024 bits | 618,185 | 987,307 | 2.30 M | 3.34 M | 1.39 M | 1.90 M |
-| 2^255 − 19 | 20,615 | 35,750 | 75,204 | 110,805 | 57,779 | 57,621 |
-| 2^521 − 1 | 91,574 | 145,975 | 342,410 | 554,487 | 157,984 | 218,804 |
-| P-224 (`s = 96`) | 61,760 | 82,796 | 115,877 | 152,837 | 768,049 | 250,674 |
+| 32 bits | 115 ns | 251 ns (`n_sqrtmod` 242 ns) | 136 ns | 0.847 | 299 ns | 2.19 |
+| 64 bits | 210 ns | 710 ns | 579 ns | 0.362 | 820 ns | 1.42 |
+| 128 bits | 1.63 µs | 4.41 µs | 4.59 µs | 0.370 | 4.59 µs | 1.02 |
+| 256 bits | 4.21 µs | 11.6 µs | 14.8 µs | 0.361 | 14.5 µs | 1.25 |
+| 1024 bits | 133 µs | 267 µs | 400 µs | 0.498 | 489 µs | 1.81 |
+| `2^255 − 19` | 4.19 µs | 12.2 µs | 12.0 µs | 0.349 | 15.1 µs | 1.28 |
+| `2^521 − 1` | 19.5 µs | 34.0 µs | 46.4 µs | 0.573 | 72.0 µs | 2.11 |
+| P-224 | 13.1 µs | 157 µs | 51.4 µs | 0.255 | 23.2 µs | 0.450 |
 
-Known to be prime, faster than FLINT and PARI at every size, 0.25 to 0.58 of the faster one's time from 64 bits on, and PARI's `Fl_sqrt` at 32 bits now too (0.84 of its time; 1.35 times slower before): the powers of a word from the low bit up, Atkin's single power for `p = 5 (mod 8)` (2^255 − 19 1.73 times faster than before, the other primes 1.34 to 1.65 times), Tonelli and Shanks's two powers side by side, and no vector. With the primality test of the unfactored form, 1.14 to 1.77 times faster than before (1.77 at 32 bits), its three strong tests' powers taken side by side.
+- Known to be prime, 0.255 to 0.847 of the fastest reference's time: the powers of a word from the low bit up, Atkin's single power for `p = 5 (mod 8)` (`2^255 − 19`), Tonelli and Shanks's two powers side by side, and no vector; P-224, whose `p − 1` has `2^96`, takes Cipolla's method, 0.255 of PARI's time. With the primality test of the unfactored form, which the references do not run, 1.02 to 2.19 times their time but at P-224.
 
-All the roots modulo words with a few prime factors, from their factorisation, against FLINT's `n_sqrtmodn`, and with the factorisation, against PARI's `Zn_sqrt`, which gives one root:
+All the roots modulo words with a few prime factors: `sqrt_mod_all`, with the factorisation and factoring the modulus, against FLINT's `n_factor` and `n_sqrtmodn`; and `sqrt_mod` against PARI's `Zn_sqrt` with the factorisation and without, which gives one root, not the smallest, so it does less, and its ratio, in parentheses, is not counted:
 
-| Modulus | factored | 0.2.32 | `sqrt_mod_all` | `sqrt_mod` | FLINT, factored | PARI, one root |
+| Modulus | `sqrt_mod_all`, factored | `sqrt_mod_all` | FLINT | ratio | `sqrt_mod`, factored | PARI, one root | (ratio) | `sqrt_mod` | PARI, one root | (ratio) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 primes of 32 bits | 367 ns | 27.6 µs | 263 µs | 0.105 | 289 ns | 448 ns | 0.645 | 28.4 µs | 133 µs | 0.214 |
+| 4 primes of 16 bits | 616 ns | 8.03 µs | 2.78 µs | 2.89 | 345 ns | 537 ns | 0.643 | 7.80 µs | 11.9 µs | 0.657 |
+| `2^20` times a prime of 40 bits | 392 ns | 753 ns | 720 ns | 1.05 | 266 ns | 631 ns | 0.422 | 624 ns | 1.63 µs | 0.383 |
+
+Cornacchia's algorithm modulo primes the form represents: the factorisation's `cornacchia`, which takes the prime as given, against PARI's `qfbcornacchia`, which takes it as prime and gives one solution (of the two for `d = 1`); and `Number::cornacchia`, which tests and factors the modulus, which PARI does not, so its ratio, in parentheses, is not counted:
+
+| Equation | factored | PARI | ratio | `cornacchia` | PARI | (ratio) |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2 primes of 32 bits | 2289 | 3536 | 140,752 | 139,330 | 3485 | 654,942 |
-| 4 primes of 16 bits | 3560 | 4940 | 40,875 | 39,912 | 3743 | 58,175 |
-| 2^20 times a prime of 40 bits | 2142 | 3021 | 4168 | 3660 | 2750 | 9134 |
+| x² + y², prime of 64 bits | 396 ns | 1.34 µs | 0.296 | 1.01 µs | 1.33 µs | 0.757 |
+| x² + y², prime of 128 bits | 3.01 µs | 5.38 µs | 0.560 | 6.59 µs | 5.37 µs | 1.23 |
+| x² + y², prime of 192 bits | 5.87 µs | 9.82 µs | 0.598 | 13.4 µs | 9.82 µs | 1.36 |
+| x² + y², prime of 256 bits | 8.90 µs | 15.0 µs | 0.594 | 22.1 µs | 15.1 µs | 1.46 |
+| x² + 2y², prime of 256 bits | 8.86 µs | 15.0 µs | 0.591 | 21.6 µs | 15.1 µs | 1.43 |
+| x² + 7y², prime of 1024 bits | 155 µs | 384 µs | 0.405 | 521 µs | 389 µs | 1.34 |
 
-From the factorisation, 0.66 to 0.95 of FLINT's time (before 1.01 times it for two primes of 32 bits, 1.32 and 1.10 times it for the others); with the factorisation of the modulus by [`factor`](factor.md), most of the time for two primes of 32 bits.
 
-Cornacchia's algorithm modulo primes the form represents, against PARI's `qfbcornacchia`, which takes the modulus as prime:
+- Known to be prime, 0.296 to 0.598 of PARI's time; with the primality test of `Number::cornacchia`, 0.757 of PARI's time at 64 bits and 1.23 to 1.46 times it beyond.
 
-| Equation | a, factored | 0.2.32, factored | a | PARI |
-| --- | --- | --- | --- | --- |
-| x² + y², 64 bits | 1919 | 3450 | 4934 | 6965 |
-| x² + y², 128 bits | 14,815 | 21,702 | 34,402 | 25,506 |
-| x² + y², 192 bits | 27,972 | 44,891 | 65,761 | 46,175 |
-| x² + y², 256 bits | 43,170 | 67,522 | 106,487 | 71,479 |
-| x² + 2y², 256 bits | 42,883 | 55,663 | 107,713 | 72,644 |
-| x² + 7y², 1024 bits | 678,899 | 1.09 M | 2.39 M | 1.61 M |
+Where the references are faster, this crate's time over the fastest same-work reference's above 1.05:
 
-Known to be prime, 0.28 to 0.61 of PARI's time (0.50 to 0.97 of it before); with the primality test of `Number::cornacchia`, 0.71 of PARI's time at 64 bits and 1.35 to 1.49 times slower beyond.
+- **All the roots modulo four primes of 16 bits.** `sqrt_mod_all` 2.89 times FLINT's `n_factor` and `n_sqrtmodn` (8.03 µs against 2.78; from the factorisation, 616 ns): the factorisation of the word, which trial-divides to 512 only and splits the rest one factor at a time, by Hart's method and the curves, where `n_factor`'s longer trial division finds the four primes at once. Modulo `2^20` times a prime of 40 bits, 1.05 times FLINT's time.
 
 ## Examples
 
@@ -146,7 +154,7 @@ assert_eq!(Number::cornacchia(&n(2), &n(1009)), [(n(19), n(18))]);
 
 ## Efficiency
 
-- Time complexity: `jacobi` and `kronecker` O(n²) in the limbs, as Lehmer's greatest common divisor; `sqrt_mod` the factorisation of `m` (a [primality test](prime.md) for a prime), then about one `pow_mod` modulo each prime and `O(s²)` products for `p − 1 = q·2^s`, `s <= 24`, about four and a half beyond, `O(log e)` steps of Hensel's lifting modulo `p^e`, and the Chinese remainder theorem's sums for every choice of the roots modulo the prime powers (`O(2^(k/2)·k)` for `k` odd primes by meeting in the middle); `cornacchia` that and one Euclid's algorithm on numbers of the modulus's length for each pair of roots
+- Time complexity: `jacobi` and `kronecker` `O(M(n) log n)` in the limbs from 800 limbs, as the subquadratic greatest common divisor, O(n²) below; `sqrt_mod` the factorisation of `m` (a [primality test](prime.md) for a prime), then about one `pow_mod` modulo each prime and `O(s²)` products for `p − 1 = q·2^s`, `s <= 24`, about four and a half beyond, `O(log e)` steps of Hensel's lifting modulo `p^e`, and the Chinese remainder theorem's sums for every choice of the roots modulo the prime powers (`O(2^(k/2)·k)` for `k` odd primes by meeting in the middle); `cornacchia` that and one Euclid's algorithm on numbers of the modulus's length for each pair of roots
 - Space complexity: the vectors of the operands, of the roots modulo the prime powers and of their sums; `sqrt_mod_all` its result
 - Time complexity, below `2^64` and modulo primes of a word: `sqrt_mod` and `sqrt_mod_all` with no vector but the result's, and the roots modulo a composite word one addition each
 - Soundness: the binary steps of the Jacobi symbol on two to six limbs are inline assembly on 64-bit little-endian aarch64, on registers only, with the same steps in Rust elsewhere and under Miri; the rings of residues use the powers' Montgomery kernels through their working memory plans, and the remainders' scratch is on the stack for short numbers; the operands are left as they were

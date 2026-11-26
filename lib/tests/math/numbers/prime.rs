@@ -456,7 +456,7 @@ fn random_numbers_match_trial_division_and_miller_rabin() {
 }
 
 /// A prime of 6480 bits, 102 limbs, which GMP's `mpz_nextprime` found: long enough for REDC by
-/// products, from 100 limbs, in both halves of the test.
+/// products, from 86 limbs, in both halves of the test.
 const P6480: &str = concat!(
     "1b51807cd751f2cb98d9ba2c6e58686e06abd238914129ced921e6d3e68773f62c9b2109d497fa91",
     "374d4984f37d03193365e20c60977d9e4006325e3c54ab3b6bee48ad45c800202cdd7d2d37170d03",

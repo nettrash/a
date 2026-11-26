@@ -519,7 +519,7 @@ fn hensel(f: &Polynomial<Number>, p: u64, a: u32, fs: &[ModPolynomial]) -> Vec<M
             .mod_inverse(&m2n)
             .expect("p does not divide the leading coefficient");
         let target = ModPolynomial::from_polynomial(f, &m2n).scale(&inv);
-        let target = ModPolynomial::of(st.m2.clone(), target.c);
+        let target = ModPolynomial::of(st.m2.clone(), target.c.into_vec());
         // The corrections modulo m1 pay for the divisions of the errors by m from two limbs up.
         if st.m2.k() >= SPLIT_LIFT {
             lift(&mut tree, target, &st, i + 2 < es.len());
@@ -783,7 +783,7 @@ fn recombine(
                     } else {
                         inside.clone()
                     };
-                    let mut prod = gs[chosen[0]].scale(&lc).c;
+                    let mut prod = gs[chosen[0]].scale(&lc).c.into_vec();
                     for &i in &chosen[1..] {
                         prod = zn::mul(&pm, &prod, &gs[i].c);
                     }

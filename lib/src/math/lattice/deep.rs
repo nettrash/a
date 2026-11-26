@@ -86,7 +86,7 @@ impl DeepLllOptions {
 /// [`depth`](DeepLllOptions::depth) allows; at `i = k − 1` that is Lovász's condition, so the
 /// basis is `(δ, η)`-LLL-reduced, as [`is_lll_reduced`](super::is_lll_reduced) checks it. These
 /// conditions are proved on the result, by interval arithmetic or exactly, and the exact
-/// integral reduction finishes the work if the floating point does not carry it. With `η = 1/2`
+/// integral reduction finishes the work if the floating point does not carry it; which of the lattice's reduced bases it is, is not promised beyond that (see [`Reduced`](super::Reduced)). With `η = 1/2`
 /// exactly, which a floating-point size reduction cannot meet in general (a coefficient of exactly
 /// `1/2` may round either way; L² needs `η > 1/2`), the whole reduction is the exact integral one,
 /// with deep insertions, as [`lll`](super::lll) is for LLL.

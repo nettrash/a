@@ -18,12 +18,19 @@ impl Rational {
     /// assert_eq!((Rational::from(7) / 2u32).floor(), 3);
     /// assert_eq!((Rational::from(-7) / 2u32).floor(), -4);
     /// ```
+    #[inline]
     pub fn floor(&self) -> Number {
         if let Some(x) = Small::of(self) {
             let (q, r) = (x.num / x.den, x.num % x.den);
             let q = u128::from(q) + u128::from(x.negative && r != 0);
             return small::number(self.byte_order(), x.negative, q);
         }
+        self.floor_long()
+    }
+
+    /// [`floor`](Rational::floor) of a rational in numbers.
+    #[inline(never)]
+    fn floor_long(&self) -> Number {
         if let Some((num, den)) = self.numbers()
             && is_one(den)
         {
@@ -53,12 +60,19 @@ impl Rational {
     /// assert_eq!((Rational::from(7) / 2u32).ceil(), 4);
     /// assert_eq!((Rational::from(-7) / 2u32).ceil(), -3);
     /// ```
+    #[inline]
     pub fn ceil(&self) -> Number {
         if let Some(x) = Small::of(self) {
             let (q, r) = (x.num / x.den, x.num % x.den);
             let q = u128::from(q) + u128::from(!x.negative && r != 0);
             return small::number(self.byte_order(), x.negative, q);
         }
+        self.ceil_long()
+    }
+
+    /// [`ceil`](Rational::ceil) of a rational in numbers.
+    #[inline(never)]
+    fn ceil_long(&self) -> Number {
         if let Some((num, den)) = self.numbers()
             && is_one(den)
         {
@@ -86,10 +100,17 @@ impl Rational {
     ///
     /// assert_eq!((Rational::from(-7) / 2u32).trunc(), -3);
     /// ```
+    #[inline]
     pub fn trunc(&self) -> Number {
         if let Some(x) = Small::of(self) {
             return small::number(self.byte_order(), x.negative, u128::from(x.num / x.den));
         }
+        self.trunc_long()
+    }
+
+    /// [`trunc`](Rational::trunc) of a rational in numbers.
+    #[inline(never)]
+    fn trunc_long(&self) -> Number {
         if let Some((num, den)) = self.numbers()
             && is_one(den)
         {
@@ -113,6 +134,7 @@ impl Rational {
     /// assert_eq!((Rational::from(-5) / 2u32).round(), -3);
     /// assert_eq!((Rational::from(7) / 3u32).round(), 2);
     /// ```
+    #[inline]
     pub fn round(&self) -> Number {
         self.nearest(false)
     }
@@ -128,6 +150,7 @@ impl Rational {
     /// assert_eq!((Rational::from(5) / 2u32).round_ties_even(), 2);
     /// assert_eq!((Rational::from(-7) / 2u32).round_ties_even(), -4);
     /// ```
+    #[inline]
     pub fn round_ties_even(&self) -> Number {
         self.nearest(true)
     }
@@ -142,6 +165,7 @@ impl Rational {
     ///
     /// assert_eq!((Rational::from(-7) / 2u32).fract().to_string(), "-1/2");
     /// ```
+    #[inline]
     pub fn fract(&self) -> Rational {
         let order = self.byte_order();
         // `num % den` is prime to `den` as `num` is, and of the sign of `num`.
@@ -150,16 +174,189 @@ impl Rational {
             let d = if r == 0 { 1 } else { x.den };
             return Rational::from_word(x.negative && r != 0, r, d, order);
         }
+        self.fract_long()
+    }
+
+    /// [`fract`](Rational::fract) of a rational in numbers.
+    #[inline(never)]
+    fn fract_long(&self) -> Rational {
+        let order = self.byte_order();
         let (num, den) = big(self);
         if is_one(den) {
             return Rational::from_word(false, 0, 1, order);
+        }
+        if let Some((negative, n, d)) = self.wide() {
+            // In registers: `0 < r < d`, prime to `d`.
+            return Rational::from_u128(negative, n % d, d, order);
         }
         let mut r = num % den;
         super::trim(&mut r);
         Rational::from_reduced(r, den.clone())
     }
 
+    /// [`floor`](Rational::floor) into `out`, in its vector when it has room: taken again and again
+    /// into one number, the floor of a rational in words allocates nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::Number;
+    /// use a::math::rational::Rational;
+    ///
+    /// let mut q = Number::from(0);
+    /// for (r, f) in [(Rational::from(-7) / 2u32, -4), (Rational::from(7) / 2u32, 3)] {
+    ///     r.floor_into(&mut q);
+    ///     assert_eq!(q, f);
+    /// }
+    /// ```
+    #[inline]
+    pub fn floor_into(&self, out: &mut Number) {
+        if let Some(x) = Small::of(self) {
+            let (q, r) = (x.num / x.den, x.num % x.den);
+            let q = u128::from(q) + u128::from(x.negative && r != 0);
+            small::put(out, self.byte_order(), x.negative, q);
+            return;
+        }
+        self.rounded_into(Rounding::Floor, out);
+    }
+
+    /// [`ceil`](Rational::ceil) into `out`, in its vector when it has room.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::Number;
+    /// use a::math::rational::Rational;
+    ///
+    /// let mut q = Number::from(0);
+    /// (Rational::from(-7) / 2u32).ceil_into(&mut q);
+    /// assert_eq!(q, -3);
+    /// ```
+    #[inline]
+    pub fn ceil_into(&self, out: &mut Number) {
+        if let Some(x) = Small::of(self) {
+            let (q, r) = (x.num / x.den, x.num % x.den);
+            let q = u128::from(q) + u128::from(!x.negative && r != 0);
+            small::put(out, self.byte_order(), x.negative, q);
+            return;
+        }
+        self.rounded_into(Rounding::Ceil, out);
+    }
+
+    /// [`trunc`](Rational::trunc) into `out`, in its vector when it has room.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::Number;
+    /// use a::math::rational::Rational;
+    ///
+    /// let mut q = Number::from(0);
+    /// (Rational::from(-7) / 2u32).trunc_into(&mut q);
+    /// assert_eq!(q, -3);
+    /// ```
+    #[inline]
+    pub fn trunc_into(&self, out: &mut Number) {
+        if let Some(x) = Small::of(self) {
+            small::put(
+                out,
+                self.byte_order(),
+                x.negative,
+                u128::from(x.num / x.den),
+            );
+            return;
+        }
+        self.rounded_into(Rounding::Trunc, out);
+    }
+
+    /// [`round`](Rational::round) into `out`, in its vector when it has room.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::Number;
+    /// use a::math::rational::Rational;
+    ///
+    /// let mut q = Number::from(0);
+    /// (Rational::from(-5) / 2u32).round_into(&mut q);
+    /// assert_eq!(q, -3);
+    /// ```
+    #[inline]
+    pub fn round_into(&self, out: &mut Number) {
+        self.nearest_into(false, out);
+    }
+
+    /// [`round_ties_even`](Rational::round_ties_even) into `out`, in its vector when it has room.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use a::math::numbers::Number;
+    /// use a::math::rational::Rational;
+    ///
+    /// let mut q = Number::from(0);
+    /// (Rational::from(-5) / 2u32).round_ties_even_into(&mut q);
+    /// assert_eq!(q, -2);
+    /// ```
+    #[inline]
+    pub fn round_ties_even_into(&self, out: &mut Number) {
+        self.nearest_into(true, out);
+    }
+
+    /// [`nearest`](Rational::nearest) into `out`.
+    #[inline(always)]
+    fn nearest_into(&self, even: bool, out: &mut Number) {
+        if let Some(x) = Small::of(self) {
+            let (q, r) = (x.num / x.den, x.num % x.den);
+            let (twice, d) = (u128::from(r) * 2, u128::from(x.den));
+            let up = (twice > d) | ((twice == d) & (!even | (q & 1 == 1)));
+            small::put(
+                out,
+                self.byte_order(),
+                x.negative,
+                u128::from(q) + u128::from(up),
+            );
+            return;
+        }
+        self.rounded_into(Rounding::Nearest(even), out);
+    }
+
+    /// The `_into` forms of a rational in numbers: an integer's numerator copied into the vector
+    /// of `out`, parts of up to 16 bytes rounded in registers into it, and longer ones as the
+    /// rounding gives them.
+    #[inline(never)]
+    fn rounded_into(&self, how: Rounding, out: &mut Number) {
+        let (num, den) = big(self);
+        if is_one(den) {
+            out.clone_from(num);
+            return;
+        }
+        if let Some((negative, n, d)) = self.wide() {
+            // Not an integer: `0 < r < d`, and `q < 2^127` as `d >= 2`.
+            let (q, r) = (n / d, n % d);
+            let up = match how {
+                Rounding::Floor => negative,
+                Rounding::Ceil => !negative,
+                Rounding::Trunc => false,
+                Rounding::Nearest(even) => match r.cmp(&(d - r)) {
+                    Ordering::Greater => true,
+                    Ordering::Less => false,
+                    Ordering::Equal => !even || q & 1 == 1,
+                },
+            };
+            small::put(out, self.byte_order(), negative, q + u128::from(up));
+            return;
+        }
+        *out = match how {
+            Rounding::Floor => self.floor_long(),
+            Rounding::Ceil => self.ceil_long(),
+            Rounding::Trunc => self.trunc_long(),
+            Rounding::Nearest(even) => self.nearest_long(even),
+        };
+    }
+
     /// The nearest integer, halves away from zero, or to the even one when `even` is set.
+    #[inline(always)]
     fn nearest(&self, even: bool) -> Number {
         // `|x| = q + r/d` with `0 < r < d`; round `q` up when `2r > d`, or at a half (`d` even)
         // away from zero, or to the even one.
@@ -174,6 +371,12 @@ impl Rational {
                 u128::from(q) + u128::from(up),
             );
         }
+        self.nearest_long(even)
+    }
+
+    /// [`nearest`](Rational::nearest) of a rational in numbers.
+    #[inline(never)]
+    fn nearest_long(&self, even: bool) -> Number {
         if let Some((num, den)) = self.numbers()
             && is_one(den)
         {
@@ -224,6 +427,16 @@ impl Rational {
         }
         Some((n.negative, n.small(), d.small()))
     }
+}
+
+/// The rounding of an `_into` form.
+#[derive(Clone, Copy)]
+enum Rounding {
+    Floor,
+    Ceil,
+    Trunc,
+    /// Halves away from zero, or to the even integer when set.
+    Nearest(bool),
 }
 
 /// The numbers of a rational not in words: one the register paths did not take.

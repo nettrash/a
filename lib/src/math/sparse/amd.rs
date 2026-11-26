@@ -98,10 +98,17 @@ pub(super) fn amd_of(graph: &Graph) -> Vec<usize> {
     let limit = dense_threshold(n);
     let dense = |v: usize| graph.degree(v) > limit;
     let mut quotient = QuotientGraph::new(n, n, graph.entries());
-    for v in 0..n {
-        if !dense(v) {
-            let neighbours = graph.neighbours(v).iter().copied().filter(|&w| !dense(w));
-            quotient.variable(v, [], neighbours, None);
+    if (0..n).any(dense) {
+        for v in 0..n {
+            if !dense(v) {
+                let neighbours = graph.neighbours(v).iter().copied().filter(|&w| !dense(w));
+                quotient.variable(v, [], neighbours, None);
+            }
+        }
+    } else {
+        // No row set aside: every list is the graph's, copied as it is.
+        for v in 0..n {
+            quotient.variable(v, [], graph.neighbours(v).iter().copied(), None);
         }
     }
     let mut order = quotient.eliminate();
@@ -123,6 +130,8 @@ enum Kind {
     /// A variable still to be eliminated, the principal one of its supervariable: it has a list
     /// and a place in the degree lists.
     Variable,
+    /// A variable of the element being formed, taken out of the degree lists for the step.
+    Front,
     /// A variable that was merged into another, or eliminated along with a pivot. It has no list;
     /// its parent is what it went into.
     Merged,
@@ -234,19 +243,14 @@ impl QuotientGraph {
                 lists.insert(i, self.degree[i]);
             }
         }
-        // Whether a variable is in the element being formed.
-        let mut in_front = vec![false; nodes];
-        // For the elements met in a step: the step, and the weight of their part outside the new
-        // element.
-        let mut seen = vec![NONE; nodes];
-        let mut outside = vec![0usize; nodes];
-        // The hash buckets of the variables of the new element, chained through `chain`.
-        let mut bucket = vec![NONE; total];
-        let mut bucket_of = vec![0usize; nodes];
-        let mut chain = vec![NONE; nodes];
-        // The marks of the comparison of two lists, each comparison with a mark of its own.
-        let mut mark = vec![0usize; nodes];
-        let mut comparison = 0usize;
+        let mut work = Work {
+            outside: vec![(NONE, 0usize); nodes],
+            bucket: vec![NONE; total],
+            bucket_of: vec![0usize; nodes],
+            chain: vec![NONE; nodes],
+            mark: vec![0usize; nodes],
+            comparison: 0,
+        };
 
         let mut pivots = Vec::with_capacity(total);
         let mut eliminated = 0;
@@ -259,205 +263,235 @@ impl QuotientGraph {
             let me = lists.head[lowest];
             lists.remove(me, lowest);
             pivots.push(me);
-            let mut pivot_weight = self.weight[me];
-            eliminated += pivot_weight;
-
-            // The new element: every variable the pivot reaches, through its elements and through
-            // its own list. A pivot with no elements is turned into its element where it lies;
-            // otherwise the element is gathered at the free end of the pool, which is compacted
-            // first if that end is too near.
-            let own = self.elements[me];
-            if own > 0 {
-                let mut bound = self.length[me] - own;
-                for k in 0..own {
-                    bound += self.length[self.pool[self.start[me] + k]];
-                }
-                if self.free + bound.min(total) > self.pool.len() {
-                    self.compact();
-                }
-            }
-            self.kind[me] = Kind::Element;
-            let begin = if own > 0 { self.free } else { self.start[me] };
-            let mut end = begin;
-            let mut front_degree = 0;
-            for k in 0..=own {
-                let source = if k < own {
-                    self.pool[self.start[me] + k]
-                } else {
-                    me
-                };
-                let (from, count) = if k < own {
-                    (self.start[source], self.length[source])
-                } else {
-                    (self.start[me] + own, self.length[me] - own)
-                };
-                for p in from..from + count {
-                    let i = self.pool[p];
-                    if self.kind[i] == Kind::Variable && !in_front[i] {
-                        in_front[i] = true;
-                        front_degree += self.weight[i];
-                        lists.remove(i, self.degree[i]);
-                        self.pool[end] = i;
-                        end += 1;
-                    }
-                }
-                if k < own {
-                    self.kind[source] = Kind::Absorbed;
-                    self.parent[source] = me;
-                }
-            }
-            self.start[me] = begin;
-
-            // For every element a variable of the new one belongs to, the weight of its part
-            // outside the new one: its weight, less that of each variable of the new one in it.
-            for p in begin..end {
-                let i = self.pool[p];
-                let weight = self.weight[i];
-                for q in self.start[i]..self.start[i] + self.elements[i] {
-                    let e = self.pool[q];
-                    if self.kind[e] != Kind::Element {
-                        continue;
-                    }
-                    if seen[e] == step {
-                        outside[e] -= weight;
-                    } else {
-                        seen[e] = step;
-                        outside[e] = self.degree[e] - weight;
-                    }
-                }
-            }
-
-            // The list of every variable of the new element is rewritten: the absorbed elements
-            // go, and so do the variables now reached through the new element; the new element
-            // comes first. What is left gives the external degree, and a hash of the list.
-            for p in begin..end {
-                let i = self.pool[p];
-                let first = self.start[i];
-                let (own_elements, length) = (self.elements[i], self.length[i]);
-                let mut out = first;
-                let mut external = 0usize;
-                let mut hash = 0usize;
-                for q in first..first + own_elements {
-                    let e = self.pool[q];
-                    if self.kind[e] != Kind::Element {
-                        continue;
-                    }
-                    if outside[e] > 0 {
-                        external += outside[e];
-                        hash = hash.wrapping_add(e);
-                        self.pool[out] = e;
-                        out += 1;
-                    } else {
-                        // Aggressive absorption: the element lies wholly inside the new one.
-                        self.kind[e] = Kind::Absorbed;
-                        self.parent[e] = me;
-                    }
-                }
-                let kept = out - first;
-                for q in first + own_elements..first + length {
-                    let j = self.pool[q];
-                    if self.kind[j] == Kind::Variable && !in_front[j] {
-                        external += self.weight[j];
-                        hash = hash.wrapping_add(j);
-                        self.pool[out] = j;
-                        out += 1;
-                    }
-                }
-                if out == first {
-                    // Mass elimination: the variable reaches nothing but the new element, so it
-                    // can be eliminated with the pivot and cause no fill.
-                    self.kind[i] = Kind::Merged;
-                    self.parent[i] = me;
-                    in_front[i] = false;
-                    front_degree -= self.weight[i];
-                    pivot_weight += self.weight[i];
-                    eliminated += self.weight[i];
-                } else {
-                    // The pivot or one of its elements has left the list, so there is room for
-                    // the new element at its front.
-                    debug_assert!(out < first + length);
-                    self.degree[i] = self.degree[i].min(external);
-                    self.pool[out] = self.pool[first + kept];
-                    self.pool[first + kept] = self.pool[first];
-                    self.pool[first] = me;
-                    self.length[i] = out - first + 1;
-                    self.elements[i] = kept + 1;
-                    let h = hash % total;
-                    bucket_of[i] = h;
-                    chain[i] = bucket[h];
-                    bucket[h] = i;
-                }
-            }
-
-            // Supervariables: two variables of the new element with the same list are adjacent
-            // to the same variables for good, and are merged. Only those in one bucket are
-            // compared.
-            for p in begin..end {
-                let i = self.pool[p];
-                if self.kind[i] != Kind::Variable {
-                    continue;
-                }
-                let mut a = bucket[bucket_of[i]];
-                bucket[bucket_of[i]] = NONE;
-                while a != NONE && chain[a] != NONE {
-                    comparison += 1;
-                    let (first, length) = (self.start[a], self.length[a]);
-                    for q in first + 1..first + length {
-                        mark[self.pool[q]] = comparison;
-                    }
-                    let mut before = a;
-                    let mut b = chain[a];
-                    while b != NONE {
-                        let after = chain[b];
-                        let list = &self.pool[self.start[b] + 1..self.start[b] + self.length[b]];
-                        if self.length[b] == length
-                            && self.elements[b] == self.elements[a]
-                            && list.iter().all(|&x| mark[x] == comparison)
-                        {
-                            self.weight[a] += self.weight[b];
-                            self.kind[b] = Kind::Merged;
-                            self.parent[b] = a;
-                            in_front[b] = false;
-                            chain[before] = after;
-                        } else {
-                            before = b;
-                        }
-                        b = after;
-                    }
-                    a = chain[a];
-                }
-            }
-
-            // The variables that are left get their degrees and go back into the degree lists,
-            // and the new element keeps them alone.
+            let mut step_of = Pivot {
+                me,
+                step,
+                weight: self.weight[me],
+                front_degree: 0,
+                begin: 0,
+                end: 0,
+                own: self.elements[me],
+            };
+            eliminated += step_of.weight;
+            self.gather(&mut step_of, total, &mut lists);
+            self.outside_weights(&step_of, &mut work);
+            eliminated += self.rewrite(&mut step_of, total, &mut work);
+            self.supervariables(&step_of, &mut work);
             let remaining = total - eliminated;
-            let mut out = begin;
-            for p in begin..end {
-                let i = self.pool[p];
-                if self.kind[i] != Kind::Variable {
-                    continue;
-                }
-                in_front[i] = false;
-                let weight = self.weight[i];
-                let degree = (self.degree[i] + front_degree - weight).min(remaining - weight);
-                self.degree[i] = degree;
-                lists.insert(i, degree);
-                lowest = lowest.min(degree);
-                self.pool[out] = i;
-                out += 1;
-            }
-            self.length[me] = out - begin;
-            self.degree[me] = front_degree;
-            self.weight[me] = pivot_weight;
-            if own > 0 {
-                self.free = out;
-            }
-            if out == begin {
-                // Nothing is left for it to be an element of: a root of the assembly forest.
-                self.kind[me] = Kind::Absorbed;
-            }
+            lowest = lowest.min(self.degrees(&step_of, remaining, &mut lists));
         }
         self.numbering(&pivots)
+    }
+
+    /// The new element: every variable the pivot reaches, through its elements and through its
+    /// own list. A pivot with no elements is turned into its element where it lies; otherwise the
+    /// element is gathered at the free end of the pool, which is compacted first if that end is
+    /// too near.
+    fn gather(&mut self, p: &mut Pivot, total: usize, lists: &mut DegreeLists) {
+        let (me, own) = (p.me, p.own);
+        if own > 0 {
+            let mut bound = self.length[me] - own;
+            for k in 0..own {
+                bound += self.length[self.pool[self.start[me] + k]];
+            }
+            if self.free + bound.min(total) > self.pool.len() {
+                self.compact();
+            }
+        }
+        self.kind[me] = Kind::Element;
+        let begin = if own > 0 { self.free } else { self.start[me] };
+        let mut end = begin;
+        let mut front_degree = 0;
+        for k in 0..=own {
+            let source = if k < own {
+                self.pool[self.start[me] + k]
+            } else {
+                me
+            };
+            let (from, count) = if k < own {
+                (self.start[source], self.length[source])
+            } else {
+                (self.start[me] + own, self.length[me] - own)
+            };
+            for q in from..from + count {
+                let i = self.pool[q];
+                if self.kind[i] == Kind::Variable {
+                    self.kind[i] = Kind::Front;
+                    front_degree += self.weight[i];
+                    lists.remove(i, self.degree[i]);
+                    self.pool[end] = i;
+                    end += 1;
+                }
+            }
+            if k < own {
+                self.kind[source] = Kind::Absorbed;
+                self.parent[source] = me;
+            }
+        }
+        self.start[me] = begin;
+        (p.begin, p.end, p.front_degree) = (begin, end, front_degree);
+    }
+
+    /// For every element a variable of the new one belongs to, the weight of its part outside
+    /// the new one: its weight, less that of each variable of the new one in it.
+    fn outside_weights(&self, p: &Pivot, work: &mut Work) {
+        for q in p.begin..p.end {
+            let i = self.pool[q];
+            let weight = self.weight[i];
+            for r in self.start[i]..self.start[i] + self.elements[i] {
+                let e = self.pool[r];
+                if self.kind[e] != Kind::Element {
+                    continue;
+                }
+                let seen = &mut work.outside[e];
+                if seen.0 == p.step {
+                    seen.1 -= weight;
+                } else {
+                    *seen = (p.step, self.degree[e] - weight);
+                }
+            }
+        }
+    }
+
+    /// The list of every variable of the new element is rewritten: the absorbed elements go, and
+    /// so do the variables now reached through the new element; the new element comes first.
+    /// What is left gives the external degree, and a hash of the list. Returns the weight of the
+    /// variables eliminated with the pivot.
+    fn rewrite(&mut self, p: &mut Pivot, total: usize, work: &mut Work) -> usize {
+        let me = p.me;
+        let mut eliminated = 0;
+        for q in p.begin..p.end {
+            let i = self.pool[q];
+            let first = self.start[i];
+            let (own_elements, length) = (self.elements[i], self.length[i]);
+            let mut out = first;
+            let mut external = 0usize;
+            let mut hash = 0usize;
+            for r in first..first + own_elements {
+                let e = self.pool[r];
+                if self.kind[e] != Kind::Element {
+                    continue;
+                }
+                let outside = work.outside[e].1;
+                if outside > 0 {
+                    external += outside;
+                    hash = hash.wrapping_add(e);
+                    self.pool[out] = e;
+                    out += 1;
+                } else {
+                    // Aggressive absorption: the element lies wholly inside the new one.
+                    self.kind[e] = Kind::Absorbed;
+                    self.parent[e] = me;
+                }
+            }
+            let kept = out - first;
+            for r in first + own_elements..first + length {
+                let j = self.pool[r];
+                if self.kind[j] == Kind::Variable {
+                    external += self.weight[j];
+                    hash = hash.wrapping_add(j);
+                    self.pool[out] = j;
+                    out += 1;
+                }
+            }
+            if out == first {
+                // Mass elimination: the variable reaches nothing but the new element, so it can
+                // be eliminated with the pivot and cause no fill.
+                self.kind[i] = Kind::Merged;
+                self.parent[i] = me;
+                p.front_degree -= self.weight[i];
+                p.weight += self.weight[i];
+                eliminated += self.weight[i];
+            } else {
+                // The pivot or one of its elements has left the list, so there is room for the
+                // new element at its front.
+                debug_assert!(out < first + length);
+                self.degree[i] = self.degree[i].min(external);
+                self.pool[out] = self.pool[first + kept];
+                self.pool[first + kept] = self.pool[first];
+                self.pool[first] = me;
+                self.length[i] = out - first + 1;
+                self.elements[i] = kept + 1;
+                let h = hash % total;
+                work.bucket_of[i] = h;
+                work.chain[i] = work.bucket[h];
+                work.bucket[h] = i;
+            }
+        }
+        eliminated
+    }
+
+    /// Supervariables: two variables of the new element with the same list are adjacent to the
+    /// same variables for good, and are merged. Only those in one bucket are compared.
+    fn supervariables(&mut self, p: &Pivot, work: &mut Work) {
+        for q in p.begin..p.end {
+            let i = self.pool[q];
+            if self.kind[i] != Kind::Front {
+                continue;
+            }
+            let mut a = work.bucket[work.bucket_of[i]];
+            work.bucket[work.bucket_of[i]] = NONE;
+            while a != NONE && work.chain[a] != NONE {
+                work.comparison += 1;
+                let comparison = work.comparison;
+                let (first, length) = (self.start[a], self.length[a]);
+                for r in first + 1..first + length {
+                    work.mark[self.pool[r]] = comparison;
+                }
+                let mut before = a;
+                let mut b = work.chain[a];
+                while b != NONE {
+                    let after = work.chain[b];
+                    let list = &self.pool[self.start[b] + 1..self.start[b] + self.length[b]];
+                    if self.length[b] == length
+                        && self.elements[b] == self.elements[a]
+                        && list.iter().all(|&x| work.mark[x] == comparison)
+                    {
+                        self.weight[a] += self.weight[b];
+                        self.kind[b] = Kind::Merged;
+                        self.parent[b] = a;
+                        work.chain[before] = after;
+                    } else {
+                        before = b;
+                    }
+                    b = after;
+                }
+                a = work.chain[a];
+            }
+        }
+    }
+
+    /// The variables that are left get their degrees and go back into the degree lists, and the
+    /// new element keeps them alone. Returns the least degree given.
+    fn degrees(&mut self, p: &Pivot, remaining: usize, lists: &mut DegreeLists) -> usize {
+        let (me, begin) = (p.me, p.begin);
+        let mut lowest = usize::MAX;
+        let mut out = begin;
+        for q in begin..p.end {
+            let i = self.pool[q];
+            if self.kind[i] != Kind::Front {
+                continue;
+            }
+            self.kind[i] = Kind::Variable;
+            let weight = self.weight[i];
+            let degree = (self.degree[i] + p.front_degree - weight).min(remaining - weight);
+            self.degree[i] = degree;
+            lists.insert(i, degree);
+            lowest = lowest.min(degree);
+            self.pool[out] = i;
+            out += 1;
+        }
+        self.length[me] = out - begin;
+        self.degree[me] = p.front_degree;
+        self.weight[me] = p.weight;
+        if p.own > 0 {
+            self.free = out;
+        }
+        if out == begin {
+            // Nothing is left for it to be an element of: a root of the assembly forest.
+            self.kind[me] = Kind::Absorbed;
+        }
+        lowest
     }
 
     /// Moves the lists that are alive to the front of the pool, in the order they lie in.
@@ -565,15 +599,45 @@ impl QuotientGraph {
     }
 }
 
+/// The working arrays of the elimination, one entry for each node.
+struct Work {
+    /// For the elements met in a step: the step, and the weight of their part outside the new
+    /// element, side by side since they are read together.
+    outside: Vec<(usize, usize)>,
+    /// The hash buckets of the variables of the new element, chained through `chain`.
+    bucket: Vec<usize>,
+    bucket_of: Vec<usize>,
+    chain: Vec<usize>,
+    /// The marks of the comparison of two lists, each comparison with a mark of its own.
+    mark: Vec<usize>,
+    comparison: usize,
+}
+
+/// A step of the elimination: its pivot and the element it makes.
+struct Pivot {
+    /// The pivot, which becomes the new element.
+    me: usize,
+    /// The number of the step.
+    step: usize,
+    /// The weight of the pivot and of the variables eliminated with it.
+    weight: usize,
+    /// The weight of the variables of the new element.
+    front_degree: usize,
+    /// Where the list of the new element lies in the pool.
+    begin: usize,
+    end: usize,
+    /// The number of elements of the pivot's list.
+    own: usize,
+}
+
 /// The variables by degree, in doubly linked lists, so that one of least degree is found at once
 /// and any is taken out at once.
 struct DegreeLists {
     /// The first variable of each degree.
     head: Vec<usize>,
-    /// The variable after each in its list.
-    next: Vec<usize>,
-    /// The variable before each in its list.
-    previous: Vec<usize>,
+    /// The variables before and after each in its list, side by side since they are changed
+    /// together.
+    links: Vec<[usize; 2]>,
 }
 
 impl DegreeLists {
@@ -581,32 +645,30 @@ impl DegreeLists {
     fn new(nodes: usize, degrees: usize) -> Self {
         Self {
             head: vec![NONE; degrees],
-            next: vec![NONE; nodes],
-            previous: vec![NONE; nodes],
+            links: vec![[NONE; 2]; nodes],
         }
     }
 
     /// Puts `i` at the front of the list of `degree`.
     fn insert(&mut self, i: usize, degree: usize) {
         let first = self.head[degree];
-        self.next[i] = first;
-        self.previous[i] = NONE;
+        self.links[i] = [NONE, first];
         if first != NONE {
-            self.previous[first] = i;
+            self.links[first][0] = i;
         }
         self.head[degree] = i;
     }
 
     /// Takes `i` out of the list of `degree`, which it is in.
     fn remove(&mut self, i: usize, degree: usize) {
-        let (before, after) = (self.previous[i], self.next[i]);
+        let [before, after] = self.links[i];
         if before == NONE {
             self.head[degree] = after;
         } else {
-            self.next[before] = after;
+            self.links[before][1] = after;
         }
         if after != NONE {
-            self.previous[after] = before;
+            self.links[after][0] = before;
         }
     }
 }

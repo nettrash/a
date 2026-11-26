@@ -13,9 +13,9 @@
 //! products of `M(n)`, and the products are the crate's multiplication, with Karatsuba's and
 //! Toom-Cook's methods.
 //!
-//! The greatest common divisor calls it on the top two thirds of the numbers, as GMP's `mpn_gcd`
-//! does, and applies the matrix to the rest, over and over until the numbers are short enough for
-//! Lehmer's method; the extended algorithm on the top half first and then the top two thirds,
+//! The greatest common divisor calls it on the top third of the numbers (`p = 2n/3`), as GMP's
+//! `mpn_gcd` does, and applies the matrix to the whole numbers, over and over until they are short
+//! enough for Lehmer's method; the extended algorithm on the top half first and then the top two thirds,
 //! keeping a row of the product of the matrices, the cofactor of one number.
 //!
 //! Under Miri the thresholds are a few limbs, so that its runs, which take numbers of a few limbs,
@@ -575,7 +575,7 @@ pub(super) fn gcd_dc_itch(n: usize) -> usize {
 }
 
 /// Reduces the numbers of `n` limbs at `a` and `b`, not both zero at the top, by [`hgcd`] on their
-/// top two thirds, the matrix applied to the rest, until they are shorter than
+/// top third, the matrix applied to the whole numbers, until they are shorter than
 /// [`GCD_DC_THRESHOLD`] limbs. Returns their length, or the greatest common divisor when a step
 /// finds it.
 ///

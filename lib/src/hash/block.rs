@@ -25,6 +25,17 @@ impl<const N: usize> Blocks<N> {
         }
     }
 
+    /// The buffer after one whole block has gone to the compression function: empty, with a
+    /// length of `N` bytes.
+    pub(super) const fn after_one_block(limit: u128) -> Self {
+        Blocks {
+            buffer: [0; N],
+            filled: 0,
+            length: N as u128,
+            limit,
+        }
+    }
+
     /// Takes `data`, giving `compress` every block that is whole, several at once when it can.
     #[track_caller]
     pub(super) fn update(&mut self, mut data: &[u8], mut compress: impl FnMut(&[u8])) {

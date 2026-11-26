@@ -66,7 +66,7 @@ The sections below give the conventions, each part's functions, their methods an
 
 | Function | Method |
 | --- | --- |
-| `a * b` | Hamilton's product, `(w₁w₂ − v₁·v₂) + (w₁v₂ + w₂v₁ + v₁ × v₂)`, four products a part; where finite operands give a part that is not finite, that part again from the operands scaled exactly by powers of two, scaled back once, the finite parts kept |
+| `a * b` | Hamilton's product, `(w₁w₂ − v₁·v₂) + (w₁v₂ + w₂v₁ + v₁ × v₂)`, four products a part (on aarch64 in the lanes of NEON vectors, the same products added in the same order, so bit for bit the same); where finite operands give a part that is not finite, that part again from the operands scaled exactly by powers of two, scaled back once, the finite parts kept |
 | `norm` | `√(w² + x² + y² + z²)` where the squared norm is in `[MIN/ε, ε/MIN]`; elsewhere the parts scaled exactly by the power of two that brings the largest into `[1, 2)`, and the root scaled back |
 | `normalize` | `q/|q|`, scaled first in the same way; NaN for zero and for non-finite parts |
 | `recip`, `a / b` | `conj(b)/|b|²` and `a·conj(b)/|b|²`; where a squared norm is outside the range above, each operand is scaled by a power of two, exactly, and the quotient of the scaled operands (parts below 4) is scaled back by the difference of the powers, rounded once |
@@ -142,7 +142,7 @@ To run the tests: `cargo test --test math -- quaternion::algebra quaternion::fun
 - `0^t` for `t < 0` is `+∞`; `Complex::powf` gives 0 there.
 - An overflowing product takes the scaled path, about twice the work, and an overflowing `powi` forms the power twice.
 - A power is accurate normwise only: where `qⁿ` overflows, a part far below `n·ε·|qⁿ|` is not determined, and can come out 0, or `±∞` of either sign, where its exact value is finite or overflows.
-- Nothing is tuned: each function checks its range on every call, and `exp`, `ln` and `sqrt` take a few divisions more than they must.
+- Each function checks its range on every call, and `exp`, `ln` and `sqrt` take a few divisions more than they must (see [Measured](#measured)).
 
 ## Rotations
 
@@ -153,7 +153,7 @@ To run the tests: `cargo test --test math -- quaternion::algebra quaternion::fun
 | `angle()` | `2·atan2(|v|, |w|)` | homogeneous |
 | `from_rotation_vector(v)` | the rotation by `|v|` about `v/|v|`; `v/2` as the vector part for `|v| < √ε` | unit result |
 | `to_rotation_vector()` | `2·` the vector part of `ln(±q/|q|)`, `w ≥ 0`: the angle in `[0, π]` | homogeneous |
-| `rotate(v)`, `rotate_inverse(v)` | `v + (w·t + u × t)/|q|²` with `t = 2·u × v`, the expansion of `q·v·q⁻¹`; the inverse by the conjugate | the rotation of `q/|q|` |
+| `rotate(v)`, `rotate_inverse(v)` | `v + (w·t + u × t)·(2/|q|²)` with `t = u × v`, the expansion of `q·v·q⁻¹`, the quotient `2/|q|²` once (exactly 2 for a unit quaternion); the inverse by the conjugate | the rotation of `q/|q|` |
 | `to_rotation_matrix()`, `to_matrix()` | `I + 2/|q|²·(w·[u]ₓ + [u]ₓ²)` | the rotation of `q/|q|` |
 | `from_rotation_matrix(m)`, `from_matrix(&m)` | Shepperd's method: the largest of `1 + tr R`, `1 + 2Rᵢᵢ − tr R` picks a column of `4·q·qᵀ`, normalised; `w ≥ 0` | unit result |
 | `slerp(b, t)` | Shoemake's `sin((1 − t)Ω)/sin Ω·a + sin(tΩ)/sin Ω·b` on the shorter arc, `Ω = 2·atan2(|a − b|, |a + b|)` | both normalised first |
@@ -163,7 +163,7 @@ To run the tests: `cargo test --test math -- quaternion::algebra quaternion::fun
 
 ### Methods
 
-- **`rotate`** expands `q·v·q*` as `(w² − |u|²)·v + 2(u·v)·u + 2w·(u × v)`, divided by `|q|²`, which is the rotation of `q/|q|` for any norm, in the form `v + (w·t + u × t)/|q|²`, `t = 2·u × v`: two cross products and no quaternion product. A quaternion of squared norm outside `[1/16, 16]` is first scaled by a power of two, exactly, which brings its largest part into `[1, 2)`; so are those of the matrix, the axis and the angles.
+- **`rotate`** expands `q·v·q*` as `(w² − |u|²)·v + 2(u·v)·u + 2w·(u × v)`, divided by `|q|²`, which is the rotation of `q/|q|` for any norm, in the form `v + (w·t + u × t)·k`, `t = u × v`, with `k = 2/|q|²` one quotient rounded once (exactly 2 for a unit quaternion): two cross products, one quotient for the three parts, and no quaternion product. `rotate_inverse` is the same with `−w`, the rotation of the conjugate. A quaternion of squared norm outside `[1/16, 16]` is first scaled by a power of two, exactly, which brings its largest part into `[1, 2)`; so are those of the matrix, the axis and the angles.
 - **`from_rotation_matrix`** follows S. W. Shepperd, *Quaternion from rotation matrix* (J. Guidance and Control 1(3), 1978), in the form F. L. Markley gives it (*Unit quaternion from rotation matrix*, J. Guidance, Control, and Dynamics 31(2), 2008) and SciPy uses: `4·q·qᵀ` has the diagonal `1 + tr R`, `1 + 2R₀₀ − tr R`, `1 + 2R₁₁ − tr R`, `1 + 2R₂₂ − tr R` and off the diagonal sums and differences of symmetric elements of `R`; the column of the largest diagonal element, at least 1, is `4·q_k·q`, and normalising it gives `±q` without a square root of a small number. The result is turned to `w ≥ 0`.
 - **`slerp`** is Shoemake's (SIGGRAPH 1985). The angle between the two unit quaternions is taken as `Ω = 2·atan2(|a − b|, |a + b|)`, accurate for nearly equal rotations where `arccos(a·b)` loses half its digits, and `b` is negated when `a·b < 0`, so that `Ω ≤ π/2` and the path is the shorter one; the ratios of sines cancel nothing for small `Ω`. When `a·b = 0` there are two arcs of the same length, and the one through `b` as given is taken. A `t` outside `[0, 1]` extrapolates along the same great circle.
 - **`angle_to`** takes the angle of `conj(a)·b` from its parts, which is homogeneous in both norms and keeps its digits for nearly equal rotations: `10⁻¹⁴` apart gives `10⁻¹⁴` to 4 units.
@@ -212,7 +212,7 @@ Against SciPy 1.18.0's `Rotation` and `Slerp` (`lib/tests/math/quaternion/data/s
 - `as_matrix` of 12 random quaternions: `3.3·10⁻¹⁶`; `from_matrix` of those matrices: `1.6·10⁻¹⁶`, and the round trip to the quaternion `1.7·10⁻¹⁶`. Each matrix is orthogonal to 4 units and has the determinant 1 to 8.
 - `from_matrix` near the switches of Shepperd's method: half turns about `x`, `y`, `z`, `(1, 1, 0)`, `(1, −1, 1)` and `(0, 1, 10⁻⁸)`, each `10⁻⁷` short of a half turn too, the identity and a rotation by `4·10⁻⁹`: at most `1.1·10⁻¹⁶`. A random rotation with noise of `10⁻⁹`, `10⁻⁶` and `10⁻³` in each element: `4.5·10⁻¹⁰`, `5.5·10⁻⁷` and `4.6·10⁻⁴` from SciPy, which orthogonalises such a matrix by an SVD first; one scaled by 1.001: `6.8·10⁻⁵`. Over 2,000 random rotations, `1.001·R` moves the quaternion by `2.4·10⁻⁴` on average and `4.2·10⁻⁴` at most, each within 1 % (and `10⁻⁶`) of the first-order amount `η·√(1 − p²)/(4p)` for `η = 10⁻³` and the largest part `p ≥ ½` of the quaternion, which is at most `0.43·η`.
 - `from_rotvec` of 18 vectors of lengths `10⁻³⁰⁰` to 10: `2.2·10⁻¹⁶`, and for the tiny ones the vector part to 4 units, relatively, both ways; below `√ε` the vector part is `v/2` exactly, in every part, for lengths from `10⁻⁹` to `2⁻¹⁰⁶⁰`; `as_rotvec` of 12 random quaternions `4.4·10⁻¹⁶` and of six chosen ones (`w = 0`, `w < 0`, vector parts of `10⁻⁹`, `3·10⁻¹²` and `10⁻³⁰⁰`) `2.2·10⁻¹⁶`, the tiny parts to 4 units relatively.
-- `apply`, and `apply(…, inverse=True)`, on 12 random quaternions and vectors of parts up to 10: `5.3·10⁻¹⁶` relative to 10. Against `q·v·q⁻¹` in 160-bit arithmetic, for 2,000 quaternions of norms `2^±500`: 3.1 units of `ε·|v|`, and `rotate_inverse(rotate(v))` back to `v` to 5.3; the matrix rotates as the quaternion to 8 units.
+- `apply`, and `apply(…, inverse=True)`, on 12 random quaternions and vectors of parts up to 10: `5.3·10⁻¹⁶` relative to 10. Against `q·v·q⁻¹` in 160-bit arithmetic, for quaternions of norms `2^±500` and vectors of parts in `[−1, 1)`, the largest errors seen, in units of `ε·|v|` (observed maxima, not bounds): 3.1 for `rotate` and 5.3 for `rotate_inverse(rotate(v))` back to `v` over the test's 2,000 (seed 30), and 4.4 and 7.8 over 200,000 more in the ignored sweep `a_heavier_sweep_of_rotate_against_160_bits` (seed 31, release); the matrix rotates as the quaternion to 8 units.
 - `Slerp` between 12 random pairs at random `t`: `2.8·10⁻¹⁶`; between pairs `10⁻⁹` apart, nearly opposite (`10⁻⁹` and `10⁻⁴` from `−q`) and 3 radians apart, at `t` = 0, ¼, ½ and 1: `1.7·10⁻¹⁶`. On 500 random pairs, `slerp` turns at a constant angular speed (the angle from `a` is `t` times the whole, to `10⁻¹³`), equals `a·(a⁻¹b)^t` to `10⁻¹⁴`, and `nlerp` stays on the same arc.
 - `magnitude`, and the magnitude of `r₀⁻¹·r₁`, for 12 random quaternions and pairs: `4.4·10⁻¹⁶` from `angle` and `angle_to`.
 - `align_vectors([a], [b])`, the shortest arc taking `b` to `a`, on 8 random pairs: `2.2·10⁻¹⁶`. On 500 random pairs, `from_rotation_arc` takes `â` to `b̂` to 16 units, by the angle between them (to `10⁻⁷`, the accuracy of the inverse cosine it is compared with) about an axis perpendicular to `â`; opposite and nearly opposite (`10⁻¹²`, `10⁻⁹`) pairs to `10⁻⁷`. At `π − δ` from `â`, with `δ` from `10⁻³` down to `1.4·√ε`, the arc is within `4ε/δ` of the exact rotation and takes `â` to within `8ε/δ` of `b̂`; at `0.7·√ε` and `0.5·√ε` it is the half turn about `â × e`, which takes `â` to within `δ` of `b̂`.
@@ -228,7 +228,7 @@ To run the tests: `cargo test --test math -- quaternion::rotation`. The data fil
 - `from_rotation_matrix` does not orthogonalise: a matrix within `δ` of a rotation gives a quaternion within about `δ` of that rotation's, not the nearest rotation that SciPy (by an SVD) and nalgebra's `from_matrix` (iteratively) find, and a scaled rotation is not recognised as one: `(1 + η)·R` moves the quaternion by up to about `0.43·η` (`4.2·10⁻⁴` at most for `η = 10⁻³` over 2,000 rotations). A reflection or another matrix far from a rotation gives a unit quaternion with no meaning; SciPy refuses a matrix of determinant ≤ 0.
 - The axis of `to_axis_angle` and the direction of `from_rotation_arc` are ill-conditioned near a half turn and near opposite directions, as the problems are: the error grows like `ε/δ` at a distance `δ` from them, and within `√ε` of opposite directions, where `1 + â·b̂` is rounding alone, `from_rotation_arc` takes the half turn about a fixed perpendicular axis.
 - `rotate` may overflow in its intermediate products for vectors longer than about a sixty-fourth of the largest float.
-- Nothing is tuned: every method that reads a rotation checks the norm on each call, and slerp normalises both ends.
+- Every method that reads a rotation checks the norm on each call, and slerp normalises both ends (see [Measured](#measured)).
 
 ## Euler angles
 
@@ -286,6 +286,100 @@ To run the tests: `cargo test --test math -- quaternion::euler`.
 - SciPy brings every angle into `[−π, π)` by a remainder, so it gives `−π` where `to_euler` gives `π` (the middle angle of a proper sequence at a half turn included), and its remainder rounds the angles by up to `4·10⁻¹⁶`; the two are the same rotation.
 - The gimbal tolerance is SciPy's `10⁻⁷` for `f32` too, below the spacing of `f32` floats near `π`: for `f32` the lock is taken only where the middle angle rounds to its singular value, and next to it the first and third angles are ill-conditioned, though they still give the rotation.
 - Within `10⁻⁷` of the lock the returned angles give the rotation only to about `10⁻⁷`, as SciPy's do.
+
+## Measured
+
+Measured on an Apple M4 Max (macOS 27.2) on 2026-11-26 between 07:55 and 07:57, with nothing else running: the areas of the release's final run were timed one after another, and every timed process ran alone on the machine. One thread; `a` as a user builds it, `cargo build --release` with the default profile (opt-level 3, no LTO, the default codegen units, no `target-cpu`), on Rust 1.100.0 stable, and the Rust references the same way, by the harness in the repository's [`bench/numtypes`](../../../bench/numtypes) (see [`bench/README.md`](../../../bench/README.md)). Each figure is the median time an operation of 21 samples of at least 1.5 ms, each a pass over a pool of fresh random inputs (64 bytes to 96 KiB), all the contenders of a row alternating sample by sample in one process; every reference's results were compared with `a`'s on the whole pool before the timing, to `10⁻¹²` relative for `f64` and `2·10⁻⁵` for `f32`, up to the sign of a quaternion read as a rotation. Each row gives the fastest reference that does the same work, its time and `a`'s time over it: below 1, `a` is faster. Times below a nanosecond are a few cycles, and their spreads are wide. The references: glam 0.33.12 (`Quat` and `DQuat`, NEON for `f32`) and nalgebra 0.35.0 (`Quaternion` and `UnitQuaternion`), which store the scalar part last.
+
+### Algebra, rotations and Euler angles
+
+The algebra on random quaternions, and the conversions of rotation vectors and Euler angles, which do the same work on every side:
+
+| Operation | Type | `a` | Fastest | Its time | `a`/fastest |
+| --- | --- | ---: | --- | ---: | ---: |
+| `a * b` | `f32` | 1.11 ns | glam | 1.30 ns | 0.85 |
+|  | `f64` | 1.91 ns | nalgebra | 1.58 ns | 1.21 |
+| `normalize` | `f32` | 0.939 ns | glam | 1.07 ns | 0.88 |
+|  | `f64` | 1.70 ns | nalgebra | 1.47 ns | 1.15 |
+| `norm` | `f32` | 0.665 ns | glam | 0.525 ns | 1.26 |
+|  | `f64` | 0.758 ns | glam | 0.740 ns | 1.02 |
+| `recip` | `f32` | 1.08 ns | nalgebra | 1.41 ns | 0.77 |
+|  | `f64` | 2.19 ns | nalgebra | 0.883 ns | 2.48 |
+| `a / b` | `f32` | 3.63 ns | nalgebra | 2.29 ns | 1.59 |
+|  | `f64` | 3.34 ns | nalgebra | 2.67 ns | 1.25 |
+| `dot` | `f32` | 0.627 ns | glam | 0.375 ns | 1.67 |
+|  | `f64` | 0.619 ns | glam | 0.619 ns | 1.00 |
+| `exp` | `f32` | 6.39 ns | nalgebra | 4.91 ns | 1.30 |
+|  | `f64` | 7.62 ns | nalgebra | 6.15 ns | 1.24 |
+| `ln` | `f32` | 10.3 ns | nalgebra | 4.12 ns | 2.50 |
+|  | `f64` | 13.4 ns | nalgebra | 5.38 ns | 2.50 |
+| `sqrt` | `f32` | 5.17 ns | nalgebra | 9.19 ns | 0.56 |
+|  | `f64` | 5.89 ns | nalgebra | 13.7 ns | 0.43 |
+| `powf` | `f32` | 26.9 ns | nalgebra | 8.82 ns | 3.05 |
+|  | `f64` | 28.8 ns | nalgebra | 13.8 ns | 2.09 |
+| `from_rotation_vector` | `f32` | 6.10 ns | nalgebra | 3.17 ns | 1.92 |
+|  | `f64` | 7.67 ns | nalgebra | 5.56 ns | 1.38 |
+| `from_euler` | `f32`, XYZ intrinsic | 11.2 ns | glam | 8.50 ns | 1.32 |
+|  | `f32`, ZYX intrinsic | 11.4 ns | glam | 7.92 ns | 1.44 |
+|  | `f32`, XYZ extrinsic | 11.1 ns | nalgebra | 6.46 ns | 1.71 |
+|  | `f32`, ZXZ intrinsic | 11.0 ns | glam | 8.18 ns | 1.34 |
+|  | `f64`, XYZ intrinsic | 20.7 ns | glam | 17.2 ns | 1.20 |
+|  | `f64`, ZYX intrinsic | 20.8 ns | glam | 17.0 ns | 1.22 |
+|  | `f64`, XYZ extrinsic | 20.4 ns | nalgebra | 14.6 ns | 1.40 |
+|  | `f64`, ZXZ intrinsic | 21.8 ns | glam | 15.7 ns | 1.39 |
+| `to_euler` | `f32`, XYZ intrinsic | 10.9 ns | glam | 11.3 ns | 0.96 |
+|  | `f32`, ZYX intrinsic | 11.2 ns | glam | 10.3 ns | 1.10 |
+|  | `f32`, XYZ extrinsic | 10.7 ns | nalgebra | 8.51 ns | 1.25 |
+|  | `f32`, ZXZ intrinsic | 11.0 ns | glam | 12.0 ns | 0.92 |
+|  | `f64`, XYZ intrinsic | 21.8 ns | glam | 20.3 ns | 1.07 |
+|  | `f64`, ZYX intrinsic | 21.6 ns | glam | 19.0 ns | 1.14 |
+|  | `f64`, XYZ extrinsic | 21.6 ns | glam | 19.6 ns | 1.10 |
+|  | `f64`, ZXZ intrinsic | 21.6 ns | glam | 20.6 ns | 1.05 |
+
+The rotations, against references that take every quaternion as a unit one (glam's `Quat` and nalgebra's `UnitQuaternion`, and their unit axes and vectors) where `a` reads any quaternion as `q/|q|`, so the references do less, and these rows are not counted. The inputs are unit quaternions, axes and vectors; `to_matrix` and `from_matrix` take a 3 × 3 `Matrix<T>` of [`a::math::matrix`](matrix.md), on the heap; glam's `angle_between` is an inverse cosine of the dot product, `a`'s `angle_to` an `atan2`, accurate near 0 and π:
+
+| Operation | Type | `a` | glam | `a`/glam | nalgebra | `a`/nalgebra |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `rotate` | `f32` | 2.83 ns | 1.94 ns | 1.46 | 1.89 ns | 1.50 |
+|  | `f64` | 2.86 ns | 2.41 ns | 1.19 | 1.88 ns | 1.52 |
+| `rotate_inverse` | `f32` | 2.74 ns | 2.02 ns | 1.36 | 1.88 ns | 1.46 |
+|  | `f64` | 2.77 ns | 2.43 ns | 1.14 | 1.90 ns | 1.46 |
+| `slerp` | `f32` | 13.1 ns | 4.67 ns | 2.81 | 5.86 ns | 2.24 |
+|  | `f64` | 24.1 ns | 11.5 ns | 2.09 | 8.67 ns | 2.77 |
+| `nlerp` | `f32` | 4.57 ns | 1.32 ns | 3.45 | 1.38 ns | 3.32 |
+|  | `f64` | 7.21 ns | 1.95 ns | 3.70 | 1.57 ns | 4.59 |
+| `angle_to` | `f32` | 8.02 ns | 1.96 ns | 4.09 | 4.48 ns | 1.79 |
+|  | `f64` | 9.87 ns | 3.05 ns | 3.23 | 7.16 ns | 1.38 |
+| `angle` | `f32` | 4.92 ns | 2.84 ns | 1.73 | 2.91 ns | 1.69 |
+|  | `f64` | 6.50 ns | 5.75 ns | 1.13 | 5.57 ns | 1.17 |
+| `to_rotation_matrix` | `f32` | 5.00 ns | 1.65 ns | 3.04 | 1.88 ns | 2.66 |
+|  | `f64` | 5.25 ns | 1.57 ns | 3.33 | 1.91 ns | 2.75 |
+| `to_matrix` | `f32` | 18.2 ns | 1.66 ns | 11 | 1.90 ns | 9.60 |
+|  | `f64` | 19.0 ns | 1.58 ns | 12 | 1.91 ns | 9.99 |
+| `from_rotation_matrix` | `f32` | 3.57 ns | 5.15 ns | 0.69 | 1.92 ns | 1.86 |
+|  | `f64` | 5.08 ns | 2.63 ns | 1.93 | 2.13 ns | 2.39 |
+| `from_matrix` | `f32` | 4.43 ns | 4.99 ns | 0.89 | 1.91 ns | 2.32 |
+|  | `f64` | 5.75 ns | 2.69 ns | 2.14 | 2.17 ns | 2.65 |
+| `from_axis_angle` | `f32` | 3.80 ns | 2.47 ns | 1.54 | 2.20 ns | 1.73 |
+|  | `f64` | 6.06 ns | 4.52 ns | 1.34 | 4.36 ns | 1.39 |
+| `to_axis_angle` | `f32` | 8.86 ns | 3.28 ns | 2.70 | 4.21 ns | 2.10 |
+|  | `f64` | 13.3 ns | 5.92 ns | 2.24 | 6.88 ns | 1.93 |
+| `to_rotation_vector` | `f32` | 10.4 ns | 3.33 ns | 3.12 | 4.40 ns | 2.36 |
+|  | `f64` | 11.7 ns | 6.34 ns | 1.84 | 7.13 ns | 1.63 |
+| `from_rotation_arc` | `f32` | 7.97 ns | 2.17 ns | 3.66 | 7.76 ns | 1.03 |
+|  | `f64` | 10.5 ns | 2.11 ns | 4.97 | 10.5 ns | 1.00 |
+
+- `sqrt` takes 0.43 to 0.56 of nalgebra's time, `mul` in `f32` 0.85 of glam's (NEON lanes, bit for bit the plain formula's results) and `normalize` in `f32` 0.88; `to_euler` takes 0.92 to 1.25 of the fastest reference's time.
+- Against the references that take unit inputs, the rotations take 0.69 to 12 times their time: the norm of the quaternion read on each call (its square, a quotient `2/|q|²` for the three parts, and the scaling where it is far from 1), both ends of `slerp` and `nlerp` normalised, angles by `atan2`, and `to_matrix` a heap `Matrix`; `from_rotation_arc` is at par with nalgebra (1.00 to 1.03).
+
+### Where the references are faster
+
+Every case above 1.05 times the fastest same-work reference's time, by cause: 28 of the 38 cases that have one.
+
+- **The products, norms and quotients** (`f64` `mul` 1.21 and `normalize` 1.15 against nalgebra; `f32` `norm` 1.26 and `dot` 1.67 against glam's NEON; `recip` and `a / b` 1.25 to 2.48 against nalgebra): every product checks that its parts are finite and every norm and quotient the range of the squared norm, the paths that keep overflowing products and quotients accurate; scalar code in `f64` and in `norm` and `dot`, where glam's `f32` is NEON.
+- **`exp`, `ln` and `powf`** (1.24 to 3.05 against nalgebra): the overflow-safe paths of `ln` (the largest part found, `ln_1p` near 1, the vector part scaled) and of `exp` run on every call, where nalgebra's `ln` is `ln|q| + acos(w/|q|)·v̂`; `powf` is `exp(t·ln q)` on them.
+- **Rotation vectors and Euler angles** (`from_rotation_vector` 1.38 to 1.92, `from_euler` 1.20 to 1.71, `to_euler` 1.07 to 1.25): `from_euler` is generic over the 24 conventions (three half-angle `sin_cos` and two checked products), against closed forms for each of glam's and nalgebra's; `to_euler` is Bernardes and Viollet's general method, `from_rotation_vector` scales its vector to keep tiny angles' digits.
+
 
 ## Efficiency
 

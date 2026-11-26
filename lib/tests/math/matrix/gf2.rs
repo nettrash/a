@@ -479,8 +479,8 @@ fn products_match_m4ri_on_the_reference_cases() {
     }
 }
 
-/// The product of two 4096 × 4096 matrices, one level of Strassen–Winograd: about two seconds in
-/// the debug profile here, more on CI, so it runs on request.
+/// The product of two 4096 × 4096 matrices by M4RM, below the crossover of Strassen–Winograd:
+/// about two seconds in the debug profile here, more on CI, so it runs on request.
 #[test]
 #[ignore = "a 4096 × 4096 product; run with --ignored"]
 fn the_product_of_4096_square_matrices_matches_m4ri() {
@@ -545,6 +545,32 @@ fn strassen_winograd_products_of_peeled_shapes_match_the_schoolbook_product() {
                 "{m} × {l} × {n} from {cutoff}"
             );
         }
+    }
+}
+
+#[test]
+fn products_of_wide_matrices_take_the_columns_in_blocks() {
+    // From 512 rows M4RM takes groups of 8 rows of `B`, whose eight tables hold 2^19 words: the
+    // columns of `B` and `C` go in blocks of 256 words, so 16700 columns (261 words) are a block
+    // of 256 words and one of 5. Against the product of the transposes, whose 512 columns are one
+    // block, and against the definition in a few places.
+    let (m, l, n) = if cfg!(miri) {
+        (8, 3, 70)
+    } else {
+        (512, 70, 16700)
+    };
+    let a = generate("dense", m, l, 21);
+    let b = generate("dense", l, n, 22);
+    let c = &a * &b;
+    assert_eq!((&b.transpose() * &a.transpose()).transpose(), c);
+    let mut s = 23u64;
+    for _ in 0..200 {
+        let (i, j) = (
+            (next(&mut s) % m as u64) as usize,
+            (next(&mut s) % n as u64) as usize,
+        );
+        let x = (0..l).fold(false, |x, k| x ^ (a.get(i, k) & b.get(k, j)));
+        assert_eq!(c.get(i, j), x, "({i}, {j})");
     }
 }
 

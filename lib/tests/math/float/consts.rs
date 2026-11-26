@@ -320,3 +320,130 @@ fn constants_at_small_precisions() {
     assert_eq!(BigFloat::pi(1), BigFloat::from(4));
     assert_eq!(BigFloat::pi_round(1, Round::Down).0, BigFloat::from(2));
 }
+
+/// The forms into an existing number (`set_pi` and the others) give the value and the direction
+/// of the forms with a new result, whatever the number held: NaN, a zero, a number of the
+/// precision (its vector reused, one or two limbs or more) or one of another precision first;
+/// and both are MPFR's, the rounding of its long floor ([`FLOORS`], [`from_floor`]), around the
+/// tables' end (16,384 bits after the point) and past it too.
+#[test]
+fn set_forms_agree_with_the_new_results() {
+    type Set = fn(&mut BigFloat, Round) -> Ordering;
+    let all: [(&str, Set); 6] = [
+        ("pi", BigFloat::set_pi),
+        ("e", BigFloat::set_e),
+        ("ln2", BigFloat::set_ln2),
+        ("euler", BigFloat::set_euler_gamma),
+        ("catalan", BigFloat::set_catalan),
+        ("ln10", BigFloat::set_ln10),
+    ];
+    let mut decided = 0;
+    for (name, set) in all {
+        let f = function(name);
+        let floor = FLOORS
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| l.strip_prefix(name).and_then(|d| d.strip_prefix(' ')))
+            .map(hex)
+            .unwrap();
+        for prec in [
+            1, 2, 24, 53, 63, 64, 65, 113, 127, 128, 129, 256, 1000, 16_000, 16_320, 16_383,
+            16_384, 16_385, 16_448, 16_800, 20_000, 30_001,
+        ] {
+            for round in MODES {
+                let (want, o) = f(prec, round);
+                let mpfr = from_floor(&floor, FLOOR_BITS, prec, round).unwrap();
+                same(
+                    &(want.clone(), o),
+                    &mpfr,
+                    &format!("{name} {prec} {round:?}"),
+                );
+                decided += 1;
+                let starts = [
+                    BigFloat::nan(prec),
+                    BigFloat::zero(prec),
+                    BigFloat::from(-3).with_prec(prec),
+                    BigFloat::from(0.1).prec_round(prec, Round::Nearest).0,
+                ];
+                for mut x in starts {
+                    let d = set(&mut x, round);
+                    same(
+                        &(x, d),
+                        &(want.clone(), o),
+                        &format!("set_{name} {prec} {round:?}"),
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(decided, 6 * 22 * 4);
+}
+
+/// The panic for a precision outside `MIN_PREC..=MAX_PREC` is reported at the caller's line for
+/// every constant, both forms (`#[track_caller]` down to the precision's check): a hook, set once
+/// and kept, records the location of the panics of a thread while it asks for them and passes the
+/// others to the hook before it.
+#[test]
+fn constants_report_an_invalid_precision_at_the_callers_line() {
+    use std::cell::RefCell;
+    use std::panic;
+    use std::sync::Once;
+    thread_local! {
+        /// The locations of this thread's panics, while recorded.
+        static SEEN: RefCell<Option<Vec<(String, u32)>>> = const { RefCell::new(None) };
+    }
+    static HOOK: Once = Once::new();
+    HOOK.call_once(|| {
+        let before = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let kept = SEEN.with(|s| match (&mut *s.borrow_mut(), info.location()) {
+                (Some(v), Some(l)) => {
+                    v.push((l.file().to_string(), l.line()));
+                    true
+                }
+                _ => false,
+            });
+            if !kept {
+                before(info);
+            }
+        }));
+    });
+    // Each call and the line it is on.
+    macro_rules! at {
+        ($e:expr) => {
+            (line!(), (|| drop($e)) as fn())
+        };
+    }
+    const BIG: u64 = BigFloat::MAX_PREC + 1;
+    let calls = [
+        at!(BigFloat::pi_round(0, Round::Nearest)),
+        at!(BigFloat::e_round(0, Round::Up)),
+        at!(BigFloat::ln2_round(0, Round::Down)),
+        at!(BigFloat::ln10_round(0, Round::TowardZero)),
+        at!(BigFloat::euler_gamma_round(0, Round::Nearest)),
+        at!(BigFloat::catalan_round(0, Round::Nearest)),
+        at!(BigFloat::pi(0)),
+        at!(BigFloat::e(0)),
+        at!(BigFloat::ln2(0)),
+        at!(BigFloat::ln10(0)),
+        at!(BigFloat::euler_gamma(0)),
+        at!(BigFloat::catalan(0)),
+        at!(BigFloat::pi_round(BIG, Round::Nearest)),
+        at!(BigFloat::catalan(BIG)),
+    ];
+    SEEN.with(|s| *s.borrow_mut() = Some(Vec::new()));
+    let panicked: Vec<bool> = calls
+        .iter()
+        .map(|&(_, f)| panic::catch_unwind(f).is_err())
+        .collect();
+    let seen = SEEN.with(|s| s.borrow_mut().take()).unwrap();
+    assert!(panicked.iter().all(|&p| p), "{panicked:?}");
+    assert_eq!(seen.len(), calls.len());
+    for ((file, line), &(want, _)) in seen.iter().zip(&calls) {
+        assert!(
+            file.ends_with("consts.rs") && file.contains("tests"),
+            "{file}:{line}, not the caller's"
+        );
+        assert_eq!(*line, want, "{file}");
+    }
+}

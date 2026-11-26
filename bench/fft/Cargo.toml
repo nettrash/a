@@ -1,0 +1,24 @@
+[package]
+name = "fftbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A probe crate: the crate `a` as a user gets it (path dependency, default release profile)
+# against FFTW 3 (FFI), rustfft, realfft, rustdct and, on macOS, Accelerate's vDSP.
+[dependencies]
+nettrash-a = { path = "../../lib" }
+rustfft = "=6.4.1"
+realfft = "=3.5.1"
+rustdct = "=0.7.1"
+
+[profile.release]
+# The default release profile (opt-level 3, no LTO, default codegen units, no target-cpu).
+
+# Optional second figure: fat LTO, one codegen unit (`PROFILE=fat bench/run.sh`).
+[profile.fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

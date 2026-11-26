@@ -35,7 +35,7 @@ use crate::math::float::round::round_mag;
 use crate::math::float::small::{add2, div2, mul2, round_top2, wide};
 use crate::math::float::sqrt_small;
 use crate::math::float::ziv::{Approx, guard, round_approx};
-use crate::math::float::{BigFloat, Kind, Round};
+use crate::math::float::{BigFloat, Kind, Mant, Round};
 use core::cmp::Ordering;
 
 /// `±∞` of the precision.
@@ -145,17 +145,22 @@ pub(super) fn root_into(out: &mut BigComplex, z: &BigComplex, round: (Round, Rou
 
 /// A number of the precision `prec` to compute in, its mantissa a vector of the thread's pool.
 fn scratch(prec: u64) -> BigFloat {
-    let mut v = fast::pool_take();
-    v.clear();
-    v.resize(prec.div_ceil(64) as usize, 0);
-    let n = v.len();
-    v[n - 1] = 1 << 63;
+    let n = prec.div_ceil(64) as usize;
+    let mut mant = if n <= 2 {
+        Mant::zeroed(n)
+    } else {
+        let mut v = fast::pool_take();
+        v.clear();
+        v.resize(n, 0);
+        Mant::Heap(v)
+    };
+    mant[n - 1] = 1 << 63;
     BigFloat {
         prec,
         kind: Kind::Finite {
             negative: false,
             exp: 0,
-            mant: v,
+            mant,
         },
     }
 }
@@ -163,7 +168,7 @@ fn scratch(prec: u64) -> BigFloat {
 /// Gives the vector of a number of [`scratch`] back to the pool.
 fn release(x: BigFloat) {
     if let Kind::Finite { mant, .. } = x.kind {
-        fast::pool_give(mant);
+        fast::pool_give_mant(mant);
     }
 }
 
@@ -463,7 +468,7 @@ fn far_root(
             kind: Kind::Finite {
                 negative: false,
                 exp: e as i64,
-                mant: m.to_vec(),
+                mant: Mant::from_slice(m),
             },
         }
     };

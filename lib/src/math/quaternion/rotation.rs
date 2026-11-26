@@ -8,7 +8,7 @@
 //! zero quaternion and one with a part that is not finite are no rotation, and give NaN.
 
 use super::Quaternion;
-use super::scale::{direction, exponent};
+use super::scale::{direction, exponent, length};
 use crate::math::complex::Float;
 use crate::math::matrix::Matrix;
 
@@ -24,6 +24,30 @@ fn cross<T: Float>(a: [T; 3], b: [T; 3]) -> [T; 3] {
 #[inline]
 fn dot<T: Float>(a: [T; 3], b: [T; 3]) -> T {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// `2/n` for the squared norm `n` of a rotation: exactly 2 for a unit quaternion, without the
+/// division.
+#[inline]
+fn twice_inverse<T: Float>(n: T) -> T {
+    if n == T::ONE { T::TWO } else { T::TWO / n }
+}
+
+/// Whether `|c| < √ε` for the cross product `c` of two unit vectors (so `|c| ≤ 1`): decided by
+/// `c·c` against `ε` but within a few rounding errors of it, where the `hypot` of the parts
+/// decides, as it did alone before.
+#[inline]
+fn near_zero<T: Float>(c: [T; 3]) -> bool {
+    let s = dot(c, c);
+    let e = T::EPSILON;
+    let margin = e * e * T::from_f64(8.0);
+    if s < e - margin {
+        true
+    } else if s > e + margin {
+        false
+    } else {
+        c[0].hypot(c[1]).hypot(c[2]) < e.sqrt()
+    }
 }
 
 impl<T: Float> Quaternion<T> {
@@ -129,9 +153,9 @@ impl<T: Float> Quaternion<T> {
     pub fn angle(self) -> T {
         match self.as_rotation() {
             None => T::NAN,
-            Some(q) => match direction(q.vector()) {
+            Some(q) => match length(q.vector()) {
                 None => T::ZERO,
-                Some((_, r)) => T::TWO * r.atan2(q.w.abs()),
+                Some(r) => T::TWO * r.atan2(q.w.abs()),
             },
         }
     }
@@ -189,11 +213,13 @@ impl<T: Float> Quaternion<T> {
         [x * T::TWO, y * T::TWO, z * T::TWO]
     }
 
-    /// The vector `v` rotated, `q·v·q⁻¹`, as `v + (w·t + u × t)/|q|²` for `t = 2·u × v` and the
-    /// vector part `u`, which is the rotation of `q/|q|` for any norm, and does not form the
-    /// products of two quaternions. A zero quaternion, or one with a part that is not finite,
-    /// gives NaN. For a vector longer than about a sixty-fourth of the largest float the
-    /// intermediate products may overflow.
+    /// The vector `v` rotated, `q·v·q⁻¹`, as `v + (w·t + u × t)·k` for `t = u × v`, the vector
+    /// part `u` and `k = 2/|q|²`, one quotient rounded once (exactly 2 for a unit quaternion),
+    /// which is the rotation of `q/|q|` for any norm, and does not form the products of two
+    /// quaternions. A zero quaternion, or one with a part that is not finite, gives NaN. For a
+    /// vector longer than a thirty-second of the largest float the intermediate products may
+    /// overflow (the quaternion is scaled to `|q|² ∈ [1/16, 16]`, so `|u| ≤ 4` and each part of
+    /// `w·t + u × t` is at most `32·|v|`).
     ///
     /// # Examples
     ///
@@ -215,15 +241,16 @@ impl<T: Float> Quaternion<T> {
         let Some(q) = self.as_rotation() else {
             return [T::NAN; 3];
         };
-        let n2 = q.norm_sqr();
+        // With t = u × v and c = u × t, the turn is v + 2·(w·t + c)/|q|²: one quotient 2/|q|²
+        // (exactly 2 for a unit quaternion) for the three parts.
+        let k = twice_inverse(q.norm_sqr());
         let u = q.vector();
         let t = cross(u, v);
-        let t = [t[0] * T::TWO, t[1] * T::TWO, t[2] * T::TWO];
         let c = cross(u, t);
         [
-            v[0] + (q.w * t[0] + c[0]) / n2,
-            v[1] + (q.w * t[1] + c[1]) / n2,
-            v[2] + (q.w * t[2] + c[2]) / n2,
+            v[0] + (q.w * t[0] + c[0]) * k,
+            v[1] + (q.w * t[1] + c[1]) * k,
+            v[2] + (q.w * t[2] + c[2]) * k,
         ]
     }
 
@@ -240,7 +267,20 @@ impl<T: Float> Quaternion<T> {
     /// assert!((v[0] - 4.0).abs() < 1e-14 && (v[1] - 5.0).abs() < 1e-14 && (v[2] - 6.0).abs() < 1e-14);
     /// ```
     pub fn rotate_inverse(&self, v: [T; 3]) -> [T; 3] {
-        self.conj().rotate(v)
+        // The turn of the conjugate: with u → −u, t = −(u × v) and c = u × (u × v) exactly, so
+        // v + 2·(c − w·(u × v))/|q|², the same values as `self.conj().rotate(v)`.
+        let Some(q) = self.as_rotation() else {
+            return [T::NAN; 3];
+        };
+        let k = twice_inverse(q.norm_sqr());
+        let u = q.vector();
+        let t = cross(u, v);
+        let c = cross(u, t);
+        [
+            v[0] + (-(q.w * t[0]) + c[0]) * k,
+            v[1] + (-(q.w * t[1]) + c[1]) * k,
+            v[2] + (-(q.w * t[2]) + c[2]) * k,
+        ]
     }
 
     /// The rotation matrix, its rows in the array: `R·v` is [`rotate`](Self::rotate)`(v)`, with
@@ -261,7 +301,7 @@ impl<T: Float> Quaternion<T> {
         let Some(q) = self.as_rotation() else {
             return [[T::NAN; 3]; 3];
         };
-        let s = T::TWO / q.norm_sqr();
+        let s = twice_inverse(q.norm_sqr());
         let (x2, y2, z2) = (q.x * s, q.y * s, q.z * s);
         let (xx, yy, zz) = (q.x * x2, q.y * y2, q.z * z2);
         let (xy, xz, yz) = (q.x * y2, q.x * z2, q.y * z2);
@@ -409,8 +449,8 @@ impl<T: Float> Quaternion<T> {
     /// assert!((a.slerp(-b, 0.25) - m).norm() < 1e-15);
     /// ```
     pub fn slerp(self, other: Self, t: T) -> Self {
-        let a = self.normalize();
-        let mut b = other.normalize();
+        let a = self.unit();
+        let mut b = other.unit();
         if a.dot(b) < T::ZERO {
             b = -b;
         }
@@ -442,8 +482,8 @@ impl<T: Float> Quaternion<T> {
     /// assert!((a.nlerp(b, 0.25).norm() - 1.0).abs() < 1e-15);
     /// ```
     pub fn nlerp(self, other: Self, t: T) -> Self {
-        let a = self.normalize();
-        let mut b = other.normalize();
+        let a = self.unit();
+        let mut b = other.unit();
         if a.dot(b) < T::ZERO {
             b = -b;
         }
@@ -468,10 +508,11 @@ impl<T: Float> Quaternion<T> {
         let (Some(p), Some(q)) = (self.as_rotation(), other.as_rotation()) else {
             return T::NAN;
         };
-        let d = p.conj() * q;
-        match direction(d.vector()) {
+        // Both are in range after `as_rotation`, so their product is finite.
+        let d = Self::hamilton(p.conj(), q);
+        match length(d.vector()) {
             None => T::ZERO,
-            Some((_, r)) => T::TWO * r.atan2(d.w.abs()),
+            Some(r) => T::TWO * r.atan2(d.w.abs()),
         }
     }
 
@@ -504,7 +545,7 @@ impl<T: Float> Quaternion<T> {
         };
         let d = dot(a, b);
         let c = cross(a, b);
-        if d < T::ZERO && c[0].hypot(c[1]).hypot(c[2]) < T::EPSILON.sqrt() {
+        if d < T::ZERO && near_zero(c) {
             let m = [a[0].abs(), a[1].abs(), a[2].abs()];
             let e = if m[0] <= m[1] && m[0] <= m[2] {
                 [T::ONE, T::ZERO, T::ZERO]

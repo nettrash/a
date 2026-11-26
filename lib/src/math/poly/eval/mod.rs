@@ -7,7 +7,7 @@ mod exact;
 mod kron;
 mod modtree;
 mod modular;
-mod mont;
+pub(crate) mod mont;
 pub(crate) mod tree;
 mod word;
 

@@ -68,11 +68,9 @@ use crate::math::matrix::Scalar;
 /// Only the pattern is read, as that of `A + Aᵀ` without its diagonal. On the graphs of meshes
 /// every level of the dissection costs about the stored elements times their logarithm, and since
 /// every cut leaves at least an eighth of a piece on either side there are at most
-/// `log n / log(8/7)` levels. The refinement works out the gain of a move afresh from all the
-/// neighbours of every vertex the move touches, though, so a vertex of high degree costs its
-/// degree at every move next to it. On a graph of many vertices with nearly `10·√n` neighbours,
-/// just short of being set aside, the time grows like `n^1.5`: on stars of that many leaves strung
-/// on a path, a graph 64 times larger takes some 560 times as long.
+/// `log n / log(8/7)` levels. The refinement keeps the gain of every vertex it has looked at up to
+/// date as vertices change sides, so a vertex of high degree costs its degree when it enters or
+/// leaves the separator, not at every move next to it.
 ///
 /// # Panics
 ///

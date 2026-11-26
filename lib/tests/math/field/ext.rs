@@ -300,10 +300,10 @@ fn aes_and_the_binomials_and_trinomials_of_the_first_choice() {
 }
 
 /// Fields of every kind for the identities: small and large primes, `p = 2` and `3`, degrees
-/// 1 to 40, sparse and dense polynomials, and both ways of the product on each side of the degree
-/// where they change, for the sizes of prime where that is cheap in the debug profile (40 for 2
-/// and 3, 20 for the other primes of a word and 10 with a dense `g`, 4 beyond nine limbs); the
-/// others are in [`product_paths`].
+/// 1 to 40, sparse and dense polynomials, both ways of the product on each side of the degree
+/// where they change beyond nine limbs (8), and both ways of the inverse over a prime of a word
+/// (the words up to 33 coefficients for 10⁹ + 7); the other changes of the product are in
+/// [`product_paths`].
 fn fields() -> Vec<ExtensionField> {
     let p = |v: u64| PrimeField::new(&n(v));
     let m = 1_000_000_007;
@@ -329,6 +329,8 @@ fn fields() -> Vec<ExtensionField> {
         ExtensionField::with_degree(&p(m), 8),
         ExtensionField::with_degree(&p(m), 19),
         ExtensionField::with_degree(&p(m), 20),
+        ExtensionField::with_degree(&p(m), 33),
+        ExtensionField::with_degree(&p(m), 34),
         // PARI's ffinit(10⁹ + 7, 5), x⁵ + x⁴ − 4x³ − 3x² + 3x + 1, with no zero coefficient, and
         // ffinit(10⁹ + 7, 10), Φ₁₁ = x¹⁰ + x⁹ + … + 1: dense, on each side of 10.
         ExtensionField::new(
@@ -340,7 +342,8 @@ fn fields() -> Vec<ExtensionField> {
         ExtensionField::with_degree(PrimeField::bls12_381_base(), 3),
         ExtensionField::with_degree(PrimeField::bls12_381_scalar(), 4),
         ExtensionField::with_degree(&p600, 3),
-        ExtensionField::with_degree(&p600, 4),
+        ExtensionField::with_degree(&p600, 7),
+        ExtensionField::with_degree(&p600, 8),
     ];
     // The fields by the first choice of 2 and 3 above have at most four terms below xᵏ, so their
     // products change ways at 40.
@@ -353,17 +356,41 @@ fn fields() -> Vec<ExtensionField> {
     v
 }
 
-/// Fields on each side of the degree where the products change ways, for primes of 2 to 9 limbs
-/// (48 for 2 to 8, 28 for 9), whose square roots and conjugates take long in the debug profile.
-fn product_paths() -> Vec<ExtensionField> {
+/// Fields on each side of the degree where the products change ways, for `p = 2` (320) and
+/// primes of 5 and 9 limbs (36 and 28), whose square roots and conjugates take long in the debug
+/// profile; with `long`, also for a prime of one word above `2⁶³` (160) and one of two limbs (130),
+/// and on each side of the degree up to which a prime of one word below `2⁶³` takes the words
+/// (256), whose irreducible polynomials take seconds to find in the debug profile.
+fn product_paths(long: bool) -> Vec<ExtensionField> {
     if miri() {
         return Vec::new();
     }
-    let p64 = PrimeField::new(&(&(n(1) << 64usize) + &n(13)));
+    let p = |v: u64| PrimeField::new(&n(v));
+    let next = |mut q: Number| {
+        while !q.is_probable_prime() {
+            q = &q + &n(2);
+        }
+        PrimeField::new(&q)
+    };
+    if long {
+        let p63 = next(&(n(1) << 63usize) + &n(1));
+        let p64 = PrimeField::new(&(&(n(1) << 64usize) + &n(13)));
+        return vec![
+            ExtensionField::with_degree(&p63, 159),
+            ExtensionField::with_degree(&p63, 160),
+            ExtensionField::with_degree(&p64, 129),
+            ExtensionField::with_degree(&p64, 130),
+            ExtensionField::with_degree(&p(1_000_000_007), 256),
+            ExtensionField::with_degree(&p(1_000_000_007), 257),
+        ];
+    }
+    let p320 = next(&(n(1) << 319usize) + &n(1));
     let p521 = PrimeField::new(&(&(n(1) << 521usize) - &n(1)));
     vec![
-        ExtensionField::with_degree(&p64, 47),
-        ExtensionField::with_degree(&p64, 48),
+        ExtensionField::with_degree(&p(2), 319),
+        ExtensionField::with_degree(&p(2), 320),
+        ExtensionField::with_degree(&p320, 35),
+        ExtensionField::with_degree(&p320, 36),
         ExtensionField::with_degree(&p521, 27),
         ExtensionField::with_degree(&p521, 28),
     ]
@@ -371,8 +398,19 @@ fn product_paths() -> Vec<ExtensionField> {
 
 #[test]
 fn both_ways_of_the_product_around_their_change_for_large_primes() {
+    both_ways_of_the_product(&product_paths(false));
+}
+
+/// The long fields of [`product_paths`]: about half a minute in a debug build, so ignored.
+#[test]
+#[ignore]
+fn both_ways_of_the_product_around_their_change_for_long_fields() {
+    both_ways_of_the_product(&product_paths(true));
+}
+
+fn both_ways_of_the_product(fields: &[ExtensionField]) {
     let mut rng = Rng(48);
-    for f in &product_paths() {
+    for f in fields {
         for _ in 0..2 {
             let (a, b, c) = (rng.element(f), rng.element(f), rng.element(f));
             assert_eq!(&(&a + &b) * &c, &(&a * &c) + &(&b * &c), "{f:?}");
@@ -980,4 +1018,261 @@ fn a_wrong_factorisation_panics() {
     // 3² − 1 = 8 = 2³, not 2².
     let _ =
         f.with_factored_unit_order(Factorization::new(vec![(n(2), 2)], ByteOrder::LittleEndian));
+}
+
+#[test]
+fn small_fields_by_tables_agree_with_polynomials() {
+    // Fields of at most 2^16 elements over a word prime (2^14 for k = 2 and 3) take the tables of
+    // logarithms: products, squares, inverses, powers, the Frobenius map, norms, characters, roots
+    // and orders against ModPolynomial arithmetic modulo g; all pairs in the smallest fields. The
+    // largest of k = 2 and 3 with tables, GF(127²) and GF(23³), and the smallest past the bound,
+    // GF(131²) and GF(29³), on the words, as GF(251²).
+    let cases: &[(u64, usize)] = if cfg!(miri) {
+        &[(2, 2), (3, 2), (5, 2)]
+    } else {
+        &[
+            (2, 2),
+            (3, 2),
+            (2, 8),
+            (3, 5),
+            (5, 3),
+            (7, 2),
+            (127, 2),
+            (131, 2),
+            (23, 3),
+            (29, 3),
+            (251, 2),
+            (13, 4),
+            (2, 16),
+        ]
+    };
+    for &(p, k) in cases {
+        let base = PrimeField::new(&Number::from(p));
+        let f = ExtensionField::with_degree(&base, k);
+        let q = p.pow(k as u32);
+        let g = f.modulus().clone();
+        let elem = |mut i: u64| {
+            let c: Vec<u64> = (0..k)
+                .map(|_| {
+                    let d = i % p;
+                    i /= p;
+                    d
+                })
+                .collect();
+            f.from_u64(&c)
+        };
+        let all = q <= 64;
+        let picks: Vec<u64> = if all {
+            (0..q).collect()
+        } else {
+            (0..40u64)
+                .map(|i| (i * 0x9e37_79b9 + 7) % q)
+                .chain([0, 1, q - 1])
+                .collect()
+        };
+        for &i in &picks {
+            let a = elem(i);
+            let pa = a.to_polynomial();
+            for &j in picks.iter().take(if all { picks.len() } else { 6 }) {
+                let b = elem(j);
+                assert_eq!(
+                    (&a * &b).to_polynomial(),
+                    pa.mul_mod(&b.to_polynomial(), &g)
+                );
+            }
+            assert_eq!(a.square().to_polynomial(), pa.mul_mod(&pa, &g));
+            let e = Number::from(i * 1_000_003 + 12_345);
+            assert_eq!(a.pow(&e).to_polynomial(), pa.pow_mod(&e, &g));
+            if a.is_zero() {
+                assert!(a.inverse().is_none() && a.multiplicative_order().is_none());
+                assert_eq!(a.norm(), base.zero());
+                continue;
+            }
+            assert!(
+                a.inverse()
+                    .unwrap()
+                    .to_polynomial()
+                    .mul_mod(&pa, &g)
+                    .is_one()
+            );
+            for fi in 0..=k {
+                let pf = pa.pow_mod(&Number::from(p).pow(fi as u32), &g);
+                assert_eq!(a.frobenius(fi).to_polynomial(), pf);
+            }
+            let nm = pa.pow_mod(&Number::from((q - 1) / (p - 1)), &g);
+            assert_eq!(f.from_base(&a.norm()).to_polynomial(), nm);
+            if p != 2 {
+                let square = pa.pow_mod(&Number::from((q - 1) / 2), &g).is_one();
+                assert_eq!(a.legendre(), if square { 1 } else { -1 });
+                match a.sqrt() {
+                    Some(r) => {
+                        assert!(square);
+                        assert_eq!(r.square(), a);
+                    }
+                    None => assert!(!square),
+                }
+            }
+            let o = a.multiplicative_order().unwrap();
+            assert!(pa.pow_mod(&o, &g).is_one());
+            assert_eq!(a.is_primitive(), o == q - 1);
+        }
+    }
+}
+
+#[test]
+fn the_tables_of_small_fields_hold_every_element_its_product_by_x_and_its_successor() {
+    // The tables of logarithms against the coefficients, for every element of fields of each shape
+    // of their construction: GF(2) by the powers of h (h = x, x + 1, …), odd p by the cosets of the
+    // powers of x (x primitive; x of a small order under a binomial, many cosets; x of a large
+    // order, a few), the largest of each kind, and polynomials other than the first choice. For
+    // each element a: its coefficients back from its logarithm, a·x (the logarithms' sum) against
+    // the shift of the coefficients reduced by g, and a + 1 (Zech's table) against the
+    // coefficients plus one.
+    let cases: &[(u64, &[u64])] = if cfg!(miri) {
+        &[(2, &[1, 1, 1]), (3, &[1, 0, 1]), (7, &[1, 0, 1])]
+    } else {
+        &[
+            (2, &[1, 1, 1]),                                           // x primitive
+            (2, &[1, 1, 0, 1]),                                        // x primitive
+            (2, &[1, 1, 0, 1, 1, 0, 0, 0, 1]),                         // AES's: x of order 51
+            (2, &[1, 0, 1, 1, 1, 0, 0, 0, 1]),                         // x primitive
+            (2, &[1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), // 2¹⁶: x of order 21845
+            (3, &[1, 0, 1]),                                           // x of order 4: 2 cosets
+            (3, &[1, 2, 0, 0, 0, 1]),                                  // x primitive
+            (3, &[2, 1, 1, 1, 2, 1]),                                  // dense: 2 cosets
+            (3, &[1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1]),                   // 3¹⁰: 122 cosets
+            (5, &[2, 0, 0, 0, 1]),                                     // a binomial: 39 cosets
+            (5, &[1, 1, 1, 1, 1, 1, 1]),                               // x⁷ = 1: 2232 cosets
+            (7, &[1, 0, 1]),                                           // x of order 4: 12 cosets
+            (7, &[2, 0, 0, 1]),                                        // 19 cosets
+            (7, &[1, 0, 1, 1]),                                        // a term in x^(k − 1)
+            (13, &[2, 0, 0, 0, 1]),                                    // 595 cosets
+            (17, &[3, 1, 0, 1]),                                       // x primitive
+            (17, &[8, 1, 0, 1]),                                       // 2 cosets
+            (127, &[1, 0, 1]),                                         // 127²: 4032 cosets
+            (127, &[3, 1, 1]),                                         // x primitive
+        ]
+    };
+    for &(p, gc) in cases {
+        let base = PrimeField::new(&Number::from(p));
+        let g = ModPolynomial::from_u64(gc, p);
+        let f = ExtensionField::new(&base, &g);
+        let k = gc.len() - 1;
+        let q = p.pow(k as u32);
+        let x = f.x();
+        let one = f.one();
+        let digits = |mut i: u64| -> Vec<u64> {
+            (0..k)
+                .map(|_| {
+                    let d = i % p;
+                    i /= p;
+                    d
+                })
+                .collect()
+        };
+        let values = |a: &Fpk<'_>| -> Vec<u64> {
+            a.coeffs()
+                .iter()
+                .map(|c| u64::try_from(&c.value()).unwrap())
+                .collect()
+        };
+        let step = if cfg!(miri) { q / 7 + 1 } else { 1 };
+        for i in (0..q).step_by(step as usize) {
+            let c = digits(i);
+            let a = f.from_u64(&c);
+            assert_eq!(values(&a), c, "GF({p}^{k}) by {g}: element {i}");
+            // c·x: the coefficients move up, the top one comes back as −t·(g − xᵏ).
+            let t = c[k - 1];
+            let mut cx: Vec<u64> = (0..k).map(|j| if j == 0 { 0 } else { c[j - 1] }).collect();
+            for (j, d) in cx.iter_mut().enumerate() {
+                *d = (*d + t * ((p - gc[j]) % p)) % p;
+            }
+            assert_eq!(values(&(&a * &x)), cx, "GF({p}^{k}) by {g}: x·({a})");
+            let mut c1 = c.clone();
+            c1[0] = (c1[0] + 1) % p;
+            assert_eq!(values(&(&a + &one)), c1, "GF({p}^{k}) by {g}: ({a}) + 1");
+            assert_eq!(values(&(&a - &one)), {
+                let mut c2 = c.clone();
+                c2[0] = (c2[0] + p - 1) % p;
+                c2
+            });
+        }
+    }
+}
+
+#[test]
+fn the_tables_made_on_the_first_use_are_shared_by_threads_and_copies() {
+    // The tables are made by whichever of four threads first makes an element, the others waiting
+    // for them, and a copy of the field taken before any use shares them: all compute the same
+    // values, those of a field made and used on its own.
+    let base = PrimeField::new(&Number::from(3u8));
+    let k = if cfg!(miri) { 2 } else { 7 };
+    let f = ExtensionField::with_degree(&base, k);
+    let copy = f.clone();
+    let values = |f: &ExtensionField, t: u64| -> Vec<Vec<Number>> {
+        (0..if cfg!(miri) { 3u64 } else { 50 })
+            .map(|i| {
+                let c: Vec<u64> = (0..k as u64).map(|j| (i * 7 + j * 3 + t) % 3).collect();
+                let a = f.from_u64(&c);
+                (&(&a * &a) + &f.one())
+                    .coeffs()
+                    .iter()
+                    .map(|x| x.value())
+                    .collect()
+            })
+            .collect()
+    };
+    let threads: Vec<Vec<Vec<Number>>> = std::thread::scope(|s| {
+        let runs: Vec<_> = (0..4u64)
+            .map(|t| {
+                let f = &f;
+                s.spawn(move || values(f, t))
+            })
+            .collect();
+        runs.into_iter().map(|r| r.join().unwrap()).collect()
+    });
+    let alone = ExtensionField::with_degree(&base, k);
+    for (t, v) in threads.iter().enumerate() {
+        assert_eq!(*v, values(&alone, t as u64), "thread {t}");
+        assert_eq!(*v, values(&copy, t as u64), "the copy, thread {t}");
+    }
+}
+
+#[test]
+fn products_over_word_primes_reduce_each_coefficient_once() {
+    // The schoolbook over a prime of one word sums an output coefficient's products in 128 bits and
+    // reduces once: from many products a reduction (10⁹ + 7) down to one (a prime just below 2⁶⁴).
+    for p in [1_000_000_007u64, (1 << 61) - 1, 18_446_744_073_709_551_557] {
+        let base = PrimeField::new(&Number::from(p));
+        for k in [2usize, 3, 7, 24, 64] {
+            if cfg!(miri) && k > 7 {
+                continue;
+            }
+            let f = ExtensionField::with_degree(&base, k);
+            let g = f.modulus().clone();
+            for s in 0..if cfg!(miri) { 2u64 } else { 30 } {
+                let x: Vec<u64> = (0..k as u64)
+                    .map(|i| (s * 7919 + i * 104_729).wrapping_mul(0x9e37_79b9_7f4a_7c15) % p)
+                    .collect();
+                let y: Vec<u64> = (0..k as u64)
+                    .map(|i| {
+                        if (s + i) % 5 == 0 {
+                            p - 1
+                        } else {
+                            (s ^ i).wrapping_mul(0xbf58_476d_1ce4_e5b9) % p
+                        }
+                    })
+                    .collect();
+                let (a, b) = (f.from_u64(&x), f.from_u64(&y));
+                assert_eq!(
+                    (&a * &b).to_polynomial(),
+                    a.to_polynomial().mul_mod(&b.to_polynomial(), &g)
+                );
+                assert_eq!(
+                    a.square().to_polynomial(),
+                    a.to_polynomial().mul_mod(&a.to_polynomial(), &g)
+                );
+            }
+        }
+    }
 }

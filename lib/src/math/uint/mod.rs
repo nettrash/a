@@ -15,9 +15,11 @@
 //!
 //! The arithmetic is the schoolbook one, as in the other fixed-width libraries (ruint,
 //! crypto-bigint, bnum): sums limb by limb with the carry, products in `O(N²)` limb products, and
-//! quotients by Knuth's algorithm D (*The Art of Computer Programming*, vol. 2, 4.3.1), with the
-//! quotient digit estimated from two limbs of the divisor, and by a plain loop for a divisor of one
-//! limb.
+//! quotients by Knuth's algorithm D (*The Art of Computer Programming*, vol. 2, 4.3.1), each
+//! quotient digit the quotient of three limbs by the divisor's top two, taken with its reciprocal
+//! (Möller and Granlund, *Improved division by invariant integers*, 2011), and for a divisor of one
+//! limb by a loop of 2-by-1 divisions with its reciprocal; square roots by Zimmermann's Karatsuba
+//! square root, about the cost of one such division.
 //!
 //! They convert to and from the primitive integers (`From` where every width holds the value,
 //! `TryFrom` with [`TryFromIntError`] elsewhere), to and from [`Number`](crate::math::numbers::Number)

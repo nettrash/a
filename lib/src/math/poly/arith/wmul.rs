@@ -653,6 +653,17 @@ pub(crate) fn sqr(a: &[u64], m: &WordMod) -> Vec<u64> {
 
 /// [`mul`] into `r`, of `la + lb - 1` coefficients.
 pub(crate) fn mul_into(r: &mut [u64], a: &[u64], b: &[u64], m: &WordMod) {
+    if m.n == 2 {
+        super::gf2::mul_into_words(r, a, b);
+        return;
+    }
+    mul_into_words(r, a, b, m);
+}
+
+/// [`mul_into`] by the methods on words of every modulus (the schoolbook method, Kronecker
+/// substitution, the transforms), the modulus 2 too: its products of long operands, where the
+/// transforms beat the packed products' Karatsuba method.
+pub(crate) fn mul_into_words(r: &mut [u64], a: &[u64], b: &[u64], m: &WordMod) {
     match method(a.len(), b.len(), m) {
         Method::School => school(r, a, b, m),
         Method::Kronecker => ks(r, a, b, m, &mut Vec::new()),
@@ -662,6 +673,10 @@ pub(crate) fn mul_into(r: &mut [u64], a: &[u64], b: &[u64], m: &WordMod) {
 
 /// [`sqr`] into `r`, of `2 la - 1` coefficients.
 pub(crate) fn sqr_into(r: &mut [u64], a: &[u64], m: &WordMod) {
+    if m.n == 2 {
+        super::gf2::mul_into_words(r, a, &[]);
+        return;
+    }
     match method(a.len(), 0, m) {
         Method::School => school_sqr(r, a, m),
         Method::Kronecker => ks(r, a, &[], m, &mut Vec::new()),
@@ -669,16 +684,43 @@ pub(crate) fn sqr_into(r: &mut [u64], a: &[u64], m: &WordMod) {
     }
 }
 
-/// The product of `a` and `b` modulo `x^l - 1` for `l = 2^k` at least both lengths, by the
-/// transforms when they are the method for operands this long; `None` otherwise.
-pub(crate) fn mul_cyclic(a: &[u64], b: &[u64], k: u32, m: &WordMod) -> Option<Vec<u64>> {
+/// The coefficients `0..len` of the product of `a` and `b` modulo `x^l - 1`, `l = 2^k` at least
+/// both lengths and `len`, by the transforms when they are the method for operands this long, the
+/// Chinese remainder theorem taken for those coefficients alone; `None` otherwise.
+pub(crate) fn mul_cyclic_low(
+    a: &[u64],
+    b: &[u64],
+    k: u32,
+    len: usize,
+    m: &WordMod,
+) -> Option<Vec<u64>> {
     let (la, lb) = (a.len(), b.len());
-    if method(la, lb, m) != Method::Transforms || !NEON && !cfg!(miri) {
+    if la == 0 || lb == 0 || method(la, lb, m) != Method::Transforms || !NEON && !cfg!(miri) {
         return None;
     }
     let p = nat::word_poly_plan_cyclic(la.min(lb), k, m.bits())?;
-    let mut r = vec![0u64; 1 << k];
-    nat::word_poly_mul_cyclic(&mut r, a, b, m.n, p);
+    let mut r = vec![0u64; len];
+    nat::word_poly_mul_cyclic_range(&mut r, a, b, m.n, p, 0);
+    Some(r)
+}
+
+/// The coefficients `lo..lo + len` of the product of `a` and `b` (not empty), exactly, by the
+/// transform of the fewest points whose wrapped coefficients land below `lo` (the middle product
+/// of Newton's iteration: for `lo = lb - 1`, `la` points where the product takes `la + lb`), when
+/// the transforms are the method for operands this long; `None` otherwise.
+pub(crate) fn mul_middle(
+    a: &[u64],
+    b: &[u64],
+    lo: usize,
+    len: usize,
+    m: &WordMod,
+) -> Option<Vec<u64>> {
+    let (la, lb) = (a.len(), b.len());
+    if la == 0 || lb == 0 || method(la, lb, m) != Method::Transforms || !NEON && !cfg!(miri) {
+        return None;
+    }
+    let mut r = vec![0u64; len];
+    nat::word_poly_mul_middle(&mut r, a, b, m.n, lo)?;
     Some(r)
 }
 
@@ -727,6 +769,15 @@ pub(crate) fn rem_school(
     let (la, ld) = (a.len(), d.len());
     if la < ld {
         let mut r = a.to_vec();
+        r.resize(ld - 1, 0);
+        return r;
+    }
+    if m.n == 2 {
+        let (qq, mut r) = super::gf2::div_rem_words(a, d);
+        if let Some(q) = q {
+            q.fill(0);
+            q[..qq.len()].copy_from_slice(&qq);
+        }
         r.resize(ld - 1, 0);
         return r;
     }
@@ -831,6 +882,13 @@ pub(crate) fn rem_school_in(
         a.resize(ld - 1, 0);
         return;
     }
+    if m.n == 2 {
+        let (_, r) = super::gf2::div_rem_words(a, d);
+        a.clear();
+        a.extend_from_slice(&r);
+        a.resize(ld - 1, 0);
+        return;
+    }
     let lq = la - ld + 1;
     let steps = lq.min(ld - 1) + 1;
     match acc(steps, m.n) {
@@ -895,9 +953,32 @@ pub(crate) fn rem_school_in(
     }
 }
 
-/// The value of the polynomial `a` at the residue `x`, by Horner's rule with Shoup's constant of
-/// `x`, in two chains (the even and the odd coefficients, in `x^2`) that the core overlaps.
+/// The value of the polynomial `a` at the residue `x`: from `2·BLOCK` coefficients by blocks,
+/// each a dot product with the powers of `x` reduced once, and Horner's rule in `x^BLOCK` over
+/// them; below, by Horner's rule with Shoup's constant of `x`, in two chains (the even and the
+/// odd coefficients, in `x^2`) that the core overlaps.
 pub(crate) fn eval(a: &[u64], x: u64, m: &WordMod) -> u64 {
+    // Measured on an Apple M4 Max (blocks of 16 to 128 against Horner's rule, 16 to 4,096
+    // coefficients, moduli of 16 to 64 bits): 32 from 64 coefficients kept, as every other
+    // single choice is slower somewhere: 16 up to 1.65 times faster below 512 coefficients but up
+    // to 1.35 times slower at 4,096, 64 and 96 the reverse; Horner's rule 1.5 times faster at 64
+    // coefficients for moduli below 2^63, the blocks 1.7 times faster there from 2^63.
+    const BLOCK: usize = 32;
+    if a.len() >= 2 * BLOCK {
+        // Blocks of BLOCK coefficients, each a dot product with the powers 1, x, …, x^(B-1),
+        // reduced once (independent, so they overlap), and Horner's rule in x^B over the blocks.
+        let mut pw = [0u64; BLOCK];
+        pw[0] = 1 % m.n;
+        for j in 1..BLOCK {
+            pw[j] = m.mul(pw[j - 1], x);
+        }
+        let xb = m.mul(pw[BLOCK - 1], x);
+        let mut v = 0u64;
+        for blk in a.chunks(BLOCK).rev() {
+            v = m.add(m.mul(v, xb), dot_mod(blk, &pw, m));
+        }
+        return v;
+    }
     if a.len() < 8 || m.n >> 63 != 0 {
         return a.iter().rev().fold(0, |v, &c| m.add(m.mul(v, x), c));
     }
@@ -924,12 +1005,48 @@ pub(crate) fn eval(a: &[u64], x: u64, m: &WordMod) -> u64 {
 /// divide and conquer beyond, `p = lo + x^h hi` giving `lo(g) + g^h hi(g)` with the powers
 /// `g^(2^i)` squared once. Not trimmed.
 pub(crate) fn compose(p: &[u64], g: &[u64], m: &WordMod) -> Vec<u64> {
+    if p.len() <= COMPOSE_HORNER && g.len() <= COMPOSE_HORNER {
+        return compose_horner(p, g, m);
+    }
     let mut pows = vec![g.to_vec()];
     while (1usize << pows.len()) < p.len() {
         let next = sqr(pows.last().expect("not empty"), m);
         pows.push(next);
     }
     compose_part(p, &pows, m)
+}
+
+/// Up to this length of both `p` and `g` the composition is Horner's rule in one buffer:
+/// measured on an Apple M4 Max (2 to 16 coefficients in each, moduli of 2 to 64 bits) up to 2.8
+/// times faster than the products of [`compose_part`] up to 6 coefficients in both for every
+/// modulus (as fast at 6 by 6 below 2^16), and slower from 6 by 7 below 2^16 (where the products
+/// go by Kronecker substitution); from 31 bits faster up to 12 coefficients in `p`.
+const COMPOSE_HORNER: usize = 6;
+
+/// `p(g)` by Horner's rule in one buffer, for `p` and `g` of at least two and at most
+/// [`COMPOSE_HORNER`] coefficients: each step `v·g + c` computed from the top coefficient down
+/// over `v`, whose coefficients below the one written are still those of `v`, each a dot product
+/// of a window of `v` with the reversed `g`, reduced once.
+fn compose_horner(p: &[u64], g: &[u64], m: &WordMod) -> Vec<u64> {
+    let lg = g.len();
+    let mut gr = [0u64; COMPOSE_HORNER];
+    for (r, &x) in gr[..lg].iter_mut().zip(g.iter().rev()) {
+        *r = x;
+    }
+    let mut v = vec![0u64; (p.len() - 1) * (lg - 1) + 1];
+    v[0] = p[p.len() - 1];
+    let mut l = 1usize;
+    for &c in p[..p.len() - 1].iter().rev() {
+        let nl = l + lg - 1;
+        for i in (0..nl).rev() {
+            // Σ v[i - j] g[j] for j0 ≤ j ≤ j1: v ascending from i - j1, gr from lg - 1 - j1.
+            let (j0, j1) = (i.saturating_sub(l - 1), i.min(lg - 1));
+            v[i] = dot_mod(&v[i - j1..=i - j0], &gr[lg - 1 - j1..=lg - 1 - j0], m);
+        }
+        v[0] = m.add(v[0], c);
+        l = nl;
+    }
+    v
 }
 
 /// [`compose`] of the coefficients `p` with `pows[i] = g^(2^i)`.

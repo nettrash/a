@@ -3,9 +3,8 @@
 
 use super::curve::{Family, PairingCurve};
 use super::error::PointError;
-use super::point::to_be_bytes;
-use crate::math::field::{Fp, Fp2, PrimeField};
-use crate::math::numbers::{ByteOrder, Number};
+use super::fast::{self, Engine};
+use crate::math::field::PrimeField;
 
 /// The ZCash flag of a compressed encoding.
 pub(super) const COMPRESSED: u8 = 0x80;
@@ -40,50 +39,6 @@ pub(super) fn field_bytes(f: &PrimeField) -> usize {
     f.bits().div_ceil(8) as usize
 }
 
-/// `x` in big-endian order, in [`field_bytes`].
-pub(super) fn fp_to_bytes(x: &Fp<'_>) -> Vec<u8> {
-    to_be_bytes(&x.value(), field_bytes(x.field()))
-}
-
-/// The element of the big-endian `bytes`, if it is below `p`.
-pub(super) fn fp_from_bytes<'f>(f: &'f PrimeField, bytes: &[u8]) -> Result<Fp<'f>, PointError> {
-    let n = Number::new(bytes.to_vec(), ByteOrder::BigEndian);
-    if &n >= f.modulus() {
-        return Err(PointError::NotInField);
-    }
-    Ok(f.element(&n))
-}
-
-/// Whether `y` is the larger of `±y`: above `(p − 1)/2`.
-pub(super) fn fp_is_largest(y: &Fp<'_>) -> bool {
-    let p = y.field().modulus();
-    y.value() * 2u8 > p - 1u8
-}
-
-/// ZCash's order on `F_p²`: `y` is the larger of `±y` if `c₁` is, or if `c₁ = 0` and `c₀` is.
-pub(super) fn fp2_is_largest(y: &Fp2<'_>) -> bool {
-    fp_is_largest(y.c1()) || (y.c1().is_zero() && fp_is_largest(y.c0()))
-}
-
-/// The bytes of an element of `F_p²` for ZCash, `c₁` first, as for Ethereum's EIP-197.
-pub(super) fn fp2_to_bytes(x: &Fp2<'_>) -> Vec<u8> {
-    let mut out = fp_to_bytes(x.c1());
-    out.extend(fp_to_bytes(x.c0()));
-    out
-}
-
-/// The element of `F_p²` of `c₁ ‖ c₀`, each below `p`.
-pub(super) fn fp2_from_bytes<'c>(
-    curve: &'c PairingCurve,
-    bytes: &[u8],
-) -> Result<Fp2<'c>, PointError> {
-    let n = bytes.len() / 2;
-    let f = curve.base_field();
-    let c1 = fp_from_bytes(f, &bytes[..n])?;
-    let c0 = fp_from_bytes(f, &bytes[n..])?;
-    Ok(Fp2::new(curve.tower(), c0, c1))
-}
-
 /// The three flags of the first byte of a ZCash encoding, and the bytes with them cleared.
 pub(super) fn zcash_flags(bytes: &[u8]) -> (bool, bool, bool, Vec<u8>) {
     let mut b = bytes.to_vec();
@@ -95,4 +50,97 @@ pub(super) fn zcash_flags(bytes: &[u8]) -> (bool, bool, bool, Vec<u8>) {
         flags & SORT != 0,
         b,
     )
+}
+
+/// An element of the engine's `F_p` from big-endian bytes, `Err(NotInField)` unless below `p`.
+pub(super) fn fast_fp_from_be<E: Engine<N>, const N: usize>(
+    bytes: &[u8],
+) -> Result<fast::Fp<E, N>, PointError> {
+    let mut l = [0u64; N];
+    if bytes.len() == 8 * N {
+        // The usual length: big-endian words from the end, no copy.
+        for (i, w) in l.iter_mut().enumerate() {
+            let at = bytes.len() - 8 * (i + 1);
+            *w = u64::from_be_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
+        }
+        return below_p::<E, N>(l);
+    }
+    let mut le = bytes.to_vec();
+    le.reverse();
+    for (i, chunk) in le.chunks(8).enumerate() {
+        let mut w = [0u8; 8];
+        w[..chunk.len()].copy_from_slice(chunk);
+        if i >= N {
+            if w != [0; 8] {
+                return Err(PointError::NotInField);
+            }
+            continue;
+        }
+        l[i] = u64::from_le_bytes(w);
+    }
+    below_p::<E, N>(l)
+}
+
+/// The element of the canonical limbs `l`, `Err(NotInField)` unless below `p`.
+fn below_p<E: Engine<N>, const N: usize>(l: [u64; N]) -> Result<fast::Fp<E, N>, PointError> {
+    // Compare from the top limb.
+    for i in (0..N).rev() {
+        match l[i].cmp(&E::P[i]) {
+            core::cmp::Ordering::Less => return Ok(fast::Fp::from_canonical(l)),
+            core::cmp::Ordering::Greater => return Err(PointError::NotInField),
+            core::cmp::Ordering::Equal => {}
+        }
+    }
+    Err(PointError::NotInField)
+}
+
+/// The big-endian bytes of an element of the engine's `F_p`, `len` of them.
+pub(super) fn fast_fp_to_be<E: Engine<N>, const N: usize>(
+    x: &fast::Fp<E, N>,
+    len: usize,
+) -> Vec<u8> {
+    let c = x.canonical();
+    let mut le: Vec<u8> = c.iter().flat_map(|l| l.to_le_bytes()).collect();
+    le.truncate(len);
+    le.reverse();
+    le
+}
+
+/// Whether `y` is the larger of `±y`: above `(p − 1)/2`.
+pub(super) fn fast_fp_is_largest<E: Engine<N>, const N: usize>(y: &fast::Fp<E, N>) -> bool {
+    let c = y.canonical();
+    let half = &E::tables().legendre_exp;
+    for i in (0..N).rev() {
+        match c[i].cmp(&half[i]) {
+            core::cmp::Ordering::Greater => return true,
+            core::cmp::Ordering::Less => return false,
+            core::cmp::Ordering::Equal => {}
+        }
+    }
+    false
+}
+
+/// ZCash's order on `F_p²`: by `y₁`, then by `y₀` when `y₁ = 0`.
+pub(super) fn fast_fp2_is_largest<E: Engine<N>, const N: usize>(y: &fast::Fp2<E, N>) -> bool {
+    fast_fp_is_largest(&y.c1) || (y.c1.is_zero() && fast_fp_is_largest(&y.c0))
+}
+
+/// `x₁ ‖ x₀` in big-endian bytes, `len` each.
+pub(super) fn fast_fp2_to_be<E: Engine<N>, const N: usize>(
+    x: &fast::Fp2<E, N>,
+    len: usize,
+) -> Vec<u8> {
+    let mut out = fast_fp_to_be(&x.c1, len);
+    out.extend(fast_fp_to_be(&x.c0, len));
+    out
+}
+
+/// An element of `F_p²` from `x₁ ‖ x₀`.
+pub(super) fn fast_fp2_from_be<E: Engine<N>, const N: usize>(
+    bytes: &[u8],
+) -> Result<fast::Fp2<E, N>, PointError> {
+    let n = bytes.len() / 2;
+    let c1 = fast_fp_from_be(&bytes[..n])?;
+    let c0 = fast_fp_from_be(&bytes[n..])?;
+    Ok(fast::Fp2::new(c0, c1))
 }

@@ -55,6 +55,14 @@ struct Weights {
 }
 
 impl Weights {
+    /// The table, computed once: the weights depend on nothing but the level, and computing all
+    /// four levels by the cosine series costs about 44,000 cosines, far more than the
+    /// integration of a smooth integrand.
+    fn get() -> &'static Self {
+        static TABLE: std::sync::OnceLock<Weights> = std::sync::OnceLock::new();
+        TABLE.get_or_init(Self::new)
+    }
+
     fn new() -> Self {
         let by_level = (0..=LAST)
             .map(|m| {
@@ -355,7 +363,11 @@ fn interpolant(values: &[f64], n: usize, u: f64) -> f64 {
 }
 
 /// The values of `f` at the two points off the grid of the panel on `[a, b]`.
-fn off_grid<T: Real>(f: &mut Integrand<'_, T>, a: f64, b: f64) -> Result<[f64; 2], f64> {
+fn off_grid<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
+    a: f64,
+    b: f64,
+) -> Result<[f64; 2], f64> {
     let (mid, half) = (a + 0.5 * (b - a), 0.5 * (b - a));
     let mut out = [0.0; 2];
     for (slot, &u) in out.iter_mut().zip(&SAMPLES) {
@@ -370,8 +382,8 @@ fn off_grid<T: Real>(f: &mut Integrand<'_, T>, a: f64, b: f64) -> Result<[f64; 2
 
 /// The values of `f` at the points of level `m` on `[a, b]` that `known` (the values at the
 /// points of the ends and the middle, or of the level below) does not hold.
-fn evaluate<T: Real>(
-    f: &mut Integrand<'_, T>,
+fn evaluate<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
     a: f64,
     b: f64,
     m: u32,
@@ -379,7 +391,7 @@ fn evaluate<T: Real>(
 ) -> Result<Vec<f64>, f64> {
     let n = 1usize << m;
     let mut values = vec![0.0; n + 1];
-    let at = |k: usize, f: &mut Integrand<'_, T>| -> Result<f64, f64> {
+    let at = |k: usize, f: &mut Integrand<'_, T, F>| -> Result<f64, f64> {
         let v = f.at(grid_point(a, b, k, n));
         if v.is_finite() { Ok(v) } else { Err(v) }
     };
@@ -460,8 +472,8 @@ fn divisible<T: Real>(a: f64, b: f64) -> bool {
 }
 
 /// Clenshaw–Curtis on the finite `[a, b]`; `None` if the budget does not allow the first panel.
-pub(super) fn integrate<T: Real>(
-    f: &mut Integrand<'_, T>,
+pub(super) fn integrate<T: Real, F: FnMut(T) -> T + ?Sized>(
+    f: &mut Integrand<'_, T, F>,
     a: f64,
     b: f64,
     s: &Settings,
@@ -471,7 +483,7 @@ pub(super) fn integrate<T: Real>(
     if s.max_evaluations < first {
         return None;
     }
-    let w = Weights::new();
+    let w = Weights::get();
     let unknown = Known::Ends {
         right: None,
         middle: None,
@@ -499,7 +511,7 @@ pub(super) fn integrate<T: Real>(
         cover: (0.0, 0.0, 0.0),
         witnesses: Vec::new(),
     };
-    assess::<T>(&mut root, &w, s);
+    assess::<T>(&mut root, w, s);
     // An estimate that overflows from finite values: no refinement brings it back.
     if !root.value.is_finite() {
         return Some(Outcome::failed(root.value));
@@ -547,7 +559,7 @@ pub(super) fn integrate<T: Real>(
             let p = &mut panels[worst];
             p.values = values;
             p.level = level + 1;
-            assess::<T>(p, &w, s);
+            assess::<T>(p, w, s);
             if !p.value.is_finite() {
                 return Some(Outcome::failed(p.value));
             }
@@ -563,7 +575,7 @@ pub(super) fn integrate<T: Real>(
             }
             let li = panels.len();
             let n = 1usize << level;
-            let seen = witnesses(&panels[worst], &w);
+            let seen = witnesses(&panels[worst], w);
             let old = std::mem::take(&mut panels[worst].values);
             let (right, middle, left) = (old[0], old[n / 2], old[n]);
             let mid = pa + 0.5 * (pb - pa);
@@ -606,7 +618,7 @@ pub(super) fn integrate<T: Real>(
                 });
             for h in &mut halves {
                 h.witnesses = evidence(&seen, h);
-                assess::<T>(h, &w, s);
+                assess::<T>(h, w, s);
                 if !h.value.is_finite() {
                     return Some(Outcome::failed(h.value));
                 }

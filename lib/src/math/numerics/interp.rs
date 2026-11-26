@@ -33,6 +33,16 @@
 //! finite.
 
 use super::Real;
+use crate::math::fft::{Dct, DctKind};
+use std::sync::OnceLock;
+
+/// The number of nodes up to which [`chebyshev`] sums its cosine transform directly, `n²`
+/// cosines, rather than planning the fast transform of `a::math::fft`.
+// Measured on an Apple M4 Max, the whole of `chebyshev` on a cheap function: the transform
+// takes 2.2 to 2.5 times the time of the direct sum at 4 to 8 nodes, 1.03 to 1.16 at 10 and 12,
+// and 0.48 to 0.79 from 13 on, in `f64` and `f32` (at the odd sizes 9 and 11 already 0.84 to
+// 0.90; sweep 4 to 96 nodes).
+const DIRECT_TRANSFORM: usize = 12;
 
 /// The piecewise cubic through the knots `(x[i], y[i])`, held in Hermite form. Build one with
 /// [`Spline::cubic`], [`Spline::cubic_clamped`], [`Spline::cubic_not_a_knot`], [`Spline::akima`]
@@ -737,32 +747,47 @@ fn not_a_knot<T: Real>(x: &[T], y: &[T], h: &[T], d: &[T]) -> Option<Vec<T>> {
             i + 1
         }
     };
-    let mut length = Vec::with_capacity(k - 1);
-    let mut secant = Vec::with_capacity(k - 1);
-    for i in 0..k - 1 {
-        let (a, b) = (knot(i), knot(i + 1));
-        let l = x[b] - x[a];
-        length.push(l);
-        secant.push((y[b] - y[a]) / l);
-    }
+    // The pieces' lengths and secants: those of the first and the last piece, each over two
+    // intervals; the others are intervals of the spline, whose `h` and `d` they are, formed by
+    // the same operations.
+    let first = x[2] - x[0];
+    let last = x[n - 1] - x[n - 3];
+    let (first_secant, last_secant) = ((y[2] - y[0]) / first, (y[n - 1] - y[n - 3]) / last);
+    let length = |i: usize| {
+        if i == 0 {
+            first
+        } else if i == k - 2 {
+            last
+        } else {
+            h[i + 1]
+        }
+    };
+    let secant = |i: usize| {
+        if i == 0 {
+            first_secant
+        } else if i == k - 2 {
+            last_secant
+        } else {
+            d[i + 1]
+        }
+    };
     let three = T::from_f64(3.0);
     let mut lower = vec![T::ZERO; k - 1];
     let mut diag = vec![T::ZERO; k];
     let mut upper = vec![T::ZERO; k - 1];
     let mut rhs = vec![T::ZERO; k];
     for i in 1..k - 1 {
-        lower[i - 1] = length[i];
-        diag[i] = T::TWO * (length[i - 1] + length[i]);
-        upper[i] = length[i - 1];
-        rhs[i] = three * (length[i] * secant[i - 1] + length[i - 1] * secant[i]);
+        lower[i - 1] = length(i);
+        diag[i] = T::TWO * (length(i - 1) + length(i));
+        upper[i] = length(i - 1);
+        rhs[i] = three * (length(i) * secant(i - 1) + length(i - 1) * secant(i));
     }
     // The end cubics through y[1] and y[n−2], each row multiplied by the length of its piece so
     // that its entries are lengths like those of the others.
-    let (u, v) = (h[0] / length[0], h[1] / length[0]);
+    let (u, v) = (h[0] / first, h[1] / first);
     diag[0] = h[1];
     upper[0] = -h[0];
     rhs[0] = h[1] * (T::ONE + T::TWO * u) * d[0] - h[0] * (T::ONE + T::TWO * v) * d[1];
-    let last = length[k - 2];
     let (u, v) = (h[n - 3] / last, h[n - 2] / last);
     lower[k - 2] = h[n - 2];
     diag[k - 1] = -h[n - 3];
@@ -773,8 +798,8 @@ fn not_a_knot<T: Real>(x: &[T], y: &[T], h: &[T], d: &[T]) -> Option<Vec<T>> {
     for (i, &s) in reduced.iter().enumerate() {
         m[knot(i)] = s;
     }
-    m[1] = inner_slope(h[0], h[1], length[0], secant[0], m[0], m[2]);
-    m[n - 2] = inner_slope(h[n - 3], h[n - 2], last, secant[k - 2], m[n - 3], m[n - 1]);
+    m[1] = inner_slope(h[0], h[1], first, first_secant, m[0], m[2]);
+    m[n - 2] = inner_slope(h[n - 3], h[n - 2], last, last_secant, m[n - 3], m[n - 1]);
     Some(m)
 }
 
@@ -846,25 +871,29 @@ fn solve_tridiagonal_scaled<T: Real>(
     mut rhs: Vec<T>,
 ) -> Option<Vec<T>> {
     let n = diag.len();
-    let mut size: Vec<T> = (0..n)
-        .map(|i| {
-            let mut s = diag[i].abs();
-            if i > 0 {
-                s = s.max(lower[i - 1].abs());
-            }
-            if i + 1 < n {
-                s = s.max(upper[i].abs());
-            }
-            s
-        })
-        .collect();
-    if size.contains(&T::ZERO) {
+    // The size of a row as it is given: the largest of its entries.
+    let size_of = |i: usize, diag: &[T], lower: &[T], upper: &[T]| {
+        let mut s = diag[i].abs();
+        if i > 0 {
+            s = s.max(lower[i - 1].abs());
+        }
+        if i + 1 < n {
+            s = s.max(upper[i].abs());
+        }
+        s
+    };
+    if (0..n).any(|i| size_of(i, &diag, &lower, &upper) == T::ZERO) {
         return None;
     }
+    // The sizes of rows i and i + 1, kept as the elimination goes: row i + 1 is still as given
+    // when its turn comes, unless an interchange put the old row i, and its size, there.
+    let mut size_i = size_of(0, &diag, &lower, &upper);
     // The second super-diagonal, filled in by the interchanges.
     let mut fill = vec![T::ZERO; n.saturating_sub(2)];
     for i in 0..n - 1 {
-        if diag[i].abs() / size[i] >= lower[i].abs() / size[i + 1] {
+        let size_next = size_of(i + 1, &diag, &lower, &upper);
+        let mut carried = size_next;
+        if diag[i].abs() / size_i >= lower[i].abs() / size_next {
             if diag[i] == T::ZERO {
                 return None;
             }
@@ -887,22 +916,25 @@ fn solve_tridiagonal_scaled<T: Real>(
             let pivot_rhs = rhs[i + 1];
             rhs[i + 1] = rhs[i] - f * pivot_rhs;
             rhs[i] = pivot_rhs;
-            size[i + 1] = size[i];
+            carried = size_i;
         }
         lower[i] = T::ZERO;
+        size_i = carried;
     }
     if diag[n - 1] == T::ZERO {
         return None;
     }
-    let mut x = vec![T::ZERO; n];
-    x[n - 1] = rhs[n - 1] / diag[n - 1];
+    // The back substitution in place of the right-hand side: each element is read before its
+    // solution is written there.
+    let x = &mut rhs;
+    x[n - 1] /= diag[n - 1];
     if n >= 2 {
-        x[n - 2] = (rhs[n - 2] - upper[n - 2] * x[n - 1]) / diag[n - 2];
+        x[n - 2] = (x[n - 2] - upper[n - 2] * x[n - 1]) / diag[n - 2];
     }
     for i in (0..n.saturating_sub(2)).rev() {
-        x[i] = (rhs[i] - upper[i] * x[i + 1] - fill[i] * x[i + 2]) / diag[i];
+        x[i] = (x[i] - upper[i] * x[i + 1] - fill[i] * x[i + 2]) / diag[i];
     }
-    Some(x)
+    Some(rhs)
 }
 
 /// The `count` nodes of Chebyshev interpolation on `[a, b]`: the zeros of the Chebyshev
@@ -1154,11 +1186,34 @@ pub fn barycentric_interpolate<T: Real>(x: &[T], y: &[T], w: &[T], t: T) -> T {
 /// assert!((c.evaluate(1.1) - 1.1f64.exp()).abs() < 1e-10);
 /// assert!((c.evaluate(10.0) - 10.0f64.exp()).abs() > 1.0);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct Chebyshev<T> {
     a: T,
     b: T,
     c: Vec<T>,
+    /// The series of the derivative, formed on the first call of `derivative` and kept: it is
+    /// the same for every point, and forming it again for each was most of the cost of one.
+    derivative: OnceLock<Vec<T>>,
+    /// The series of the integral and its value at `a`, kept the same way.
+    integral: OnceLock<(Vec<T>, T)>,
+}
+
+impl<T: core::fmt::Debug> core::fmt::Debug for Chebyshev<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Chebyshev")
+            .field("a", &self.a)
+            .field("b", &self.b)
+            .field("c", &self.c)
+            .finish()
+    }
+}
+
+/// Two fits are equal when their intervals and coefficients are; the series kept for the
+/// derivative and the integral follow from those.
+impl<T: PartialEq> PartialEq for Chebyshev<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.a == other.a && self.b == other.b && self.c == other.c
+    }
 }
 
 impl<T: Real> Chebyshev<T> {
@@ -1191,14 +1246,17 @@ impl<T: Real> Chebyshev<T> {
         if n < 2 {
             return T::ZERO;
         }
-        let mut d = vec![T::ZERO; n];
-        // The top coefficient of the derivative series vanishes, and with it the one above.
-        d[n - 2] = T::from_f64(2.0 * (n - 1) as f64) * self.c[n - 1];
-        for k in (1..n - 1).rev() {
-            d[k - 1] = d[k + 1] + T::from_f64(2.0 * k as f64) * self.c[k];
-        }
-        d[0] *= T::HALF;
-        clenshaw(&d, map_in(t, self.a, self.b)) / ((self.b - self.a) * T::HALF)
+        let d = self.derivative.get_or_init(|| {
+            let mut d = vec![T::ZERO; n];
+            // The top coefficient of the derivative series vanishes, and with it the one above.
+            d[n - 2] = T::from_f64(2.0 * (n - 1) as f64) * self.c[n - 1];
+            for k in (1..n - 1).rev() {
+                d[k - 1] = d[k + 1] + T::from_f64(2.0 * k as f64) * self.c[k];
+            }
+            d[0] *= T::HALF;
+            d
+        });
+        clenshaw(d, map_in(t, self.a, self.b)) / ((self.b - self.a) * T::HALF)
     }
 
     /// The integral from `a` to `t`, term by term.
@@ -1207,21 +1265,25 @@ impl<T: Real> Chebyshev<T> {
         if n == 0 {
             return T::ZERO;
         }
-        // ∫T[0] = T[1], ∫T[1] = T[0]/4 + T[2]/4 and, for k at least 2,
-        // ∫T[k] = (T[k+1]/(k+1) − T[k−1]/(k−1))/2. The constant term is settled below.
-        let mut e = vec![T::ZERO; n + 2];
-        e[1] += self.c[0];
-        if n > 1 {
-            e[2] += self.c[1] * T::from_f64(0.25);
-            e[0] += self.c[1] * T::from_f64(0.25);
-        }
-        for k in 2..n {
-            let kf = T::from_f64(k as f64);
-            e[k + 1] += self.c[k] * T::HALF / (kf + T::ONE);
-            e[k - 1] -= self.c[k] * T::HALF / (kf - T::ONE);
-        }
+        let (e, at_a) = self.integral.get_or_init(|| {
+            // ∫T[0] = T[1], ∫T[1] = T[0]/4 + T[2]/4 and, for k at least 2,
+            // ∫T[k] = (T[k+1]/(k+1) − T[k−1]/(k−1))/2. The constant term is settled below.
+            let mut e = vec![T::ZERO; n + 2];
+            e[1] += self.c[0];
+            if n > 1 {
+                e[2] += self.c[1] * T::from_f64(0.25);
+                e[0] += self.c[1] * T::from_f64(0.25);
+            }
+            for k in 2..n {
+                let kf = T::from_f64(k as f64);
+                e[k + 1] += self.c[k] * T::HALF / (kf + T::ONE);
+                e[k - 1] -= self.c[k] * T::HALF / (kf - T::ONE);
+            }
+            let at_a = clenshaw(&e, -T::ONE);
+            (e, at_a)
+        });
         let scale = (self.b - self.a) * T::HALF;
-        (clenshaw(&e, map_in(t, self.a, self.b)) - clenshaw(&e, -T::ONE)) * scale
+        (clenshaw(e, map_in(t, self.a, self.b)) - *at_a) * scale
     }
 }
 
@@ -1283,21 +1345,42 @@ pub fn chebyshev<T: Real>(
     // The discrete cosine transform at the Gauss nodes: the orthogonality of the cosines there
     // gives the constant coefficient as the mean of the values and every other one as twice its
     // projection. The nodes come from −cos θ, and T[k](−u) is (−1)^k·T[k](u), which is what the
-    // parity of k carries below. The angle k·θ_j = π·k·(2j + 1)/(2n) is reduced modulo 2π in
-    // integers before the cosine is taken, so that high degrees lose nothing to its rounding.
+    // parity of k carries below.
     let n = T::from_f64(count as f64);
-    let period = 4 * count;
-    let mut c = Vec::with_capacity(count);
-    for k in 0..count {
-        let mut sum = T::ZERO;
-        for (j, &value) in values.iter().enumerate() {
-            let turns = (k * (2 * j + 1)) % period;
-            let t = (T::PI * T::from_f64(turns as f64) / (T::TWO * n)).cos();
-            sum += value * if k % 2 == 0 { t } else { -t };
+    let c = if count <= DIRECT_TRANSFORM {
+        // Summed directly, the angle k·θ_j = π·k·(2j + 1)/(2n) reduced modulo 2π in integers
+        // before the cosine is taken.
+        let period = 4 * count;
+        let mut c = Vec::with_capacity(count);
+        for k in 0..count {
+            let mut sum = T::ZERO;
+            for (j, &value) in values.iter().enumerate() {
+                let turns = (k * (2 * j + 1)) % period;
+                let t = (T::PI * T::from_f64(turns as f64) / (T::TWO * n)).cos();
+                sum += value * if k % 2 == 0 { t } else { -t };
+            }
+            c.push(if k == 0 { sum / n } else { T::TWO * sum / n });
         }
-        c.push(if k == 0 { sum / n } else { T::TWO * sum / n });
-    }
-    Some(Chebyshev { a, b, c })
+        c
+    } else {
+        // The DCT-II of `a::math::fft`, `Y[k] = 2·Σ_j v_j·cos(k·θ_j)`, in `O(n log n)`.
+        Dct::<T>::new(count, DctKind::II).transform(&mut values);
+        values
+            .iter()
+            .enumerate()
+            .map(|(k, &y)| {
+                let y = if k % 2 == 0 { y } else { -y };
+                if k == 0 { y / (T::TWO * n) } else { y / n }
+            })
+            .collect()
+    };
+    Some(Chebyshev {
+        a,
+        b,
+        c,
+        derivative: OnceLock::new(),
+        integral: OnceLock::new(),
+    })
 }
 
 /// `t` mapped from `[a, b]` onto `[-1, 1]`.

@@ -1,7 +1,8 @@
 //! Strassen–Winograd's products of matrices of numbers against the classical product written
 //! here: the same numbers, little-endian, at and around the crossovers for each length of the
-//! elements (128 up to 64 bytes, 32 up to 256 bytes, 16 beyond), with one and two levels of the
-//! recursion, odd and even dimensions, rectangles, zeros, both signs and both byte orders.
+//! elements (96 up to 16 bytes, 72 up to 48, 64 up to 64, 48 up to 128, 32 up to 256, 16 up to
+//! 1024, 12 beyond), below the orders from which the residues take the product, with odd and even
+//! dimensions, rectangles, zeros, both signs and both byte orders.
 
 use super::common::{Rng, size};
 use a::math::matrix::Matrix;
@@ -49,7 +50,7 @@ fn check(a: &Matrix<Number>, b: &Matrix<Number>, what: &str) {
 
 #[test]
 fn long_elements_from_sixteen_rows() {
-    // Elements of 300 bytes: the crossover is 16, so 32 is split twice.
+    // Elements of 300 bytes: the crossover is 16; from 32 the residues take the product.
     let mut r = Rng(0x57_0300);
     let shapes: &[(usize, usize, usize)] = if cfg!(miri) {
         &[(2, 2, 2)]
@@ -70,30 +71,78 @@ fn long_elements_from_sixteen_rows() {
 }
 
 #[test]
-fn elements_of_a_few_limbs_from_thirty_two_rows() {
-    // Elements of 100 bytes: the crossover is 32.
+fn elements_of_a_few_limbs_from_forty_eight_and_thirty_two_rows() {
+    // Elements of 72 bytes: the crossover is 48, the residues from 57 rows; of 140 bytes: 32.
     let mut r = Rng(0x57_0100);
-    let shapes: &[(usize, usize, usize)] = if cfg!(miri) {
+    let shapes: &[(usize, usize, usize, usize)] = if cfg!(miri) {
         &[]
     } else {
         &[
-            (31, 32, 33),
-            (32, 32, 32),
-            (33, 33, 33),
-            (40, 35, 33),
-            (64, 64, 65),
+            (72, 47, 48, 49),
+            (72, 48, 48, 48),
+            (72, 49, 49, 49),
+            (72, 50, 52, 49),
+            (72, 56, 56, 56),
+            (140, 31, 32, 33),
+            (140, 32, 32, 32),
+            (140, 33, 33, 33),
+            (100, 64, 64, 65),
         ]
     };
+    for &(bytes, m, k, n) in shapes {
+        let (a, b) = (
+            random(&mut r, m, k, bytes, 5),
+            random(&mut r, k, n, bytes, 5),
+        );
+        check(&a, &b, &format!("{bytes} bytes, {m} × {k} × {n}"));
+    }
+}
+
+#[test]
+fn elements_of_two_to_eight_limbs_from_ninety_six_seventy_two_and_sixty_four_rows() {
+    // Elements of 16 bytes: the crossover is 96; of 24 bytes: 72; of 56 bytes: 64, the residues
+    // from 69 rows. One product below and one at each, for the time of the debug profile.
+    let mut r = Rng(0x57_0016);
+    let shapes: &[(usize, usize, usize, usize)] = if cfg!(miri) {
+        &[]
+    } else {
+        &[
+            (16, 95, 96, 96),
+            (16, 96, 97, 96),
+            (24, 71, 72, 72),
+            (24, 73, 72, 72),
+            (56, 63, 64, 64),
+            (56, 64, 65, 64),
+        ]
+    };
+    for &(bytes, m, k, n) in shapes {
+        let (a, b) = (
+            random(&mut r, m, k, bytes, 4),
+            random(&mut r, k, n, bytes, 4),
+        );
+        check(&a, &b, &format!("{bytes} bytes, {m} × {k} × {n}"));
+    }
+}
+
+#[test]
+fn very_long_elements_from_twelve_rows() {
+    // Elements of 1100 bytes: the crossover is 12.
+    let mut r = Rng(0x57_1100);
+    let shapes: &[(usize, usize, usize)] = if cfg!(miri) {
+        &[]
+    } else {
+        &[(11, 12, 13), (12, 12, 12), (13, 13, 12)]
+    };
     for &(m, k, n) in shapes {
-        let (a, b) = (random(&mut r, m, k, 100, 5), random(&mut r, k, n, 100, 5));
+        let (a, b) = (random(&mut r, m, k, 1100, 6), random(&mut r, k, n, 1100, 6));
         check(&a, &b, &format!("{m} × {k} × {n}"));
     }
 }
 
 #[test]
 fn short_elements_from_one_hundred_and_twenty_eight_rows() {
-    // Elements of 1 and 8 bytes, whose sums can pass a word: the crossover is 128. Only one
-    // product at and past it, for the time of the classical product in the debug profile.
+    // Elements of 1 and 8 bytes, whose sums can pass a word: the sums of products in machine
+    // arithmetic. Only one product, for the time of the classical product in the debug profile.
     let mut r = Rng(0x57_0008);
     let n = size(129, 3);
     for bytes in [1, 8] {

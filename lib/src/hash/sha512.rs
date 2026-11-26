@@ -6,7 +6,7 @@ use super::block::Blocks;
 
 /// The round constants: the first 64 bits of the fractional parts of the cube roots of the first
 /// 80 primes (FIPS 180-4, section 4.2.3).
-const K: [u64; 80] = [
+pub(super) const K: [u64; 80] = [
     0x428a2f98d728ae22,
     0x7137449123ef65cd,
     0xb5c0fbcfec4d3b2f,
@@ -137,6 +137,14 @@ impl Core {
         }
     }
 
+    /// A core that has taken one block of zeros, from the state `zero` after it.
+    const fn after_zero_block(zero: [u64; 8]) -> Core {
+        Core {
+            state: zero,
+            blocks: Blocks::after_one_block(LIMIT),
+        }
+    }
+
     /// Takes the next piece of the message.
     #[track_caller]
     fn update(&mut self, data: &[u8]) {
@@ -152,47 +160,130 @@ impl Core {
     }
 }
 
-/// The compression function of section 6.4.2 on each block of 128 bytes in `blocks`.
+/// The compression function of section 6.4.2 on each block of 128 bytes in `blocks`: on the
+/// SHA-512 instructions of ARMv8 where the CPU has them, else in portable Rust.
 fn compress(state: &mut [u64; 8], blocks: &[u8]) {
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    if super::aarch64::has_sha512() {
+        // SAFETY: the CPU has FEAT_SHA512.
+        unsafe { super::aarch64::sha512(state, blocks, &K) };
+        return;
+    }
+    portable(state, blocks);
+}
+
+/// The compression function in portable Rust: the schedule kept as its last sixteen words, the
+/// rounds unrolled eight at a time with the working words renamed rather than moved.
+fn portable(state: &mut [u64; 8], blocks: &[u8]) {
     for block in blocks.as_chunks::<128>().0 {
-        // The message schedule.
-        let mut w = [0u64; 80];
+        let mut w = [0u64; 16];
         for (t, word) in block.as_chunks::<8>().0.iter().enumerate() {
             w[t] = u64::from_be_bytes(*word);
         }
-        for t in 16..80 {
-            let s0 = w[t - 15].rotate_right(1) ^ w[t - 15].rotate_right(8) ^ (w[t - 15] >> 7);
-            let s1 = w[t - 2].rotate_right(19) ^ w[t - 2].rotate_right(61) ^ (w[t - 2] >> 6);
-            w[t] = w[t - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[t - 7])
-                .wrapping_add(s1);
-        }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-        for t in 0..80 {
-            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let ch = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[t])
-                .wrapping_add(w[t]);
-            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
+        // Round `t`, as in SHA-256: `d += t1` and `h = t1 + t2`, the names turning.
+        macro_rules! round {
+            ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $t:expr, $wt:expr) => {{
+                let s1 = $e.rotate_right(14) ^ $e.rotate_right(18) ^ $e.rotate_right(41);
+                let ch = ($e & $f) ^ (!$e & $g);
+                let t1 = $h
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[$t])
+                    .wrapping_add($wt);
+                let s0 = $a.rotate_right(28) ^ $a.rotate_right(34) ^ $a.rotate_right(39);
+                let maj = ($a & $b) ^ ($c & ($a ^ $b));
+                $d = $d.wrapping_add(t1);
+                $h = t1.wrapping_add(s0.wrapping_add(maj));
+            }};
+        }
+        macro_rules! given {
+            ($t:expr) => {
+                w[$t & 15]
+            };
+        }
+        macro_rules! scheduled {
+            ($t:expr) => {{
+                let t = $t;
+                let w15 = w[(t + 1) & 15];
+                let w2 = w[(t + 14) & 15];
+                let s0 = w15.rotate_right(1) ^ w15.rotate_right(8) ^ (w15 >> 7);
+                let s1 = w2.rotate_right(19) ^ w2.rotate_right(61) ^ (w2 >> 6);
+                w[t & 15] = w[t & 15]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[(t + 9) & 15])
+                    .wrapping_add(s1);
+                w[t & 15]
+            }};
+        }
+        macro_rules! eight {
+            ($t:expr, $word:ident) => {{
+                let t = $t;
+                round!(a, b, c, d, e, f, g, h, t, $word!(t));
+                round!(h, a, b, c, d, e, f, g, t + 1, $word!(t + 1));
+                round!(g, h, a, b, c, d, e, f, t + 2, $word!(t + 2));
+                round!(f, g, h, a, b, c, d, e, t + 3, $word!(t + 3));
+                round!(e, f, g, h, a, b, c, d, t + 4, $word!(t + 4));
+                round!(d, e, f, g, h, a, b, c, t + 5, $word!(t + 5));
+                round!(c, d, e, f, g, h, a, b, t + 6, $word!(t + 6));
+                round!(b, c, d, e, f, g, h, a, t + 7, $word!(t + 7));
+            }};
+        }
+        eight!(0, given);
+        eight!(8, given);
+        for t in [16, 24, 32, 40, 48, 56, 64, 72] {
+            eight!(t, scheduled);
         }
         for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
             *s = s.wrapping_add(v);
         }
     }
+}
+
+/// The state after one block of zeros from `iv`, computed when the crate is built: the
+/// `Z_pad` with which `expand_message_xmd` starts.
+const fn after_zero_block(iv: [u64; 8]) -> [u64; 8] {
+    let mut w = [0u64; 80];
+    let mut t = 16;
+    while t < 80 {
+        let s0 = w[t - 15].rotate_right(1) ^ w[t - 15].rotate_right(8) ^ (w[t - 15] >> 7);
+        let s1 = w[t - 2].rotate_right(19) ^ w[t - 2].rotate_right(61) ^ (w[t - 2] >> 6);
+        w[t] = w[t - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[t - 7])
+            .wrapping_add(s1);
+        t += 1;
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = iv;
+    let mut t = 0;
+    while t < 80 {
+        let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+        let ch = (e & f) ^ (!e & g);
+        let t1 = h
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(K[t])
+            .wrapping_add(w[t]);
+        let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(t1);
+        d = c;
+        c = b;
+        b = a;
+        a = t1.wrapping_add(s0.wrapping_add(maj));
+        t += 1;
+    }
+    let v = [a, b, c, d, e, f, g, h];
+    let mut out = iv;
+    let mut i = 0;
+    while i < 8 {
+        out[i] = out[i].wrapping_add(v[i]);
+        i += 1;
+    }
+    out
 }
 
 /// The first `N` bytes of the words, each in big-endian order.
@@ -274,6 +365,11 @@ impl Digest for Sha512 {
     fn finalize(self) -> [u8; 64] {
         Sha512::finalize(self)
     }
+
+    fn after_zero_block() -> Sha512 {
+        const ZERO: [u64; 8] = after_zero_block(IV512);
+        Sha512(Core::after_zero_block(ZERO))
+    }
 }
 
 /// SHA-384 of FIPS 180-4: SHA-512 from another initial value, its digest cut to 48 bytes.
@@ -343,6 +439,11 @@ impl Digest for Sha384 {
 
     fn finalize(self) -> [u8; 48] {
         Sha384::finalize(self)
+    }
+
+    fn after_zero_block() -> Sha384 {
+        const ZERO: [u64; 8] = after_zero_block(IV384);
+        Sha384(Core::after_zero_block(ZERO))
     }
 }
 

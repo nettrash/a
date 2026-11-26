@@ -8,27 +8,27 @@
 - `RealFft::<T>::new(n)` plans the transform of `n` reals: `forward(input, output)` takes runs of `n` reals and gives for each the `n/2 + 1` values `X[0..=n/2]` that determine the rest (`X[n − k]` is the conjugate of `X[k]`), as FFTW's `r2c` and NumPy's `rfft` do; `inverse(input, output)` takes runs of `n/2 + 1` values and gives `n` reals. `spectrum_len()` is `n/2 + 1` (0 for `n = 0`); `scratch_len`, `forward_with_scratch` and `inverse_with_scratch` are as for `Fft`.
 - `Dct::<T>::new(n, kind)` and `Dst::<T>::new(n, kind)` plan the cosine and sine transforms of the types `DctKind::{I, II, III, IV}` and `DstKind::{I, II, III, IV}`, FFTW's `REDFT00`, `REDFT10`, `REDFT01`, `REDFT11` and `RODFT00`, `RODFT10`, `RODFT01`, `RODFT11`, unscaled as FFTW's. `transform` works in place, `transform_to` from one slice into another, and `transform_with_scratch` in place with at least `scratch_len()` complex values of working memory from the caller, without allocating; `len`, `is_empty` and `kind` describe the plan.
 - `Fft2::<T>::new(rows, cols)` and `Fft3::<T>::new(n0, n1, n2)` plan the transforms of complex arrays of two and three dimensions stored with the last index varying fastest; `forward` and `inverse` work in place, `shape` gives the shape.
-- `convolve(&a, &b)`, `correlate(&a, &b)`, `circular_convolve(&a, &b)` and `circular_correlate(&a, &b)` take two slices of the same type, `f32`, `f64`, `Complex<f32>` or `Complex<f64>` (the sealed trait `Sample`), and return a new vector; they choose between a direct sum and transforms by the lengths, and keep the plans of their transforms for the next calls.
-- The sections below give the plans and their working memory, each kind of transform and the convolutions, then the examples; the methods are after the examples, then how the module was tested and the measurements against FFTW, rustfft and realfft, and Apple's Accelerate.
+- `convolve(&a, &b)`, `correlate(&a, &b)`, `circular_convolve(&a, &b)` and `circular_correlate(&a, &b)` take two slices of the same type, `f32`, `f64`, `Complex<f32>` or `Complex<f64>` (the sealed trait `Sample`), and return a new vector; `convolve_into(&a, &b, &mut out)` and `correlate_into(&a, &b, &mut out)` write the `len(a) + len(b) − 1` values into a slice of that length instead of a new vector (and panic for another length). They choose between a direct sum and transforms by the lengths, and keep the plans of their transforms for the next calls.
+- The sections below give the plans and their working memory, each kind of transform and the convolutions, then the examples; the methods are after the examples, then how the module was tested and the measurements against FFTW, rustfft, realfft and rustdct, and Apple's Accelerate.
 
 ## Plans, batches and working memory
 
-- A plan is immutable, `Send` and `Sync`. `Fft`, `RealFft`, `Dct` and `Dst` are `Clone`: a clone shares the plan's tables, and costs one reference count. `Fft2` and `Fft3` are not `Clone`; they hold one `Fft` per dimension.
+- A plan is immutable, `Send` and `Sync`. `Fft`, `RealFft`, `Dct` and `Dst` are `Clone`: a clone shares the plan's tables, and costs one reference count. `Fft2` and `Fft3` are not `Clone`; they hold one `Fft` per dimension and, for each dimension but the last, the plan of its transforms across the rows: the Stockham passes of its length planned for interleaved sequences (for an array of at most 4 MiB whose length along that dimension has no prime factor above 19), or else a clone of its `Fft` and the width of its tiles ([below](#two-and-three-dimensions-1)).
 - Every method takes a batch: any number of sequences (or arrays) of the planned length one after the other in one slice, each transformed in turn, and panics when the length of the slice is not a multiple of the planned one, or when an output's length differs from its input's (for `RealFft`, when the output does not hold `n/2 + 1` values for each sequence of the input, or `n` for each of `n/2 + 1`). Short sequences of a batch go through the passes of the complex transform together, as many as fit in 256 values a call, when the working memory has room for them; each result is that of its sequence transformed alone, to within rounding.
 - Every inverse is unscaled, as FFTW's: `Fft`'s `inverse(forward(x)) = n·x`, `RealFft`'s the same, `Fft2`'s `rows·cols·x` and `Fft3`'s `n0·n1·n2·x`; for the cosine and sine transforms see [below](#cosine-and-sine-transforms).
-- `scratch_len()` is the working memory one sequence needs, in complex values (0 for some lengths: those of one pass of the complex transform, and the shortest real transforms, which are summed directly). A `_with_scratch` method panics with "scratch of … values, … needed" when given less, and never allocates; given more, `Fft::inverse_with_scratch`, `Fft::forward_with_scratch` and `RealFft::inverse_with_scratch` let the short sequences of a batch run together. The other methods take their working memory themselves: `Fft`'s `forward`, `inverse`, `forward_to` and `inverse_to` allocate one run's (or the room a batch of short runs takes together); `RealFft`'s and `Dct`'s and `Dst`'s methods take it on the stack up to 512 complex values and from the heap beyond, once for the whole batch, and `RealFft::forward` of a batch of even lengths stages its complex transforms in a buffer of up to 4096 values (one sequence's, when that is longer). `Fft2` and `Fft3` have no `_with_scratch` form: each call allocates a tile of at most 1 MiB (or one column, when a column is longer) and the scratch of its transforms.
+- `scratch_len()` is the working memory one sequence needs, in complex values. It is 0 for the lengths of one butterfly of the complex transform (2, 3, 4, 5, 7, 8, 11, 13, 17 and 19, and the composites 6, 9, 10, 12, 15, 16, 20, 24 and 25); for the real transforms of 2 (summed directly), of the odd lengths 3 to 15 (the complex butterfly on the reals) and of the even lengths whose half is one butterfly (every even length from 4 to 26, then 30, 32, 34, 38, 40, 48 and 50: the whole transform in one kernel); and for the cosine and sine transforms summed directly (up to 8 values, 16 for type I). A `_with_scratch` method panics with "scratch of … values, … needed" when given less, and never allocates; given more, `Fft::inverse_with_scratch`, `Fft::forward_with_scratch` and `RealFft::inverse_with_scratch` let the short sequences of a batch run together. The other methods take their working memory themselves, on the stack up to 512 complex values and from the heap beyond, once for the whole batch: `Fft`'s `forward`, `inverse`, `forward_to` and `inverse_to` (one run's, or the room a batch of short runs takes together; one run of a length of one butterfly calls its kernel directly and takes none), and `RealFft`'s, `Dct`'s and `Dst`'s methods; `RealFft::forward` of a batch of even lengths stages its complex transforms in a buffer of up to 4096 values (one sequence's, when that is longer) from the heap. `Fft2` and `Fft3` have no `_with_scratch` form: each call takes one buffer, on the stack up to 512 values and from the heap beyond, for the scratch of the transforms of the rows and, for each other dimension, the second buffer of its passes along the rows (the size of one array) or a tile of at most 1 MiB (or one column, when a column is longer) with the scratch of its transforms.
 - `forward_to`, `inverse_to` and `transform_to` have no `_with_scratch` form.
 
 ## The complex transform
 
-- Every length is planned in time `O(n log n)`: by Stockham passes of the radices 2, 4 and 8 for the factors 2, hard-coded butterflies of 3, 5 and 7, and the odd butterfly from tables for the primes 11 to 19; a prime factor above 19 of a composite length by a plan of its own; and a prime length above 19 by Rader's algorithm or by Bluestein's with a smooth inner length, whichever the planner estimates faster. `Debug` shows the choice: `"8·8·4·4"` for 1024, `"8·8·5·5·5·5·5·5"` for 10⁶, `"Rader(4·4·3·3·7)"` for 1009, `"Bluestein(20480: 8·8·8·8·5)"` for 10007, `"2·[Rader(4·5·5)]"` for 202.
+- Every length is planned in time `O(n log n)`: by Stockham passes of the radices 2, 4 and 8 for the factors 2, hard-coded butterflies of 3, 5 and 7, and the odd butterfly from tables for the primes 11 to 19 (a length of 6, 9, 10, 12, 15, 16, 20, 24 or 25 is one butterfly of its own); a prime factor above 19 of a composite length by a plan of its own; and a prime length above 19 by Rader's algorithm or by Bluestein's with a smooth inner length, whichever the planner estimates faster. `Debug` shows the choice: `"8·8·4·4"` for 1024, `"8·8·5·5·5·5·5·5"` for 10⁶, `"Rader(4·4·3·3·7)"` for 1009, `"Bluestein(20480: 8·8·8·8·5)"` for 10007, `"2·[Rader(4·5·5)]"` for 202.
 - The kernels are NEON on little-endian aarch64, SSE2 or, detected when the plan is made, AVX2 with FMA on x86_64, and portable Rust elsewhere and under Miri; the same algorithm in each, so a plan's results differ between instruction sets only by rounding.
-- On an Apple M4 Max, one thread, a forward transform of `Complex<f64>` takes 1.33 µs at 1024 and 4.22 ms at 2²⁰, 0.59 and 0.52 of FFTW's time; of `Complex<f32>` 705 ns and 2.08 ms, 0.34 and 0.31 of FFTW's time and 2.3 and 1.5 times Accelerate's. The tables are [below](#measured).
+- On an Apple M4 Max, one thread, a forward transform of `Complex<f64>` takes 1.26 µs at 1024 and 4.02 ms at 2²⁰, 0.592 and 0.494 of FFTW's time; of `Complex<f32>` 617 ns and 1.88 ms, 0.287 and 0.277 of FFTW's time and 2.22 and 0.987 times Accelerate's. The tables are [below](#measured).
 
 ## Real sequences
 
 - `forward` gives `X[0]` with an imaginary part of exactly 0, and `X[n/2]` too for an even `n`; `inverse` ignores the imaginary parts of `X[0]` and, for an even `n`, of `X[n/2]`, as FFTW's `c2r` does.
-- An even length takes the complex transform of `n/2`; an odd one with a factor up to 11 splits by it; a prime, or a length whose factors all exceed 11, takes the complex transform of `n`; odd lengths up to 15 and even ones up to 16 are summed directly. Batches are as for `Fft`.
+- An even length takes the complex transform of `n/2` (a half of one butterfly the whole transform in one kernel); an odd one with a factor among 19, 15, 9, 17, 13, 11, 7, 5 and 3 splits by the first of them in this order that divides it; a prime above 15, or a length with no such factor, takes the complex transform of `n`; the odd lengths 3 to 15 take the complex butterfly of `n` on the reals, and `n = 2` is summed directly. Batches are as for `Fft`.
 
 ## Cosine and sine transforms
 
@@ -49,14 +49,14 @@ The eight transforms, of a sequence `X[0..n]` into `Y[0..n]`, unscaled as FFTW d
 
 ## Two and three dimensions
 
-`Fft2` computes `X[k, l] = Σ x[i, j]·e^(−2πi·(ik/rows + jl/cols))` for arrays of `rows × cols` values stored row after row, and `Fft3` the same over three indices: the last, contiguous dimension as one batch of rows, then each other dimension by tiles of adjacent columns gathered into a buffer, so that every pass over the array reads and writes whole cache lines.
+`Fft2` computes `X[k, l] = Σ x[i, j]·e^(−2πi·(ik/rows + jl/cols))` for arrays of `rows × cols` values stored row after row, and `Fft3` the same over three indices: the last, contiguous dimension as one batch of rows, then each other dimension, for an array of at most 4 MiB whose length along it has no prime factor above 19, by the passes of its transform run along the rows (the columns as interleaved sequences, the vectors across them), else by tiles of adjacent columns gathered into a buffer, so that every pass over the array reads and writes whole cache lines.
 
 ## Convolution and correlation
 
 - `convolve(&a, &b)` is the linear convolution, the `len(a) + len(b) − 1` values `c[k] = Σ a[i]·b[k − i]` (none when either is empty), as NumPy's `convolve` gives them in its full mode.
 - `correlate(&a, &b)` is the cross-correlation, the `len(a) + len(b) − 1` values `c[k + len(b) − 1] = Σ a[i + k]·conj(b[i])` for the lags `k` from `−(len(b) − 1)` to `len(a) − 1`, NumPy's `correlate` in its full mode: the convolution with `b` reversed and conjugated, without a copy of `b`.
 - `circular_convolve(&a, &b)` and `circular_correlate(&a, &b)` take two sequences of the same length `n` (and panic when the lengths differ): `c[k] = Σ a[j]·b[(k − j) mod n]` and `c[k] = Σ a[(j + k) mod n]·conj(b[j])`.
-- The path is chosen by a model of the costs of the lengths: a direct sum by SIMD kernels while the shorter operand is short, the product of the transforms of the operands padded to a length `2^a·3^b·5^c·7^d`, or overlap-add when one operand is much longer than the other. With the constants of this release the direct path is taken against a long operand (10⁴ to 10⁶ values) up to a shorter one of 123 to 137 values for `f32`, 99 to 105 for `f64`, 50 to 53 for `Complex<f32>` and 38 to 40 for `Complex<f64>`, and against 1,000 values up to 187, 137, 67 and 47 ([below](#convolution)). A circular convolution is direct, by three transforms of the length `n`, or the linear convolution by transforms of a smooth length of at least `2n − 1` folded modulo `n` (for a prime `n`, whose own transforms would take Bluestein's algorithm).
+- The path is chosen by a model of the costs of the lengths: a direct sum by SIMD kernels while the shorter operand is short, the product of the transforms of the operands padded to a length `2^a·3^b·5^c·7^d`, or overlap-add when one operand is much longer than the other. With the constants of this release the direct path is taken against a long operand (10⁴ to 10⁶ values) up to a shorter one of 112 to 125 values for `f32`, 91 to 99 for `f64`, 43 to 46 for `Complex<f32>` and 38 to 40 for `Complex<f64>`, and against 1,000 values up to 172, 130, 54 and 47 (the model on the constants of `conv.rs`; measured [below](#convolution)). A circular convolution is direct, by three transforms of the length `n`, or the linear convolution by transforms of a smooth length of at least `2n − 1` folded modulo `n` (for a prime `n`, whose own transforms would take Bluestein's algorithm).
 - **The plans are kept.** The transforms' plans are kept for the next calls of the same lengths, in one cache shared by all the threads: at most 16 plans and at most 16 MiB of them by an estimate of twice `L` complex values for a length with no prime factor above 13 (measured: 1.5 times for a real plan, twice for a complex one) and twelve times for the others (Bluestein's and Rader's plans, measured at up to about ten). The least recently used plan goes first; a plan larger than 16 MiB alone is made, used and dropped and evicts nothing. The largest smooth plans kept are of 2²⁰ values for `f32` and `Complex<f32>` and of 2¹⁹ for `f64` and `Complex<f64>`. A repeated call skips the planning and gives the same bits as the first: the choice of the path does not look at the cache. The memory stays held, up to the 16 MiB, until other plans push it out; there is no call to empty the cache. The lock is held only to look a plan up, to insert one and to unlink those evicted; plans are made, run and dropped outside it.
 - The direct path's sums are in the order of the taps, in the type; the transforms' error is a few units of rounding of the type times `‖a‖·‖b‖·log₂ len` (the tests check `10·ε·(log₂ len + 1)` relative to `‖a‖·‖b‖`). With infinities or NaNs among the values the result may hold NaN where the exact sums would be infinite: the direct path reads the operands between zeros, and every value of a transform mixes all the inputs.
 
@@ -188,25 +188,25 @@ assert_eq!(convolve(&long, &taps), c);
 
 ### The complex transform
 
-**Stockham passes.** Every length is a sequence of passes, one per factor `r` of `n`, in the Stockham autosort form of decimation in frequency: a pass of radix `r` over sub-transforms of the length `L = r·m` of `s` interleaved sequences reads `x[q + s·(p + k·m)]` and writes `y[q + s·(r·p + j)] = W_L^(j·p) · Σ_k x[q + s·(p + k·m)]·W_r^(j·k)`. After the passes of all the factors (`s` growing from 1, `m` shrinking to 1) the result is in natural order: no bit reversal and no transposition. The passes alternate between the data and one buffer of `n` values; the last pass, which has no twiddles and its own kernel without the loop over `p`, runs in place, so an in-place transform ends in the data and an out-of-place one writes its output without a copy. The factors 2 take radix-8 passes, with one or two radix-4 passes for what is left (a radix-2 pass for a single factor 2); the factors 3, 5 and 7 have hard-coded butterflies, and the primes 11 to 19 the general odd butterfly with its cosines and sines from a table (the sums `x_k ± x_(r−k)` halve its products), each instantiated for its radix so that its loops unroll into registers. The odd factors come after the twos and the largest last. Measured on the M4 and dropped: radix-16 passes (slower at every length: 16 streams at power-of-two strides, and more vectors than registers), and four-step and six-step algorithms with blocks of columns in the caches, about twice as slow as the plain passes at 2²⁰ and 2²² in `f64`.
+**Stockham passes.** Every length is a sequence of passes, one per factor `r` of `n`, in the Stockham autosort form of decimation in frequency: a pass of radix `r` over sub-transforms of the length `L = r·m` of `s` interleaved sequences reads `x[q + s·(p + k·m)]` and writes `y[q + s·(r·p + j)] = W_L^(j·p) · Σ_k x[q + s·(p + k·m)]·W_r^(j·k)`. After the passes of all the factors (`s` growing from 1, `m` shrinking to 1) the result is in natural order: no bit reversal and no transposition. The passes alternate between the data and one buffer of `n` values; the last pass, which has no twiddles and its own kernel without the loop over `p`, runs in place, so an in-place transform ends in the data and an out-of-place one writes its output without a copy. The factors 2 take radix-8 passes, with one or two radix-4 passes for what is left (a radix-2 pass for a single factor 2); the factors 3, 5 and 7 have hard-coded butterflies, and the primes 11 to 19 the general odd butterfly with its cosines and sines from a table (the sums `x_k ± x_(r−k)` halve its products), each instantiated for its radix so that its loops unroll into registers. The odd factors come after the twos and the largest last. A length that is one of the composites 6, 9, 10, 12, 15, 16, 20, 24 and 25 is one butterfly of its own, by decimation in time `n = R₁·R₂` with every value in registers (the `R₂` butterflies of `R₁`, the twiddles `W_n^(n₂·k₁)` by rotations for the quarter and eighth turns and from a table for the rest, then the `R₁` butterflies of `R₂`), and `Debug` shows it as one radix (`"16"`). Measured on the M4 and dropped: radix-16 passes in longer transforms (slower at every length: 16 streams at power-of-two strides, and more vectors than registers), and four-step and six-step algorithms with blocks of columns in the caches, about twice as slow as the plain passes at 2²⁰ and 2²² in `f64`.
 
-**Twiddles.** Each pass has its own table of `W_L^(j·p)`, stored expanded for the products as `[wr, wr, −wi, wi]` (or by blocks of SIMD lanes for a first pass that runs its vectors along `p`): a product is one multiplication, one exchange of the parts and one fused multiply-add. The inverse runs the same tables with the conjugate products and `+i` for `−i` in the butterflies, by kernels instantiated for each direction: no conjugation passes. All the tables of a plan come from one table of the roots of its length (each pass's `W_L^e` is `W_n^(e·n/L)`) that holds only the angles of at most π/4: `n/8 + 1` entries for a multiple of 4, `n/4 + 1` for twice an odd number and `n/2 + 1` for an odd `n`. Every root is an entry with its signs and parts exchanged, exactly, the octant found by comparisons and the signs set by bit operations, without a division or a branch. An entry is the system's `sin` and `cos` of the angle carried as a double-double and corrected by its low part, so each factor is as accurate as `sin` and `cos` of an `f64` and the symmetric ones are exact images of each other; `f32` tables are rounded from them.
+**Twiddles.** Each pass has its own table of `W_L^(j·p)`, stored expanded for the products as `[wr, wr, −wi, wi]` (or by blocks of SIMD lanes for a first pass that runs its vectors along `p`): a product is one multiplication, one exchange of the parts and one fused multiply-add. The inverse runs the same tables with the conjugate products and `+i` for `−i` in the butterflies, by kernels instantiated for each direction: no conjugation passes. All the tables of a plan come from one table of the roots of its length (each pass's `W_L^e` is `W_n^(e·n/L)`) that holds only the angles of at most π/4: `n/8 + 1` entries for a multiple of 4, `n/4 + 1` for twice an odd number and `n/2 + 1` for an odd `n`. Every root is an entry with its signs and parts exchanged, exactly, the octant found by comparisons and the signs set by bit operations, without a division or a branch. A table of 512 entries or more (`TABLE_PRODUCTS`) comes from the real transforms' generator ([below](#real-transforms)): each entry the correctly rounded `f64` root but for ties within about 10⁻²⁸ of it. A shorter one is the system's `sin` and `cos` of the angle carried as a double-double and corrected by its low part, each entry as accurate as `sin` and `cos` of an `f64` (within about half a unit in the last place). Either way the factors that the symmetries of the circle relate are exact images of each other in `f64`. The `f32` tables of a length below 512 are rounded from these. From 512 on (`GRID_F32`) every `f32` twiddle of the passes is the product, in `f64`, of a coarse and a fine table of the real transforms' generator (the exponents `2^b` apart and below `2^b`, `b = ⌈log₂ n/2⌉`, about `√n` values each) rounded to `f32` (`Grid`): the product is within about 2⁻⁵² of the root, so the value is the nearest `f32` to the root but for ties closer than that, as the real transforms' `f32` tables are, and the symmetric factors are exact images of each other only as far as their nearest `f32` values are (no longer by construction). A replica of `Grid` in Python against mpmath found no value off the correctly rounded `f32` root, both parts, at every `k` for `n` = 1024, 1025, 3072 and 65,536 and at 150,000 sampled `k` for 1,024,001 and 2²⁰. The tables are written once, in order, without zeroing their memory first.
 
 **Primes.** A prime length up to 19 is one pass. Above 19 it takes Rader's algorithm, the cyclic convolution of length `p − 1` of the input permuted by a primitive root with the transform of the permuted roots (computed once in `f64` and divided by `p − 1`; the inverse is the forward transform written to the reversed indices), or Bluestein's, the convolution with the chirp `W_2n^(k²)` (its angle exact from `k² mod 2n`) by transforms of a smooth length `m` in `[2n − 1, 2(2n − 1))` of the form `2^a·3^b·5^c·7^d`, the cheapest by the estimate rather than a power of two. The planner estimates the time of each from the passes each inner length needs, measured per radix on the M4: Rader's for 101 and 1009 (`p − 1 = 2²·5²` and `2⁴·3²·7`), Bluestein's for 10007, 100003 and 1000003, whose `p − 1` has a large prime factor. A prime factor above 19 of a composite length is a pass of its own, taken last; its sequences are adjacent there, so Rader's or Bluestein's algorithm runs on blocks of up to 16 of them at once (a divisor of their count), with the inner transform planned for that many interleaved sequences so that the vectors run across them, and the twiddles of the pass applied on the way out; one sequence at a time when no block divides the count. Bluestein's algorithm for the whole length is taken instead when it is estimated faster. Rader's and Bluestein's kernels are computed in `f64`, through the plan's own inner transform when the type is `f64`.
 
-**SIMD.** The butterflies and passes are written once over a block of complex values and instantiated per instruction set: NEON (`f64`: one complex value a vector; `f32`: two, with a block of one for what is left), SSE2, and AVX2 with FMA (two `f64` and four `f32` values a vector, with SSE2 blocks for what is left), chosen at run time when the plan is made; the portable block is a `Complex<T>`. The vectors run along the contiguous index `q`; the first pass (`s = 1`) of `f32` (and of AVX2's `f64`) runs them along `p` instead, with the twiddles by lanes, and stores the results by rows. AVX2's `f32` first pass takes the 128-bit block.
+**SIMD.** The butterflies and passes are written once over a block of complex values and instantiated per instruction set: NEON (`f64`: one complex value a vector; `f32`: two, with a block of one for what is left), SSE2, and AVX2 with FMA (two `f64` and four `f32` values a vector, with SSE2 blocks for what is left), chosen at run time when the plan is made; the portable block is a `Complex<T>`. The vectors run along the contiguous index `q`; the first pass (`s = 1`) of `f32` (and of AVX2's `f64`) runs them along `p` instead, with the twiddles by lanes, and stores the results by rows. AVX2's `f32` first pass takes the 128-bit block. Where the target has FEAT_FCMA, as the Apple ones do, the NEON radix-4 and radix-8 butterflies add `±i·b` by one FCADD (inline assembly); the composite and odd butterflies keep the exchange of the parts and the fused multiply-add, since the assembly keeps the compiler from unrolling their loops, and a target without FCMA takes the exchange everywhere (the same values, bit for bit).
 
-**Batches.** A length of one pass (2, 3, 4, 5, 7, 8, 11, 13, 17 and 19) runs in place with no working memory, its vector lanes across the runs of a batch. Longer short transforms of a batch go through the passes together, up to 256 values a call, each kernel called once for the chunk, as far as the working memory allows: `scratch_len` is what one run needs, the allocating methods take room for the chunk when given more than one run, and a `_with_scratch` caller that passes more gets the same.
+**Batches.** A length of one butterfly (2, 3, 4, 5, 7, 8, 11, 13, 17 and 19, and the composites 6, 9, 10, 12, 15, 16, 20, 24 and 25) runs in place with no working memory, its vector lanes across the runs of a batch; one run calls the butterfly's kernel directly, without the loop of a batch. Longer short transforms of a batch go through the passes together, up to 256 values a call, each kernel called once for the chunk, as far as the working memory allows: `scratch_len` is what one run needs, the allocating methods take room for the chunk when given more than one run, and a `_with_scratch` caller that passes more gets the same.
 
-**Planning.** `Fft::new` costs about 2 ns a value for the lengths of passes (two transforms' time at 1024, half of one at 2²⁰) and 13 to 23 ns a value for Rader's and Bluestein's lengths; the cost is the table of roots, each entry about 2 ns (its lookup, signs and expanded store), and for Rader's and Bluestein's lengths the transform of the kernel. The estimate of the time of Bluestein's candidate lengths is computed from their exponents, without factoring them.
+**Planning.** `Fft::new` of `f64` takes 2.40 µs at 1024, about two transforms' time, and 1.95 ms at 2²⁰, about half of one, and 13.5 µs, 183 µs and 1.98 ms for Rader's 1009 and Bluestein's 10,007 and 100,003 ([below](#the-complex-transform-2)); the cost is the table of roots (each entry's lookup, signs and expanded store), and for Rader's and Bluestein's lengths the transform of the kernel; an `f32` plan of 512 values or more takes its twiddles from the products of two short tables instead of the lookups (above). The estimate of the time of Bluestein's candidate lengths is computed from their exponents, without factoring them.
 
 ### Real transforms
 
-**Even lengths** `n = 2m` pack the reals in pairs, `z[j] = x[2j] + i·x[2j + 1]`, take the complex transform of `m` out of place straight into the output (a short one in place, its working memory on the stack; a batch of short ones as batches of the complex transform, up to 4096 values at a time, into a buffer the pass then reads), and separate the spectra of the even and odd halves in one pass over the pairs of bins `(k, m − k)`: with `a = Z[k]`, `b = conj Z[m − k]`, `u = (a + b)/2` and `t = w_k·(a − b)` for `w_k = −i·e^(−2πi·k/n)/2`, `X[k] = u + t` and `X[m − k] = conj(u − t)`; `X[0]` and `X[m]` come from `Z[0]`, and `X[m/2]` is `conj Z[m/2]`. The inverse runs the same pass with `w_k = i·e^(2πi·k/n)` for every sequence of a batch straight into the output, then the inverse complex transforms of all of them as one batch, in place, which leaves the reals there. The pass is vectorised: NEON (two `f64` or four `f32` pairs a step, the parts split into lanes by de-interleaving loads, the top bins reversed in the registers), SSE2 and AVX2 with FMA (two or four, and four or eight pairs, chosen once when the plan is made), and portable Rust elsewhere and under Miri, the same expressions lane by lane. `forward_with_scratch` runs the sequences one by one (each copied into its output and transformed there in place), since the staging of a batch needs memory its contract does not give.
+**Even lengths** `n = 2m` pack the reals in pairs, `z[j] = x[2j] + i·x[2j + 1]`. A half of one butterfly (`m` from 2 to 13, 15, 16, 17, 19, 20, 24 and 25) runs the whole transform in one kernel, the butterfly of `m` and the pass over the pairs in registers, with no working memory. Otherwise one sequence takes the complex transform of `m` out of place straight into the output, its working memory not initialised (on the stack up to 512 values), and a batch takes its complex transforms as batches, up to 4096 values at a time, into a buffer the pass then reads. The pass separates the spectra of the even and odd halves over the pairs of bins `(k, m − k)`: with `a = Z[k]`, `b = conj Z[m − k]`, `u = (a + b)/2` and `t = w_k·(a − b)` for `w_k = −i·e^(−2πi·k/n)/2`, `X[k] = u + t` and `X[m − k] = conj(u − t)`; `X[0]` and `X[m]` come from `Z[0]`, and `X[m/2]` is `conj Z[m/2]`. For `f64`, when the last pass of the transform of `m` is a butterfly of 2, 3, 4, 5 or 8, one sequence (and `forward_with_scratch`, and the real transform inside the types II by Makhoul's step) runs that last pass and the pass over the pairs as one kernel: its butterflies `q` and `s − q` together, whose outputs are each other's partners (`Z[q + s·j]` and `Z[s − q + s·(r − 1 − j)]`), so that the spectrum is written from the registers; `f32` keeps the separate pass, whose vectors hold four pairs, which measured faster than the fused kernel's blocks of one value. The inverse runs the same pass with `w_k = i·e^(2πi·k/n)` for every sequence of a batch straight into the output, then the inverse complex transforms of all of them as one batch, in place, which leaves the reals there (one sequence with its working memory not initialised). The separate pass is vectorised: NEON (two `f64` or four `f32` pairs a step, the parts split into lanes by de-interleaving loads, the top bins reversed in the registers), SSE2 and AVX2 with FMA (two or four, and four or eight pairs, chosen once when the plan is made), and portable Rust elsewhere and under Miri, the same expressions lane by lane. `forward_with_scratch` runs the sequences one by one (each copied into its output and transformed there in place), since the staging of a batch needs memory its contract does not give.
 
-**Odd lengths** have no packing into a half-length transform. One whose smallest prime factor `r` is at most 11, `n = r·m`, splits into the `r` sequences of the residues of the index modulo `r`. Their spectra come two at a time from one complex transform of `m` of `x_{2p} + i·x_{2p+1}`, all `(r − 1)/2` of them as one batch, and the last from the real transform of `m`, recursively; one pass of radix `r` (written out for 3 and 5, sums for 7 and 11) then makes only the first half of the spectrum, `X[s + q·m] = Σ_a e^(−2πi·a·s/n)·Y_a[s]·e^(−2πi·a·q/r)` for `s ≤ (m − 1)/2`, writing the bins beyond `n/2` as the conjugates they mirror. The inverse is its transpose. This costs about `1 + 1/r + …` complex transforms of `m`, near half the complex transform of `n` on reals. Odd lengths up to 15 and even ones up to 16 are summed directly from the table of `e^(−2πi·jk/n)`, the sums of the whole spectrum held in registers (faster there than any transform with its fixed costs, measured); primes and lengths whose factors all exceed 11 run the complex transform of `n` on the reals (a prime then takes Rader's or Bluestein's algorithm). Combining two real sequences of a batch into one complex one was not used: it loses accuracy for a sequence much smaller than its partner.
+**Odd lengths** have no packing into a half-length transform. One with a factor among 19, 15, 9, 17, 13, 11, 7, 5 and 3, `r` the first of them in this order that divides it (19 first, then the composites, then the other primes from the largest; measured), `n = r·m`, splits into the `r` sequences of the residues of the index modulo `r`. Their spectra come two at a time from one complex transform of `m` of `x_{2p} + i·x_{2p+1}`, all `(r − 1)/2` of them as one batch, and the last from the real transform of `m`, recursively; one pass of radix `r` then makes only the first half of the spectrum, `X[s + q·m] = Σ_a e^(−2πi·a·s/n)·Y_a[s]·e^(−2πi·a·q/r)` for `s ≤ (m − 1)/2`, writing the bins beyond `n/2` as the conjugates they mirror. That pass is a kernel per instruction set on blocks of one complex value, the complex passes' butterfly of `r` (written out for 3, 5 and 7, one butterfly in registers for the composites 9 and 15, the odd butterfly from a table for 11 to 19) after the twiddles `e^(−2πi·a·s/n)`; the inverse is its transpose. This costs about `1 + 1/r + …` complex transforms of `m`, near half the complex transform of `n` on reals. The odd lengths 3 to 15 take the complex butterfly of `n` on the reals as one kernel, with no working memory, and `n = 2` is summed directly from the table of `e^(−2πi·jk/n)` (the even lengths 4 to 16, summed directly before, take the fused kernels above); primes above 15 and the lengths with no factor up to 19 run the complex transform of `n` on the reals (a prime then takes Rader's or Bluestein's algorithm). Combining two real sequences of a batch into one complex one was not used: it loses accuracy for a sequence much smaller than its partner.
 
-**The tables** of the real transforms' pass, of the odd splits and of the cosine and sine transforms of types II to IV are built as `e^(−2πi·(o + s·k)/n) = C[a]·F[j]` for `k = a·b + j`, `b` about `√len`: a fine table `F` of the powers of one root and a coarse table `C` of the powers of another, both and their products carried in double-double, the two roots summed by Taylor's series in double-double. Each value is then the correctly rounded root (the bench's `rootcheck`, against the tests' double-double roots up to `n = 2²³`, found no value off, where the complex transform's generator is off by up to one unit in the last place) and costs one product of double-doubles instead of a sine and a cosine; tables of fewer than 128 roots take the roots one by one from the complex transform's generator. These are two generators of roots, this one and the complex transform's; they are to be merged.
+**The tables** of the real transforms' pass, of the odd splits and of the cosine and sine transforms of types II to IV are built as `e^(−2πi·(o + s·k)/n) = C[a]·F[j]` for `k = a·b + j`, `b` about `√len`: a fine table `F` of the powers of one root and a coarse table `C` of the powers of another, both and their products carried in double-double, the two roots summed by Taylor's series in double-double. Each value is then the correctly rounded root but for ties within about 10⁻²⁸ of it (the bench's `rootcheck`, against the tests' double-double roots up to `n = 2²³`, found no value off, where the system's `sin` and `cos` are off by up to one unit in the last place) and costs one product of double-doubles instead of a sine and a cosine; an `f32` table takes the product of the two roots rounded to `f64` and then to `f32`, the nearest `f32` but for ties closer than about 2⁻⁵². Tables of fewer than 128 roots take the roots one by one from the sines and cosines of the complex transform's short tables. The complex transform's octant tables of 512 entries or more come from this generator too (below that the sines and cosines one by one are faster), and its `f32` twiddles from 512 values on from the same products of a coarse and a fine table (`Grid`, [above](#the-complex-transform-1)): one generator of correctly rounded roots, with the sines and cosines for the short tables.
 
 ### Cosine and sine transforms
 
@@ -216,1144 +216,676 @@ The algorithms are FFTW's accurate ones (those it enables by default), on the re
 - Type IV of an even `n` by the complex transform of `n/2` of `(x[2j] + i·x[n − 1 − 2j])·e^(−πi·j/n)`; with `W = 2·e^(−πi·(4p + 1)/4n)·Z[p]`, `y[2p] = Re W` and `y[n − 1 − 2p] = −Im W`, every step in place. Of an odd `n` by the real transform of `n` of a permutation of the values with signs, and sums and differences of the spectrum's parts times `√2` (Chan and Ho, FFTW's `reodft11e-r2hc-odd`).
 - Type I of an odd `n` by FFTW's split-radix step (`reodft00e-splitradix`): with `N = n − 1`, `A` the DCT-I of the `N/2 + 1` even-indexed values and `B` the DCT-II of the `N/2` odd-indexed ones, `y[k] = A[k] + B[k]` and `y[N − k] = A[k] − B[k]`, recursively, which costs about one real transform of `n` where the symmetric extension would take one of `2(n − 1)`; DST-I alike, with the DST-I of the odd-indexed values and the DST-II of the even-indexed ones. An even `n` takes the real transform of the symmetric (antisymmetric) extension, `2(n − 1)` (`2(n + 1)`) values, as FFTW does.
 - The sine transforms take the same steps with the signs and orders that turn them into the cosine transforms of their types, `DST-II(x)[k] = DCT-II((−1)^j·x[j])[n − 1 − k]`, `DST-III(X)[j] = (−1)^j·DCT-III(X[n − 1 − k])[j]` and `DST-IV(x)[k] = (−1)^k·DCT-IV(x[n − 1 − j])[k]`, folded into the reordering and the twiddle passes rather than run as passes of their own.
-- Lengths up to 8 (16 for type I) are summed directly from the matrix, each column padded to 16 entries and the 16 sums held in registers; the crossovers were measured.
+- Lengths up to 8 (16 for type I) are summed directly from the matrix, each column padded to 8 entries (16 beyond 8) and the sums held in registers in two banks (for the even and the odd columns), one run of 8 by loops unrolled for that length; one run of such a length skips the checks and the loop of a batch, and none takes working memory. The crossovers were measured.
 
-The passes around the transforms are loops over slices cut to the lengths they cover, read and written from both ends, which the compiler vectorises (NEON, and SSE2 at the baseline of x86_64); the permutation and the `√2` pass of the odd type IV, and the gathers of the type I split, are scalar. DCT-II's twiddle pass runs after the real transform's pass, not fused into it.
+The passes around the transforms are loops over slices cut to the lengths they cover, read and written from both ends, which the compiler vectorises (NEON, and SSE2 at the baseline of x86_64); the permutation and the `√2` pass of the odd type IV are scalar, and the type I split de-interleaves its input in one pass and combines its two halves with reversed stores. For `f64`, a type II of an even length of 1024 or more inside the type I split (DCT-I of 2049 values and more, DST-I of 2047) is reordered for Makhoul's step straight from the input, every fourth value, and its twiddle pass and the combination of the split run as one loop, so that neither its values nor its result are copied (measured: within ±2 % of the separate passes for shorter ones down to 256, and for `f32`, which keeps them). Elsewhere DCT-II's twiddle pass runs after the real transform's pass, not fused into it.
 
 ### Two and three dimensions
 
-The last, contiguous dimension is transformed as one batch of rows over all the arrays of the call. Each other dimension goes by tiles of adjacent columns: up to 256 bytes of each row (two cache lines of 128 bytes: 16 `Complex<f64>` or 32 `Complex<f32>`) and at most 1 MiB in all are gathered into a buffer, column after column, transformed there as one batch of contiguous sequences and scattered back, so that every pass over the array reads and writes whole cache lines even where the stride of the rows, a power of two, maps the values of a column to the same sets of the cache. The gather and the scatter copy value by value.
+The last, contiguous dimension is transformed as one batch of rows over all the arrays of the call. Each other dimension, for an array of at most 4 MiB whose length along it has no prime factor above 19, runs the Stockham passes of that length along the rows, planned for as many interleaved sequences as there are columns (the vectors running across the columns, each pass reading and writing the whole array, which stays in the caches), the second buffer of the passes the size of one array. A larger array, or a length with a larger prime factor, goes by tiles of adjacent columns: up to 256 bytes of each row (two cache lines of 128 bytes: 16 `Complex<f64>` or 32 `Complex<f32>`) and at most 1 MiB in all are gathered into a buffer, column after column, transformed there as one batch of contiguous sequences and scattered back, so that every pass over the array reads and writes whole cache lines even where the stride of the rows, a power of two, maps the values of a column to the same sets of the cache. The gather and the scatter copy value by value.
 
 ### Convolution and correlation
 
 `convolve` takes one of four paths, chosen by a model of their costs in nanoseconds:
 
 - **Scalar**: for at most 16 products, operands of at most 16 values, the double loop on stack copies.
-- **Direct**: `c[k] = Σ_t taps[t]·x[k + t]` with `taps` the shorter operand reversed and `x` the longer between `len(short) − 1` zeros, by SIMD kernels: NEON on aarch64, SSE2 and AVX2 with FMA (chosen at run time) on x86_64, and the same steps on arrays of lanes elsewhere and under Miri, from one body of macros. A kernel keeps a block of outputs in registers (8 vectors on NEON, 4 on AVX2 and SSE2) while the taps run past it two vectors at a time: for each lane `s` of the taps the vectors of `x` from `k + t + s` are loaded once, and each serves the tap `t + s` for one block of sums and `t + W + s` for the next, kept apart so that no multiply-add waits for another; the taps left over are taken one at a time. Complex values stay interleaved: the kernel sums `A = Σ x·re(tap)` and `B = Σ x·im(tap)` lane by lane and forms `A + i·B` once per block, so its steps have no shuffles. The outputs that every tap reaches (a multiple of 64 of them) are computed in place on the longer operand; only those at the two ends read short copies between zeros (on the stack up to 512 values, the taps up to 128). A correlation is `conv(op(u), v) = op(conv(u, op(v)))` for `op` a reversal, a conjugation or both, so whichever operand is reversed nothing is copied; the result is reversed or conjugated in place.
+- **Direct**: `c[k] = Σ_t taps[t]·x[k + t]` with `taps` the shorter operand reversed and `x` the longer between `len(short) − 1` zeros, by SIMD kernels: NEON on aarch64, SSE2 and AVX2 with FMA (chosen at run time) on x86_64, and the same steps on arrays of lanes elsewhere and under Miri, from one body of macros. A kernel keeps a block of outputs in registers (8 vectors on NEON, 4 on AVX2 and SSE2) while the taps run past it two vectors at a time: for each lane `s` of the taps the vectors of `x` from `k + t + s` are loaded once, and each serves the tap `t + s` for one block of sums and `t + W + s` for the next, kept apart so that no multiply-add waits for another; the taps left over are taken one at a time. For at most 4 taps another kernel holds the taps in registers, broadcast once, and computes in place on the longer operand every output that takes all of them (four vectors of outputs at a time, then one, then the last values one by one); the `len(short) − 1` outputs at either end are summed over the values inside, so nothing is copied. Complex values stay interleaved: the kernel sums `A = Σ x·re(tap)` and `B = Σ x·im(tap)` lane by lane and forms `A + i·B` once per block, so its steps have no shuffles. With more taps, the outputs that every tap reaches (a multiple of 64 of them) are computed in place on the longer operand; only those at the two ends read short copies between zeros (on the stack up to 512 values, the taps up to 128). A correlation is `conv(op(u), v) = op(conv(u, op(v)))` for `op` a reversal, a conjugation or both, so whichever operand is reversed nothing is copied; the result is reversed or conjugated in place.
 - **Transforms of the padded product**: both operands padded to a length `L ≥ len(a) + len(b) − 1` of the form `2^a·3^b·5^c·7^d` (`b ≤ 4`, `c ≤ 2`, `d ≤ 1`, and `a ≥ 1` for real data, which go through `RealFft` and its `L/2 + 1` values), the cheapest by the model rather than the shortest; the spectra multiplied with the scale `1/L` folded in (a SIMD pass), and the product transformed back.
 - **Overlap-add**, when the longer operand has at least four times the shorter's length: the longer is cut into blocks of `B = L − len(short) + 1` values, each padded to `L`, transformed, multiplied by the shorter operand's spectrum (computed once) and transformed back, and the results added where they overlap; the blocks go through the transforms in batches of up to 65,536 values a call. The padded product is the case of one block.
 
-The model prices the direct path at `direct + copy·len + mac·len·len(short)`, a transform of the length `L = 2^a·3^b·5^c·7^d` at `call + fft·L·(a + w₃b + w₅c + w₇d)` (`fft·L·log₂ L` for a power of two; factors 11 and 13 and larger primes have weights of their own), planning at half of `plan_call + plan·L`, and each pass over the buffers at `pass·L`. It takes the cheapest of the direct path, the padded product at its cheapest length, and overlap-add at every length `L` of that form from `2·len(short)` up to the padded length or `64·max(len(short), 16)`, whichever is smaller. A lower bound of every transform path skips that search when the direct path is cheaper anyway: each plans a length `L ≥ 2·len(short) − 1`, transforms the shorter operand once and its blocks there and back, at least `len(long)` values each way, and a transform of `L` values costs at least `fft·L·log₂ L` times the least weight of a radix per bit; being below every path's estimate, the bound never changes the path chosen. Half of the planning: with the plans kept, a first call pays all of it and a repeated one none, and the choice may not depend on what is kept, or the same call would give other bits after another one; charging all of it measured up to 3.2 times slower on repeated calls where kept plans make the transforms win, charging none of it up to 2.9 times slower on first calls, and a half at most 1.6 times (2.0 for repeated `f32` calls) either way, the geometric means within 1.03. The constants are measured per type by the bench's `calibrate` (`mac` by sweeps of the direct path near the crossover, where its taps are longer than calibrate's fit sees) and are to be measured again whenever the transforms or the kernels change; on x86_64 without AVX2 the cost of a product of the direct path is doubled, an estimate (SSE2's kernels have a quarter of AVX2's products a cycle and its transforms about half of AVX2's speed), not a measurement.
+The model prices the direct path at `direct + copy·len + mac·len·len(short)`, a transform of the length `L = 2^a·3^b·5^c·7^d` at `call + fft·L·(a + w₃b + w₅c + w₇d)` (`fft·L·log₂ L` for a power of two; factors 11 and 13 and larger primes have weights of their own), planning at half of `plan_call + plan·L`, and each pass over the buffers at `pass·L`. It takes the cheapest of the direct path, the padded product at its cheapest length, and overlap-add at every length `L` of that form from `2·len(short)` up to the padded length or `64·max(len(short), 16)`, whichever is smaller. A lower bound of every transform path skips that search when the direct path is cheaper anyway: each plans a length `L ≥ 2·len(short) − 1`, transforms the shorter operand once and its blocks there and back, at least `len(long)` values each way, and a transform of `L` values costs at least `fft·L·log₂ L` times the least weight of a radix per bit; being below every path's estimate, the bound never changes the path chosen. Half of the planning: with the plans kept, a first call pays all of it and a repeated one none, and the choice may not depend on what is kept, or the same call would give other bits after another one; charging all of it measured up to 3.2 times slower on repeated calls where kept plans make the transforms win, charging none of it up to 2.9 times slower on first calls, and a half at most 1.6 times (2.0 for repeated `f32` calls) either way, the geometric means within 1.03. The constants are measured per type by the bench's `calibrate` (`mac` by sweeps of the direct path near the crossover, where its taps are longer than calibrate's fit sees), and were measured again on the final transforms and kernels of v0.2: the direct path's constants are the new fits, the transforms' the earlier ones scaled by one factor per type (0.85 for `f32`, 0.90 for `f64`, 0.87 for `Complex<f32>`, none for `Complex<f64>`), so that the transform lengths chosen stay and the lower bound still skips the search for short direct convolutions (the fits themselves would add that search, about 0.2 µs, to small ones); they are to be measured again whenever the transforms or the kernels change; on x86_64 without AVX2 the cost of a product of the direct path is doubled, an estimate (SSE2's kernels have a quarter of AVX2's products a cycle and its transforms about half of AVX2's speed), not a measurement.
 
 `circular_convolve` takes the cheapest of the direct path on `a` extended periodically (`n²` products), three transforms of the length `n`, and the linear convolution by transforms of a smooth length of at least `2n − 1`, folded modulo `n`, which the model's costs favour when `n` has a large prime factor (whose transforms of `n` would take Bluestein's algorithm). `circular_correlate` is the circular convolution with `conj(b[(n − j) mod n])`, written straight into the buffer each path fills (the folded linear path makes one copy); it takes the time of `circular_convolve`.
 
 ## Testing
 
-The tests of `lib/tests/math/fft` (52 of them) check every algorithm of every transform against references summed in double-double arithmetic: the DFT for the complex and real transforms on dense data at every length to 64 and at chosen ones to 2062, and on sparse data at long lengths to 100,000, the definitions of the eight cosine and sine transforms, and the double-double matrix columns (impulses) at long lengths, with the relative L2 error bounded by `c·ε·(log₂ n + 1)`, `c` 3 for the complex transform, 10 for the others, 20 for round trips and 4 for batches against single runs; every batch against its runs one by one; the ignored imaginary parts of the real inverse for every algorithm; the two and three dimensions against line-by-line transforms (tiles of widths not a multiple of the tile, long columns, axes of 1); in place against out of place; every `_with_scratch` method with exactly `scratch_len()` values and with more against the allocating one, and short scratch panicking; empty batches of every algorithm (a panic of `RealFft::forward` on an empty batch of an even length of 18 and more was found by the fuzzing below and fixed); clones; `Send` and `Sync`; convolutions on every path (scalar, direct with its interior and its ends, either operand longer, padded product, overlap-add with full and partial batches, the three circular paths) against direct double-double sums, the direct kernels at every count of taps, exact small integers, and the plan cache (kept, evicted least recently used, a plan past the bytes never kept, eight threads with another churning the cache, every result bit-identical to the one-thread result).
+The tests of `lib/tests/math/fft` (54 of them) check every algorithm of every transform against references summed in double-double arithmetic: the DFT for the complex and real transforms on dense data at every length to 64 and at chosen ones to 2062, and on sparse data at long lengths to 100,000, the definitions of the eight cosine and sine transforms, and the double-double matrix columns (impulses) at long lengths, with the relative L2 error bounded by `c·ε·(log₂ n + 1)`, `c` 3 for the complex transform, 10 for the others, 20 for round trips and 4 for batches against single runs; every batch against its runs one by one; the ignored imaginary parts of the real inverse for every algorithm; the two and three dimensions against line-by-line transforms (tiles of widths not a multiple of the tile, long columns, axes of 1); in place against out of place; every `_with_scratch` method with exactly `scratch_len()` values and with more against the allocating one, and short scratch panicking; empty batches of every algorithm (a panic of `RealFft::forward` on an empty batch of an even length of 18 and more was found by the fuzzing below and fixed); clones; `Send` and `Sync`; convolutions on every path (scalar, direct with its interior and its ends, either operand longer, padded product, overlap-add with full and partial batches, the three circular paths) against direct double-double sums, the direct kernels at every count of taps, exact small integers, and the plan cache (kept, evicted least recently used, a plan past the bytes never kept, eight threads with another churning the cache, every result bit-identical to the one-thread result); the real transform at lengths of every radix of the odd split (3 to 19, the composites 9 and 15 among them) and of the complex fallback (23·23, 23·29), and with one class of residues of 10⁶ against 10⁻⁶ for the others, for the classes 3, 5, 7, 9 and 15; the allocation-free `convolve_into` and `correlate_into` against the vectors, and a slice of another length panicking; arrays of two and three dimensions by the passes along the rows and by tiles, (700, 400) and (72, 72, 72) among them.
 
-The gates passed on the final code: `cargo fmt`, `clippy -D warnings`, clippy for `wasm32`, a check on the MSRV 1.88, rustdoc with `-D warnings`, the math tests in release and debug (1271) and the doctests (707). Under Miri, one test a process, on `aarch64-apple-darwin`, `s390x-unknown-linux-gnu` (big-endian) and `i686-unknown-linux-gnu` (32-bit), 49 of the 52 tests run and pass on each (three are too long for Miri: the long operands and two of the cache's; the threads test runs the cache under Miri with three threads); Miri runs the portable kernels, which follow the same steps as the vector ones lane by lane. It caught a violation of Stacked Borrows in the setup of Rader's and Bluestein's kernels, and on 32 bits a bound `1 << 60` overflowing `usize`; both were fixed, and with the second Rader's `a·g mod p`, which could overflow a 32-bit `usize` for `p > 2¹⁶`. On x86_64, in Docker's `linux/amd64` (`rust:1.88`), the 52 tests pass on the AVX2 and FMA path, and 52 again on the SSE2 path, by the same test binary under `qemu-x86_64 -cpu Nehalem`, where the plans report `isa: Sse2`. The x86_64 kernels were checked for correctness under emulation only; their speed has never been measured.
+The gates passed on the code of the release that added the module: `cargo fmt`, `clippy -D warnings`, clippy for `wasm32`, a check on the MSRV 1.88, rustdoc with `-D warnings`, the math tests in release and debug (1271) and the doctests (707). Under Miri, one test a process, on `aarch64-apple-darwin`, `s390x-unknown-linux-gnu` (big-endian) and `i686-unknown-linux-gnu` (32-bit), 49 of the 52 tests it then had ran and passed on each (three are too long for Miri: the long operands and two of the cache's; the threads test runs the cache under Miri with three threads); Miri runs the portable kernels, which follow the same steps as the vector ones lane by lane. It caught a violation of Stacked Borrows in the setup of Rader's and Bluestein's kernels, and on 32 bits a bound `1 << 60` overflowing `usize`; both were fixed, and with the second Rader's `a·g mod p`, which could overflow a 32-bit `usize` for `p > 2¹⁶`. On x86_64, in Docker's `linux/amd64` (`rust:1.88`), the 52 tests passed on the AVX2 and FMA path, and 52 again on the SSE2 path, by the same test binary under `qemu-x86_64 -cpu Nehalem`, where the plans reported `isa: Sse2`. The x86_64 kernels were checked for correctness under emulation only; their speed has never been measured.
 
 The module was also fuzzed differentially against FFTW and the double-double reference: every API, the `_with_scratch` forms and batches among them, `f32` and `f64`, on random, sparse, constant and impulse data of ordinary, tiny and huge scales, and on empty data and lengths 0. The first run, 5,211,326 cases on the code before its last changes, found the empty-batch panic above; the second, 3,478,231 cases on the final code, found nothing, its worst error 0.14 of the tests' bound (in DCT-IV). Its only rejected cases are convolutions with near-constant operands, where an error measured relative to `‖a‖·‖b‖` does not apply; FFTW in the same precision fails them alike.
 
+The speed pass of v0.2 (the composite butterflies, the fused real kernels and last pass, the odd splits' kernels and radices, the products of two tables for `f32` twiddles, FCADD, the few-tap convolutions and the `_into` forms, the passes along the rows of `Fft2` and `Fft3`, the uninitialised working memory) was checked on its final code by the 54 tests in release and debug and the 17 doctests of the module; under Miri on `aarch64-apple-darwin`, 51 of the 54 (the same three too long); in the CI's x86_64 container (Ubuntu 26.04, x86-64-v3, Rust 1.100), the 54 on the AVX2 and FMA path, and on the SSE2 path by the suite built with `--cfg a_baseline`, which makes every run-time detection of AVX2 report false; on the M4, the NEON kernels' fallback for a target without FEAT_FCMA by the suite built with `RUSTFLAGS="-C target-feature=-fcma"` (no FCADD left in the module's code, against 534 instructions in the default build), the 54 passing, and by the audit's hashes of every output, bit-identical to FCADD's; by clippy for `x86_64-apple-darwin` with Rust 1.100, with no warning; and by the differential fuzzing above against FFTW, 7,334,013 cases in two runs (the second, 2,979,558, on the final code) with no failure and a worst error of 0.015 of the bound. An independent audit then compared it with double-double references and with the code before the pass: 809 complex lengths (every one to 700, composites, powers of two and their neighbours to 2²², primes to 1,000,003, the edges of the tables' switches) and 1,221 real ones in seven methods and batches, the eight cosine and sine types at 283 lengths, 46 arrays of two and 20 of three dimensions, and the convolutions on every path, with a worst error of 0.097 of the tests' bound; the methods bit-identical to each other; working memory full of NaN giving the same bits as zeroed; no `_with_scratch` method allocating (a counting allocator); eight threads bit-identical to one; and Miri, with no undefined behaviour, on its tests of every new unsafe path on `aarch64-apple-darwin`, `s390x-unknown-linux-gnu` (big-endian) and `i686-unknown-linux-gnu` (32-bit). Real transforms of `f32` subnormals of a few significant bits (about 10⁻⁴¹ to 10⁻⁴⁴) are far less accurate than the bound, as they were before (up to three times more so now); nothing is promised there, and `f64` subnormals and every normal scale showed no excess.
+
 ## Measured
 
-Measured on an Apple M4 Max on 2026-11-17, three full runs of each of three harnesses: the complex transform and the real, cosine and sine transforms with the two and three dimensions between 19:13 and 20:02, and the convolutions between 20:47 and 21:16, on the final code after a change to the lower bound of their model (above), one thread, `env -u MallocNanoZone`, fat LTO and one codegen unit, with nothing else running but the machine's own: one-minute load averages 1.2 to 8.0 at the times recorded (each table gives its range). Each figure here is the median of the three runs' figures, each of those the median of its rounds; the ratios are recomputed from the medians, `a/x` being `a`'s time over the reference's: below 1, `a` is faster. The accuracy of the real and trigonometric transforms was measured once, right after, at 20:03 (it does not depend on the load).
+Measured on an Apple M4 Max (macOS 27.2.1) on 2026-11-26 between 06:51 and 07:05, in the final run of the release's speed pass, which timed every area of the crate in turn with nothing else running: one thread on every side, by the harness `bench/fft` of the repository (its method is in `bench/README.md`). `a` is built as a user builds it, by rustc 1.100 stable with the default release profile (no LTO, no `target-cpu`), and so are rustfft 6.4.1, realfft 3.5.1 and rustdct 0.7.1; FFTW 3.3.11 is Homebrew's build (which on arm64 has no SIMD codelets: FFTW runs its scalar ones here), called from a driver built with `-O3 -mcpu=native`; vDSP is Accelerate's, of macOS 27.2.1. Each figure is the median of 15 samples of at least 1 ms, `a` and each reference alternated sample by sample in one process, after each reference's output on the row's input was compared with `a`'s (no mismatch). The x86_64 paths were not timed for these tables.
 
-The references: FFTW 3.3.11 (Homebrew's static build, `FFTW_MEASURE`, one thread, planned before the clock starts; on arm64 Homebrew's FFTW has no SIMD codelets, only its scalar ones, so it is FFTW at its scalar speed here); rustfft 6.4.1 (NEON) and realfft 3.5.1; and Apple's Accelerate vDSP, on split complex data (`vDSP_fft_zip` in place for the complex powers of two, `vDSP_DFT_Execute` out of place for `f·2^k`, `f` in 1, 3, 5, 15; `vDSP_fft_zrip` and `vDSP_DFT_zrop` for real data; `vDSP_DCT_Execute` for the cosine transforms of types II, III and IV, `f32` only; `vDSP_fft2d_zip`; `vDSP_conv` and `vDSP_zconv`, direct). The x86_64 paths were not measured.
+The references, each in its best case: FFTW planned before the clock with `FFTW_MEASURE` (and with `FFTW_PATIENT` too for the powers of two from 64 to 2²⁰, the faster kept), in place for the complex transforms and out of place for the real and trigonometric ones; rustfft's `process_with_scratch` in place and `process_immutable_with_scratch` out of place; realfft's and rustdct's `process_with_scratch` (`rustdct` in place, against `transform_with_scratch`); vDSP on split complex data and with its real data split into even and odd values before the clock (`vDSP_fft_zip`, `vDSP_DFT_Execute` and `vDSP_DFT_Interleaved_Execute` for the complex transforms, `vDSP_fft_zrip`, `vDSP_DFT_zrop` and the interleaved real DFTs for real data, `vDSP_fftm_zip` and `vDSP_fftm_zrip` for batches, `vDSP_DCT_Execute` for the `f32` DCT-II, III and IV, `vDSP_fft2d_zip`, and the direct `vDSP_conv` and `vDSP_zconv` on operands padded and split before the clock, into a preallocated output). The convolutions of FFTW, rustfft and realfft are the library's transforms with the harness's spectral product and overlap-add, the output preallocated, at the fastest of the padded 7-smooth length, the next power of two and the overlap-add lengths `2^k` from `2·len(b)` to `64·len(b)`, chosen per row; the circular ones two forward transforms of `n` and one inverse. Planning is compared with FFTW's `FFTW_ESTIMATE`, rustfft's, realfft's and rustdct's planners and vDSP's setups, each made and destroyed in the loop.
+
+A case is an operation at one length and type; its ratio `a/x` is `a`'s time over that of the fastest reference that does the same work (below 1 `a` is faster), and a loss is a ratio above 1.05. Counted as the same work though they favour the reference: vDSP's layouts and padding prepared before the clock, realfft and FFTW's `c2r` using their input as scratch where `a` keeps its input, and the preallocated outputs where `convolve`, `correlate` and the circular forms return a new vector. Not counted: rustfft's out-of-place form that overwrites its input (`process_outofplace_with_scratch`, a weaker contract; the form that keeps it is the reference), and `FFTW_MEASURE`'s planning, which times candidate plans. Over the 1,602 cases there are 300 losses, 145 ties within 5 % and 1,157 cases below 0.95; the median ratio is 0.762.
+
+Each cell gives `a`'s time, then `a/x` and the reference `x`.
 
 ### The complex transform
 
-`forward_with_scratch` in place for one transform and the allocating `forward` for a batch, against FFTW in place, rustfft's `process_with_scratch` and vDSP; nanoseconds per transform, the median of 7 rounds of 20 ms with the contenders interleaved; Gflop/s is FFTW's `5·n·log₂ n / t`.
+`Fft::forward_with_scratch` in place, powers of two:
 
-`f64`, powers of two (load 2.0 to 8.0):
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 2 | 3.04 ns, 1.31 FFTW | 3.12 ns, 1.88 rustfft |
+| 4 | 3.98 ns, 0.952 FFTW | 4.14 ns, 0.966 FFTW |
+| 8 | 7.10 ns, 1.11 FFTW | 6.38 ns, 0.987 FFTW |
+| 16 | 10.4 ns, 0.890 FFTW | 10.7 ns, 0.961 rustfft |
+| 32 | 31.5 ns, 1.15 rustfft | 18.6 ns, 1.15 rustfft |
+| 64 | 53.0 ns, 0.929 vDSP | 29.5 ns, 1.07 vDSP |
+| 128 | 121 ns, 0.953 vDSP | 65.1 ns, 1.30 vDSP |
+| 256 | 259 ns, 0.949 vDSP | 128 ns, 1.08 vDSP |
+| 512 | 510 ns, 0.798 vDSP | 274 ns, 1.64 vDSP |
+| 1024 | 1.26 µs, 0.924 vDSP | 617 ns, 2.22 vDSP |
+| 2048 | 2.86 µs, 0.905 vDSP | 1.31 µs, 2.22 vDSP |
+| 4096 | 6.94 µs, 1.02 vDSP | 3.65 µs, 2.85 vDSP |
+| 16,384 | 35.6 µs, 0.655 vDSP | 16.0 µs, 1.94 vDSP |
+| 65,536 | 179 µs, 0.649 FFTW | 85.4 µs, 1.80 vDSP |
+| 262,144 | 910 µs, 0.729 rustfft | 425 µs, 1.75 vDSP |
+| 1,048,576 | 4.02 ms, 0.707 rustfft | 1.88 ms, 0.987 vDSP |
+| 4,194,304 | 19.4 ms, 0.734 rustfft | 9.03 ms, 1.12 vDSP |
 
-| n | `a` | FFTW | rustfft | vDSP | `a` Gflop/s | a/FFTW | a/rustfft | a/vDSP |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 5.9 ns | 2.7 ns | 3.3 ns | 4.6 ns | 1.7 | 2.19 | 1.79 | 1.28 |
-| 4 | 6.7 ns | 4.4 ns | 7.2 ns | 5.3 ns | 6.0 | 1.52 | 0.93 | 1.26 |
-| 8 | 8.6 ns | 6.8 ns | 12.6 ns | 7.6 ns | 14.0 | 1.26 | 0.68 | 1.13 |
-| 16 | 19 ns | 12 ns | 16.9 ns | 16.7 ns | 16.8 | 1.58 | 1.12 | 1.14 |
-| 32 | 32.2 ns | 30.4 ns | 27.4 ns | 33.8 ns | 24.8 | 1.06 | 1.18 | 0.95 |
-| 64 | 57.3 ns | 85.7 ns | 81.4 ns | 60.1 ns | 33.5 | 0.67 | 0.70 | 0.95 |
-| 128 | 122 ns | 216 ns | 181 ns | 135 ns | 36.6 | 0.57 | 0.68 | 0.91 |
-| 256 | 265 ns | 433 ns | 404 ns | 272 ns | 38.6 | 0.61 | 0.66 | 0.98 |
-| 512 | 588 ns | 962 ns | 905 ns | 658 ns | 39.2 | 0.61 | 0.65 | 0.89 |
-| 1024 | 1.33 µs | 2.23 µs | 1.99 µs | 1.41 µs | 38.6 | 0.59 | 0.67 | 0.94 |
-| 2048 | 3.05 µs | 4.81 µs | 4.42 µs | 3.22 µs | 36.9 | 0.63 | 0.69 | 0.95 |
-| 4096 | 7.17 µs | 11.9 µs | 10.5 µs | 6.9 µs | 34.3 | 0.60 | 0.68 | 1.04 |
-| 8192 | 17 µs | 27 µs | 23.9 µs | 16.7 µs | 31.2 | 0.63 | 0.71 | 1.02 |
-| 16,384 | 37.5 µs | 57.6 µs | 63.7 µs | 52.1 µs | 30.6 | 0.65 | 0.59 | 0.72 |
-| 32,768 | 80.1 µs | 127 µs | 119 µs | 140 µs | 30.7 | 0.63 | 0.67 | 0.57 |
-| 65,536 | 189 µs | 288 µs | 295 µs | 299 µs | 27.8 | 0.65 | 0.64 | 0.63 |
-| 131,072 | 427 µs | 621 µs | 534 µs | 707 µs | 26.1 | 0.69 | 0.80 | 0.60 |
-| 262,144 | 956 µs | 1.36 ms | 1.31 ms | 1.66 ms | 24.7 | 0.70 | 0.73 | 0.58 |
-| 524,288 | 1.96 ms | 3.56 ms | 2.48 ms | 3.39 ms | 25.4 | 0.55 | 0.79 | 0.58 |
-| 1,048,576 | 4.22 ms | 8.04 ms | 5.51 ms | 7.31 ms | 24.9 | 0.52 | 0.77 | 0.58 |
-| 2,097,152 | 8.9 ms | 15.9 ms | 12.2 ms | 16.1 ms | 24.8 | 0.56 | 0.73 | 0.55 |
-| 4,194,304 | 20.3 ms | 39.2 ms | 26.6 ms | 32.9 ms | 22.7 | 0.52 | 0.76 | 0.62 |
+Smooth lengths `3·2^k` and `5·2^k`:
 
-`f32`, powers of two (load 2.7 to 6.8):
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 6 | 7.88 ns, 1.32 FFTW | 7.54 ns, 1.27 FFTW |
+| 12 | 10.0 ns, 1.07 FFTW | 10.1 ns, 1.08 FFTW |
+| 24 | 15.9 ns, 0.774 rustfft | 15.7 ns, 1.17 rustfft |
+| 48 | 48.7 ns, 1.01 vDSP | 29.2 ns, 0.879 vDSP |
+| 96 | 88.6 ns, 0.915 vDSP | 50.6 ns, 0.547 vDSP |
+| 384 | 427 ns, 0.732 vDSP | 227 ns, 1.37 vDSP |
+| 1536 | 2.00 µs, 0.653 rustfft | 1.05 µs, 2.50 vDSP |
+| 6144 | 11.5 µs, 0.726 rustfft | 6.62 µs, 3.13 vDSP |
+| 24,576 | 67.7 µs, 0.794 rustfft | 30.9 µs, 2.58 vDSP |
+| 98,304 | 323 µs, 0.820 rustfft | 152 µs, 2.14 vDSP |
+| 786,432 | 2.91 ms, 0.704 rustfft | 1.41 ms, 1.42 vDSP |
+| 10 | 10.3 ns, 1.09 FFTW | 9.21 ns, 1.01 rustfft |
+| 20 | 14.4 ns, 0.877 FFTW | 14.2 ns, 0.866 FFTW |
+| 40 | 35.2 ns, 0.951 vDSP | 24.4 ns, 0.937 vDSP |
+| 80 | 76.8 ns, 0.940 vDSP | 43.3 ns, 0.920 vDSP |
+| 320 | 324 ns, 0.674 vDSP | 172 ns, 1.22 vDSP |
+| 1280 | 1.65 µs, 0.597 FFTW | 853 ns, 2.04 vDSP |
+| 5120 | 8.93 µs, 0.586 FFTW | 5.58 µs, 3.15 vDSP |
+| 20,480 | 41.6 µs, 0.590 FFTW | 19.7 µs, 2.16 vDSP |
+| 81,920 | 244 µs, 0.671 FFTW | 116 µs, 2.06 vDSP |
+| 655,360 | 2.26 ms, 0.604 rustfft | 1.10 ms, 1.61 vDSP |
 
-| n | `a` | FFTW | rustfft | vDSP | `a` Gflop/s | a/FFTW | a/rustfft | a/vDSP |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 6.2 ns | 2.5 ns | 1.7 ns | 5.1 ns | 1.6 | 2.48 | 3.65 | 1.22 |
-| 4 | 6.7 ns | 4.4 ns | 6 ns | 7.3 ns | 6.0 | 1.52 | 1.12 | 0.92 |
-| 8 | 9 ns | 6.6 ns | 10.8 ns | 9 ns | 13.3 | 1.36 | 0.83 | 1.00 |
-| 16 | 15.2 ns | 12.1 ns | 10.7 ns | 16 ns | 21.1 | 1.26 | 1.42 | 0.95 |
-| 32 | 20 ns | 30.3 ns | 16.5 ns | 19.8 ns | 40.0 | 0.66 | 1.21 | 1.01 |
-| 64 | 32.4 ns | 85.5 ns | 51.3 ns | 35.6 ns | 59.3 | 0.38 | 0.63 | 0.91 |
-| 128 | 72.2 ns | 203 ns | 103 ns | 60.7 ns | 62.0 | 0.36 | 0.70 | 1.19 |
-| 256 | 149 ns | 419 ns | 239 ns | 120 ns | 68.8 | 0.36 | 0.62 | 1.24 |
-| 512 | 314 ns | 960 ns | 521 ns | 196 ns | 73.5 | 0.33 | 0.60 | 1.60 |
-| 1024 | 705 ns | 2.1 µs | 1.2 µs | 306 ns | 72.6 | 0.34 | 0.59 | 2.30 |
-| 2048 | 1.53 µs | 4.78 µs | 2.52 µs | 680 ns | 73.4 | 0.32 | 0.61 | 2.26 |
-| 4096 | 4.71 µs | 10.4 µs | 5.76 µs | 1.28 µs | 52.2 | 0.45 | 0.82 | 3.69 |
-| 8192 | 10.5 µs | 23.3 µs | 13.1 µs | 3.31 µs | 50.9 | 0.45 | 0.80 | 3.16 |
-| 16,384 | 17.8 µs | 51.4 µs | 30 µs | 8.23 µs | 64.4 | 0.35 | 0.59 | 2.16 |
-| 32,768 | 39.7 µs | 121 µs | 63.8 µs | 18.2 µs | 62.0 | 0.33 | 0.62 | 2.18 |
-| 65,536 | 94.1 µs | 258 µs | 148 µs | 47.8 µs | 55.7 | 0.36 | 0.64 | 1.97 |
-| 131,072 | 210 µs | 584 µs | 284 µs | 112 µs | 53.0 | 0.36 | 0.74 | 1.88 |
-| 262,144 | 463 µs | 1.28 ms | 748 µs | 231 µs | 51.0 | 0.36 | 0.62 | 2.00 |
-| 524,288 | 971 µs | 3.24 ms | 1.26 ms | 495 µs | 51.3 | 0.30 | 0.77 | 1.96 |
-| 1,048,576 | 2.08 ms | 6.8 ms | 3.27 ms | 1.38 ms | 50.5 | 0.31 | 0.63 | 1.50 |
-| 2,097,152 | 4.33 ms | 13.8 ms | 5.89 ms | 3.53 ms | 50.8 | 0.31 | 0.74 | 1.23 |
-| 4,194,304 | 9.57 ms | 32 ms | 13.6 ms | 7.76 ms | 48.2 | 0.30 | 0.70 | 1.23 |
+Short and odd smooth lengths, `3^k`, `5^k`, `7^k` and mixed ones (15,360 is `15·2^10`):
 
-Smooth lengths: `3·2^k` and `5·2^k` (vDSP's DFT has them from 24 and 40), then `3^k`, `5^k`, `7^k` and mixed ones (15,360 is `15·2^10`):
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 3 | 4.92 ns, 1.07 FFTW | 5.90 ns, 1.27 FFTW |
+| 5 | 6.91 ns, 1.06 FFTW | 5.96 ns, 0.932 FFTW |
+| 7 | 7.22 ns, 0.989 FFTW | 7.75 ns, 1.06 FFTW |
+| 9 | 10.2 ns, 0.960 FFTW | 10.4 ns, 1.04 FFTW |
+| 11 | 9.97 ns, 0.864 rustfft | 10.4 ns, 0.995 rustfft |
+| 13 | 11.8 ns, 0.831 rustfft | 10.8 ns, 0.880 rustfft |
+| 15 | 13.4 ns, 0.916 FFTW | 13.5 ns, 0.992 rustfft |
+| 25 | 20.1 ns, 0.676 FFTW | 20.4 ns, 0.691 FFTW |
+| 27 | 34.7 ns, 0.732 FFTW | 25.7 ns, 0.592 FFTW |
+| 49 | 46.6 ns, 0.600 FFTW | 34.3 ns, 0.456 rustfft |
+| 81 | 104 ns, 0.689 FFTW | 69.1 ns, 0.531 rustfft |
+| 243 | 344 ns, 0.582 FFTW | 203 ns, 0.385 FFTW |
+| 2187 | 4.29 µs, 0.614 FFTW | 2.43 µs, 0.369 FFTW |
+| 19,683 | 65.5 µs, 0.806 FFTW | 35.2 µs, 0.459 FFTW |
+| 531,441 | 2.75 ms, 0.828 FFTW | 1.41 ms, 0.480 FFTW |
+| 625 | 896 ns, 0.550 FFTW | 517 ns, 0.315 FFTW |
+| 15,625 | 36.8 µs, 0.535 FFTW | 20.7 µs, 0.335 FFTW |
+| 390,625 | 1.25 ms, 0.465 FFTW | 680 µs, 0.274 FFTW |
+| 2401 | 4.27 µs, 0.528 FFTW | 2.49 µs, 0.322 FFTW |
+| 117,649 | 329 µs, 0.445 FFTW | 182 µs, 0.258 FFTW |
+| 823,543 | 2.73 ms, 0.422 FFTW | 1.49 ms, 0.245 rustfft |
+| 18 | 25.6 ns, 0.826 FFTW | 21.5 ns, 0.694 FFTW |
+| 36 | 44.3 ns, 1.27 vDSP | 26.6 ns, 1.09 vDSP |
+| 60 | 63.5 ns, 1.02 vDSP | 36.8 ns, 1.07 vDSP |
+| 100 | 101 ns, 0.602 FFTW | 73.8 ns, 0.473 rustfft |
+| 360 | 438 ns, 0.578 FFTW | 242 ns, 0.397 rustfft |
+| 1000 | 1.42 µs, 0.567 FFTW | 766 ns, 0.310 FFTW |
+| 2160 | 3.89 µs, 0.684 FFTW | 1.89 µs, 0.373 FFTW |
+| 6000 | 13.0 µs, 0.730 FFTW | 6.22 µs, 0.371 FFTW |
+| 10,000 | 23.4 µs, 0.709 FFTW | 11.5 µs, 0.353 FFTW |
+| 15,360 | 41.0 µs, 0.828 FFTW | 17.9 µs, 2.47 vDSP |
+| 48,000 | 122 µs, 0.621 FFTW | 60.6 µs, 0.351 FFTW |
+| 100,000 | 275 µs, 0.584 FFTW | 135 µs, 0.295 FFTW |
+| 1,000,000 | 3.30 ms, 0.429 FFTW | 1.65 ms, 0.229 FFTW |
 
-`f64`, smooth lengths (load 2.0 to 7.9):
+Primes, by one pass (17), Rader's algorithm (101 and 1009) and Bluestein's (10,007 and above), and twice a prime:
 
-| n | `a` | FFTW | rustfft | vDSP | `a` Gflop/s | a/FFTW | a/rustfft | a/vDSP |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 6 | 11.6 ns | 6.1 ns | 8.9 ns |  | 6.7 | 1.90 | 1.30 |  |
-| 12 | 15.8 ns | 9.7 ns | 12.6 ns |  | 13.6 | 1.63 | 1.25 |  |
-| 24 | 27.1 ns | 36.8 ns | 20.6 ns | 40.1 ns | 20.3 | 0.74 | 1.32 | 0.68 |
-| 48 | 50.4 ns | 74.7 ns | 88.7 ns | 84.4 ns | 26.6 | 0.67 | 0.57 | 0.60 |
-| 96 | 96 ns | 174 ns | 186 ns | 178 ns | 32.9 | 0.55 | 0.52 | 0.54 |
-| 192 | 205 ns | 334 ns | 277 ns | 388 ns | 35.6 | 0.61 | 0.74 | 0.53 |
-| 384 | 457 ns | 720 ns | 634 ns | 838 ns | 36.1 | 0.63 | 0.72 | 0.55 |
-| 768 | 1 µs | 1.51 µs | 1.41 µs | 1.91 µs | 36.8 | 0.66 | 0.71 | 0.52 |
-| 1536 | 2.19 µs | 3.5 µs | 3.09 µs | 3.99 µs | 37.0 | 0.63 | 0.71 | 0.55 |
-| 3072 | 5.15 µs | 7.98 µs | 7.54 µs | 9.5 µs | 34.5 | 0.65 | 0.68 | 0.54 |
-| 6144 | 12 µs | 17.5 µs | 15.9 µs | 21.9 µs | 32.3 | 0.68 | 0.75 | 0.55 |
-| 12,288 | 25.9 µs | 40 µs | 40.3 µs | 55.4 µs | 32.3 | 0.65 | 0.64 | 0.47 |
-| 24,576 | 69.8 µs | 88.5 µs | 86.8 µs | 156 µs | 25.7 | 0.79 | 0.80 | 0.45 |
-| 49,152 | 149 µs | 200 µs | 206 µs | 333 µs | 25.7 | 0.75 | 0.72 | 0.45 |
-| 98,304 | 329 µs | 433 µs | 395 µs | 1.07 ms | 24.8 | 0.76 | 0.83 | 0.31 |
-| 196,608 | 634 µs | 939 µs | 956 µs | 1.46 ms | 27.3 | 0.67 | 0.66 | 0.43 |
-| 393,216 | 1.41 ms | 2.2 ms | 1.89 ms | 4.61 ms | 25.9 | 0.64 | 0.74 | 0.31 |
-| 786,432 | 3.04 ms | 4.73 ms | 4.22 ms | 6.22 ms | 25.3 | 0.64 | 0.72 | 0.49 |
-| 10 | 15.4 ns | 9.6 ns | 11.5 ns |  | 10.8 | 1.60 | 1.34 |  |
-| 20 | 22.2 ns | 16.8 ns | 34.3 ns |  | 19.5 | 1.32 | 0.65 |  |
-| 40 | 39.2 ns | 61 ns | 60 ns | 69.3 ns | 27.2 | 0.64 | 0.65 | 0.57 |
-| 80 | 80 ns | 134 ns | 158 ns | 139 ns | 31.6 | 0.60 | 0.51 | 0.57 |
-| 160 | 165 ns | 284 ns | 352 ns | 294 ns | 35.5 | 0.58 | 0.47 | 0.56 |
-| 320 | 357 ns | 581 ns | 803 ns | 669 ns | 37.3 | 0.62 | 0.45 | 0.53 |
-| 640 | 812 ns | 1.35 µs | 1.71 µs | 1.44 µs | 36.8 | 0.60 | 0.48 | 0.57 |
-| 1280 | 1.79 µs | 2.97 µs | 3.59 µs | 3.29 µs | 36.9 | 0.60 | 0.50 | 0.54 |
-| 2560 | 4.03 µs | 6.64 µs | 7.91 µs | 7.23 µs | 36.0 | 0.61 | 0.51 | 0.56 |
-| 5120 | 9.52 µs | 15.4 µs | 18.6 µs | 17.5 µs | 33.2 | 0.62 | 0.51 | 0.54 |
-| 10,240 | 20.6 µs | 33.9 µs | 40.4 µs | 54.7 µs | 33.1 | 0.61 | 0.51 | 0.38 |
-| 20,480 | 44.2 µs | 74.2 µs | 87.1 µs | 129 µs | 33.2 | 0.60 | 0.51 | 0.34 |
-| 40,960 | 119 µs | 170 µs | 187 µs | 323 µs | 26.3 | 0.70 | 0.64 | 0.37 |
-| 81,920 | 251 µs | 362 µs | 449 µs | 645 µs | 26.7 | 0.69 | 0.56 | 0.39 |
-| 163,840 | 559 µs | 771 µs | 855 µs | 2 ms | 25.4 | 0.73 | 0.65 | 0.28 |
-| 327,680 | 1.07 ms | 1.89 ms | 2 ms | 2.8 ms | 28.1 | 0.56 | 0.53 | 0.38 |
-| 655,360 | 2.37 ms | 3.89 ms | 3.75 ms | 8.52 ms | 26.8 | 0.61 | 0.63 | 0.28 |
-| 9 | 14 ns | 10.9 ns | 14.3 ns |  | 10.2 | 1.28 | 0.98 |  |
-| 27 | 35.2 ns | 43.5 ns | 56.6 ns |  | 18.2 | 0.81 | 0.62 |  |
-| 81 | 103 ns | 151 ns | 175 ns |  | 24.9 | 0.68 | 0.59 |  |
-| 243 | 344 ns | 552 ns | 948 ns |  | 28.0 | 0.62 | 0.36 |  |
-| 729 | 1.22 µs | 1.94 µs | 3.89 µs |  | 28.4 | 0.63 | 0.31 |  |
-| 2187 | 4.27 µs | 6.96 µs | 11.1 µs |  | 28.4 | 0.61 | 0.39 |  |
-| 6561 | 19 µs | 24.2 µs | 37 µs |  | 21.9 | 0.78 | 0.51 |  |
-| 19,683 | 65.1 µs | 81.4 µs | 146 µs |  | 21.6 | 0.80 | 0.44 |  |
-| 59,049 | 245 µs | 275 µs | 542 µs |  | 19.1 | 0.89 | 0.45 |  |
-| 177,147 | 778 µs | 969 µs | 1.91 ms |  | 19.8 | 0.80 | 0.41 |  |
-| 531,441 | 2.78 ms | 3.35 ms | 6.58 ms |  | 18.2 | 0.83 | 0.42 |  |
-| 25 | 25.7 ns | 29.8 ns | 52.6 ns |  | 22.6 | 0.86 | 0.49 |  |
-| 125 | 136 ns | 271 ns | 463 ns |  | 32.1 | 0.50 | 0.29 |  |
-| 625 | 910 ns | 1.75 µs | 3.29 µs |  | 31.9 | 0.52 | 0.28 |  |
-| 3125 | 6.03 µs | 11.2 µs | 21.5 µs |  | 30.1 | 0.54 | 0.28 |  |
-| 15,625 | 37.2 µs | 65.8 µs | 141 µs |  | 29.2 | 0.57 | 0.26 |  |
-| 78,125 | 215 µs | 419 µs | 826 µs |  | 29.5 | 0.51 | 0.26 |  |
-| 390,625 | 1.26 ms | 2.71 ms | 4.79 ms |  | 28.8 | 0.47 | 0.26 |  |
-| 49 | 47.5 ns | 87.4 ns | 93.6 ns |  | 29.0 | 0.54 | 0.51 |  |
-| 343 | 447 ns | 866 ns | 1.14 µs |  | 32.3 | 0.52 | 0.39 |  |
-| 2401 | 4.33 µs | 8.16 µs | 11.4 µs |  | 31.2 | 0.53 | 0.38 |  |
-| 16,807 | 39 µs | 72.6 µs | 119 µs |  | 30.3 | 0.54 | 0.33 |  |
-| 117,649 | 331 µs | 746 µs | 1.02 ms |  | 30.0 | 0.44 | 0.32 |  |
-| 823,543 | 2.74 ms | 7.07 ms | 8.69 ms |  | 29.5 | 0.39 | 0.32 |  |
-| 60 | 62.6 ns | 96.3 ns | 116 ns |  | 28.3 | 0.65 | 0.54 |  |
-| 360 | 463 ns | 790 ns | 885 ns |  | 33.0 | 0.59 | 0.52 |  |
-| 1000 | 1.48 µs | 2.53 µs | 5.34 µs |  | 33.6 | 0.59 | 0.28 |  |
-| 2160 | 4 µs | 5.78 µs | 7.97 µs |  | 29.9 | 0.69 | 0.50 |  |
-| 6000 | 13.3 µs | 19 µs | 43.4 µs |  | 28.3 | 0.70 | 0.31 |  |
-| 10,000 | 23.8 µs | 34.2 µs | 55.5 µs |  | 27.9 | 0.70 | 0.43 |  |
-| 15,360 | 42.1 µs | 48.6 µs | 72.1 µs | 66 µs | 25.4 | 0.87 | 0.58 | 0.64 |
-| 30,000 | 78.5 µs | 111 µs | 259 µs |  | 28.4 | 0.71 | 0.30 |  |
-| 48,000 | 124 µs | 201 µs | 388 µs |  | 30.1 | 0.62 | 0.32 |  |
-| 100,000 | 274 µs | 495 µs | 917 µs |  | 30.3 | 0.55 | 0.30 |  |
-| 216,000 | 697 µs | 1.07 ms | 2.14 ms |  | 27.5 | 0.65 | 0.33 |  |
-| 1,000,000 | 3.38 ms | 7.64 ms | 12.7 ms |  | 29.5 | 0.44 | 0.27 |  |
-
-`f32`, smooth lengths (load 2.2 to 6.4):
-
-| n | `a` | FFTW | rustfft | vDSP | `a` Gflop/s | a/FFTW | a/rustfft | a/vDSP |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 6 | 11.7 ns | 6.1 ns | 7.3 ns |  | 6.6 | 1.92 | 1.60 |  |
-| 12 | 15.2 ns | 9.6 ns | 10.3 ns |  | 14.2 | 1.58 | 1.48 |  |
-| 24 | 19.3 ns | 37 ns | 13.9 ns | 24.9 ns | 28.5 | 0.52 | 1.39 | 0.78 |
-| 48 | 32.2 ns | 68 ns | 69.3 ns | 47.1 ns | 41.6 | 0.47 | 0.46 | 0.68 |
-| 96 | 56.9 ns | 174 ns | 134 ns | 85.8 ns | 55.5 | 0.33 | 0.42 | 0.66 |
-| 192 | 117 ns | 317 ns | 172 ns | 173 ns | 62.0 | 0.37 | 0.68 | 0.68 |
-| 384 | 250 ns | 654 ns | 375 ns | 332 ns | 66.0 | 0.38 | 0.67 | 0.75 |
-| 768 | 534 ns | 1.55 µs | 873 ns | 250 ns | 69.0 | 0.35 | 0.61 | 2.14 |
-| 1536 | 1.15 µs | 3.22 µs | 1.84 µs | 454 ns | 70.6 | 0.36 | 0.63 | 2.53 |
-| 3072 | 2.58 µs | 7.44 µs | 4.2 µs | 893 ns | 69.0 | 0.35 | 0.61 | 2.89 |
-| 6144 | 7.72 µs | 16.3 µs | 9.54 µs | 2.11 µs | 50.1 | 0.47 | 0.81 | 3.66 |
-| 12,288 | 13 µs | 35.6 µs | 20.3 µs | 5.45 µs | 64.1 | 0.37 | 0.64 | 2.39 |
-| 24,576 | 33 µs | 79.8 µs | 45.8 µs | 12 µs | 54.2 | 0.41 | 0.72 | 2.75 |
-| 49,152 | 71.4 µs | 171 µs | 100 µs | 30.9 µs | 53.7 | 0.42 | 0.71 | 2.31 |
-| 98,304 | 161 µs | 408 µs | 215 µs | 70.8 µs | 50.8 | 0.39 | 0.75 | 2.27 |
-| 196,608 | 313 µs | 884 µs | 495 µs | 159 µs | 55.2 | 0.35 | 0.63 | 1.97 |
-| 393,216 | 697 µs | 1.99 ms | 939 µs | 343 µs | 52.4 | 0.35 | 0.74 | 2.03 |
-| 786,432 | 1.51 ms | 4.21 ms | 2.37 ms | 837 µs | 51.1 | 0.36 | 0.64 | 1.80 |
-| 10 | 14.1 ns | 9.3 ns | 9.3 ns |  | 11.8 | 1.52 | 1.52 |  |
-| 20 | 18 ns | 16.8 ns | 30.3 ns |  | 24.0 | 1.07 | 0.59 |  |
-| 40 | 26.3 ns | 60.8 ns | 48.7 ns | 39.1 ns | 40.5 | 0.43 | 0.54 | 0.67 |
-| 80 | 47.1 ns | 125 ns | 114 ns | 65.8 ns | 53.7 | 0.38 | 0.41 | 0.72 |
-| 160 | 96.4 ns | 279 ns | 252 ns | 131 ns | 60.8 | 0.35 | 0.38 | 0.73 |
-| 320 | 204 ns | 543 ns | 539 ns | 258 ns | 65.4 | 0.38 | 0.38 | 0.79 |
-| 640 | 455 ns | 1.23 µs | 1.1 µs | 552 ns | 65.6 | 0.37 | 0.41 | 0.82 |
-| 1280 | 975 ns | 2.83 µs | 2.34 µs | 412 ns | 67.7 | 0.34 | 0.42 | 2.37 |
-| 2560 | 2.13 µs | 6.29 µs | 4.87 µs | 771 ns | 68.2 | 0.34 | 0.44 | 2.76 |
-| 5120 | 6.4 µs | 13.4 µs | 10.7 µs | 1.77 µs | 49.3 | 0.48 | 0.60 | 3.63 |
-| 10,240 | 11.2 µs | 30 µs | 24 µs | 4.41 µs | 60.7 | 0.37 | 0.47 | 2.55 |
-| 20,480 | 21.9 µs | 64.3 µs | 50 µs | 9.1 µs | 66.9 | 0.34 | 0.44 | 2.41 |
-| 40,960 | 57.1 µs | 144 µs | 105 µs | 21.9 µs | 54.9 | 0.40 | 0.54 | 2.61 |
-| 81,920 | 124 µs | 330 µs | 232 µs | 57 µs | 53.8 | 0.38 | 0.53 | 2.18 |
-| 163,840 | 275 µs | 730 µs | 474 µs | 132 µs | 51.6 | 0.38 | 0.58 | 2.08 |
-| 327,680 | 546 µs | 1.6 ms | 1.06 ms | 271 µs | 55.0 | 0.34 | 0.52 | 2.01 |
-| 655,360 | 1.2 ms | 3.42 ms | 2.08 ms | 697 µs | 52.9 | 0.35 | 0.57 | 1.72 |
-| 9 | 14.9 ns | 10.6 ns | 11.6 ns |  | 9.6 | 1.41 | 1.28 |  |
-| 27 | 27.1 ns | 43.4 ns | 48.5 ns |  | 23.7 | 0.62 | 0.56 |  |
-| 81 | 69.4 ns | 132 ns | 130 ns |  | 37.0 | 0.53 | 0.53 |  |
-| 243 | 207 ns | 526 ns | 780 ns |  | 46.4 | 0.39 | 0.27 |  |
-| 729 | 706 ns | 1.88 µs | 3.33 µs |  | 49.1 | 0.38 | 0.21 |  |
-| 2187 | 2.45 µs | 6.58 µs | 8.68 µs |  | 49.5 | 0.37 | 0.28 |  |
-| 6561 | 8.66 µs | 22.9 µs | 24.5 µs |  | 48.0 | 0.38 | 0.35 |  |
-| 19,683 | 35.4 µs | 78 µs | 109 µs |  | 39.7 | 0.45 | 0.32 |  |
-| 59,049 | 128 µs | 263 µs | 419 µs |  | 36.5 | 0.49 | 0.31 |  |
-| 177,147 | 407 µs | 911 µs | 1.5 ms |  | 37.9 | 0.45 | 0.27 |  |
-| 531,441 | 1.43 ms | 2.96 ms | 5.26 ms |  | 35.3 | 0.48 | 0.27 |  |
-| 25 | 20.6 ns | 29.8 ns | 41.5 ns |  | 28.2 | 0.69 | 0.50 |  |
-| 125 | 86.6 ns | 243 ns | 370 ns |  | 50.3 | 0.36 | 0.23 |  |
-| 625 | 542 ns | 1.65 µs | 2.66 µs |  | 53.6 | 0.33 | 0.20 |  |
-| 3125 | 3.34 µs | 10.2 µs | 16.3 µs |  | 54.3 | 0.33 | 0.21 |  |
-| 15,625 | 20.8 µs | 63.3 µs | 105 µs |  | 52.4 | 0.33 | 0.20 |  |
-| 78,125 | 119 µs | 407 µs | 644 µs |  | 53.3 | 0.29 | 0.19 |  |
-| 390,625 | 687 µs | 2.4 ms | 3.64 ms |  | 52.8 | 0.29 | 0.19 |  |
-| 49 | 35.2 ns | 78 ns | 74.2 ns |  | 39.1 | 0.45 | 0.47 |  |
-| 343 | 286 ns | 824 ns | 871 ns |  | 50.5 | 0.35 | 0.33 |  |
-| 2401 | 2.55 µs | 7.69 µs | 8.4 µs |  | 53.0 | 0.33 | 0.30 |  |
-| 16,807 | 22.3 µs | 69.1 µs | 82.1 µs |  | 53.0 | 0.32 | 0.27 |  |
-| 117,649 | 184 µs | 657 µs | 726 µs |  | 53.7 | 0.28 | 0.25 |  |
-| 823,543 | 1.52 ms | 6.08 ms | 5.85 ms |  | 53.4 | 0.25 | 0.26 |  |
-| 60 | 39.7 ns | 95.8 ns | 86.8 ns | 30.7 ns | 44.6 | 0.41 | 0.46 | 1.29 |
-| 360 | 262 ns | 728 ns | 609 ns |  | 58.4 | 0.36 | 0.43 |  |
-| 1000 | 821 ns | 2.34 µs | 3.99 µs |  | 60.7 | 0.35 | 0.21 |  |
-| 2160 | 2.01 µs | 5.09 µs | 5.47 µs |  | 59.5 | 0.40 | 0.37 |  |
-| 6000 | 6.47 µs | 17 µs | 30.2 µs |  | 58.2 | 0.38 | 0.21 |  |
-| 10,000 | 11.8 µs | 31.8 µs | 36.5 µs |  | 56.5 | 0.37 | 0.32 |  |
-| 15,360 | 19.1 µs | 45.6 µs | 39.4 µs | 7.2 µs | 55.8 | 0.42 | 0.49 | 2.66 |
-| 30,000 | 39.5 µs | 107 µs | 194 µs |  | 56.5 | 0.37 | 0.20 |  |
-| 48,000 | 62.7 µs | 165 µs | 264 µs |  | 59.5 | 0.38 | 0.24 |  |
-| 100,000 | 139 µs | 472 µs | 649 µs |  | 59.9 | 0.29 | 0.21 |  |
-| 216,000 | 338 µs | 953 µs | 1.5 ms |  | 56.6 | 0.35 | 0.23 |  |
-| 1,000,000 | 1.71 ms | 7.01 ms | 8.58 ms |  | 58.2 | 0.24 | 0.20 |  |
-
-Primes, by Rader's algorithm (17 by one pass; 101 and 1009) and Bluestein's (10007 and above), and twice a prime:
-
-`f64`, primes (load 2.6 to 7.4):
-
-| n | `a` | FFTW | rustfft | `a` Gflop/s | a/FFTW | a/rustfft |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 17 | 17.4 ns | 33.3 ns | 21.1 ns | 20.0 | 0.52 | 0.82 |
-| 101 | 301 ns | 969 ns | 1.01 µs | 11.2 | 0.31 | 0.30 |
-| 1009 | 4.13 µs | 13 µs | 12 µs | 12.2 | 0.32 | 0.34 |
-| 10,007 | 116 µs | 171 µs | 196 µs | 5.7 | 0.68 | 0.60 |
-| 100,003 | 1.6 ms | 2.24 ms | 2.85 ms | 5.2 | 0.72 | 0.56 |
-| 1,000,003 | 20.7 ms | 30.4 ms | 25.6 ms | 4.8 | 0.68 | 0.81 |
-
-`f32`, primes (load 2.2 to 5.5):
-
-| n | `a` | FFTW | rustfft | `a` Gflop/s | a/FFTW | a/rustfft |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 17 | 16.9 ns | 32.9 ns | 16.9 ns | 20.6 | 0.51 | 1.00 |
-| 101 | 191 ns | 922 ns | 847 ns | 17.6 | 0.21 | 0.23 |
-| 1009 | 2.41 µs | 12.4 µs | 9.78 µs | 20.9 | 0.19 | 0.25 |
-| 10,007 | 59.9 µs | 157 µs | 101 µs | 11.1 | 0.38 | 0.59 |
-| 100,003 | 800 µs | 2 ms | 1.6 ms | 10.4 | 0.40 | 0.50 |
-| 1,000,003 | 10.3 ms | 26.5 ms | 13.1 ms | 9.7 | 0.39 | 0.79 |
-
-`f64`, twice a prime (load 2.6 to 7.3):
-
-| n | `a` | FFTW | rustfft | `a` Gflop/s | a/FFTW | a/rustfft |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 202 | 755 ns | 2.09 µs | 2.35 µs | 10.2 | 0.36 | 0.32 |
-| 2018 | 10.3 µs | 28.3 µs | 26.6 µs | 10.8 | 0.36 | 0.39 |
-| 20,014 | 266 µs | 351 µs | 444 µs | 5.4 | 0.76 | 0.60 |
-| 200,006 | 3.49 ms | 4.57 ms | 6.27 ms | 5.0 | 0.76 | 0.56 |
-| 2,000,006 | 42.4 ms | 63 ms | 55.3 ms | 4.9 | 0.67 | 0.77 |
-
-`f32`, twice a prime (load 2.5 to 5.4):
-
-| n | `a` | FFTW | rustfft | `a` Gflop/s | a/FFTW | a/rustfft |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 202 | 537 ns | 1.95 µs | 2 µs | 14.4 | 0.28 | 0.27 |
-| 2018 | 6.56 µs | 26.7 µs | 21.4 µs | 16.9 | 0.25 | 0.31 |
-| 20,014 | 132 µs | 321 µs | 229 µs | 10.8 | 0.41 | 0.58 |
-| 200,006 | 1.76 ms | 4.13 ms | 3.3 ms | 10.0 | 0.43 | 0.53 |
-| 2,000,006 | 21.9 ms | 53.4 ms | 28.4 ms | 9.5 | 0.41 | 0.77 |
-
-Batches of 1000 transforms in one call, against FFTW's `plan_many_dft` and rustfft's processing of the whole buffer; ns per transform, as printed to 0.1 ns:
-
-`f64`, batches of 1000 transforms, ns per transform (load 3.3 to 7.0):
-
-| n | `a` | FFTW | rustfft | a/FFTW | a/rustfft |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.4 | 0.5 | 0.3 | 0.80 | 1.33 |
-| 4 | 0.8 | 1.1 | 0.7 | 0.73 | 1.14 |
-| 8 | 2.1 | 3.5 | 2.7 | 0.60 | 0.78 |
-| 16 | 9.6 | 10.0 | 8.1 | 0.96 | 1.19 |
-| 32 | 21.4 | 26.8 | 23.7 | 0.80 | 0.90 |
-| 64 | 52.3 | 70.7 | 84.5 | 0.74 | 0.62 |
-
-`f32`, batches of 1000 transforms, ns per transform (load 2.4 to 5.4):
-
-| n | `a` | FFTW | rustfft | a/FFTW | a/rustfft |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | 0.2 | 0.5 | 0.2 | 0.40 | 1.00 |
-| 4 | 0.6 | 1.1 | 0.6 | 0.55 | 1.00 |
-| 8 | 1.6 | 3.5 | 1.7 | 0.46 | 0.94 |
-| 16 | 5.5 | 9.8 | 4.3 | 0.56 | 1.28 |
-| 32 | 13.0 | 26.4 | 11.4 | 0.49 | 1.14 |
-| 64 | 26.8 | 75.4 | 49.4 | 0.36 | 0.54 |
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 17 | 17.4 ns, 0.838 rustfft | 15.8 ns, 0.929 rustfft |
+| 101 | 293 ns, 0.313 FFTW | 190 ns, 0.224 rustfft |
+| 1009 | 4.05 µs, 0.337 rustfft | 2.32 µs, 0.234 rustfft |
+| 10,007 | 111 µs, 0.680 FFTW | 55.1 µs, 0.542 rustfft |
+| 100,003 | 1.58 ms, 0.719 FFTW | 771 µs, 0.473 rustfft |
+| 1,000,003 | 19.9 ms, 0.783 rustfft | 9.76 ms, 0.747 rustfft |
+| 202 | 752 ns, 0.365 FFTW | 543 ns, 0.276 rustfft |
+| 2018 | 10.3 µs, 0.380 rustfft | 6.51 µs, 0.305 rustfft |
+| 20,014 | 260 µs, 0.755 FFTW | 123 µs, 0.540 rustfft |
+| 200,006 | 3.47 ms, 0.725 FFTW | 1.68 ms, 0.505 rustfft |
+| 2,000,006 | 40.9 ms, 0.756 rustfft | 20.9 ms, 0.747 rustfft |
 
 The inverse, `inverse_with_scratch`:
 
-`f64`, inverse transforms (load 3.3 to 7.0):
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 16 | 11.3 ns, 0.956 FFTW | 11.0 ns, 0.974 rustfft |
+| 64 | 55.7 ns, 0.972 vDSP | 30.6 ns, 1.10 vDSP |
+| 1024 | 1.42 µs, 1.02 vDSP | 672 ns, 2.40 vDSP |
+| 4096 | 7.52 µs, 1.09 vDSP | 4.12 µs, 3.21 vDSP |
+| 65,536 | 199 µs, 0.698 FFTW | 90.0 µs, 1.88 vDSP |
+| 1,048,576 | 4.25 ms, 0.745 rustfft | 1.98 ms, 1.05 vDSP |
+| 1000 | 1.56 µs, 0.640 FFTW | 832 ns, 0.342 FFTW |
+| 1,000,000 | 3.62 ms, 0.478 FFTW | 1.80 ms, 0.250 FFTW |
+| 1009 | 4.11 µs, 0.332 rustfft | 2.32 µs, 0.233 rustfft |
+| 10,007 | 113 µs, 0.680 FFTW | 56.6 µs, 0.568 rustfft |
+| 100,003 | 1.59 ms, 0.729 FFTW | 773 µs, 0.482 rustfft |
 
-| n | `a` | FFTW | rustfft | vDSP | `a` Gflop/s | a/FFTW | a/rustfft | a/vDSP |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 | 58.4 ns | 85.3 ns | 81.6 ns | 60.2 ns | 32.9 | 0.68 | 0.72 | 0.97 |
-| 1024 | 1.47 µs | 2.24 µs | 2 µs | 1.41 µs | 34.8 | 0.66 | 0.74 | 1.04 |
-| 65,536 | 199 µs | 292 µs | 295 µs | 302 µs | 26.4 | 0.68 | 0.67 | 0.66 |
-| 1000 | 1.63 µs | 2.56 µs | 5.2 µs |  | 30.5 | 0.64 | 0.31 |  |
-| 10,007 | 118 µs | 169 µs | 195 µs |  | 5.7 | 0.69 | 0.60 |  |
+Out of place, `forward_to`:
 
-`f32`, inverse transforms (load 2.3 to 6.2):
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 16 | 6.36 ns, 0.761 rustfft | 6.48 ns, 1.23 rustfft |
+| 64 | 64.4 ns, 1.12 vDSP | 34.5 ns, 1.23 vDSP |
+| 256 | 291 ns, 1.06 vDSP | 145 ns, 1.68 vDSP |
+| 1024 | 1.46 µs, 1.03 vDSP | 705 ns, 2.53 vDSP |
+| 4096 | 7.94 µs, 1.07 vDSP | 3.88 µs, 3.04 vDSP |
+| 65,536 | 180 µs, 0.718 FFTW | 87.4 µs, 1.81 vDSP |
+| 1,048,576 | 4.13 ms, 0.750 rustfft | 1.93 ms, 0.965 vDSP |
+| 1000 | 1.58 µs, 0.640 FFTW | 838 ns, 0.353 FFTW |
+| 10,007 | 122 µs, 0.748 FFTW | 60.6 µs, 0.594 rustfft |
 
-| n | `a` | FFTW | rustfft | vDSP | `a` Gflop/s | a/FFTW | a/rustfft | a/vDSP |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 | 33.7 ns | 84.8 ns | 50.9 ns | 35.5 ns | 57.0 | 0.40 | 0.66 | 0.95 |
-| 1024 | 765 ns | 2.16 µs | 1.19 µs | 307 ns | 66.9 | 0.36 | 0.64 | 2.49 |
-| 65,536 | 100 µs | 258 µs | 147 µs | 47.8 µs | 52.4 | 0.39 | 0.68 | 2.09 |
-| 1000 | 890 ns | 2.43 µs | 4.04 µs |  | 56.0 | 0.37 | 0.22 |  |
-| 10,007 | 60.3 µs | 155 µs | 102 µs |  | 11.0 | 0.39 | 0.59 |  |
+The allocating `forward` of one sequence:
 
-**Planning.** `Fft::new`, the median of up to 200 plans in each of three interleaved runs at a load of 3.3 to 3.4, on this code (measured with the change that made planning cheaper, not in the campaign), next to the campaign's time of one forward transform of `Complex<f64>`:
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 16 | 10.9 ns, 0.916 FFTW | 10.8 ns, 1.00 rustfft |
+| 1024 | 1.44 µs, 0.680 rustfft | 735 ns, 0.565 rustfft |
+| 65,536 | 192 µs, 0.672 FFTW | 96.6 µs, 0.602 rustfft |
 
-| n | plan `f64` | plan `f32` | ns a value (`f64`) | transform `f64` | plan / transform |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 0.17 µs | 0.17 µs | 10.4 | 19 ns | 8.9 |
-| 64 | 0.33 µs | 0.29 µs | 5.2 | 57.3 ns | 5.8 |
-| 1024 | 2.58 µs | 2.54 µs | 2.52 | 1.33 µs | 1.9 |
-| 4096 | 9.04 µs | 9.29 µs | 2.21 | 7.17 µs | 1.3 |
-| 65,536 | 136 µs | 142 µs | 2.08 | 189 µs | 0.72 |
-| 2²⁰ | 2.13 ms | 2.21 ms | 2.03 | 4.22 ms | 0.50 |
-| 10⁶ | 2.02 ms | 2.11 ms | 2.02 | 3.38 ms | 0.60 |
-| 1009 (Rader) | 13.0 µs | 15.5 µs | 12.8 | 4.13 µs | 3.1 |
-| 10007 (Bluestein) | 174 µs | 209 µs | 17.4 | 116 µs | 1.5 |
-| 100003 (Bluestein) | 1.93 ms | 2.28 ms | 19.3 | 1.60 ms | 1.2 |
+Batches of 1000 transforms in one call of `forward`, in ns a transform, against FFTW's `plan_many_dft`, rustfft on the whole buffer and `vDSP_fftm_zip`:
 
-The calibration in the convolutions' runs fits the planning of the lengths `2^k`, `3·2^k`, `5·2^k` and `7·2^k` from 1024 to 2²¹ (median of the three runs): `Fft::<f32>::new` 189 ns + 2.14 ns a value, `Fft::<f64>::new` 203 ns + 2.08 ns, `RealFft::<f32>::new` 481 ns + 1.26 ns and `RealFft::<f64>::new` 399 ns + 1.60 ns.
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 2 | 0.337 ns, 1.23 rustfft | 0.277 ns, 1.49 rustfft |
+| 3 | 0.604 ns, 0.979 rustfft | 0.500 ns, 1.15 rustfft |
+| 4 | 0.590 ns, 0.831 rustfft | 0.512 ns, 0.927 rustfft |
+| 5 | 1.27 ns, 0.689 rustfft | 0.985 ns, 0.840 rustfft |
+| 6 | 1.74 ns, 1.15 rustfft | 1.36 ns, 1.29 rustfft |
+| 8 | 1.82 ns, 0.672 rustfft | 1.36 ns, 0.823 rustfft |
+| 10 | 3.94 ns, 0.897 rustfft | 2.82 ns, 1.09 rustfft |
+| 12 | 4.79 ns, 0.979 rustfft | 3.28 ns, 1.23 rustfft |
+| 15 | 8.07 ns, 0.916 rustfft | 5.50 ns, 1.14 rustfft |
+| 16 | 6.12 ns, 0.760 rustfft | 4.20 ns, 0.914 rustfft |
+| 17 | 11.5 ns, 0.800 rustfft | 7.12 ns, 0.977 rustfft |
+| 32 | 23.4 ns, 0.981 rustfft | 12.1 ns, 1.05 rustfft |
+| 64 | 48.7 ns, 0.751 vDSP | 28.5 ns, 0.787 vDSP |
+| 101 | 299 ns, 0.322 FFTW | 183 ns, 0.226 rustfft |
+| 128 | 129 ns, 0.908 vDSP | 61.4 ns, 0.941 vDSP |
+| 1024 | 1.43 µs, 0.935 vDSP | 663 ns, 2.19 vDSP |
+
+Planning, `Fft::new`:
+
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 16 | 168 ns, 1.98 vDSP | 165 ns, 1.78 vDSP |
+| 64 | 307 ns, 2.10 vDSP | 329 ns, 2.24 vDSP |
+| 1024 | 2.40 µs, 1.35 vDSP | 1.91 µs, 0.498 rustfft |
+| 4096 | 8.49 µs, 1.20 vDSP | 5.12 µs, 0.352 rustfft |
+| 65,536 | 123 µs, 0.673 vDSP | 60.9 µs, 0.925 FFTW |
+| 1,048,576 | 1.95 ms, 4.50 FFTW | 1.48 ms, 3.36 FFTW |
+| 1000 | 2.26 µs, 0.476 rustfft | 1.82 µs, 0.412 rustfft |
+| 1009 | 13.5 µs, 1.13 rustfft | 15.1 µs, 1.38 rustfft |
+| 10,007 | 183 µs, 0.760 FFTW | 192 µs, 1.01 FFTW |
+| 100,003 | 1.98 ms, 0.705 FFTW | 2.06 ms, 1.06 FFTW |
 
 ### Real transforms
 
-`RealFft::forward` and `inverse` (the allocating forms, out of place), against FFTW's `r2c` and `c2r`, realfft, and vDSP's `zrip` (powers of two) and `DFT_zrop` (`f·2^k`); the last column, `Fft` of `n/2`, is `a`'s complex transform of half the length alone, the core of an even length. The median of 9 rounds of 4 ms, the contenders interleaved, a different one first in each round. Powers of two, then `f·2^k`, then other even lengths, odd lengths with small factors, and primes:
+`RealFft::forward` and `inverse`, the allocating forms out of place: powers of two, then other even lengths, odd lengths with small factors, and primes and lengths with a factor above 19.
 
-`f64`, `RealFft::forward` (load 1.5 to 5.3):
+`f64`:
 
-| n | `a` | FFTW | realfft | vDSP | `Fft` of n/2 | a/fastest |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 23.5 ns | 7.8 ns | 8.1 ns | 14.7 ns | 8.3 ns | 3.01 |
-| 32 | 39.1 ns | 15.7 ns | 18.1 ns | 28.8 ns | 18.3 ns | 2.49 |
-| 64 | 58.6 ns | 42.7 ns | 40.9 ns | 53.6 ns | 32.3 ns | 1.43 |
-| 128 | 105 ns | 98.9 ns | 103 ns | 93.9 ns | 57.4 ns | 1.12 |
-| 256 | 222 ns | 195 ns | 228 ns | 197 ns | 122 ns | 1.14 |
-| 512 | 453 ns | 468 ns | 493 ns | 402 ns | 264 ns | 1.13 |
-| 1024 | 954 ns | 987 ns | 1.09 µs | 899 ns | 587 ns | 1.06 |
-| 2048 | 1.93 µs | 2.33 µs | 2.37 µs | 1.9 µs | 1.33 µs | 1.02 |
-| 4096 | 4.67 µs | 5.13 µs | 5.22 µs | 4.18 µs | 3.07 µs | 1.12 |
-| 8192 | 9.92 µs | 11.2 µs | 11.3 µs | 8.85 µs | 7.26 µs | 1.12 |
-| 16,384 | 21.5 µs | 28 µs | 26.3 µs | 21.9 µs | 17.3 µs | 0.98 |
-| 65,536 | 96.4 µs | 135 µs | 128 µs | 160 µs | 80.3 µs | 0.75 |
-| 262,144 | 471 µs | 603 µs | 574 µs | 782 µs | 426 µs | 0.82 |
-| 1,048,576 | 2.2 ms | 2.98 ms | 2.72 ms | 3.67 ms | 1.95 ms | 0.81 |
-| 96 | 93.5 ns | 64.4 ns | 107 ns | 106 ns | 49.6 ns | 1.45 |
-| 384 | 351 ns | 292 ns | 347 ns | 469 ns | 205 ns | 1.20 |
-| 1536 | 1.44 µs | 1.53 µs | 1.69 µs | 2.22 µs | 999 ns | 0.94 |
-| 6144 | 7.42 µs | 7.49 µs | 8.02 µs | 10.8 µs | 5.13 µs | 0.99 |
-| 80 | 71.6 ns | 54.4 ns | 72.1 ns | 89.1 ns | 38.6 ns | 1.32 |
-| 640 | 592 ns | 563 ns | 1.01 µs | 801 ns | 356 ns | 1.05 |
-| 5120 | 5.93 µs | 6.15 µs | 9.53 µs | 8.63 µs | 4.19 µs | 0.96 |
-| 1000 | 1.06 µs | 1.13 µs | 2.77 µs |  | 686 ns | 0.94 |
-| 10,000 | 12.9 µs | 15.8 µs | 37.4 µs |  | 9.98 µs | 0.81 |
-| 100,000 | 159 µs | 210 µs | 464 µs |  | 134 µs | 0.76 |
-| 1,000,000 | 1.87 ms | 2.85 ms | 6.06 ms |  | 1.64 ms | 0.66 |
-| 6000 | 7.76 µs | 8.22 µs | 17.9 µs |  | 5.57 µs | 0.94 |
-| 30,000 | 41.7 µs | 52.6 µs | 116 µs |  | 34.6 µs | 0.79 |
-| 15 | 20.6 ns | 7.5 ns | 13.9 ns |  |  | 2.75 |
-| 45 | 92.5 ns | 59.1 ns | 81.4 ns |  |  | 1.57 |
-| 135 | 272 ns | 142 ns | 348 ns |  |  | 1.91 |
-| 243 | 559 ns | 302 ns | 997 ns |  |  | 1.85 |
-| 625 | 1.18 µs | 975 ns | 3.53 µs |  |  | 1.21 |
-| 2187 | 5 µs | 3.53 µs | 12 µs |  |  | 1.41 |
-| 3125 | 6.35 µs | 6.37 µs | 22.9 µs |  |  | 1.00 |
-| 2401 | 8.04 µs | 4.03 µs | 11.7 µs |  |  | 1.99 |
-| 16,807 | 61.2 µs | 38.8 µs | 123 µs |  |  | 1.58 |
-| 19,683 | 53.6 µs | 42.5 µs | 157 µs |  |  | 1.26 |
-| 177,147 | 582 µs | 499 µs | 1.97 ms |  |  | 1.17 |
-| 1155 | 2.47 µs | 1.8 µs | 4.76 µs |  |  | 1.37 |
-| 15,015 | 38.1 µs | 35.5 µs | 84.3 µs |  |  | 1.07 |
-| 99,225 | 262 µs | 247 µs | 806 µs |  |  | 1.06 |
-| 101 | 390 ns | 832 ns | 1.04 µs |  |  | 0.47 |
-| 1009 | 4.98 µs | 9.24 µs | 12.1 µs |  |  | 0.54 |
-| 10,007 | 130 µs | 153 µs | 205 µs |  |  | 0.85 |
-| 100,003 | 1.69 ms | 2.65 ms | 2.91 ms |  |  | 0.64 |
+| n | `forward` | `inverse` |
+| ---: | --- | --- |
+| 8 | 4.03 ns, 1.09 FFTW | 4.22 ns, 1.22 FFTW |
+| 16 | 4.77 ns, 0.752 FFTW | 5.52 ns, 0.929 FFTW |
+| 32 | 11.8 ns, 0.809 FFTW | 11.9 ns, 0.724 FFTW |
+| 64 | 30.9 ns, 0.886 FFTW | 44.5 ns, 1.16 FFTW |
+| 128 | 64.5 ns, 0.753 FFTW | 77.0 ns, 0.885 FFTW |
+| 256 | 157 ns, 0.906 vDSP | 178 ns, 1.03 vDSP |
+| 512 | 328 ns, 0.862 vDSP | 376 ns, 0.937 vDSP |
+| 1024 | 700 ns, 0.819 vDSP | 764 ns, 0.856 vDSP |
+| 4096 | 3.60 µs, 0.892 vDSP | 4.17 µs, 0.997 vDSP |
+| 8192 | 7.85 µs, 0.888 vDSP | 9.25 µs, 1.04 vDSP |
+| 16,384 | 18.9 µs, 0.898 vDSP | 21.4 µs, 1.000 vDSP |
+| 65,536 | 217 µs, 1.71 realfft | 98.2 µs, 0.778 realfft |
+| 262,144 | 431 µs, 0.749 realfft | 499 µs, 0.883 realfft |
+| 1,048,576 | 2.06 ms, 0.724 realfft | 2.23 ms, 0.760 realfft |
+| 12 | 4.76 ns, 0.961 FFTW | 5.43 ns, 1.15 FFTW |
+| 80 | 42.6 ns, 0.842 vDSP | 52.7 ns, 1.09 FFTW |
+| 96 | 57.0 ns, 0.946 FFTW | 67.2 ns, 1.03 vDSP |
+| 384 | 252 ns, 0.783 vDSP | 271 ns, 0.845 vDSP |
+| 640 | 445 ns, 0.752 vDSP | 474 ns, 0.846 FFTW |
+| 1000 | 862 ns, 0.770 FFTW | 929 ns, 0.807 FFTW |
+| 1536 | 1.21 µs, 0.791 FFTW | 1.35 µs, 0.854 FFTW |
+| 5120 | 4.79 µs, 0.760 FFTW | 5.42 µs, 0.879 FFTW |
+| 6144 | 6.26 µs, 0.842 FFTW | 6.79 µs, 0.862 realfft |
+| 6000 | 6.81 µs, 0.819 FFTW | 7.31 µs, 0.903 FFTW |
+| 10,000 | 11.7 µs, 0.775 FFTW | 12.8 µs, 0.842 FFTW |
+| 30,000 | 39.3 µs, 0.711 FFTW | 44.5 µs, 0.798 FFTW |
+| 100,000 | 151 µs, 0.704 FFTW | 168 µs, 0.790 FFTW |
+| 1,000,000 | 1.76 ms, 0.655 FFTW | 1.95 ms, 0.706 FFTW |
+| 15 | 10.5 ns, 1.45 FFTW | 10.9 ns, 1.75 FFTW |
+| 45 | 54.9 ns, 0.956 FFTW | 71.6 ns, 1.33 FFTW |
+| 135 | 147 ns, 1.10 FFTW | 157 ns, 1.16 FFTW |
+| 243 | 341 ns, 1.13 FFTW | 344 ns, 1.22 FFTW |
+| 625 | 794 ns, 0.791 FFTW | 800 ns, 0.915 FFTW |
+| 1155 | 1.45 µs, 0.819 FFTW | 1.66 µs, 0.880 FFTW |
+| 2187 | 3.17 µs, 0.872 FFTW | 3.40 µs, 0.989 FFTW |
+| 2401 | 3.21 µs, 0.795 FFTW | 3.36 µs, 0.850 FFTW |
+| 3125 | 4.63 µs, 0.721 FFTW | 4.83 µs, 0.897 FFTW |
+| 16,807 | 28.6 µs, 0.752 FFTW | 30.8 µs, 0.686 FFTW |
+| 19,683 | 39.8 µs, 0.944 FFTW | 42.1 µs, 0.857 FFTW |
+| 99,225 | 211 µs, 0.844 FFTW | 232 µs, 0.761 FFTW |
+| 177,147 | 451 µs, 0.916 FFTW | 459 µs, 0.794 FFTW |
+| 101 | 433 ns, 0.519 FFTW | 358 ns, 0.424 FFTW |
+| 1009 | 4.92 µs, 0.504 FFTW | 4.89 µs, 0.525 FFTW |
+| 10,007 | 125 µs, 0.819 FFTW | 124 µs, 0.793 FFTW |
+| 100,003 | 1.62 ms, 0.613 FFTW | 1.69 ms, 0.624 FFTW |
+| 15,015 | 25.4 µs, 0.719 FFTW | 27.1 µs, 0.643 FFTW |
 
-`f32`, `RealFft::forward` (load 1.5 to 5.3):
+`f32`:
 
-| n | `a` | FFTW | realfft | vDSP | `Fft` of n/2 | a/fastest |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 15.3 ns | 7.8 ns | 7.9 ns | 16.6 ns | 8.6 ns | 1.96 |
-| 32 | 35.7 ns | 15.8 ns | 14.5 ns | 22.1 ns | 14.9 ns | 2.46 |
-| 64 | 44.5 ns | 35.8 ns | 32.8 ns | 30.4 ns | 19.6 ns | 1.46 |
-| 128 | 66.6 ns | 94 ns | 75.1 ns | 49.3 ns | 32.3 ns | 1.35 |
-| 256 | 131 ns | 196 ns | 159 ns | 81.4 ns | 71.4 ns | 1.61 |
-| 512 | 248 ns | 419 ns | 352 ns | 270 ns | 144 ns | 0.92 |
-| 1024 | 510 ns | 973 ns | 740 ns | 382 ns | 308 ns | 1.34 |
-| 2048 | 1.04 µs | 2.15 µs | 1.63 µs | 877 ns | 694 ns | 1.18 |
-| 4096 | 2.2 µs | 4.5 µs | 3.42 µs | 846 ns | 1.51 µs | 2.60 |
-| 8192 | 5.82 µs | 10.4 µs | 7.53 µs | 1.62 µs | 4.08 µs | 3.59 |
-| 16,384 | 11.7 µs | 23.3 µs | 16.1 µs | 7.03 µs | 9.78 µs | 1.66 |
-| 65,536 | 50.9 µs | 126 µs | 76.8 µs | 30.1 µs | 39.3 µs | 1.69 |
-| 262,144 | 239 µs | 601 µs | 340 µs | 144 µs | 209 µs | 1.66 |
-| 1,048,576 | 1.14 ms | 2.7 ms | 1.49 ms | 614 µs | 958 µs | 1.86 |
-| 96 | 58.6 ns | 69.1 ns | 87.9 ns | 57.8 ns | 31.2 ns | 1.01 |
-| 384 | 197 ns | 311 ns | 253 ns | 197 ns | 118 ns | 1.00 |
-| 1536 | 777 ns | 1.53 µs | 1.19 µs | 344 ns | 527 ns | 2.25 |
-| 6144 | 4.37 µs | 7.26 µs | 5.53 µs | 1.18 µs | 2.51 µs | 3.70 |
-| 80 | 51.1 ns | 54.3 ns | 65.2 ns | 50 ns | 26.5 ns | 1.02 |
-| 640 | 327 ns | 561 ns | 714 ns | 181 ns | 197 ns | 1.81 |
-| 5120 | 3.06 µs | 5.98 µs | 6.28 µs | 979 ns | 2.08 µs | 3.13 |
-| 1000 | 581 ns | 1.04 µs | 2.18 µs |  | 383 ns | 0.56 |
-| 10,000 | 7.59 µs | 15.5 µs | 28.7 µs |  | 6.28 µs | 0.49 |
-| 100,000 | 82.5 µs | 202 µs | 334 µs |  | 68.1 µs | 0.41 |
-| 1,000,000 | 953 µs | 2.62 ms | 4.24 ms |  | 808 µs | 0.36 |
-| 6000 | 4.24 µs | 7.98 µs | 13.3 µs |  | 2.89 µs | 0.53 |
-| 30,000 | 22.7 µs | 48.7 µs | 90.7 µs |  | 18.9 µs | 0.47 |
-| 15 | 13.2 ns | 7.7 ns | 11.4 ns |  |  | 1.71 |
-| 45 | 102 ns | 52 ns | 75 ns |  |  | 1.96 |
-| 135 | 282 ns | 138 ns | 254 ns |  |  | 2.04 |
-| 243 | 544 ns | 337 ns | 785 ns |  |  | 1.62 |
-| 625 | 983 ns | 986 ns | 2.81 µs |  |  | 1.00 |
-| 2187 | 4.89 µs | 3.66 µs | 9.16 µs |  |  | 1.34 |
-| 3125 | 4.94 µs | 5.95 µs | 17.4 µs |  |  | 0.83 |
-| 2401 | 7.26 µs | 3.98 µs | 9.05 µs |  |  | 1.83 |
-| 16,807 | 52.7 µs | 35.2 µs | 87.8 µs |  |  | 1.50 |
-| 19,683 | 46.9 µs | 41.4 µs | 113 µs |  |  | 1.13 |
-| 177,147 | 474 µs | 483 µs | 1.51 ms |  |  | 0.98 |
-| 1155 | 2.37 µs | 1.73 µs | 3.97 µs |  |  | 1.37 |
-| 15,015 | 33 µs | 34.9 µs | 60.5 µs |  |  | 0.95 |
-| 99,225 | 239 µs | 240 µs | 609 µs |  |  | 0.99 |
-| 101 | 227 ns | 806 ns | 903 ns |  |  | 0.28 |
-| 1009 | 2.76 µs | 9.18 µs | 9.88 µs |  |  | 0.30 |
-| 10,007 | 71.7 µs | 143 µs | 107 µs |  |  | 0.67 |
-| 100,003 | 938 µs | 2.62 ms | 1.6 ms |  |  | 0.59 |
+| n | `forward` | `inverse` |
+| ---: | --- | --- |
+| 8 | 3.99 ns, 1.07 FFTW | 3.96 ns, 1.14 FFTW |
+| 16 | 4.88 ns, 0.867 vDSP | 5.19 ns, 0.877 FFTW |
+| 32 | 11.1 ns, 0.963 vDSP | 11.5 ns, 0.858 vDSP |
+| 64 | 27.6 ns, 1.41 vDSP | 26.8 ns, 1.37 vDSP |
+| 128 | 45.7 ns, 1.11 vDSP | 47.8 ns, 1.27 vDSP |
+| 256 | 104 ns, 1.46 vDSP | 101 ns, 1.45 vDSP |
+| 512 | 196 ns, 1.33 vDSP | 204 ns, 1.35 vDSP |
+| 1024 | 400 ns, 1.81 vDSP | 422 ns, 2.19 vDSP |
+| 4096 | 1.97 µs, 2.34 vDSP | 2.03 µs, 2.36 vDSP |
+| 8192 | 5.45 µs, 3.37 vDSP | 5.83 µs, 3.58 vDSP |
+| 16,384 | 9.83 µs, 2.45 vDSP | 9.37 µs, 2.35 vDSP |
+| 65,536 | 45.5 µs, 2.04 vDSP | 46.0 µs, 2.18 vDSP |
+| 262,144 | 239 µs, 1.77 vDSP | 234 µs, 1.87 vDSP |
+| 1,048,576 | 1.01 ms, 1.38 vDSP | 1.05 ms, 1.52 vDSP |
+| 12 | 4.64 ns, 0.961 FFTW | 5.44 ns, 1.17 FFTW |
+| 80 | 34.5 ns, 1.06 vDSP | 33.9 ns, 0.991 vDSP |
+| 96 | 46.8 ns, 1.10 vDSP | 42.8 ns, 0.984 vDSP |
+| 384 | 155 ns, 0.894 vDSP | 156 ns, 0.894 vDSP |
+| 640 | 260 ns, 1.45 vDSP | 264 ns, 1.42 vDSP |
+| 1000 | 477 ns, 0.435 FFTW | 510 ns, 0.494 FFTW |
+| 1536 | 689 ns, 2.00 vDSP | 740 ns, 2.25 vDSP |
+| 5120 | 2.65 µs, 2.70 vDSP | 2.83 µs, 2.97 vDSP |
+| 6144 | 3.75 µs, 3.15 vDSP | 4.07 µs, 3.45 vDSP |
+| 6000 | 3.92 µs, 0.516 FFTW | 4.31 µs, 0.537 FFTW |
+| 10,000 | 7.13 µs, 0.495 FFTW | 7.38 µs, 0.470 FFTW |
+| 30,000 | 21.6 µs, 0.436 FFTW | 22.6 µs, 0.432 FFTW |
+| 100,000 | 78.9 µs, 0.386 FFTW | 84.7 µs, 0.408 FFTW |
+| 1,000,000 | 904 µs, 0.341 FFTW | 990 µs, 0.397 FFTW |
+| 15 | 11.3 ns, 1.59 FFTW | 10.8 ns, 1.67 FFTW |
+| 45 | 50.7 ns, 1.09 FFTW | 62.1 ns, 1.31 FFTW |
+| 135 | 140 ns, 1.03 FFTW | 137 ns, 0.981 FFTW |
+| 243 | 274 ns, 0.908 FFTW | 281 ns, 0.980 FFTW |
+| 625 | 608 ns, 0.639 FFTW | 632 ns, 0.740 FFTW |
+| 1155 | 1.21 µs, 0.680 FFTW | 1.33 µs, 0.747 FFTW |
+| 2187 | 2.44 µs, 0.681 FFTW | 2.63 µs, 0.781 FFTW |
+| 2401 | 2.50 µs, 0.614 FFTW | 2.60 µs, 0.663 FFTW |
+| 3125 | 3.33 µs, 0.568 FFTW | 3.48 µs, 0.587 FFTW |
+| 16,807 | 19.5 µs, 0.547 FFTW | 20.6 µs, 0.592 FFTW |
+| 19,683 | 24.7 µs, 0.608 FFTW | 26.8 µs, 0.673 FFTW |
+| 99,225 | 142 µs, 0.577 FFTW | 155 µs, 0.618 FFTW |
+| 177,147 | 274 µs, 0.574 FFTW | 298 µs, 0.607 FFTW |
+| 101 | 223 ns, 0.286 FFTW | 229 ns, 0.283 FFTW |
+| 1009 | 2.79 µs, 0.291 FFTW | 2.86 µs, 0.300 FFTW |
+| 10,007 | 70.5 µs, 0.656 realfft | 69.8 µs, 0.641 realfft |
+| 100,003 | 919 µs, 0.581 realfft | 981 µs, 0.605 realfft |
+| 15,015 | 18.2 µs, 0.523 FFTW | 19.5 µs, 0.550 FFTW |
 
-`f64`, `RealFft::inverse` (load 1.5 to 4.8):
+The `_with_scratch` forms:
 
-| n | `a` | FFTW | realfft | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 16 | 44.7 ns | 6.3 ns | 9.7 ns | 7.10 |
-| 32 | 29.8 ns | 20.7 ns | 17.9 ns | 1.66 |
-| 64 | 50 ns | 38.9 ns | 40.3 ns | 1.29 |
-| 128 | 93.8 ns | 88.5 ns | 99.2 ns | 1.06 |
-| 256 | 198 ns | 188 ns | 222 ns | 1.05 |
-| 512 | 418 ns | 464 ns | 482 ns | 0.90 |
-| 1024 | 905 ns | 1 µs | 1.06 µs | 0.90 |
-| 2048 | 2 µs | 2.14 µs | 2.32 µs | 0.94 |
-| 4096 | 4.45 µs | 5.07 µs | 5.02 µs | 0.89 |
-| 8192 | 10.5 µs | 11.6 µs | 11.4 µs | 0.92 |
-| 16,384 | 22.4 µs | 26.7 µs | 26.1 µs | 0.86 |
-| 65,536 | 104 µs | 135 µs | 126 µs | 0.82 |
-| 262,144 | 524 µs | 594 µs | 564 µs | 0.93 |
-| 1,048,576 | 2.36 ms | 2.99 ms | 2.63 ms | 0.90 |
-| 96 | 78.1 ns | 61.4 ns | 110 ns | 1.27 |
-| 384 | 316 ns | 313 ns | 338 ns | 1.01 |
-| 1536 | 1.51 µs | 1.54 µs | 1.65 µs | 0.98 |
-| 6144 | 7.52 µs | 7.57 µs | 7.89 µs | 0.99 |
-| 80 | 62.2 ns | 55.4 ns | 72.7 ns | 1.12 |
-| 640 | 550 ns | 621 ns | 1000 ns | 0.88 |
-| 5120 | 5.98 µs | 6.51 µs | 9.49 µs | 0.92 |
-| 1000 | 1.01 µs | 1.04 µs | 2.75 µs | 0.97 |
-| 10,000 | 14.1 µs | 15.9 µs | 36.9 µs | 0.89 |
-| 100,000 | 171 µs | 214 µs | 462 µs | 0.80 |
-| 1,000,000 | 2 ms | 2.71 ms | 5.91 ms | 0.74 |
-| 6000 | 7.82 µs | 8.13 µs | 17.4 µs | 0.96 |
-| 30,000 | 46 µs | 55.4 µs | 116 µs | 0.83 |
-| 15 | 40.7 ns | 6.6 ns | 16 ns | 6.17 |
-| 45 | 128 ns | 51.5 ns | 85.2 ns | 2.49 |
-| 135 | 346 ns | 138 ns | 350 ns | 2.50 |
-| 243 | 615 ns | 278 ns | 1.01 µs | 2.21 |
-| 625 | 1.3 µs | 842 ns | 3.48 µs | 1.55 |
-| 2187 | 5.82 µs | 3.41 µs | 12.1 µs | 1.71 |
-| 3125 | 7 µs | 5.31 µs | 22.1 µs | 1.32 |
-| 2401 | 9.18 µs | 3.97 µs | 11.8 µs | 2.31 |
-| 16,807 | 70.8 µs | 44.9 µs | 123 µs | 1.58 |
-| 19,683 | 60.9 µs | 49.6 µs | 157 µs | 1.23 |
-| 177,147 | 618 µs | 582 µs | 1.97 ms | 1.06 |
-| 1155 | 2.87 µs | 1.82 µs | 4.77 µs | 1.58 |
-| 15,015 | 42.8 µs | 41.7 µs | 83.6 µs | 1.03 |
-| 99,225 | 302 µs | 315 µs | 810 µs | 0.96 |
-| 101 | 362 ns | 836 ns | 1.06 µs | 0.43 |
-| 1009 | 4.93 µs | 9.58 µs | 12.1 µs | 0.51 |
-| 10,007 | 129 µs | 153 µs | 205 µs | 0.84 |
-| 100,003 | 1.72 ms | 2.69 ms | 2.91 ms | 0.64 |
+| n | `forward_with_scratch` `f64` | `f32` | `inverse_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 15 | 9.04 ns, 1.32 FFTW | 9.71 ns, 1.37 FFTW | 9.96 ns, 1.61 FFTW | 10.4 ns, 1.61 FFTW |
+| 16 | 6.19 ns, 0.969 FFTW | 6.21 ns, 0.932 FFTW | 4.72 ns, 0.795 FFTW | 4.56 ns, 0.767 FFTW |
+| 64 | 36.8 ns, 1.06 FFTW | 35.7 ns, 1.10 realfft | 45.6 ns, 1.19 FFTW | 28.2 ns, 1.00 realfft |
+| 101 | 325 ns, 0.389 FFTW | 204 ns, 0.254 FFTW | 323 ns, 0.381 FFTW | 209 ns, 0.264 FFTW |
+| 1000 | 933 ns, 0.833 FFTW | 518 ns, 0.470 FFTW | 926 ns, 0.810 FFTW | 509 ns, 0.495 FFTW |
+| 1024 | 765 ns, 0.799 FFTW | 446 ns, 0.601 realfft | 769 ns, 0.703 FFTW | 426 ns, 0.606 realfft |
+| 65,536 | 238 µs, 1.88 realfft | 50.6 µs, 0.656 realfft | 99.9 µs, 0.791 realfft | 48.7 µs, 0.654 realfft |
 
-`f32`, `RealFft::inverse` (load 1.5 to 4.8):
+Batches, `n × count` sequences in one call of `forward`, in ns a transform, against FFTW's `plan_many_dft_r2c`, realfft in a loop and `vDSP_fftm_zrip`:
 
-| n | `a` | FFTW | realfft | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 16 | 38.2 ns | 6.4 ns | 8.5 ns | 5.97 |
-| 32 | 24.3 ns | 17.8 ns | 12.9 ns | 1.88 |
-| 64 | 32.7 ns | 38.9 ns | 28.3 ns | 1.16 |
-| 128 | 55.6 ns | 93.8 ns | 71.7 ns | 0.78 |
-| 256 | 116 ns | 216 ns | 152 ns | 0.76 |
-| 512 | 234 ns | 460 ns | 338 ns | 0.69 |
-| 1024 | 490 ns | 1.01 µs | 712 ns | 0.69 |
-| 2048 | 1.09 µs | 2.24 µs | 1.59 µs | 0.69 |
-| 4096 | 2.34 µs | 5.01 µs | 3.3 µs | 0.71 |
-| 8192 | 6.72 µs | 11.2 µs | 7.31 µs | 0.92 |
-| 16,384 | 11.4 µs | 24.3 µs | 15.7 µs | 0.73 |
-| 65,536 | 52.2 µs | 124 µs | 74.5 µs | 0.70 |
-| 262,144 | 265 µs | 588 µs | 332 µs | 0.80 |
-| 1,048,576 | 1.18 ms | 2.62 ms | 1.47 ms | 0.81 |
-| 96 | 49.3 ns | 62.2 ns | 92 ns | 0.79 |
-| 384 | 180 ns | 340 ns | 245 ns | 0.73 |
-| 1536 | 820 ns | 1.56 µs | 1.16 µs | 0.71 |
-| 6144 | 4.85 µs | 7.77 µs | 5.36 µs | 0.90 |
-| 80 | 40.8 ns | 53.3 ns | 65.9 ns | 0.77 |
-| 640 | 313 ns | 584 ns | 713 ns | 0.54 |
-| 5120 | 3.36 µs | 6.31 µs | 6.26 µs | 0.54 |
-| 1000 | 563 ns | 1.03 µs | 2.18 µs | 0.55 |
-| 10,000 | 7.87 µs | 15.5 µs | 29 µs | 0.51 |
-| 100,000 | 88 µs | 207 µs | 332 µs | 0.43 |
-| 1,000,000 | 1.02 ms | 2.54 ms | 4.21 ms | 0.40 |
-| 6000 | 4.56 µs | 8.12 µs | 13.9 µs | 0.56 |
-| 30,000 | 24.4 µs | 52.3 µs | 88.5 µs | 0.47 |
-| 15 | 35.7 ns | 6.8 ns | 13.4 ns | 5.25 |
-| 45 | 118 ns | 48.3 ns | 78.7 ns | 2.45 |
-| 135 | 323 ns | 142 ns | 259 ns | 2.27 |
-| 243 | 545 ns | 289 ns | 789 ns | 1.88 |
-| 625 | 1.11 µs | 835 ns | 2.85 µs | 1.33 |
-| 2187 | 4.67 µs | 3.38 µs | 9.14 µs | 1.38 |
-| 3125 | 5.61 µs | 5.87 µs | 17.1 µs | 0.95 |
-| 2401 | 8.51 µs | 3.95 µs | 9.22 µs | 2.16 |
-| 16,807 | 61.6 µs | 35.1 µs | 95.3 µs | 1.76 |
-| 19,683 | 44.7 µs | 39.9 µs | 122 µs | 1.12 |
-| 177,147 | 452 µs | 485 µs | 1.55 ms | 0.93 |
-| 1155 | 2.4 µs | 1.78 µs | 4.06 µs | 1.35 |
-| 15,015 | 33.7 µs | 35.5 µs | 61.8 µs | 0.95 |
-| 99,225 | 230 µs | 257 µs | 610 µs | 0.90 |
-| 101 | 234 ns | 787 ns | 876 ns | 0.30 |
-| 1009 | 2.89 µs | 9.19 µs | 10 µs | 0.31 |
-| 10,007 | 71.3 µs | 144 µs | 109 µs | 0.66 |
-| 100,003 | 990 µs | 2.56 ms | 1.6 ms | 0.62 |
+| n × count | `f64` | `f32` |
+| ---: | --- | --- |
+| 8 × 2048 | 1.59 ns, 0.701 FFTW | 1.54 ns, 0.881 FFTW |
+| 15 × 1092 | 7.38 ns, 1.42 FFTW | 8.63 ns, 1.78 FFTW |
+| 16 × 1024 | 4.16 ns, 0.807 FFTW | 4.08 ns, 0.936 FFTW |
+| 32 × 512 | 11.5 ns, 0.929 FFTW | 11.0 ns, 0.953 FFTW |
+| 60 × 272 | 44.4 ns, 1.02 FFTW | 26.3 ns, 0.608 FFTW |
+| 64 × 256 | 40.4 ns, 1.37 FFTW | 22.2 ns, 0.762 FFTW |
+| 100 × 160 | 77.3 ns, 0.888 FFTW | 45.3 ns, 0.605 FFTW |
+| 1024 × 64 | 806 ns, 0.847 vDSP | 426 ns, 0.865 vDSP |
 
-Batches, `n × count` sequences in one call, against FFTW's `plan_many_dft_r2c` and realfft in a loop:
+Planning, `RealFft::new`:
 
-`f64`, batches of `RealFft::forward`, n × count (load 2.4 to 4.5):
-
-| n | `a` | FFTW | realfft | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 8 × 2048 | 20.3 µs | 4.67 µs | 8.11 µs | 4.35 |
-| 16 × 1024 | 21.1 µs | 5.34 µs | 8.3 µs | 3.95 |
-| 32 × 512 | 9.04 µs | 6.39 µs | 9.26 µs | 1.42 |
-| 64 × 256 | 9.73 µs | 7.74 µs | 10.6 µs | 1.26 |
-| 15 × 1092 | 18 µs | 5.95 µs | 15.2 µs | 3.02 |
-| 60 × 272 | 12 µs | 11.9 µs | 15.7 µs | 1.01 |
-| 100 × 160 | 12.3 µs | 14 µs | 19.7 µs | 0.88 |
-
-`f32`, batches of `RealFft::forward`, n × count (load 2.4 to 4.5):
-
-| n | `a` | FFTW | realfft | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 8 × 2048 | 14.8 µs | 3.58 µs | 7.41 µs | 4.14 |
-| 16 × 1024 | 11.8 µs | 4.53 µs | 7.93 µs | 2.60 |
-| 32 × 512 | 5.87 µs | 5.92 µs | 7.46 µs | 0.99 |
-| 64 × 256 | 5.98 µs | 7.45 µs | 8.29 µs | 0.80 |
-| 15 × 1092 | 10.7 µs | 5.44 µs | 12.1 µs | 1.96 |
-| 60 × 272 | 7.23 µs | 11.7 µs | 13.7 µs | 0.62 |
-| 100 × 160 | 7.36 µs | 13.3 µs | 15.8 µs | 0.55 |
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 16 | 208 ns, 2.27 vDSP | 211 ns, 1.69 vDSP |
+| 1024 | 2.44 µs, 1.02 vDSP | 2.02 µs, 0.703 realfft |
+| 65,536 | 97.5 µs, 0.684 vDSP | 43.4 µs, 0.266 realfft |
+| 1,048,576 | 1.53 ms, 0.667 vDSP | 633 µs, 0.337 FFTW |
+| 1000 | 2.37 µs, 0.648 realfft | 2.13 µs, 0.591 realfft |
+| 1001 | 9.85 µs, 2.27 realfft | 9.64 µs, 2.23 realfft |
+| 1009 | 13.3 µs, 1.10 realfft | 15.1 µs, 1.36 realfft |
 
 ### Cosine and sine transforms
 
-`Dct::transform_to` and `Dst::transform_to` against FFTW's `r2r` kinds and, for `f32` and the lengths it has, `vDSP_DCT_Execute`; the same rounds as the real transforms:
+`transform_to` against FFTW's `r2r` kinds and, for the `f32` DCT-II, III and IV, `vDSP_DCT_Execute`; `transform_with_scratch` in place against rustdct.
 
-`f64`, DCT-II (load 2.4 to 4.4):
+DCT-I:
 
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 37.1 ns | 24.4 ns | 1.52 |
-| 64 | 96.9 ns | 76 ns | 1.28 |
-| 256 | 362 ns | 326 ns | 1.11 |
-| 1024 | 1.3 µs | 1.45 µs | 0.90 |
-| 4096 | 6.93 µs | 7 µs | 0.99 |
-| 16,384 | 31.9 µs | 41.4 µs | 0.77 |
-| 65,536 | 135 µs | 216 µs | 0.63 |
-| 1,048,576 | 3.33 ms | 4.99 ms | 0.67 |
-| 48 | 66.5 ns | 77.8 ns | 0.85 |
-| 1000 | 1.39 µs | 1.64 µs | 0.85 |
-| 10,000 | 19.2 µs | 26.3 µs | 0.73 |
-| 3000 | 5.13 µs | 5.23 µs | 0.98 |
-| 255 | 617 ns | 630 ns | 0.98 |
-| 1023 | 4.75 µs | 4.13 µs | 1.15 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 9 | 11.1 ns, 0.522 FFTW | 10.0 ns, 0.412 FFTW | 13.9 ns, 0.472 rustdct | 11.7 ns, 0.396 rustdct |
+| 17 | 31.5 ns, 0.910 FFTW | 28.1 ns, 0.701 FFTW | 29.5 ns, 0.770 rustdct | 26.9 ns, 1.02 rustdct |
+| 65 | 112 ns, 0.982 FFTW | 95.5 ns, 0.875 FFTW | 103 ns, 0.502 rustdct | 94.8 ns, 0.791 rustdct |
+| 257 | 417 ns, 1.10 FFTW | 326 ns, 0.910 FFTW | 383 ns, 0.382 rustdct | 311 ns, 0.535 rustdct |
+| 1025 | 1.66 µs, 1.01 FFTW | 1.19 µs, 0.735 FFTW | 1.47 µs, 0.278 rustdct | 1.08 µs, 0.392 rustdct |
+| 4097 | 8.48 µs, 1.13 FFTW | 4.86 µs, 0.699 FFTW | 7.54 µs, 0.290 rustdct | 4.36 µs, 0.305 rustdct |
+| 16,385 | 36.5 µs, 1.01 FFTW | 23.7 µs, 0.760 FFTW | 39.0 µs, 0.311 rustdct | 22.1 µs, 0.325 rustdct |
+| 65,537 | 156 µs, 0.887 FFTW | 100 µs, 0.684 FFTW | 155 µs, 0.274 rustdct | 96.7 µs, 0.320 rustdct |
+| 64 | 155 ns, 0.855 FFTW | 114 ns, 0.642 FFTW | 139 ns, 0.309 rustdct | 100 ns, 0.268 rustdct |
+| 1000 | 4.85 µs, 0.636 FFTW | 3.18 µs, 0.436 FFTW | 4.32 µs, 0.183 rustdct | 2.99 µs, 0.152 rustdct |
+| 1024 | 5.05 µs, 0.625 FFTW | 3.44 µs, 0.446 FFTW | 4.50 µs, 0.517 rustdct | 3.24 µs, 0.596 rustdct |
+| 4096 | 13.7 µs, 0.810 FFTW | 8.07 µs, 0.528 FFTW | 12.3 µs, 0.218 rustdct | 7.29 µs, 0.178 rustdct |
 
-`f32`, DCT-II (load 2.4 to 4.4):
+DCT-II:
 
-| n | `a` | FFTW | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 16 | 22.8 ns | 24.1 ns | 10.3 ns | 2.21 |
-| 64 | 55.8 ns | 67.6 ns | 27.5 ns | 2.03 |
-| 256 | 178 ns | 325 ns | 98.5 ns | 1.81 |
-| 1024 | 729 ns | 1.39 µs | 412 ns | 1.77 |
-| 4096 | 3.65 µs | 6.61 µs | 1.82 µs | 2.00 |
-| 16,384 | 15.9 µs | 31.3 µs | 8.53 µs | 1.86 |
-| 65,536 | 73 µs | 158 µs | 106 µs | 0.69 |
-| 1,048,576 | 1.75 ms | 4.18 ms | 2.22 ms | 0.79 |
-| 48 | 50 ns | 73.7 ns | 39 ns | 1.28 |
-| 1000 | 780 ns | 1.52 µs |  | 0.51 |
-| 10,000 | 9.97 µs | 19.6 µs |  | 0.51 |
-| 3000 | 2.63 µs | 5.12 µs |  | 0.51 |
-| 255 | 562 ns | 625 ns |  | 0.90 |
-| 1023 | 3.85 µs | 4.31 µs |  | 0.89 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 | 4.82 ns, 1.23 FFTW | 3.31 ns, 0.853 FFTW | 7.25 ns, 0.966 rustdct | 6.75 ns, 0.912 rustdct |
+| 16 | 20.4 ns, 0.828 FFTW | 17.2 ns, 1.73 vDSP | 22.8 ns, 1.95 rustdct | 23.4 ns, 2.11 rustdct |
+| 48 | 51.4 ns, 0.622 FFTW | 42.0 ns, 1.12 vDSP | 41.5 ns, 0.346 rustdct | 38.4 ns, 0.417 rustdct |
+| 64 | 68.8 ns, 0.932 FFTW | 54.8 ns, 2.06 vDSP | 54.8 ns, 0.799 rustdct | 45.4 ns, 0.693 rustdct |
+| 255 | 388 ns, 0.577 FFTW | 306 ns, 0.485 FFTW | 336 ns, 0.463 rustdct | 284 ns, 0.551 rustdct |
+| 256 | 267 ns, 0.786 FFTW | 174 ns, 1.78 vDSP | 215 ns, 0.570 rustdct | 149 ns, 0.466 rustdct |
+| 1000 | 1.35 µs, 0.879 FFTW | 764 ns, 0.472 FFTW | 1.12 µs, 0.195 rustdct | 647 ns, 0.142 rustdct |
+| 1023 | 3.17 µs, 0.733 FFTW | 2.46 µs, 0.621 FFTW | 2.86 µs, 0.604 rustdct | 2.33 µs, 0.724 rustdct |
+| 1024 | 1.20 µs, 0.815 FFTW | 714 ns, 1.74 vDSP | 965 ns, 0.498 rustdct | 581 ns, 0.374 rustdct |
+| 3000 | 5.01 µs, 0.932 FFTW | 2.54 µs, 0.492 FFTW | 4.01 µs, 0.223 rustdct | 2.12 µs, 0.159 rustdct |
+| 4096 | 6.43 µs, 0.918 FFTW | 3.54 µs, 1.95 vDSP | 5.13 µs, 0.540 rustdct | 2.70 µs, 0.369 rustdct |
+| 10,000 | 18.3 µs, 0.708 FFTW | 9.63 µs, 0.502 FFTW | 16.7 µs, 0.269 rustdct | 8.57 µs, 0.207 rustdct |
+| 16,384 | 29.3 µs, 0.706 FFTW | 15.5 µs, 1.83 vDSP | 27.0 µs, 0.591 rustdct | 14.1 µs, 0.415 rustdct |
+| 65,536 | 256 µs, 1.15 FFTW | 72.1 µs, 0.680 vDSP | 140 µs, 0.656 rustdct | 67.7 µs, 0.442 rustdct |
+| 1,048,576 | 3.20 ms, 0.596 FFTW | 1.77 ms, 0.796 vDSP | 2.72 ms, 0.618 rustdct | 1.67 ms, 0.549 rustdct |
 
-`f64`, DCT-III (load 2.4 to 4.4):
+DCT-III:
 
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 55.1 ns | 23.9 ns | 2.31 |
-| 64 | 96.2 ns | 81.4 ns | 1.18 |
-| 256 | 319 ns | 332 ns | 0.96 |
-| 1024 | 1.32 µs | 1.48 µs | 0.90 |
-| 4096 | 6.56 µs | 7.15 µs | 0.92 |
-| 16,384 | 29.4 µs | 35.7 µs | 0.82 |
-| 65,536 | 130 µs | 191 µs | 0.68 |
-| 1,048,576 | 2.76 ms | 4.55 ms | 0.61 |
-| 48 | 64.3 ns | 79.6 ns | 0.81 |
-| 1000 | 1.51 µs | 1.64 µs | 0.92 |
-| 10,000 | 17.9 µs | 22.6 µs | 0.79 |
-| 3000 | 5.05 µs | 5.13 µs | 0.98 |
-| 255 | 679 ns | 684 ns | 0.99 |
-| 1023 | 5.04 µs | 4.16 µs | 1.21 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 | 4.80 ns, 1.24 FFTW | 3.27 ns, 0.841 FFTW | 7.19 ns, 0.970 rustdct | 6.70 ns, 0.682 rustdct |
+| 16 | 19.1 ns, 0.790 FFTW | 15.2 ns, 1.19 vDSP | 23.2 ns, 1.89 rustdct | 23.0 ns, 1.89 rustdct |
+| 48 | 49.9 ns, 0.578 FFTW | 39.1 ns, 0.864 vDSP | 42.0 ns, 0.304 rustdct | 38.1 ns, 0.359 rustdct |
+| 64 | 79.2 ns, 1.03 FFTW | 53.7 ns, 1.32 vDSP | 65.7 ns, 0.927 rustdct | 46.1 ns, 0.644 rustdct |
+| 255 | 400 ns, 0.595 FFTW | 314 ns, 0.496 FFTW | 350 ns, 0.427 rustdct | 288 ns, 0.479 rustdct |
+| 256 | 292 ns, 0.852 FFTW | 174 ns, 1.35 vDSP | 245 ns, 0.651 rustdct | 151 ns, 0.392 rustdct |
+| 1000 | 1.48 µs, 0.959 FFTW | 770 ns, 0.474 FFTW | 1.19 µs, 0.192 rustdct | 655 ns, 0.135 rustdct |
+| 1023 | 3.12 µs, 0.742 FFTW | 2.44 µs, 0.617 FFTW | 2.82 µs, 0.547 rustdct | 2.30 µs, 0.644 rustdct |
+| 1024 | 1.27 µs, 0.849 FFTW | 708 ns, 1.28 vDSP | 1.04 µs, 0.539 rustdct | 577 ns, 0.298 rustdct |
+| 3000 | 5.07 µs, 0.966 FFTW | 2.66 µs, 0.516 FFTW | 4.45 µs, 0.233 rustdct | 2.24 µs, 0.157 rustdct |
+| 4096 | 6.39 µs, 0.914 FFTW | 3.52 µs, 1.29 vDSP | 5.39 µs, 0.573 rustdct | 3.04 µs, 0.328 rustdct |
+| 10,000 | 17.5 µs, 0.805 FFTW | 9.47 µs, 0.490 FFTW | 15.4 µs, 0.232 rustdct | 8.37 µs, 0.187 rustdct |
+| 16,384 | 29.0 µs, 0.794 FFTW | 15.7 µs, 1.40 vDSP | 25.7 µs, 0.485 rustdct | 14.0 µs, 0.315 rustdct |
+| 65,536 | 126 µs, 0.640 FFTW | 72.1 µs, 0.577 vDSP | 118 µs, 0.440 rustdct | 66.3 µs, 0.319 rustdct |
+| 1,048,576 | 2.72 ms, 0.555 FFTW | 1.60 ms, 0.569 vDSP | 2.62 ms, 0.440 rustdct | 1.54 ms, 0.359 rustdct |
 
-`f32`, DCT-III (load 2.4 to 4.4):
+DCT-IV:
 
-| n | `a` | FFTW | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 16 | 46.7 ns | 23.2 ns | 13.1 ns | 3.56 |
-| 64 | 55.3 ns | 72 ns | 41.4 ns | 1.34 |
-| 256 | 172 ns | 325 ns | 130 ns | 1.32 |
-| 1024 | 721 ns | 1.41 µs | 548 ns | 1.32 |
-| 4096 | 3.6 µs | 6.62 µs | 2.48 µs | 1.45 |
-| 16,384 | 16.5 µs | 31.4 µs | 11.5 µs | 1.44 |
-| 65,536 | 72.7 µs | 158 µs | 124 µs | 0.59 |
-| 1,048,576 | 1.63 ms | 4.19 ms | 2.82 ms | 0.58 |
-| 48 | 50.5 ns | 75.4 ns | 47 ns | 1.07 |
-| 1000 | 797 ns | 1.52 µs |  | 0.53 |
-| 10,000 | 9.45 µs | 19.8 µs |  | 0.48 |
-| 3000 | 2.79 µs | 5.23 µs |  | 0.53 |
-| 255 | 563 ns | 628 ns |  | 0.90 |
-| 1023 | 3.96 µs | 4.31 µs |  | 0.92 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 | 4.79 ns, 0.262 FFTW | 3.35 ns, 0.186 FFTW | 7.26 ns, 0.441 rustdct | 6.79 ns, 0.364 rustdct |
+| 16 | 18.4 ns, 0.731 FFTW | 18.5 ns, 1.39 vDSP | 25.9 ns, 1.22 rustdct | 26.5 ns, 1.22 rustdct |
+| 48 | 46.1 ns, 0.486 FFTW | 42.2 ns, 0.849 vDSP | 49.1 ns, 0.531 rustdct | 43.5 ns, 0.597 rustdct |
+| 64 | 79.7 ns, 1.06 FFTW | 61.4 ns, 1.52 vDSP | 74.0 ns, 0.836 rustdct | 55.6 ns, 0.624 rustdct |
+| 255 | 730 ns, 1.08 FFTW | 665 ns, 0.955 FFTW | 685 ns, 0.990 rustdct | 646 ns, 1.22 rustdct |
+| 256 | 299 ns, 1.02 FFTW | 204 ns, 1.57 vDSP | 282 ns, 0.652 rustdct | 192 ns, 0.453 rustdct |
+| 1000 | 1.39 µs, 0.892 FFTW | 875 ns, 0.549 FFTW | 1.29 µs, 0.204 rustdct | 829 ns, 0.155 rustdct |
+| 1023 | 4.46 µs, 0.990 FFTW | 3.90 µs, 0.910 FFTW | 4.18 µs, 0.904 rustdct | 3.77 µs, 1.15 rustdct |
+| 1024 | 1.26 µs, 0.869 FFTW | 815 ns, 1.50 vDSP | 1.14 µs, 0.531 rustdct | 761 ns, 0.363 rustdct |
+| 3000 | 4.59 µs, 0.913 FFTW | 2.76 µs, 0.557 FFTW | 4.62 µs, 0.234 rustdct | 2.65 µs, 0.167 rustdct |
+| 4096 | 6.22 µs, 0.924 FFTW | 3.77 µs, 1.46 vDSP | 5.68 µs, 0.554 rustdct | 3.57 µs, 0.360 rustdct |
+| 10,000 | 16.1 µs, 0.731 FFTW | 9.95 µs, 0.517 FFTW | 16.1 µs, 0.187 rustdct | 9.46 µs, 0.141 rustdct |
+| 16,384 | 27.4 µs, 0.714 FFTW | 15.9 µs, 1.28 vDSP | 27.2 µs, 0.489 rustdct | 16.1 µs, 0.308 rustdct |
+| 65,536 | 123 µs, 0.681 FFTW | 68.7 µs, 0.503 vDSP | 123 µs, 0.440 rustdct | 70.1 µs, 0.318 rustdct |
+| 1,048,576 | 2.63 ms, 0.558 FFTW | 1.45 ms, 0.506 vDSP | 2.64 ms, 0.424 rustdct | 1.46 ms, 0.323 rustdct |
 
-`f64`, DCT-IV (load 2.4 to 4.4):
+DST-I:
 
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 24.1 ns | 25.6 ns | 0.94 |
-| 64 | 77.2 ns | 78.3 ns | 0.99 |
-| 256 | 302 ns | 294 ns | 1.03 |
-| 1024 | 1.3 µs | 1.49 µs | 0.87 |
-| 4096 | 6.36 µs | 6.63 µs | 0.96 |
-| 16,384 | 28.2 µs | 34.5 µs | 0.82 |
-| 65,536 | 124 µs | 182 µs | 0.68 |
-| 1,048,576 | 2.67 ms | 4.67 ms | 0.57 |
-| 48 | 63.7 ns | 102 ns | 0.63 |
-| 1000 | 1.39 µs | 1.55 µs | 0.90 |
-| 10,000 | 16.8 µs | 20.3 µs | 0.83 |
-| 3000 | 4.61 µs | 5.35 µs | 0.86 |
-| 255 | 956 ns | 673 ns | 1.42 |
-| 1023 | 5.92 µs | 4.4 µs | 1.34 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 7 | 8.34 ns, 0.354 FFTW | 6.37 ns, 0.227 FFTW | 10.9 ns, 0.458 rustdct | 8.98 ns, 0.387 rustdct |
+| 15 | 15.8 ns, 0.403 FFTW | 14.1 ns, 0.340 FFTW | 19.5 ns, 0.196 rustdct | 14.6 ns, 0.145 rustdct |
+| 63 | 100 ns, 0.868 FFTW | 85.1 ns, 0.731 FFTW | 91.9 ns, 0.428 rustdct | 80.9 ns, 0.649 rustdct |
+| 255 | 398 ns, 1.02 FFTW | 324 ns, 0.864 FFTW | 362 ns, 0.359 rustdct | 307 ns, 0.523 rustdct |
+| 1023 | 1.62 µs, 0.959 FFTW | 1.19 µs, 0.743 FFTW | 1.44 µs, 0.271 rustdct | 1.09 µs, 0.393 rustdct |
+| 4095 | 8.20 µs, 1.09 FFTW | 4.77 µs, 0.695 FFTW | 7.30 µs, 0.277 rustdct | 4.29 µs, 0.296 rustdct |
+| 16,383 | 35.4 µs, 0.975 FFTW | 23.3 µs, 0.760 FFTW | 33.1 µs, 0.265 rustdct | 21.2 µs, 0.314 rustdct |
+| 65,535 | 156 µs, 0.879 FFTW | 97.5 µs, 0.658 FFTW | 152 µs, 0.268 rustdct | 91.9 µs, 0.300 rustdct |
+| 64 | 146 ns, 0.641 FFTW | 95.0 ns, 0.470 FFTW | 122 ns, 0.451 rustdct | 83.3 ns, 0.413 rustdct |
+| 1000 | 2.61 µs, 0.591 FFTW | 1.48 µs, 0.343 FFTW | 2.32 µs, 0.260 rustdct | 1.34 µs, 0.195 rustdct |
+| 1024 | 4.73 µs, 0.563 FFTW | 3.05 µs, 0.381 FFTW | 4.17 µs, 0.184 rustdct | 2.85 µs, 0.149 rustdct |
+| 4096 | 25.8 µs, 0.282 FFTW | 15.3 µs, 0.180 FFTW | 24.3 µs, 0.222 rustdct | 14.6 µs, 0.167 rustdct |
 
-`f32`, DCT-IV (load 2.4 to 4.4):
+DST-II:
 
-| n | `a` | FFTW | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 16 | 21.2 ns | 24.8 ns | 14.2 ns | 1.49 |
-| 64 | 60.7 ns | 68.9 ns | 41 ns | 1.48 |
-| 256 | 210 ns | 298 ns | 132 ns | 1.59 |
-| 1024 | 837 ns | 1.37 µs | 545 ns | 1.54 |
-| 4096 | 4.04 µs | 6.31 µs | 2.4 µs | 1.68 |
-| 16,384 | 15.7 µs | 30 µs | 11.8 µs | 1.32 |
-| 65,536 | 70.8 µs | 144 µs | 138 µs | 0.51 |
-| 1,048,576 | 1.48 ms | 3.89 ms | 2.87 ms | 0.52 |
-| 48 | 50.9 ns | 80.2 ns | 51.1 ns | 1.00 |
-| 1000 | 896 ns | 1.52 µs |  | 0.59 |
-| 10,000 | 10.2 µs | 19 µs |  | 0.54 |
-| 3000 | 2.88 µs | 4.97 µs |  | 0.58 |
-| 255 | 930 ns | 684 ns |  | 1.36 |
-| 1023 | 5.32 µs | 4.61 µs |  | 1.15 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 | 4.77 ns, 0.293 FFTW | 3.27 ns, 0.207 FFTW | 7.28 ns, 1.00 rustdct | 6.67 ns, 0.900 rustdct |
+| 16 | 20.3 ns, 0.752 FFTW | 17.1 ns, 0.754 FFTW | 23.9 ns, 2.08 rustdct | 23.5 ns, 1.97 rustdct |
+| 48 | 50.6 ns, 0.600 FFTW | 41.7 ns, 0.587 FFTW | 41.8 ns, 0.373 rustdct | 39.0 ns, 0.412 rustdct |
+| 64 | 68.1 ns, 0.914 FFTW | 55.0 ns, 0.833 FFTW | 55.5 ns, 0.645 rustdct | 45.5 ns, 0.571 rustdct |
+| 255 | 392 ns, 0.570 FFTW | 304 ns, 0.486 FFTW | 339 ns, 0.493 rustdct | 278 ns, 0.530 rustdct |
+| 256 | 271 ns, 0.792 FFTW | 174 ns, 0.509 FFTW | 218 ns, 0.521 rustdct | 155 ns, 0.443 rustdct |
+| 1000 | 1.35 µs, 0.874 FFTW | 752 ns, 0.465 FFTW | 1.13 µs, 0.195 rustdct | 641 ns, 0.140 rustdct |
+| 1023 | 3.17 µs, 0.761 FFTW | 2.46 µs, 0.620 FFTW | 2.87 µs, 0.623 rustdct | 2.32 µs, 0.686 rustdct |
+| 1024 | 1.19 µs, 0.803 FFTW | 691 ns, 0.482 FFTW | 956 ns, 0.460 rustdct | 569 ns, 0.345 rustdct |
+| 3000 | 5.17 µs, 0.948 FFTW | 2.74 µs, 0.538 FFTW | 4.32 µs, 0.238 rustdct | 2.14 µs, 0.161 rustdct |
+| 4096 | 6.30 µs, 0.899 FFTW | 4.38 µs, 0.693 FFTW | 5.61 µs, 0.555 rustdct | 3.11 µs, 0.406 rustdct |
+| 10,000 | 18.4 µs, 0.714 FFTW | 9.74 µs, 0.507 FFTW | 16.6 µs, 0.269 rustdct | 8.63 µs, 0.210 rustdct |
+| 16,384 | 28.8 µs, 0.702 FFTW | 15.0 µs, 0.488 FFTW | 27.0 µs, 0.552 rustdct | 13.8 µs, 0.388 rustdct |
+| 65,536 | 148 µs, 0.673 FFTW | 71.1 µs, 0.445 FFTW | 141 µs, 0.617 rustdct | 66.7 µs, 0.411 rustdct |
+| 1,048,576 | 3.20 ms, 0.599 FFTW | 1.74 ms, 0.447 FFTW | 3.15 ms, 0.678 rustdct | 1.68 ms, 0.525 rustdct |
 
-`f64`, DST-II (load 2.4 to 4.4):
+DST-III:
 
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 37.2 ns | 27.6 ns | 1.35 |
-| 64 | 97.2 ns | 75.9 ns | 1.28 |
-| 256 | 362 ns | 325 ns | 1.11 |
-| 1024 | 1.32 µs | 1.45 µs | 0.91 |
-| 4096 | 7.06 µs | 6.95 µs | 1.02 |
-| 16,384 | 31.3 µs | 40.9 µs | 0.77 |
-| 65,536 | 136 µs | 215 µs | 0.63 |
-| 1,048,576 | 3.33 ms | 4.98 ms | 0.67 |
-| 48 | 66.2 ns | 76.6 ns | 0.86 |
-| 1000 | 1.39 µs | 1.63 µs | 0.86 |
-| 10,000 | 19.4 µs | 26.3 µs | 0.74 |
-| 3000 | 5.36 µs | 5.18 µs | 1.03 |
-| 255 | 616 ns | 614 ns | 1.00 |
-| 1023 | 4.62 µs | 4.15 µs | 1.11 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 | 4.77 ns, 0.295 FFTW | 3.27 ns, 0.210 FFTW | 7.29 ns, 0.910 rustdct | 6.67 ns, 0.831 rustdct |
+| 16 | 19.6 ns, 0.838 FFTW | 15.7 ns, 0.697 FFTW | 22.9 ns, 1.99 rustdct | 24.6 ns, 2.12 rustdct |
+| 48 | 49.2 ns, 0.596 FFTW | 39.1 ns, 0.527 FFTW | 41.6 ns, 0.318 rustdct | 39.3 ns, 0.347 rustdct |
+| 64 | 79.6 ns, 1.03 FFTW | 54.5 ns, 0.791 FFTW | 66.4 ns, 0.773 rustdct | 46.4 ns, 0.550 rustdct |
+| 255 | 406 ns, 0.586 FFTW | 315 ns, 0.503 FFTW | 354 ns, 0.440 rustdct | 288 ns, 0.462 rustdct |
+| 256 | 294 ns, 0.853 FFTW | 173 ns, 0.500 FFTW | 247 ns, 0.592 rustdct | 151 ns, 0.363 rustdct |
+| 1000 | 1.40 µs, 0.907 FFTW | 764 ns, 0.470 FFTW | 1.19 µs, 0.195 rustdct | 656 ns, 0.132 rustdct |
+| 1023 | 3.18 µs, 0.767 FFTW | 2.46 µs, 0.607 FFTW | 2.87 µs, 0.563 rustdct | 2.31 µs, 0.606 rustdct |
+| 1024 | 1.25 µs, 0.834 FFTW | 720 ns, 0.499 FFTW | 1.03 µs, 0.499 rustdct | 577 ns, 0.284 rustdct |
+| 3000 | 4.95 µs, 0.947 FFTW | 2.69 µs, 0.526 FFTW | 4.45 µs, 0.237 rustdct | 2.27 µs, 0.157 rustdct |
+| 4096 | 6.44 µs, 0.916 FFTW | 3.48 µs, 0.557 FFTW | 5.38 µs, 0.534 rustdct | 3.01 µs, 0.312 rustdct |
+| 10,000 | 17.6 µs, 0.806 FFTW | 9.15 µs, 0.481 FFTW | 15.4 µs, 0.236 rustdct | 8.23 µs, 0.187 rustdct |
+| 16,384 | 29.1 µs, 0.797 FFTW | 15.8 µs, 0.508 FFTW | 25.7 µs, 0.459 rustdct | 14.2 µs, 0.307 rustdct |
+| 65,536 | 126 µs, 0.485 FFTW | 71.8 µs, 0.450 FFTW | 118 µs, 0.419 rustdct | 66.8 µs, 0.309 rustdct |
+| 1,048,576 | 2.71 ms, 0.557 FFTW | 1.60 ms, 0.408 FFTW | 2.58 ms, 0.417 rustdct | 1.54 ms, 0.346 rustdct |
 
-`f32`, DST-II (load 2.4 to 4.4):
+DST-IV:
 
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 23 ns | 24.6 ns | 0.93 |
-| 64 | 55.6 ns | 67.6 ns | 0.82 |
-| 256 | 176 ns | 325 ns | 0.54 |
-| 1024 | 717 ns | 1.4 µs | 0.51 |
-| 4096 | 4.36 µs | 6.59 µs | 0.66 |
-| 16,384 | 15.3 µs | 31.3 µs | 0.49 |
-| 65,536 | 72.9 µs | 158 µs | 0.46 |
-| 1,048,576 | 1.74 ms | 4.15 ms | 0.42 |
-| 48 | 50.4 ns | 75.9 ns | 0.66 |
-| 1000 | 786 ns | 1.52 µs | 0.52 |
-| 10,000 | 9.88 µs | 19.8 µs | 0.50 |
-| 3000 | 2.62 µs | 5.17 µs | 0.51 |
-| 255 | 563 ns | 626 ns | 0.90 |
-| 1023 | 3.82 µs | 4.31 µs | 0.89 |
+| n | `transform_to` `f64` | `f32` | `transform_with_scratch` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 | 4.81 ns, 0.268 FFTW | 3.32 ns, 0.185 FFTW | 7.32 ns, 0.446 rustdct | 6.74 ns, 0.358 rustdct |
+| 16 | 18.5 ns, 0.732 FFTW | 18.6 ns, 0.770 FFTW | 25.4 ns, 1.20 rustdct | 26.7 ns, 1.15 rustdct |
+| 48 | 45.8 ns, 0.490 FFTW | 40.5 ns, 0.500 FFTW | 48.3 ns, 0.518 rustdct | 43.6 ns, 0.583 rustdct |
+| 64 | 72.5 ns, 0.974 FFTW | 60.5 ns, 0.906 FFTW | 70.1 ns, 0.774 rustdct | 54.6 ns, 0.606 rustdct |
+| 255 | 729 ns, 0.964 FFTW | 662 ns, 0.935 FFTW | 680 ns, 0.994 rustdct | 648 ns, 1.23 rustdct |
+| 256 | 283 ns, 0.966 FFTW | 187 ns, 0.642 FFTW | 268 ns, 0.617 rustdct | 178 ns, 0.414 rustdct |
+| 1000 | 1.32 µs, 0.838 FFTW | 811 ns, 0.509 FFTW | 1.23 µs, 0.192 rustdct | 765 ns, 0.149 rustdct |
+| 1023 | 4.47 µs, 0.987 FFTW | 3.93 µs, 0.920 FFTW | 4.22 µs, 0.912 rustdct | 3.80 µs, 1.11 rustdct |
+| 1024 | 1.18 µs, 0.815 FFTW | 742 ns, 0.553 FFTW | 1.07 µs, 0.499 rustdct | 696 ns, 0.331 rustdct |
+| 3000 | 4.49 µs, 0.888 FFTW | 2.59 µs, 0.525 FFTW | 4.67 µs, 0.225 rustdct | 2.49 µs, 0.155 rustdct |
+| 4096 | 6.05 µs, 0.912 FFTW | 3.75 µs, 0.596 FFTW | 5.56 µs, 0.539 rustdct | 3.06 µs, 0.307 rustdct |
+| 10,000 | 16.0 µs, 0.720 FFTW | 9.44 µs, 0.488 FFTW | 16.0 µs, 0.177 rustdct | 8.96 µs, 0.133 rustdct |
+| 16,384 | 27.2 µs, 0.702 FFTW | 14.1 µs, 0.474 FFTW | 27.1 µs, 0.491 rustdct | 14.2 µs, 0.298 rustdct |
+| 65,536 | 123 µs, 0.667 FFTW | 65.0 µs, 0.458 FFTW | 124 µs, 0.450 rustdct | 66.3 µs, 0.301 rustdct |
+| 1,048,576 | 2.60 ms, 0.563 FFTW | 1.39 ms, 0.353 FFTW | 2.64 ms, 0.430 rustdct | 1.40 ms, 0.312 rustdct |
 
-`f64`, DST-IV (load 2.4 to 4.4):
+Planning, `Dct::new(n, DctKind::II)`:
 
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 24.2 ns | 26.2 ns | 0.92 |
-| 64 | 73.6 ns | 76.5 ns | 0.96 |
-| 256 | 283 ns | 295 ns | 0.96 |
-| 1024 | 1.24 µs | 1.5 µs | 0.82 |
-| 4096 | 6.23 µs | 6.66 µs | 0.94 |
-| 16,384 | 28.1 µs | 34.7 µs | 0.81 |
-| 65,536 | 124 µs | 181 µs | 0.69 |
-| 1,048,576 | 2.66 ms | 4.66 ms | 0.57 |
-| 48 | 60.9 ns | 101 ns | 0.60 |
-| 1000 | 1.34 µs | 1.57 µs | 0.85 |
-| 10,000 | 16.2 µs | 20.4 µs | 0.80 |
-| 3000 | 4.51 µs | 5.36 µs | 0.84 |
-| 255 | 989 ns | 707 ns | 1.40 |
-| 1023 | 6.09 µs | 4.44 µs | 1.37 |
-
-`f32`, DST-IV (load 2.4 to 4.4):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 | 21.2 ns | 24.5 ns | 0.87 |
-| 64 | 60.6 ns | 68.9 ns | 0.88 |
-| 256 | 191 ns | 297 ns | 0.64 |
-| 1024 | 779 ns | 1.38 µs | 0.57 |
-| 4096 | 3.91 µs | 6.31 µs | 0.62 |
-| 16,384 | 15.1 µs | 30 µs | 0.50 |
-| 65,536 | 68.8 µs | 146 µs | 0.47 |
-| 1,048,576 | 1.42 ms | 3.92 ms | 0.36 |
-| 48 | 50.9 ns | 80.9 ns | 0.63 |
-| 1000 | 850 ns | 1.52 µs | 0.56 |
-| 10,000 | 9.77 µs | 19.1 µs | 0.51 |
-| 3000 | 2.7 µs | 4.94 µs | 0.55 |
-| 255 | 957 ns | 696 ns | 1.37 |
-| 1023 | 5.4 µs | 4.63 µs | 1.17 |
-
-Types I, at `2^k ± 1` (the split-radix step for these odd lengths) and at even lengths (the real transform of the extension):
-
-`f64`, DCT-I (load 3.0 to 4.3):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 17 | 40.2 ns | 36.9 ns | 1.09 |
-| 65 | 168 ns | 112 ns | 1.49 |
-| 257 | 589 ns | 404 ns | 1.46 |
-| 1025 | 2.36 µs | 1.71 µs | 1.38 |
-| 4097 | 9.87 µs | 7.52 µs | 1.31 |
-| 16,385 | 44 µs | 36.2 µs | 1.22 |
-| 65,537 | 212 µs | 177 µs | 1.20 |
-| 64 | 151 ns | 180 ns | 0.84 |
-| 1000 | 5.03 µs | 7.73 µs | 0.65 |
-| 1024 | 5.19 µs | 8.18 µs | 0.63 |
-| 4096 | 13.8 µs | 16.9 µs | 0.82 |
-
-`f32`, DCT-I (load 3.0 to 4.3):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 17 | 35 ns | 38.1 ns | 0.92 |
-| 65 | 150 ns | 99.3 ns | 1.51 |
-| 257 | 512 ns | 361 ns | 1.42 |
-| 1025 | 1.91 µs | 1.59 µs | 1.21 |
-| 4097 | 7.32 µs | 6.83 µs | 1.07 |
-| 16,385 | 30.4 µs | 31.4 µs | 0.97 |
-| 65,537 | 130 µs | 149 µs | 0.87 |
-| 64 | 115 ns | 160 ns | 0.72 |
-| 1000 | 3.21 µs | 7.3 µs | 0.44 |
-| 1024 | 3.31 µs | 7.71 µs | 0.43 |
-| 4096 | 8.52 µs | 15.2 µs | 0.56 |
-
-`f64`, DST-I (load 3.0 to 4.3):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 15 | 22.9 ns | 35.4 ns | 0.65 |
-| 63 | 153 ns | 115 ns | 1.33 |
-| 255 | 578 ns | 411 ns | 1.41 |
-| 1023 | 2.37 µs | 1.71 µs | 1.38 |
-| 4095 | 10.9 µs | 7.51 µs | 1.45 |
-| 16,383 | 44 µs | 36.3 µs | 1.21 |
-| 65,535 | 188 µs | 177 µs | 1.06 |
-| 64 | 162 ns | 186 ns | 0.87 |
-| 1000 | 2.9 µs | 4.36 µs | 0.67 |
-| 1024 | 5.01 µs | 8.81 µs | 0.57 |
-| 4096 | 27.2 µs | 93.6 µs | 0.29 |
-
-`f32`, DST-I (load 3.0 to 4.3):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 15 | 18.1 ns | 39.9 ns | 0.45 |
-| 63 | 130 ns | 104 ns | 1.24 |
-| 255 | 455 ns | 362 ns | 1.26 |
-| 1023 | 1.81 µs | 1.6 µs | 1.13 |
-| 4095 | 6.77 µs | 6.77 µs | 1.00 |
-| 16,383 | 29.6 µs | 31.2 µs | 0.95 |
-| 65,535 | 121 µs | 150 µs | 0.80 |
-| 64 | 109 ns | 226 ns | 0.48 |
-| 1000 | 1.72 µs | 4.26 µs | 0.40 |
-| 1024 | 3.29 µs | 8.01 µs | 0.41 |
-| 4096 | 16.1 µs | 85.2 µs | 0.19 |
+| n | `f64` | `f32` |
+| ---: | --- | --- |
+| 16 | 280 ns, 2.31 rustdct | 292 ns, 2.30 rustdct |
+| 1000 | 3.72 µs, 0.475 rustdct | 2.90 µs, 0.384 rustdct |
+| 1024 | 3.77 µs, 1.81 rustdct | 2.85 µs, 1.38 rustdct |
+| 65,536 | 148 µs, 1.58 rustdct | 56.7 µs, 0.604 rustdct |
 
 ### Two and three dimensions
 
-`Fft2::forward` and `Fft3::forward` in place, against FFTW's `plan_dft_2d` and `plan_dft_3d` in place and, in two dimensions, `vDSP_fft2d_zip` (powers of two):
+`Fft2::forward` and `inverse` in place, against FFTW's `plan_dft_2d` in place and `vDSP_fft2d_zip`:
 
-`f64`, `Fft2`, rows × columns (load 2.3 to 4.9):
+| rows × cols | `forward` `f64` | `f32` | `inverse` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 16 × 16 | 203 ns, 0.651 FFTW | 120 ns, 1.27 vDSP |  |  |
+| 64 × 64 | 5.58 µs, 0.665 FFTW | 2.95 µs, 0.938 vDSP | 6.03 µs, 0.681 FFTW | 3.17 µs, 1.00 vDSP |
+| 128 × 128 | 34.0 µs, 0.595 FFTW | 15.6 µs, 1.10 vDSP |  |  |
+| 256 × 256 | 159 µs, 0.620 FFTW | 81.5 µs, 0.976 vDSP |  |  |
+| 512 × 512 | 674 µs, 0.590 FFTW | 370 µs, 0.774 vDSP |  |  |
+| 1024 × 1024 | 6.61 ms, 1.12 FFTW | 4.29 ms, 1.83 vDSP | 6.85 ms, 1.24 FFTW | 4.42 ms, 1.92 vDSP |
+| 2048 × 2048 | 28.8 ms, 0.949 FFTW | 24.0 ms, 2.10 vDSP |  |  |
+| 4096 × 4096 | 121 ms, 0.839 FFTW | 110 ms, 2.15 vDSP |  |  |
+| 480 × 640 | 965 µs, 0.680 FFTW | 489 µs, 0.381 FFTW | 1.03 ms, 0.713 FFTW | 511 µs, 0.385 FFTW |
+| 1000 × 1000 | 3.75 ms, 0.624 FFTW | 2.19 ms, 0.438 FFTW |  |  |
+| 4096 × 64 | 786 µs, 0.670 FFTW | 423 µs, 0.884 vDSP |  |  |
+| 64 × 4096 | 741 µs, 0.642 FFTW | 481 µs, 0.990 vDSP |  |  |
 
-| n | `a` | FFTW | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 64 × 64 | 9.76 µs | 8.82 µs | 20.5 µs | 1.11 |
-| 128 × 128 | 42.1 µs | 60.4 µs | 285 µs | 0.70 |
-| 256 × 256 | 181 µs | 270 µs | 2.2 ms | 0.67 |
-| 512 × 512 | 839 µs | 1.18 ms | 11 ms | 0.71 |
-| 1024 × 1024 | 6.71 ms | 5.63 ms | 64.9 ms | 1.19 |
-| 2048 × 2048 | 29 ms | 29.6 ms | 383 ms | 0.98 |
-| 4096 × 4096 | 125 ms | 144 ms | 1.61 s | 0.86 |
-| 480 × 640 | 1.01 ms | 1.41 ms |  | 0.72 |
-| 1000 × 1000 | 3.8 ms | 5.47 ms |  | 0.69 |
-| 4096 × 64 | 1.58 ms | 1.14 ms | 6.05 ms | 1.38 |
-| 64 × 4096 | 952 µs | 1.19 ms | 14.3 ms | 0.80 |
+`Fft3::forward` and `inverse` in place, against FFTW's `plan_dft_3d`:
 
-`f32`, `Fft2`, rows × columns (load 2.3 to 4.9):
+| shape | `forward` `f64` | `f32` | `inverse` `f64` | `f32` |
+| ---: | --- | --- | --- | --- |
+| 8 × 8 × 8 | 465 ns, 0.683 FFTW | 312 ns, 0.458 FFTW |  |  |
+| 16 × 16 × 16 | 4.90 µs, 0.654 FFTW | 2.86 µs, 0.383 FFTW | 5.03 µs, 0.670 FFTW | 2.95 µs, 0.402 FFTW |
+| 32 × 32 × 32 | 81.9 µs, 0.744 FFTW | 37.4 µs, 0.376 FFTW |  |  |
+| 64 × 64 × 64 | 752 µs, 0.719 FFTW | 381 µs, 0.358 FFTW | 775 µs, 0.724 FFTW | 387 µs, 0.369 FFTW |
+| 128 × 128 × 128 | 9.30 ms, 0.700 FFTW | 4.26 ms, 0.336 FFTW |  |  |
+| 256 × 256 × 256 | 86.6 ms, 0.755 FFTW | 43.1 ms, 0.419 FFTW |  |  |
+| 100 × 100 × 100 | 3.66 ms, 0.668 FFTW | 2.17 ms, 0.421 FFTW |  |  |
+| 8 × 256 × 256 | 1.82 ms, 0.726 FFTW | 782 µs, 0.340 FFTW |  |  |
+| 256 × 256 × 8 | 1.90 ms, 0.767 FFTW | 785 µs, 0.339 FFTW |  |  |
 
-| n | `a` | FFTW | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: |
-| 64 × 64 | 6.34 µs | 9.56 µs | 3.17 µs | 2.00 |
-| 128 × 128 | 27.4 µs | 56.8 µs | 14.3 µs | 1.91 |
-| 256 × 256 | 115 µs | 254 µs | 84.4 µs | 1.37 |
-| 512 × 512 | 524 µs | 1.13 ms | 458 µs | 1.15 |
-| 1024 × 1024 | 4.43 ms | 5.31 ms | 2.46 ms | 1.80 |
-| 2048 × 2048 | 24.5 ms | 24.7 ms | 11.5 ms | 2.13 |
-| 4096 × 4096 | 112 ms | 118 ms | 51.3 ms | 2.19 |
-| 480 × 640 | 626 µs | 1.4 ms |  | 0.45 |
-| 1000 × 1000 | 2.27 ms | 5.33 ms |  | 0.43 |
-| 4096 × 64 | 1.49 ms | 1.09 ms | 576 µs | 2.58 |
-| 64 × 4096 | 599 µs | 1.14 ms | 561 µs | 1.07 |
+Planning, `Fft2::new` (FFTW's `ESTIMATE` plan of two dimensions):
 
-`f64`, `Fft3` (load 2.3 to 4.9):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 × 16 × 16 | 16.1 µs | 7.56 µs | 2.14 |
-| 32 × 32 × 32 | 136 µs | 108 µs | 1.26 |
-| 64 × 64 × 64 | 1.2 ms | 1.07 ms | 1.12 |
-| 128 × 128 × 128 | 10.5 ms | 13.4 ms | 0.78 |
-| 256 × 256 × 256 | 96.7 ms | 117 ms | 0.82 |
-| 100 × 100 × 100 | 4.39 ms | 5.41 ms | 0.81 |
-| 8 × 256 × 256 | 1.97 ms | 2.55 ms | 0.77 |
-| 256 × 256 × 8 | 2.38 ms | 2.46 ms | 0.97 |
-
-`f32`, `Fft3` (load 2.3 to 4.9):
-
-| n | `a` | FFTW | a/fastest |
-| ---: | ---: | ---: | ---: |
-| 16 × 16 × 16 | 13.8 µs | 7.49 µs | 1.84 |
-| 32 × 32 × 32 | 88.3 µs | 100 µs | 0.88 |
-| 64 × 64 × 64 | 673 µs | 1.06 ms | 0.63 |
-| 128 × 128 × 128 | 5.88 ms | 12 ms | 0.49 |
-| 256 × 256 × 256 | 54.5 ms | 106 ms | 0.51 |
-| 100 × 100 × 100 | 3.01 ms | 4.84 ms | 0.62 |
-| 8 × 256 × 256 | 1.33 ms | 2.39 ms | 0.56 |
-| 256 × 256 × 8 | 1.35 ms | 2.37 ms | 0.57 |
+| rows × cols | `f64` | `f32` |
+| ---: | --- | --- |
+| 64 × 64 | 880 ns, 0.162 FFTW | 945 ns, 0.178 FFTW |
+| 1024 × 1024 | 4.70 µs, 0.0441 FFTW | 3.78 µs, 0.0353 FFTW |
 
 ### Convolution
 
-`convolve(&a, &b)` of random operands, called again and again, so that its plans come from the cache (as a repeated call finds them; a plan larger than the cache's 16 MiB would be made in every call). The references: FFTW (`r2c` and `c2r` for real data, complex transforms in place) and rustfft or realfft, planned before the clock starts, each timed at the padded length (the cheapest 7-smooth length of at least `len(a) + len(b) − 1`) and at overlap-add lengths `2^k` from twice the shorter operand up to 64 times that, the fastest of them kept (the best case of each library); and vDSP's direct `vDSP_conv` and `vDSP_zconv`, with the copy of the input between zeros (and the split of complex values) they need timed with them. `a`, plan reused, is the same overlap-add naively on `a`'s public `RealFft` and `Fft` planned once, block by block, at the same lengths as the references: it shows `a`'s transforms in the place of the others'. The median of 5 rounds of 20 ms (`a` and vDSP interleaved; the lengths of each FFT-based reference raced among themselves), times a call; "–" where vDSP's direct sums would take too long:
+`convolve_into(&a, &b, &mut out)` of random operands, called again and again, so that its plans come from the cache as a repeated call finds them:
 
-`convolve` of `f32` (load 2.1 to 3.8):
+| len(a) × len(b) | `f32` | `f64` | `Complex<f32>` | `Complex<f64>` |
+| ---: | --- | --- | --- | --- |
+| 16 × 3 | 18.1 ns, 2.12 vDSP | 18.1 ns, 1.90 vDSP | 20.2 ns, 0.598 vDSP | 23.4 ns, 1.01 vDSP |
+| 16 × 8 | 23.6 ns, 2.47 vDSP | 36.0 ns, 2.78 vDSP | 41.9 ns, 0.831 rustfft | 64.5 ns, 0.785 vDSP |
+| 16 × 16 | 29.0 ns, 1.75 vDSP | 43.1 ns, 1.86 vDSP | 59.7 ns, 0.986 rustfft | 117 ns, 0.975 rustfft |
+| 100 × 3 | 21.8 ns, 1.44 vDSP | 28.0 ns, 0.784 vDSP | 36.8 ns, 0.203 vDSP | 64.6 ns, 0.545 vDSP |
+| 100 × 8 | 54.8 ns, 2.27 vDSP | 88.3 ns, 2.37 vDSP | 136 ns, 0.688 rustfft | 223 ns, 0.621 vDSP |
+| 100 × 16 | 70.7 ns, 1.92 vDSP | 129 ns, 1.74 vDSP | 199 ns, 0.707 rustfft | 535 ns, 1.01 rustfft |
+| 100 × 64 | 228 ns, 1.17 vDSP | 430 ns, 1.14 vDSP | 909 ns, 1.18 rustfft | 935 ns, 0.899 FFTW |
+| 1000 × 3 | 77.6 ns, 0.788 vDSP | 126 ns, 0.443 vDSP | 274 ns, 0.189 rustfft | 536 ns, 0.470 vDSP |
+| 1000 × 16 | 344 ns, 1.12 vDSP | 670 ns, 1.07 vDSP | 1.46 µs, 0.585 rustfft | 2.89 µs, 0.654 rustfft |
+| 1000 × 64 | 1.46 µs, 1.19 vDSP | 2.69 µs, 1.13 vDSP | 2.87 µs, 0.748 rustfft | 5.22 µs, 0.799 rustfft |
+| 1000 × 128 | 2.83 µs, 1.03 vDSP | 5.35 µs, 1.45 FFTW | 3.48 µs, 0.804 rustfft | 7.19 µs, 0.929 rustfft |
+| 1000 × 256 | 2.33 µs, 0.648 realfft | 4.17 µs, 0.871 FFTW | 4.06 µs, 0.725 rustfft | 7.97 µs, 0.802 rustfft |
+| 1000 × 1000 | 3.73 µs, 0.687 realfft | 7.09 µs, 0.892 FFTW | 6.87 µs, 0.801 rustfft | 14.6 µs, 0.873 rustfft |
+| 10,000 × 3 | 693 ns, 0.733 vDSP | 1.09 µs, 0.393 vDSP | 2.62 µs, 0.183 rustfft | 5.22 µs, 0.437 vDSP |
+| 10,000 × 16 | 3.07 µs, 1.01 vDSP | 6.05 µs, 0.982 vDSP | 12.0 µs, 0.496 rustfft | 25.8 µs, 0.606 rustfft |
+| 10,000 × 128 | 17.3 µs, 0.820 realfft | 32.8 µs, 1.11 FFTW | 30.0 µs, 0.876 rustfft | 52.4 µs, 0.869 rustfft |
+| 10,000 × 1000 | 24.7 µs, 0.710 realfft | 43.6 µs, 0.828 FFTW | 44.2 µs, 0.703 rustfft | 74.9 µs, 0.660 rustfft |
+| 10,000 × 10,000 | 44.1 µs, 0.412 FFTW | 89.9 µs, 0.804 FFTW | 84.8 µs, 0.405 rustfft | 162 µs, 0.683 FFTW |
+| 100,000 × 3 | 8.06 µs, 1.32 vDSP | 11.3 µs, 0.408 vDSP | 25.9 µs, 0.190 rustfft | 52.0 µs, 0.411 vDSP |
+| 100,000 × 128 | 153 µs, 0.800 realfft | 268 µs, 0.937 FFTW | 245 µs, 0.753 rustfft | 445 µs, 0.790 rustfft |
+| 100,000 × 1000 | 201 µs, 0.801 realfft | 337 µs, 0.863 FFTW | 328 µs, 0.732 rustfft | 627 µs, 0.764 rustfft |
+| 100,000 × 100,000 | 564 µs, 0.521 realfft | 1.19 ms, 0.813 FFTW | 1.20 ms, 0.503 rustfft | 2.28 ms, 0.691 FFTW |
+| 1,000,000 × 3 | 74.5 µs, 1.21 vDSP | 138 µs, 0.489 vDSP | 263 µs, 0.191 rustfft | 519 µs, 0.406 vDSP |
+| 1,000,000 × 32 | 574 µs, 0.965 vDSP | 1.12 ms, 0.876 vDSP | 2.27 ms, 0.848 rustfft | 4.91 ms, 1.06 rustfft |
+| 1,000,000 × 128 | 1.42 ms, 0.751 realfft | 2.60 ms, 0.902 FFTW | 3.17 ms, 0.959 rustfft | 4.60 ms, 0.829 rustfft |
+| 1,000,000 × 1000 | 1.70 ms, 0.702 realfft | 3.44 ms, 0.900 FFTW | 2.98 ms, 0.646 rustfft | 6.03 ms, 0.752 rustfft |
+| 1,000,000 × 100,000 | 3.13 ms, 0.568 realfft | 7.15 ms, 0.756 realfft | 6.82 ms, 0.677 rustfft | 12.7 ms, 0.680 rustfft |
 
-| len(a) | len(b) | `a` | `a`, plan reused | FFTW | rustfft | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 3 | 30 ns | 113 ns | 76 ns | 73 ns | 24 ns | 1.25 (vDSP) |
-| 16 | 8 | 32 ns | 121 ns | 78 ns | 75 ns | 26 ns | 1.23 (vDSP) |
-| 16 | 16 | 37 ns | 136 ns | 83 ns | 84 ns | 35 ns | 1.06 (vDSP) |
-| 100 | 3 | 61 ns | 274 ns | 223 ns | 224 ns | 40 ns | 1.52 (vDSP) |
-| 100 | 8 | 69 ns | 270 ns | 229 ns | 223 ns | 51 ns | 1.35 (vDSP) |
-| 100 | 16 | 91 ns | 282 ns | 324 ns | 305 ns | 65 ns | 1.40 (vDSP) |
-| 100 | 32 | 134 ns | 336 ns | 424 ns | 381 ns | 110 ns | 1.22 (vDSP) |
-| 100 | 64 | 254 ns | 353 ns | 509 ns | 491 ns | 224 ns | 1.13 (vDSP) |
-| 1000 | 3 | 139 ns | 1.36 µs | 1.57 µs | 1.42 µs | 189 ns | 0.74 (vDSP) |
-| 1000 | 8 | 200 ns | 1.53 µs | 1.92 µs | 1.56 µs | 273 ns | 0.73 (vDSP) |
-| 1000 | 16 | 350 ns | 1.53 µs | 2.13 µs | 1.77 µs | 398 ns | 0.88 (vDSP) |
-| 1000 | 32 | 636 ns | 1.75 µs | 2.51 µs | 2.14 µs | 723 ns | 0.88 (vDSP) |
-| 1000 | 64 | 1.48 µs | 2.07 µs | 3.03 µs | 2.54 µs | 1.33 µs | 1.12 (vDSP) |
-| 1000 | 128 | 2.86 µs | 2.16 µs | 3.6 µs | 2.86 µs | 2.91 µs | 1.00 (rustfft) |
-| 1000 | 256 | 2.58 µs | 2.77 µs | 4.6 µs | 3.66 µs | 6.91 µs | 0.70 (rustfft) |
-| 1000 | 1000 | 3.97 µs | 4.22 µs | 7.69 µs | 14.5 µs | 45.5 µs | 0.52 (FFTW) |
-| 10,000 | 3 | 1.11 µs | 13 µs | 15.5 µs | 13.3 µs | 2.28 µs | 0.49 (vDSP) |
-| 10,000 | 8 | 1.63 µs | 13.2 µs | 18.9 µs | 14.8 µs | 2.96 µs | 0.55 (vDSP) |
-| 10,000 | 16 | 3.15 µs | 13.6 µs | 19.6 µs | 16.9 µs | 4.08 µs | 0.77 (vDSP) |
-| 10,000 | 32 | 6.08 µs | 13.8 µs | 21.5 µs | 18.1 µs | 7.03 µs | 0.87 (vDSP) |
-| 10,000 | 64 | 11.8 µs | 14.9 µs | 24.4 µs | 19.7 µs | 12.9 µs | 0.91 (vDSP) |
-| 10,000 | 128 | 23.3 µs | 16.5 µs | 28.1 µs | 22.3 µs | 26.6 µs | 1.05 (rustfft) |
-| 10,000 | 256 | 20.5 µs | 18.5 µs | 33.4 µs | 25.6 µs | 57.6 µs | 0.80 (rustfft) |
-| 10,000 | 1000 | 27.3 µs | 29 µs | 49.5 µs | 36.6 µs | 258 µs | 0.75 (rustfft) |
-| 10,000 | 10,000 | 48.9 µs | 54 µs | 110 µs | 136 µs | 4.71 ms | 0.45 (FFTW) |
-| 100,000 | 3 | 9.9 µs | 126 µs | 153 µs | 130 µs | 16.1 µs | 0.62 (vDSP) |
-| 100,000 | 8 | 15.7 µs | 126 µs | 185 µs | 142 µs | 25.4 µs | 0.62 (vDSP) |
-| 100,000 | 16 | 32.5 µs | 129 µs | 191 µs | 161 µs | 38.3 µs | 0.85 (vDSP) |
-| 100,000 | 32 | 58.1 µs | 132 µs | 209 µs | 172 µs | 68.6 µs | 0.85 (vDSP) |
-| 100,000 | 64 | 114 µs | 139 µs | 233 µs | 187 µs | 127 µs | 0.90 (vDSP) |
-| 100,000 | 128 | 165 µs | 147 µs | 264 µs | 199 µs | 259 µs | 0.83 (rustfft) |
-| 100,000 | 256 | 175 µs | 163 µs | 288 µs | 218 µs | 558 µs | 0.80 (rustfft) |
-| 100,000 | 1000 | 219 µs | 189 µs | 349 µs | 256 µs | 2.35 ms | 0.85 (rustfft) |
-| 100,000 | 10,000 | 278 µs | 308 µs | 671 µs | 432 µs | 26 ms | 0.64 (rustfft) |
-| 100,000 | 100,000 | 603 µs | 592 µs | 1.47 ms | 2.21 ms | – | 0.41 (FFTW) |
-| 1,000,000 | 3 | 95.6 µs | 1.23 ms | 1.52 ms | 1.27 ms | 137 µs | 0.70 (vDSP) |
-| 1,000,000 | 8 | 154 µs | 1.23 ms | 1.83 ms | 1.42 ms | 242 µs | 0.64 (vDSP) |
-| 1,000,000 | 16 | 310 µs | 1.27 ms | 1.88 ms | 1.6 ms | 377 µs | 0.82 (vDSP) |
-| 1,000,000 | 32 | 569 µs | 1.3 ms | 2.08 ms | 1.72 ms | 661 µs | 0.86 (vDSP) |
-| 1,000,000 | 64 | 1.17 ms | 1.35 ms | 2.33 ms | 1.83 ms | 1.26 ms | 0.93 (vDSP) |
-| 1,000,000 | 128 | 1.5 ms | 1.45 ms | 2.56 ms | 1.95 ms | 2.55 ms | 0.77 (rustfft) |
-| 1,000,000 | 256 | 1.74 ms | 1.57 ms | 2.79 ms | 2.09 ms | 5.51 ms | 0.84 (rustfft) |
-| 1,000,000 | 1000 | 1.81 ms | 1.74 ms | 3.35 ms | 2.45 ms | 23 ms | 0.74 (rustfft) |
-| 1,000,000 | 10,000 | 2.33 ms | 2.43 ms | 5.28 ms | 3.36 ms | – | 0.69 (rustfft) |
-| 1,000,000 | 100,000 | 3.3 ms | 4.27 ms | 9.28 ms | 5.63 ms | – | 0.59 (rustfft) |
+`convolve`, which returns a new vector, at the sizes where its allocation shows:
 
-`convolve` of `f64` (load 1.6 to 4.9):
+| len(a) × len(b) | `f32` | `f64` | `Complex<f32>` | `Complex<f64>` |
+| ---: | --- | --- | --- | --- |
+| 16 × 3 | 27.5 ns, 3.22 vDSP | 26.7 ns, 2.82 vDSP | 30.6 ns, 0.909 vDSP | 39.5 ns, 1.70 vDSP |
+| 16 × 8 | 31.8 ns, 3.33 vDSP | 47.6 ns, 3.67 vDSP | 50.2 ns, 0.997 rustfft | 79.2 ns, 0.964 vDSP |
+| 100 × 3 | 39.4 ns, 2.60 vDSP | 45.2 ns, 1.27 vDSP | 58.6 ns, 0.323 vDSP | 80.6 ns, 0.680 vDSP |
+| 100 × 8 | 67.8 ns, 2.80 vDSP | 106 ns, 2.86 vDSP | 154 ns, 0.779 rustfft | 237 ns, 0.660 vDSP |
+| 100 × 64 | 248 ns, 1.27 vDSP | 443 ns, 1.18 vDSP | 924 ns, 1.20 rustfft | 949 ns, 0.913 FFTW |
+| 1000 × 3 | 90.4 ns, 0.918 vDSP | 149 ns, 0.525 vDSP | 290 ns, 0.200 rustfft | 553 ns, 0.485 vDSP |
+| 1000 × 128 | 2.84 µs, 1.03 vDSP | 5.38 µs, 1.45 FFTW | 3.51 µs, 0.811 rustfft | 7.29 µs, 0.942 rustfft |
+| 10,000 × 128 | 17.3 µs, 0.820 realfft | 33.0 µs, 1.12 FFTW | 29.7 µs, 0.868 rustfft | 52.6 µs, 0.873 rustfft |
+| 1,000,000 × 3 | 75.4 µs, 1.23 vDSP | 138 µs, 0.489 vDSP | 261 µs, 0.189 rustfft | 521 µs, 0.408 vDSP |
+| 1,000,000 × 128 | 1.41 ms, 0.744 realfft | 2.60 ms, 0.902 FFTW | 3.19 ms, 0.966 rustfft | 4.61 ms, 0.829 rustfft |
 
-| len(a) | len(b) | `a` | `a`, plan reused | FFTW | rustfft | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 3 | 43 ns | 128 ns | 85 ns | 88 ns | 24 ns | 1.79 (vDSP) |
-| 16 | 8 | 46 ns | 143 ns | 87 ns | 89 ns | 30 ns | 1.53 (vDSP) |
-| 16 | 16 | 53 ns | 156 ns | 93 ns | 115 ns | 38 ns | 1.39 (vDSP) |
-| 100 | 3 | 89 ns | 373 ns | 248 ns | 310 ns | 64 ns | 1.39 (vDSP) |
-| 100 | 8 | 109 ns | 374 ns | 256 ns | 311 ns | 71 ns | 1.54 (vDSP) |
-| 100 | 16 | 147 ns | 428 ns | 354 ns | 421 ns | 109 ns | 1.35 (vDSP) |
-| 100 | 32 | 234 ns | 519 ns | 436 ns | 529 ns | 201 ns | 1.16 (vDSP) |
-| 100 | 64 | 443 ns | 575 ns | 552 ns | 620 ns | 417 ns | 1.06 (vDSP) |
-| 1000 | 3 | 246 ns | 2.24 µs | 1.81 µs | 2.1 µs | 451 ns | 0.55 (vDSP) |
-| 1000 | 8 | 404 ns | 2.49 µs | 2.14 µs | 2.21 µs | 515 ns | 0.78 (vDSP) |
-| 1000 | 16 | 679 ns | 2.47 µs | 2.24 µs | 2.57 µs | 794 ns | 0.86 (vDSP) |
-| 1000 | 32 | 1.22 µs | 2.96 µs | 2.75 µs | 3.13 µs | 1.5 µs | 0.81 (vDSP) |
-| 1000 | 64 | 2.66 µs | 3.46 µs | 3.5 µs | 3.72 µs | 2.61 µs | 1.02 (vDSP) |
-| 1000 | 128 | 5.34 µs | 3.9 µs | 3.98 µs | 4.3 µs | 5.16 µs | 1.34 (FFTW) |
-| 1000 | 256 | 4.53 µs | 4.99 µs | 5.09 µs | 5.44 µs | 11.2 µs | 0.89 (FFTW) |
-| 1000 | 1000 | 7.97 µs | 8.24 µs | 8.69 µs | 18.6 µs | 68.4 µs | 0.92 (FFTW) |
-| 10,000 | 3 | 1.92 µs | 21.8 µs | 18.2 µs | 20.1 µs | 5.16 µs | 0.37 (vDSP) |
-| 10,000 | 8 | 3.72 µs | 22.7 µs | 21.2 µs | 21.9 µs | 5.4 µs | 0.69 (vDSP) |
-| 10,000 | 16 | 6.23 µs | 23.8 µs | 22.2 µs | 25.1 µs | 8.35 µs | 0.75 (vDSP) |
-| 10,000 | 32 | 11.7 µs | 25.4 µs | 25.2 µs | 27.2 µs | 14.8 µs | 0.79 (vDSP) |
-| 10,000 | 64 | 22.5 µs | 27.8 µs | 28.2 µs | 30.4 µs | 24.5 µs | 0.92 (vDSP) |
-| 10,000 | 128 | 33.9 µs | 31 µs | 31.6 µs | 33.8 µs | 46.6 µs | 1.07 (FFTW) |
-| 10,000 | 256 | 36.2 µs | 35.1 µs | 35.3 µs | 38.5 µs | 92.6 µs | 1.03 (FFTW) |
-| 10,000 | 1000 | 46.4 µs | 52.1 µs | 54.3 µs | 57.6 µs | 375 µs | 0.85 (FFTW) |
-| 10,000 | 10,000 | 92.4 µs | 102 µs | 121 µs | 205 µs | 7.16 ms | 0.76 (FFTW) |
-| 100,000 | 3 | 18.2 µs | 208 µs | 174 µs | 192 µs | 42.1 µs | 0.43 (vDSP) |
-| 100,000 | 8 | 34.6 µs | 218 µs | 201 µs | 210 µs | 49 µs | 0.71 (vDSP) |
-| 100,000 | 16 | 62.1 µs | 227 µs | 215 µs | 242 µs | 76.5 µs | 0.81 (vDSP) |
-| 100,000 | 32 | 113 µs | 242 µs | 239 µs | 260 µs | 144 µs | 0.79 (vDSP) |
-| 100,000 | 64 | 220 µs | 255 µs | 264 µs | 281 µs | 238 µs | 0.93 (vDSP) |
-| 100,000 | 128 | 279 µs | 275 µs | 285 µs | 307 µs | 453 µs | 0.98 (FFTW) |
-| 100,000 | 256 | 296 µs | 305 µs | 305 µs | 330 µs | 896 µs | 0.97 (FFTW) |
-| 100,000 | 1000 | 351 µs | 353 µs | 403 µs | 422 µs | 3.44 ms | 0.87 (FFTW) |
-| 100,000 | 10,000 | 521 µs | 586 µs | 766 µs | 731 µs | 39.2 ms | 0.71 (rustfft) |
-| 100,000 | 100,000 | 1.15 ms | 1.14 ms | 1.46 ms | 2.98 ms | – | 0.78 (FFTW) |
-| 1,000,000 | 3 | 182 µs | 2.05 ms | 1.71 ms | 1.91 ms | 418 µs | 0.43 (vDSP) |
-| 1,000,000 | 8 | 335 µs | 2.15 ms | 1.99 ms | 2.08 ms | 483 µs | 0.69 (vDSP) |
-| 1,000,000 | 16 | 631 µs | 2.26 ms | 2.12 ms | 2.41 ms | 762 µs | 0.83 (vDSP) |
-| 1,000,000 | 32 | 1.13 ms | 2.43 ms | 2.38 ms | 2.57 ms | 1.42 ms | 0.79 (vDSP) |
-| 1,000,000 | 64 | 2.21 ms | 2.57 ms | 2.62 ms | 2.78 ms | 2.38 ms | 0.93 (vDSP) |
-| 1,000,000 | 128 | 2.67 ms | 2.76 ms | 2.83 ms | 3.05 ms | 4.53 ms | 0.94 (FFTW) |
-| 1,000,000 | 256 | 2.96 ms | 2.99 ms | 3.01 ms | 3.28 ms | 8.9 ms | 0.98 (FFTW) |
-| 1,000,000 | 1000 | 3.48 ms | 3.45 ms | 3.94 ms | 4.12 ms | 34.1 ms | 0.88 (FFTW) |
-| 1,000,000 | 10,000 | 4.58 ms | 4.61 ms | 6.16 ms | 5.82 ms | – | 0.79 (rustfft) |
-| 1,000,000 | 100,000 | 7.35 ms | 8.39 ms | 10.4 ms | 9.67 ms | – | 0.76 (rustfft) |
+`correlate_into`:
 
-`convolve` of `Complex<f32>` (load 1.2 to 3.4):
+| len(a) × len(b) | `f32` | `f64` | `Complex<f32>` | `Complex<f64>` |
+| ---: | --- | --- | --- | --- |
+| 100 × 8 | 54.1 ns, 2.37 vDSP | 89.0 ns, 2.30 vDSP | 133 ns, 0.665 rustfft | 224 ns, 0.771 vDSP |
+| 1000 × 16 | 344 ns, 1.12 vDSP | 668 ns, 1.05 vDSP | 1.50 µs, 0.601 rustfft | 2.94 µs, 0.634 rustfft |
+| 1000 × 1000 | 3.69 µs, 0.671 realfft | 7.03 µs, 0.877 FFTW | 7.49 µs, 0.853 rustfft | 14.6 µs, 0.853 rustfft |
+| 10,000 × 64 | 11.5 µs, 0.990 vDSP | 22.4 µs, 0.999 vDSP | 25.1 µs, 0.826 rustfft | 45.2 µs, 0.839 rustfft |
+| 10,000 × 1000 | 25.2 µs, 0.717 realfft | 43.6 µs, 0.817 FFTW | 44.0 µs, 0.694 rustfft | 75.0 µs, 0.658 rustfft |
+| 100,000 × 32 | 57.1 µs, 0.940 vDSP | 116 µs, 0.935 vDSP | 227 µs, 0.845 rustfft | 485 µs, 1.04 rustfft |
+| 100,000 × 10,000 | 258 µs, 0.613 realfft | 490 µs, 0.683 realfft | 493 µs, 0.629 rustfft | 941 µs, 0.639 rustfft |
+| 1,000,000 × 128 | 1.45 ms, 0.761 realfft | 2.59 ms, 0.908 FFTW | 3.18 ms, 0.998 rustfft | 4.59 ms, 0.831 rustfft |
 
-| len(a) | len(b) | `a` | `a`, plan reused | FFTW | rustfft | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 3 | 42 ns | 109 ns | 118 ns | 89 ns | 56 ns | 0.75 (vDSP) |
-| 16 | 8 | 52 ns | 104 ns | 120 ns | 74 ns | 125 ns | 0.70 (rustfft) |
-| 16 | 16 | 73 ns | 114 ns | 142 ns | 89 ns | 302 ns | 0.82 (rustfft) |
-| 100 | 3 | 94 ns | 284 ns | 358 ns | 233 ns | 235 ns | 0.40 (rustfft) |
-| 100 | 8 | 143 ns | 281 ns | 402 ns | 234 ns | 525 ns | 0.61 (rustfft) |
-| 100 | 16 | 215 ns | 341 ns | 562 ns | 324 ns | 1.07 µs | 0.66 (rustfft) |
-| 100 | 32 | 488 ns | 451 ns | 872 ns | 617 ns | 2.28 µs | 0.79 (rustfft) |
-| 100 | 64 | 947 ns | 464 ns | 1.01 µs | 701 ns | 5.57 µs | 1.35 (rustfft) |
-| 1000 | 3 | 330 ns | 1.81 µs | 2.75 µs | 1.57 µs | 2.21 µs | 0.21 (rustfft) |
-| 1000 | 8 | 744 ns | 1.92 µs | 3.46 µs | 1.82 µs | 4.63 µs | 0.41 (rustfft) |
-| 1000 | 16 | 1.53 µs | 2.02 µs | 4.38 µs | 2.61 µs | 9.33 µs | 0.59 (rustfft) |
-| 1000 | 32 | 2.7 µs | 2.36 µs | 5.27 µs | 3.14 µs | 17.9 µs | 0.86 (rustfft) |
-| 1000 | 64 | 5.25 µs | 2.78 µs | 6.43 µs | 3.92 µs | 36.2 µs | 1.34 (rustfft) |
-| 1000 | 128 | 3.82 µs | 3.13 µs | 7.75 µs | 4.46 µs | 79.3 µs | 0.86 (rustfft) |
-| 1000 | 256 | 4.26 µs | 4.03 µs | 9.99 µs | 5.76 µs | 180 µs | 0.74 (rustfft) |
-| 1000 | 1000 | 7.76 µs | 7.13 µs | 16.9 µs | 24.5 µs | 1.23 ms | 0.46 (FFTW) |
-| 10,000 | 3 | 2.77 µs | 17.2 µs | 27.4 µs | 15.3 µs | 22.4 µs | 0.18 (rustfft) |
-| 10,000 | 8 | 6.8 µs | 18.2 µs | 33.9 µs | 18.4 µs | 47.1 µs | 0.37 (rustfft) |
-| 10,000 | 16 | 12.3 µs | 19.3 µs | 41.9 µs | 25 µs | 92.3 µs | 0.49 (rustfft) |
-| 10,000 | 32 | 23.4 µs | 20.5 µs | 46.2 µs | 28.7 µs | 174 µs | 0.82 (rustfft) |
-| 10,000 | 64 | 26.9 µs | 22.3 µs | 51.6 µs | 31.2 µs | 339 µs | 0.86 (rustfft) |
-| 10,000 | 128 | 31.4 µs | 25.2 µs | 59.6 µs | 35.3 µs | 711 µs | 0.89 (rustfft) |
-| 10,000 | 256 | 36.2 µs | 29.7 µs | 71.5 µs | 40.7 µs | 1.48 ms | 0.89 (rustfft) |
-| 10,000 | 1000 | 47.4 µs | 47.1 µs | 106 µs | 64.1 µs | 6.82 ms | 0.74 (rustfft) |
-| 10,000 | 10,000 | 88.7 µs | 91 µs | 222 µs | 350 µs | 137 ms | 0.40 (FFTW) |
-| 100,000 | 3 | 26.6 µs | 165 µs | 267 µs | 146 µs | 221 µs | 0.18 (rustfft) |
-| 100,000 | 8 | 66.7 µs | 175 µs | 329 µs | 180 µs | 468 µs | 0.37 (rustfft) |
-| 100,000 | 16 | 121 µs | 184 µs | 415 µs | 240 µs | 924 µs | 0.50 (rustfft) |
-| 100,000 | 32 | 229 µs | 196 µs | 452 µs | 273 µs | 1.72 ms | 0.84 (rustfft) |
-| 100,000 | 64 | 259 µs | 209 µs | 504 µs | 296 µs | 3.38 ms | 0.88 (rustfft) |
-| 100,000 | 128 | 266 µs | 232 µs | 553 µs | 331 µs | 6.93 ms | 0.80 (rustfft) |
-| 100,000 | 256 | 319 µs | 266 µs | 609 µs | 349 µs | 14.2 ms | 0.91 (rustfft) |
-| 100,000 | 1000 | 343 µs | 307 µs | 747 µs | 461 µs | 62.5 ms | 0.75 (rustfft) |
-| 100,000 | 10,000 | 526 µs | 563 µs | 1.38 ms | 792 µs | – | 0.66 (rustfft) |
-| 100,000 | 100,000 | 1.26 ms | 1.06 ms | 3 ms | 4.25 ms | – | 0.42 (FFTW) |
-| 1,000,000 | 3 | 264 µs | 1.63 ms | 2.67 ms | 1.46 ms | 2.17 ms | 0.18 (rustfft) |
-| 1,000,000 | 8 | 669 µs | 1.73 ms | 3.32 ms | 1.75 ms | 4.68 ms | 0.38 (rustfft) |
-| 1,000,000 | 16 | 1.17 ms | 1.84 ms | 4.12 ms | 2.41 ms | 9.21 ms | 0.49 (rustfft) |
-| 1,000,000 | 32 | 2.29 ms | 1.95 ms | 4.44 ms | 2.78 ms | 17.2 ms | 0.82 (rustfft) |
-| 1,000,000 | 64 | 2.53 ms | 2.09 ms | 5 ms | 2.94 ms | 34.6 ms | 0.86 (rustfft) |
-| 1,000,000 | 128 | 3.18 ms | 2.3 ms | 5.49 ms | 3.23 ms | 70.3 ms | 0.99 (rustfft) |
-| 1,000,000 | 256 | 2.91 ms | 2.6 ms | 6.03 ms | 3.46 ms | 142 ms | 0.84 (rustfft) |
-| 1,000,000 | 1000 | 3.19 ms | 3.03 ms | 7.35 ms | 4.44 ms | – | 0.72 (rustfft) |
-| 1,000,000 | 10,000 | 4.28 ms | 4.59 ms | 11 ms | 6.12 ms | – | 0.70 (rustfft) |
-| 1,000,000 | 100,000 | 7.09 ms | 7.92 ms | 19.3 ms | 9.93 ms | – | 0.71 (rustfft) |
+`circular_convolve`:
 
-`convolve` of `Complex<f64>` (load 1.2 to 3.9):
+| n | `f32` | `f64` | `Complex<f32>` | `Complex<f64>` |
+| ---: | --- | --- | --- | --- |
+| 16 | 54.0 ns, 1.49 FFTW | 58.5 ns, 1.49 FFTW | 64.7 ns, 2.06 rustfft | 92.4 ns, 1.55 rustfft |
+| 100 | 278 ns, 1.12 FFTW | 551 ns, 1.78 FFTW | 413 ns, 0.815 rustfft | 580 ns, 0.929 FFTW |
+| 128 | 443 ns, 1.64 realfft | 745 ns, 2.28 FFTW | 439 ns, 1.18 rustfft | 679 ns, 1.01 rustfft |
+| 1000 | 1.89 µs, 0.539 FFTW | 3.33 µs, 0.849 FFTW | 3.27 µs, 0.406 FFTW | 6.19 µs, 0.688 FFTW |
+| 1009 | 4.01 µs, 0.140 FFTW | 7.52 µs, 0.263 FFTW | 8.07 µs, 0.261 rustfft | 15.5 µs, 0.410 rustfft |
+| 1024 | 1.65 µs, 0.668 realfft | 2.82 µs, 0.799 FFTW | 2.95 µs, 0.694 rustfft | 6.20 µs, 0.838 rustfft |
+| 4096 | 8.58 µs, 0.733 realfft | 14.2 µs, 0.799 FFTW | 17.6 µs, 0.849 rustfft | 27.9 µs, 0.712 rustfft |
+| 10,007 | 46.1 µs, 0.141 realfft | 87.6 µs, 0.188 FFTW | 83.7 µs, 0.265 rustfft | 160 µs, 0.317 FFTW |
+| 65,536 | 159 µs, 0.642 realfft | 334 µs, 0.798 realfft | 304 µs, 0.614 rustfft | 611 µs, 0.646 FFTW |
+| 100,000 | 263 µs, 0.407 FFTW | 506 µs, 0.719 FFTW | 469 µs, 0.329 FFTW | 943 µs, 0.608 FFTW |
+| 1,048,576 | 3.51 ms, 0.724 realfft | 8.46 ms, 0.977 realfft | 6.70 ms, 0.647 rustfft | 15.5 ms, 0.868 rustfft |
 
-| len(a) | len(b) | `a` | `a`, plan reused | FFTW | rustfft | vDSP | a/fastest |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 16 | 3 | 56 ns | 139 ns | 132 ns | 130 ns | 53 ns | 1.06 (vDSP) |
-| 16 | 8 | 77 ns | 139 ns | 139 ns | 114 ns | 116 ns | 0.68 (rustfft) |
-| 16 | 16 | 117 ns | 166 ns | 170 ns | 151 ns | 245 ns | 0.77 (rustfft) |
-| 100 | 3 | 144 ns | 438 ns | 399 ns | 385 ns | 195 ns | 0.74 (vDSP) |
-| 100 | 8 | 219 ns | 453 ns | 449 ns | 399 ns | 444 ns | 0.55 (rustfft) |
-| 100 | 16 | 560 ns | 559 ns | 631 ns | 559 ns | 819 ns | 1.00 (rustfft) |
-| 100 | 32 | 811 ns | 700 ns | 946 ns | 1.01 µs | 1.72 µs | 0.86 (FFTW) |
-| 100 | 64 | 981 ns | 798 ns | 1.14 µs | 1.14 µs | 4.83 µs | 0.86 (rustfft) |
-| 1000 | 3 | 628 ns | 3.06 µs | 3.2 µs | 2.89 µs | 1.91 µs | 0.33 (vDSP) |
-| 1000 | 8 | 1.39 µs | 3.23 µs | 3.8 µs | 3.4 µs | 4.12 µs | 0.41 (rustfft) |
-| 1000 | 16 | 2.68 µs | 3.52 µs | 4.8 µs | 4.5 µs | 7.27 µs | 0.60 (rustfft) |
-| 1000 | 32 | 5 µs | 4.24 µs | 6.11 µs | 5.49 µs | 13.5 µs | 0.91 (rustfft) |
-| 1000 | 64 | 5.64 µs | 5.11 µs | 7.25 µs | 6.84 µs | 32.1 µs | 0.83 (rustfft) |
-| 1000 | 128 | 7.11 µs | 5.84 µs | 8.54 µs | 7.99 µs | 74.6 µs | 0.89 (rustfft) |
-| 1000 | 256 | 8.73 µs | 7.5 µs | 11 µs | 10.2 µs | 190 µs | 0.86 (rustfft) |
-| 1000 | 1000 | 14.6 µs | 13.9 µs | 19.1 µs | 34 µs | 1.31 ms | 0.77 (FFTW) |
-| 10,000 | 3 | 5.71 µs | 29.2 µs | 32.2 µs | 28.8 µs | 21.1 µs | 0.27 (vDSP) |
-| 10,000 | 8 | 13.2 µs | 31.5 µs | 38.5 µs | 34 µs | 44.3 µs | 0.39 (rustfft) |
-| 10,000 | 16 | 23.8 µs | 34.5 µs | 47.6 µs | 44.1 µs | 73.9 µs | 0.54 (rustfft) |
-| 10,000 | 32 | 45.5 µs | 37.7 µs | 52.7 µs | 49.2 µs | 135 µs | 0.93 (rustfft) |
-| 10,000 | 64 | 47.7 µs | 41.3 µs | 59.7 µs | 55.1 µs | 303 µs | 0.87 (rustfft) |
-| 10,000 | 128 | 54.3 µs | 46.7 µs | 66.9 µs | 62 µs | 680 µs | 0.88 (rustfft) |
-| 10,000 | 256 | 59.4 µs | 56.1 µs | 78.6 µs | 73.1 µs | 1.56 ms | 0.81 (rustfft) |
-| 10,000 | 1000 | 80 µs | 87.4 µs | 123 µs | 115 µs | 7.27 ms | 0.69 (rustfft) |
-| 10,000 | 10,000 | 163 µs | 175 µs | 242 µs | 476 µs | 135 ms | 0.67 (FFTW) |
-| 100,000 | 3 | 53.4 µs | 285 µs | 316 µs | 282 µs | 201 µs | 0.27 (vDSP) |
-| 100,000 | 8 | 132 µs | 309 µs | 379 µs | 336 µs | 423 µs | 0.39 (rustfft) |
-| 100,000 | 16 | 242 µs | 336 µs | 477 µs | 436 µs | 734 µs | 0.56 (rustfft) |
-| 100,000 | 32 | 453 µs | 367 µs | 513 µs | 487 µs | 1.35 ms | 0.93 (rustfft) |
-| 100,000 | 64 | 427 µs | 396 µs | 565 µs | 536 µs | 2.98 ms | 0.80 (rustfft) |
-| 100,000 | 128 | 470 µs | 441 µs | 635 µs | 574 µs | 6.68 ms | 0.82 (rustfft) |
-| 100,000 | 256 | 532 µs | 503 µs | 683 µs | 663 µs | 15.3 ms | 0.80 (rustfft) |
-| 100,000 | 1000 | 649 µs | 656 µs | 914 µs | 831 µs | 66.2 ms | 0.78 (rustfft) |
-| 100,000 | 10,000 | 960 µs | 1.11 ms | 1.6 ms | 1.51 ms | – | 0.64 (rustfft) |
-| 100,000 | 100,000 | 2.23 ms | 2.08 ms | 3.37 ms | 6.12 ms | – | 0.66 (FFTW) |
-| 1,000,000 | 3 | 531 µs | 2.86 ms | 3.15 ms | 2.82 ms | 2.06 ms | 0.26 (vDSP) |
-| 1,000,000 | 8 | 1.33 ms | 3.11 ms | 3.78 ms | 3.38 ms | 4.29 ms | 0.39 (rustfft) |
-| 1,000,000 | 16 | 2.43 ms | 3.36 ms | 4.73 ms | 4.35 ms | 7.21 ms | 0.56 (rustfft) |
-| 1,000,000 | 32 | 4.53 ms | 3.71 ms | 5.14 ms | 4.78 ms | 13.5 ms | 0.95 (rustfft) |
-| 1,000,000 | 64 | 4.33 ms | 4.03 ms | 5.83 ms | 5.32 ms | 30.2 ms | 0.81 (rustfft) |
-| 1,000,000 | 128 | 4.88 ms | 4.49 ms | 6.43 ms | 5.85 ms | 66.7 ms | 0.83 (rustfft) |
-| 1,000,000 | 256 | 5.09 ms | 4.96 ms | 6.99 ms | 6.53 ms | 153 ms | 0.78 (rustfft) |
-| 1,000,000 | 1000 | 6.3 ms | 6.38 ms | 8.88 ms | 8.21 ms | – | 0.77 (rustfft) |
-| 1,000,000 | 10,000 | 8.35 ms | 9.08 ms | 13 ms | 11.8 ms | – | 0.71 (rustfft) |
-| 1,000,000 | 100,000 | 13.4 ms | 16 ms | 22.7 ms | 18.8 ms | – | 0.72 (rustfft) |
+### Where the references are faster
 
-**The crossover.** The shorter operand up to which the model of this release takes the direct path, and the path it takes beyond (`bench/crossover.py` on the constants of `conv.rs`, which `calibrate` measured on the final transforms; `c32` and `c64` are `Complex<f32>` and `Complex<f64>`):
+Every loss of the cases above (a ratio above 1.05 against the fastest reference that does the same work), by cause:
 
-| type | len(long) | direct up to len(short) | then |
-| --- | ---: | ---: | --- |
-| f32 | 100 | all | - |
-| f32 | 1000 | 187 | overlap-add L=700 |
-| f32 | 10000 | 137 | overlap-add L=1280 |
-| f32 | 100000 | 123 | overlap-add L=2048 |
-| f32 | 1000000 | 123 | overlap-add L=2048 |
-| f64 | 100 | all | - |
-| f64 | 1000 | 137 | overlap-add L=640 |
-| f64 | 10000 | 105 | overlap-add L=1024 |
-| f64 | 100000 | 99 | overlap-add L=1280 |
-| f64 | 1000000 | 99 | overlap-add L=1024 |
-| c32 | 100 | 89 | padded L=192 |
-| c32 | 1000 | 67 | overlap-add L=320 |
-| c32 | 10000 | 53 | overlap-add L=512 |
-| c32 | 100000 | 50 | overlap-add L=512 |
-| c32 | 1000000 | 50 | overlap-add L=1024 |
-| c64 | 100 | 57 | padded L=160 |
-| c64 | 1000 | 47 | overlap-add L=256 |
-| c64 | 10000 | 40 | overlap-add L=320 |
-| c64 | 100000 | 38 | overlap-add L=512 |
-| c64 | 1000000 | 38 | overlap-add L=512 |
+- **vDSP in `f32`**, in every transform it has: the complex transform of the powers of two from 64 (1.07 to 2.85: 2.22 at 1024, 2.85 at 4096, 1.80 at 65,536, 0.987 at 2²⁰), of `f·2^k` from 320 (1.22 to 3.15) and of 36 and 60 (1.09, 1.07), its inverse (1.10 to 3.21) and `forward_to` (1.23 to 3.04), batches of 1024 (2.19); the real transform of the powers of two from 64 (`forward` 1.11 to 3.37, `inverse` 1.27 to 3.58) and of `f·2^k` from 640 (1.42 to 3.45; 80 and 96 1.06 and 1.10); DCT-II, III and IV from 16 (1.12 to 2.06); and `Fft2` (1.10 to 2.15, the inverse 1.92). vDSP's `f32` kernels run at about five times its own `f64` speed (`vDSP_DFT_Execute` of 1024: 278 ns in `f32`, 1.37 µs in `f64`), where twice the lanes of a NEON vector account for two; `a` runs `f32` at about twice its `f64` speed (617 ns and 1.26 µs) and is as fast as vDSP or faster in `f64`. That points to Apple's matrix hardware (AMX or SME on the M4), which no stable or portable Rust interface reaches, or to an algorithm far from FFTW's family; which of the two was not determined.
+- **Short complex transforms**: the powers of two 2, 8 and 32 (`f64` 1.31, 1.11 and 1.15; `f32` 1.88 at 2, 3.12 ns against 1.67 ns, and 1.15 at 32), the smooth 3, 5, 6, 7, 10, 12, 24 and 36 (1.06 to 1.32), batches of 2, 3, 6, 10, 12 and 15 against rustfft (1.09 to 1.49) and `forward_to` of 16 in `f32` (1.23): a call dispatches through the plan (its algorithm, a kernel by a function pointer) where FFTW's and rustfft's codelets are called straight, a few nanoseconds that are most of a transform this short; 32 and 36 take two passes where they have one butterfly.
+- **`f64` against vDSP out of place and in the inverse**: `forward_to` of 64, 256 and 4096 (1.12, 1.06, 1.07), which takes its working memory itself, from the heap beyond 512 values, and `inverse_with_scratch` of 4096 (1.09), not investigated.
+- **Short real transforms**: `forward` and `inverse` of 8 (1.07 to 1.22), the inverse of 12 (1.15, 1.17) and in `f64` of 64 and 80 (1.16, 1.09); `forward_with_scratch` and `inverse_with_scratch` of 15 and 64 (1.06 to 1.61); batches of 15 and, in `f64`, of 64 (1.37 to 1.78). FFTW has straight-line real codelets (`r2cf`, `r2cb`) for these; `a` runs an odd length up to 15 as the complex butterfly of `n` on the reals, about twice their arithmetic, and pays a plan's fixed costs at 8 to 80.
+- **Odd real lengths with small factors**, 15, 45, 135 and 243 (`forward` 1.09 to 1.59, `inverse` 1.16 to 1.75, against FFTW): FFTW's odd real codelets (`hc2hc`) against the split of the residues, whose sequences go in pairs through complex transforms and one pass combines them; from 625 on `a` is faster.
+- **The `f64` real transform of 65,536** (`forward` 1.71, `forward_with_scratch` 1.88 against realfft; 217 µs where the inverse takes 98.2 µs): its last complex pass, of radix 8 at the half length 32,768, is fused with the pass over the pairs, which at this length runs slower than the two separate passes. Turning the fusion off for those lengths is a known follow-up, not in this release.
+- **Short and odd cosine and sine transforms**: in place against rustdct, types II and III of 16 (1.89 to 2.12), type IV of 16 (1.15 to 1.22) and the `f32` DCT-IV and DST-IV of 255 and 1023 (1.11 to 1.23); out of place in `f64` against FFTW, DCT-II and III of 8 (1.23, 1.24), DCT-IV of 64 and 255 (1.06, 1.08), DCT-I of 257 and 4097 and DST-I of 4095 (1.09 to 1.13), DCT-II of 65,536 (1.15). Types II to IV of 16 go through Makhoul's step and the real transform of 16 with their fixed costs, where rustdct has straight-line 16-point codelets; 8 is summed from the matrix against FFTW's `e10`/`e01` codelets; the odd 255 and 1023 run on the odd real transforms (above) and the odd type IV's scalar permutation; DCT-I and DST-I at `2^k ± 1` on the split-radix step, whose gathers are scalar and whose levels are plans of their own; and DCT-II's twiddle pass runs after the real transform's, not fused into it.
+- **`Fft2` of 1024 × 1024 in `f64`** (1.12, the inverse 1.24, against FFTW): an array of 16 MiB is beyond the 4 MiB of the passes along the rows, and goes by tiles of columns gathered and scattered value by value.
+- **Short convolutions against vDSP's direct sums**: `convolve_into` of 16 × 3 to 16 × 16 (1.75 to 2.78), 100 × 3 to 100 × 64 (1.14 to 2.37) and 1000 × 8 to 1000 × 64 (1.07 to 1.19) in `f32` and `f64`, and of 3 taps over 10⁵ and 10⁶ `f32` values (1.32, 1.21); `correlate_into` of 100 × 8 (2.30, 2.37) and 1000 × 16 in `f32` (1.12); the allocating `convolve` and `correlate` at the same sizes and the complex 16 × 3 and 16 × 16 (1.70 in `Complex<f64>`, 1.12), with the result's allocation on top (`convolve` of 16 × 8 in `f64`: 47.6 ns against 13.0 ns, 3.67). The fixed costs of a call (the model's choice of the path, the handling of the operands, the short ends) and kernel blocks of 32 or 16 outputs computed for a handful of them; for a few taps over long data vDSP's kernel is faster per output. vDSP's operands are padded before the clock.
+- **Convolutions near the switch to the transforms**: `f64` 1000 × 128 and 10⁴ × 128 (1.45, 1.11, against FFTW), `Complex<f32>` 100 × 64 (1.18, rustfft) and `Complex<f64>` 10⁶ × 32 (1.06): the model charges half a plan's cost to every call and may not ask the cache whether the plans are kept (the same call must give the same bits), so near the switch it can keep the slower path.
+- **Short circular convolutions and correlations** of 16, 100 and 128 values (1.11 to 2.29; `f64` of 128: 745 ns against FFTW's 327 ns): the model takes the direct `n²` path where three transforms on kept plans are faster, and the result is a new vector.
+- **Planning**: `Fft::new` of 2²⁰ (3.36 and 4.50 times FFTW's `ESTIMATE`: 1.48 ms and 1.95 ms against 441 µs and 434 µs), of 16 to 4096 against vDSP's interleaved setup (1.20 to 2.24), of Rader's 1009 against rustfft (1.13, 1.38) and of Bluestein's 100,003 in `f32` (1.06); `RealFft::new` of 16 against vDSP (1.69, 2.27) and of 1001 and 1009 against realfft (1.10 to 2.27); `Dct::new` of 16, 1024 and 65,536 against rustdct (1.38 to 2.31). Every root of a plan's tables is correctly rounded (an octant table's entry corrected in double-double, or a product of a coarse and a fine table in double-double), the short lengths summed directly carry matrices of their own, and an odd real length plans the transforms of its split; FFTW, rustfft and realfft build plainer tables.
 
-The grid above follows it: in `f32` against 10⁴ to 10⁶ values the direct path takes 0.49 to 0.93 of the fastest reference's time up to 64 taps and the transforms 0.41 to 1.05 from 128; three cells near the switch are 1.34 to 1.35 times the fastest reference ([below](#where-the-references-are-faster)). The calibration in these runs (median of the three) measured the direct kernels at 0.0130 (`f32`), 0.0331 (`f64`), 0.0683 (`Complex<f32>`) and 0.134 (`Complex<f64>`) ns a product over 8 to 32 taps, and the transforms, the mean of a forward and an inverse one, at 0.0517, 0.0966, 0.0954 and 0.177 ns times `L·log₂ L` (the median over the powers of two from 1024; FFTW's, the same way from 2¹⁰ to 2¹⁸: 0.103, 0.122, 0.227 and 0.258).
+Not counted, the references that do less or more: rustfft's out-of-place form that overwrites its input takes within 2 % of the time of the form that keeps it at every length timed; and against `FFTW_MEASURE`'s planning, which times candidate plans, `Fft::new` and `RealFft::new` take 0.000257 to 0.0991 of its time.
 
 ### Accuracy
+
+Measured with version 0.2.40, before the speed pass. The audit of the speed pass compared every changed path with double-double references on 809 complex lengths up to 2²², 1,221 real lengths, the eight cosine and sine transforms at 283 lengths, the 2-D and 3-D shapes and the convolutions, in `f32` and `f64`: the worst error was 0.097 of the tests' bounds.
 
 The relative L2 error of the forward transform of random data in [−1, 1) against the tests' double-double references, in units of the type's `ε` (`2⁻²³` for `f32`, `2⁻⁵²` for `f64`), the largest over the lengths and the root mean square, next to FFTW's (its `FFTW_ESTIMATE` plans, the same codelets as `FFTW_MEASURE`'s) and rustfft's on the same data. The complex transform over 93 lengths from 2 to 1000003, dense up to 4096 and sparse beyond:
 
@@ -1375,38 +907,3 @@ The relative L2 error of the forward transform of random data in [−1, 1) again
 | DST-II | 1.57 / 1.13 | 1.67 / 0.99 | 1.36 / 1.01 | 1.55 / 0.96 |
 | DST-III | 1.56 / 1.08 | 1.69 / 1.03 | 1.36 / 0.99 | 1.65 / 1.03 |
 | DST-IV | 1.66 / 1.11 | 1.63 / 1.04 | 1.41 / 1.00 | 1.57 / 0.95 |
-
-### Where the references are faster
-
-Every row group above where `a` takes more than 1.10 times the fastest reference's time, by cause:
-
-- **vDSP in `f32`**: the complex transform of powers of two from 128 (1.19 to 3.69 times; 2.30 at 1024, 1.50 at 2²⁰) and of `f·2^k` from 768 (1.72 to 3.66; and 60, 1.29), its inverse (2.49 at 1024, 2.09 at 65,536); the real transform of powers of two from 64 but 512 (1.18 to 3.59) and of `f·2^k` from 640 (1.81 to 3.70); DCT-II at 16 to 16,384 and 48 (1.28 to 2.21), DCT-III at 16 to 16,384 (1.32 to 3.56), DCT-IV at 16 to 16,384 (1.32 to 1.68); and `Fft2` at every size it has but 64 × 4096 (1.15 to 2.58; 1.07 there). vDSP works on split complex data with Apple's own kernels, where `a` keeps `Complex<T>` interleaved: a split layout through NEON's de-interleaving loads would save about a quarter of the arithmetic of a butterfly by the implementer's count, and is the main idea for this gap. In `f64` vDSP is matched or beaten (powers of two 0.55 to 1.04, `f·2^k` 0.28 to 0.68), and its cosine transforms from 65,536 values in `f32` are slower than `a`'s (0.51 to 0.79).
-- **Single short complex transforms**: powers of two up to 32 (`f64` 1.18 to 2.19, `f32` 1.21 to 3.65, the worst `n = 2` in `f32`, 6.2 ns against rustfft's 1.7) and the smooth lengths 6, 9, 10, 12, 20 and 24 (1.28 to 1.92): a call costs about 5 ns of dispatch (the shared plan, the match on its algorithm, a function pointer a pass, the set-up of the passes), and 6, 9, 10, 12, 15 and 16 have no composite one-pass codelets, so 16 takes two passes of 4 and 24 two passes, where FFTW and rustfft have one butterfly for each.
-- **Batches of short complex transforms against rustfft**: `f64` at 2, 4 and 16 (1.33, 1.14, 1.19; at 2 and 4 the times are 0.4 against 0.3 and 0.8 against 0.7 ns, printed to 0.1 ns) and `f32` at 16 and 32 (1.28, 1.14): rustfft's 16- and 32-point butterflies, where `a` runs two passes.
-- **Short real transforms**: `RealFft::forward` up to 64 (`f64` 1.43 to 3.01, `f32` 1.46 to 2.46), at 80, 96 and 384 in `f64` (1.20 to 1.45), and `inverse` up to 64 (`f64` 1.29 to 7.10, `f32` 1.16 to 5.97); batches of 8, 15 and 16 values (1.96 to 4.35) and of 32 and 64 in `f64` (1.42, 1.26): fixed costs and no real codelets (FFTW's `r2cf` and `r2cb` for these sizes), the lengths up to 16 summed directly sequence by sequence. The inverse's direct sums at 15 and 16 take 1.9 to 2.7 times the forward's time and more than the inverse of 32 (41 and 45 ns against 30 in `f64`): not investigated, and DCT-III of 16 (2.31 and 3.56 times) runs on them.
-- **Even real transforms of 128 to 8192 values in `f64`**: 1.12 to 1.14 at 128, 256, 512, 4096 and 8192 against vDSP or FFTW (1.02 to 1.06 at the others, faster from 16,384): the pass that separates the two halves' spectra ran at about 5 cycles a step of two pairs where 4 would do by the count of its operations (measured while the machine was loaded), and is a pass of its own over the data rather than fused into the complex transform's last.
-- **Odd real lengths**: 15 to 177,147 with factors of 3, 5, 7 and 11 (`forward` `f64` 1.17 to 2.75, `f32` 1.13 to 2.04; `inverse` 1.12 to 6.17), against FFTW, which has real codelets for odd radices: here the residue sequences go in pairs through the complex transform and one pass combines them, scalar, with sums rather than written-out butterflies for 7 and 11; part of it is the complex transform's own odd lengths. The cosine and sine transforms of types II to IV at 255 and 1023 (1.11 to 1.42) run on these, and the odd type IV adds a scalar permutation and `√2` pass.
-- **Short cosine and sine transforms in `f64`**: DCT-II and DST-II at 16, 64 and 256 (1.11 to 1.52) and DCT-III at 64 (1.18): the fixed costs of the short real transforms they run on, and the DCT-II twiddle pass run as a pass of its own after the real transform's (fusing the two would save about 15 to 20 % of a DCT-II at 1024, by the implementer's estimate).
-- **DCT-I and DST-I at `2^k ± 1`**: `f64` 63 to 65,537 (1.20 to 1.49), `f32` 63 to 1025 (1.13 to 1.51): the split-radix step's gathers are scalar and each level of its recursion is a plan of its own with its fixed costs; FFTW's planner measures several algorithms for these lengths, and which one it took was not recorded. At even lengths `a` is 0.19 to 0.87 times FFTW's time.
-- **Two and three dimensions in `f64`, and small arrays**: `Fft2` at 64 × 64 (1.11), 1024 × 1024 (1.19) and 4096 × 64 (1.38; `f32` 1.37 against FFTW, besides vDSP), `Fft3` at 16³ (2.14, `f32` 1.84), 32³ and 64³ (1.26, 1.12): the tiles of columns are gathered and scattered value by value, with no SIMD transpose, and their sizes were tuned on a loaded machine; the small arrays pay the working memory each call allocates and a call of the transform per tile.
-- **Short convolutions, direct**: `f32` at 16 × 3 and 8 (1.25, 1.23) and 100 × 3 to 64 (1.13 to 1.52 against vDSP), and `f64` at 16 × 3 to 16 and 100 × 3 to 32 (1.16 to 1.79): fixed costs, the allocation of the result and a whole kernel block of outputs (32 or 16) computed for a few. At 1000 × 64 in `f32` (1.12, 1.48 against 1.33 µs) it is the kernels' rate, about 77 % of the FMA peak by the implementer's measurement under load, against vDSP's.
-- **Convolutions near the crossover**: `f64` at 1000 × 128 (1.34 against FFTW), `Complex<f32>` at 100 × 64 and 1000 × 64 (1.35, 1.34 against rustfft): the model takes the direct path where the transforms on kept plans would be faster (`a`'s own transforms, plan reused, take 3.90 against 5.34 µs, 464 against 947 ns and 2.78 against 5.25 µs), because it charges half a plan's cost to every call and may not ask the cache; the implementer's sweeps put it within 1.6 times of the best path at the switch.
-
-The first runs of the convolutions, before the change to the model's lower bound, had a third group: the first sizes at which the model searched the transform lengths and then took the direct path anyway (`f32` 1000 × 8 to 64, `f64` 1000 × 8 and 16, `Complex<f32>` 100 × 3 to 16 and `Complex<f64>` 100 × 3, 1.11 to 1.72 times); the tighter bound skips those searches, and `f32` 1000 × 8 went from 443 to 200 ns. Nothing of that group is left.
-
-### For the optimisation pass
-
-The measured gaps above, with the ideas the implementers named for them:
-
-- **The split-complex layout for vDSP-level `f32`** (1.2 to 3.7 times vDSP from 128 values in the complex, real, cosine and 2D transforms): planar data through `ld2`/`st2`, radix-16 and radix-32 codelets with register-blocked twiddles (genfft's style), and FCMA's `fcadd`/`fcmla` for rotations and products (inline assembly or unstable intrinsics).
-- **Composite small codelets** (6, 9, 10, 12, 15, 16, and 16 and 32 for batches; 1.2 to 3.7 times at `n ≤ 32`) and a direct path for a single short call, without the dispatch of about 5 ns; **real codelets** (`r2cf`-style) for `RealFft` up to 32 or 64, and its batches.
-- **The fused DCT-II pass**: the twiddles of DCT-II's outputs in the real transform's pass over the pairs (and DCT-III's in its inverse's), one pass of `O(n)` instead of two, about 15 to 20 % of a DCT-II at 1024; it needs a new kernel in NEON, SSE2, AVX2 and portable form.
-- **Odd real lengths** (1.1 to 2.75 times FFTW): the combine pass vectorised across `s` (its twiddles and outputs are contiguous, the mirrored ones reversed), radix 7 and 11 written out, real (`hc2hc`) codelets; the odd type IV's permutation and `√2` pass are scalar too. The inverse's direct sums at 15 and 16, slower than the forward's.
-- **The pair pass of the even real transforms**: about 0.84 ns a pair in `f64` and 0.49 in `f32` (measured under load), 5 cycles a step against 4; scheduling, or fusing it into the complex transform's last pass.
-- **Two and three dimensions**: a 2 × 2 or 4 × 4 SIMD transpose for the tiles, the tiles tuned on a quiet machine, and the per-call allocation of the work.
-- **Merging the two root generators**, `twiddle::Roots` (the complex transform's, an octant table of `sin` and `cos` corrected in double-double) and `real/roots.rs` (the real and trigonometric transforms', products of a coarse and a fine table in double-double, correctly rounded); planning still costs about 2 ns a twiddle entry, and Bluestein's `f32` plans transform their kernel in `f64`.
-- **Long transforms**: from 2²⁰ the passes run at 23 to 25 Gflop/s in `f64` and 48 to 51 in `f32`; a properly blocked six-step algorithm (columns in L1, two-level twiddles, prefetching) might gain 10 to 20 %, where the two attempts lost twice.
-- **Primes**: 23 to 31 as passes (hand-scheduled against the spills of 23), and the product of Rader's and Bluestein's kernels fused into the last pass of the inner forward transform and the first of the inverse.
-- **Kernels**: the odd butterflies 11 to 19 by-element FMAs with two constants a register; AVX2's `f32` first pass on 256-bit vectors (a 4 × 4 lane transpose); the convolutions' direct kernels at about 77 % of the FMA peak (measured under load; hand scheduling, and 12 vectors of outputs for long taps, measured 6 % faster there and slower at short ones), a one-vector kernel for tiny outputs, overlap-save in place of overlap-add, and the spectral product fused into the transforms' passes.
-- **The convolutions' choice**: its constants near the switch (1.34 to 1.35 times the fastest reference in three cells); `calibrate`'s fit of the direct path under-reads its cost per product in `f32` at long taps.
-- **x86 tuning**: nothing on x86_64 has been timed. The planner's estimates and the convolutions' constants are the M4's (the doubled cost of SSE2's products an estimate), the AVX2 kernels' assembly was checked only for the intrinsics being inlined, and every crossover is to be measured on x86 hardware.
