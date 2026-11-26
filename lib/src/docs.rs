@@ -119,8 +119,26 @@ struct MathPow;
 #[doc = include_str!("../docs/math/prime.md")]
 struct MathPrime;
 
+#[doc = include_str!("../docs/math/sieve.md")]
+struct MathSieve;
+
+#[doc = include_str!("../docs/math/factor.md")]
+struct MathFactor;
+
+#[doc = include_str!("../docs/math/siqs.md")]
+struct MathSiqs;
+
+#[doc = include_str!("../docs/math/sequences.md")]
+struct MathSequences;
+
 #[doc = include_str!("../docs/math/quadratic.md")]
 struct MathQuadratic;
+
+#[doc = include_str!("../docs/math/arith.md")]
+struct MathArith;
+
+#[doc = include_str!("../docs/math/modular.md")]
+struct MathModular;
 
 #[doc = include_str!("../docs/math/ec.md")]
 struct MathEc;
@@ -128,5 +146,47 @@ struct MathEc;
 #[doc = include_str!("../docs/math/complex.md")]
 struct MathComplex;
 
+#[doc = include_str!("../docs/math/poly.md")]
+struct MathPoly;
+
+#[doc = include_str!("../docs/math/fft.md")]
+struct MathFft;
+
+#[doc = include_str!("../docs/math/special.md")]
+struct MathSpecial;
+
+#[doc = include_str!("../docs/math/rational.md")]
+struct MathRational;
+
+#[doc = include_str!("../docs/math/float.md")]
+struct MathFloat;
+
 #[doc = include_str!("../docs/math/matrix.md")]
 struct MathMatrix;
+
+#[doc = include_str!("../docs/math/lattice.md")]
+struct MathLattice;
+
+#[doc = include_str!("../docs/math/field.md")]
+struct MathField;
+
+#[doc = include_str!("../docs/math/pairing.md")]
+struct MathPairing;
+
+#[doc = include_str!("../docs/hash/sha2.md")]
+struct HashSha2;
+
+#[doc = include_str!("../docs/math/numerics.md")]
+struct MathNumerics;
+
+#[doc = include_str!("../docs/math/sparse.md")]
+struct MathSparse;
+
+#[doc = include_str!("../docs/math/quaternion.md")]
+struct MathQuaternion;
+
+#[doc = include_str!("../docs/math/dual.md")]
+struct MathDual;
+
+#[doc = include_str!("../docs/math/uint.md")]
+struct MathUint;

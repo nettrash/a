@@ -149,7 +149,8 @@ impl Edwards {
 
     /// The bytes of RFC 8032's encoding of an element: enough for the prime and one bit more.
     fn encoded_len(&self) -> usize {
-        self.base.p.bits() as usize / 8 + 1
+        // Divided first: on 32-bit targets `as usize` would cut the bits of a prime of 512 MiB.
+        (self.base.p.bits() / 8) as usize + 1
     }
 }
 

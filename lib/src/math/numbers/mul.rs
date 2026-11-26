@@ -27,7 +27,7 @@
 
 // The kernels of the schoolbook method, one set per target under the name `kernels`, chosen as
 // those of the addition are: assembly on 64-bit little-endian aarch64 where the system allows
-// unaligned accesses and on x86_64, and portable Rust elsewhere and under Miri.
+// unaligned accesses and on 64-bit x86_64, and portable Rust elsewhere (x32 too) and under Miri.
 pub(super) mod fft;
 #[cfg(all(
     target_arch = "aarch64",
@@ -47,7 +47,7 @@ pub(super) mod fft;
 ))]
 #[path = "mul/aarch64.rs"]
 pub(super) mod kernels;
-#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(miri)))]
 #[path = "mul/x86_64.rs"]
 mod kernels;
 #[cfg(not(any(
@@ -67,11 +67,12 @@ mod kernels;
         ),
         not(miri)
     ),
-    all(target_arch = "x86_64", not(miri))
+    all(target_arch = "x86_64", target_pointer_width = "64", not(miri))
 )))]
 #[path = "mul/portable.rs"]
 mod kernels;
 pub(super) mod limbs;
+pub(super) mod short;
 
 /// The schoolbook kernels, for the products of fixed length of the curves' fields.
 pub(crate) mod basecase {
@@ -100,14 +101,59 @@ pub(crate) mod basecase {
         // SAFETY: as the caller guarantees.
         unsafe { kernels::sqr_basecase(r, x, n) }
     }
+
+    /// Below this many limbs in the shorter operand, a product is computed by the schoolbook
+    /// method, as [`mul_unbalanced`] does.
+    pub(crate) const SCHOOLBOOK: usize = super::limbs::KARATSUBA_MUL;
+
+    /// Adds the `n` limbs at `x` times `y` to the `n` limbs at `r`, and returns the limb that
+    /// carries out of them.
+    ///
+    /// # Safety
+    ///
+    /// `n >= 1`; the `n` limbs at `x` must be valid for reads and those at `r` for reads and
+    /// writes, and apart from them.
+    #[inline(always)]
+    pub(crate) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+        // SAFETY: as the caller guarantees.
+        #[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(miri)))]
+        unsafe {
+            kernels::addmul_1_any(r, x, n, y)
+        }
+        // SAFETY: as the caller guarantees.
+        #[cfg(not(all(target_arch = "x86_64", target_pointer_width = "64", not(miri))))]
+        unsafe {
+            kernels::addmul_1(r, x, n, y)
+        }
+    }
+
+    /// Sets the `nx + ny` limbs at `r` to the product of the `nx` limbs at `x` and the `ny` at
+    /// `y`, by the schoolbook method.
+    ///
+    /// # Safety
+    ///
+    /// `nx >= ny >= 1`; the limbs of `x` and `y` must be valid for reads and those of `r` for
+    /// writes, and `r` apart from both.
+    #[inline(always)]
+    pub(crate) unsafe fn mul_unbalanced(
+        r: *mut u64,
+        x: *const u64,
+        nx: usize,
+        y: *const u64,
+        ny: usize,
+    ) {
+        // SAFETY: as the caller guarantees.
+        unsafe { kernels::mul_basecase(r, x, nx, y, ny) }
+    }
 }
 mod toom;
 
-pub(super) use kernels::mul_1_bytes;
+pub(crate) use kernels::{addmul_1_bytes, mul_1_bytes};
 
 use super::add::{SMALL, read, read_small, significant_len, small, write, write_small};
 use super::div::limb_of;
 use super::prim::{copy_times_limb, times_limb};
+use super::scratch::{Scratch, scratch};
 use super::{ByteOrder, Number};
 use core::mem::{self, MaybeUninit};
 use core::ops::{Mul, MulAssign};
@@ -807,15 +853,15 @@ fn put_widest(v: &mut Vec<u8>, order: ByteOrder, w: &Widest) {
 
 /// An operand of the general path: its vector, its byte order and its significant length.
 #[derive(Clone, Copy)]
-pub(super) struct Operand {
-    pub(super) ptr: *const u8,
-    pub(super) len: usize,
-    pub(super) big_endian: bool,
-    pub(super) significant: usize,
+pub(crate) struct Operand {
+    pub(crate) ptr: *const u8,
+    pub(crate) len: usize,
+    pub(crate) big_endian: bool,
+    pub(crate) significant: usize,
 }
 
 impl Operand {
-    pub(super) fn of(n: &Number) -> Self {
+    pub(crate) fn of(n: &Number) -> Self {
         let big_endian = n.byte_order == ByteOrder::BigEndian;
         let significant = if big_endian {
             significant_len::<true>(&n.value)
@@ -1142,7 +1188,8 @@ unsafe fn product<R>(
         if nx + ny <= MEDIUM_LIMBS {
             // The operands, each in an even number of limbs, and the product.
             let mut s = [PAIR; MEDIUM_LIMBS + 1];
-            return compute(s.as_mut_ptr().cast(), x, y, square, negative, place);
+            let s = Scratch::new(s.as_mut_ptr().cast(), 2 * (MEDIUM_LIMBS + 1));
+            return compute(s, x, y, square, negative, place);
         }
         let (long, short) = if nx >= ny { (nx, ny) } else { (ny, nx) };
         let itch = if square {
@@ -1156,7 +1203,9 @@ unsafe fn product<R>(
             even(nx) + even(ny)
         };
         let need = operands + even(nx + ny) + itch;
-        let compute = |s: *mut MaybeUninit<u64>| compute(s.cast(), x, y, square, negative, place);
+        let compute = |s: *mut MaybeUninit<u64>| {
+            compute(scratch!(s.cast(), need), x, y, square, negative, place)
+        };
         if need <= STACK_LIMBS {
             on_stack(compute)
         } else {
@@ -1182,7 +1231,7 @@ unsafe fn product<R>(
 /// product's and the scratch the product needs, each rounded up to an even number.
 #[inline(always)]
 unsafe fn compute<R>(
-    s: *mut u64,
+    s: Scratch,
     x: Operand,
     y: Operand,
     square: bool,
@@ -1193,15 +1242,16 @@ unsafe fn compute<R>(
     let (nx, ny) = (la.div_ceil(8), lb.div_ceil(8));
     // SAFETY: as the caller guarantees.
     unsafe {
-        let (a, b) = (s.add(nx & 1), s.add(even(nx) + (ny & 1)));
+        // The operands are carved before their length is counted, and the first is read in
+        // first: counted first, the length is held across the read.
+        let (a, b) = (s.add(nx & 1).take(nx), s.add(even(nx) + (ny & 1)));
         to_limbs(x, a);
         let operands = if square {
             even(nx)
         } else {
             even(nx) + even(ny)
         };
-        let r = s.add(operands);
-        let t = r.add(even(nx + ny));
+        let (r, t) = s.add(operands).split(even(nx + ny));
         // Short operands go straight to the kernels, without the dispatch of the longer ones.
         let medium = nx + ny <= MEDIUM_LIMBS;
         if square {
@@ -1211,6 +1261,7 @@ unsafe fn compute<R>(
                 limbs::sqr(r, a, nx, t);
             }
         } else {
+            let b = b.take(ny);
             to_limbs(y, b);
             let ((p, np), (q, nq)) = if nx >= ny {
                 ((a, nx), (b, ny))

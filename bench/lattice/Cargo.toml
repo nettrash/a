@@ -1,0 +1,21 @@
+[package]
+name = "latbench"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+publish = false
+
+[dependencies]
+nettrash-a = { path = "../../lib" }
+
+# The crate as a user gets it: the default release profile (opt-level 3, no LTO).
+[profile.release]
+debug = false
+
+# The second figure the brief allows: fat LTO, one codegen unit.
+[profile.fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

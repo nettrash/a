@@ -1,0 +1,163 @@
+input sqrt2_sqrt3 0 0
+input sqrt2_sqrt3 1 2dbd905994660ca8
+input sqrt2_sqrt3 2 c08a1d3ded16f83d
+input sqrt2_sqrt3 3 e16159b5ee67d7db
+input sqrt2_sqrt3 4 70aca48d685cb64c
+ref sqrt2_sqrt3 relation 1 0 -10 0 1
+mpmath sqrt2_sqrt3 1 0 -10 0 1
+findpoly sqrt2_sqrt3 1 0 -10 0 1
+pari sqrt2_sqrt3 1 0 -10 0 1
+input deg12 0 0
+input deg12 1 f517af231c12bd6a
+input deg12 2 31b1168b2f7762d9
+input deg12 3 765b4aaa6bc9a372
+input deg12 4 6022850342776180
+input deg12 5 562ab908cf93d6e2
+input deg12 6 fb7be1bcad5806b5
+input deg12 7 a013e04cb23a8a6a
+input deg12 8 ad722ef79c876cf5
+input deg12 9 ffa7a4f82a12af12
+input deg12 10 6dae7649d4591e2e
+input deg12 11 651b9c7c0eba9c4a
+input deg12 12 25d8bc38f20c5d25
+ref deg12 relation 73 -144 -540 -108 12 -288 54 0 -6 -12 0 0 1
+mpmath deg12 73 -144 -540 -108 12 -288 54 0 -6 -12 0 0 1
+findpoly deg12 73 -144 -540 -108 12 -288 54 0 -6 -12 0 0 1
+pari deg12 73 -144 -540 -108 12 -288 54 0 -6 -12 0 0 1
+input deg16 0 0
+input deg16 1 97d2062bcd84f153
+input deg16 2 8b6468e06e50b7dd
+input deg16 3 170f894d6347f8c6
+input deg16 4 3432fb122e4668e8
+input deg16 5 d559ca7a2be08e20
+input deg16 6 fd22e01b549ac76e
+input deg16 7 2e572e8ed10221af
+input deg16 8 82897cf0e194a01c
+input deg16 9 e839dfca2a01667
+input deg16 10 d4aa4fa2c5d9f9db
+input deg16 11 c89d39b6f3b7ddca
+input deg16 12 9497cf84d273196a
+input deg16 13 ccf38520e06fa247
+input deg16 14 202bfb0cc055ebaf
+input deg16 15 cf4b26cf7b0abef7
+input deg16 16 489f98788898accf
+ref deg16 relation 1 0 0 0 -3860 0 0 0 -666 0 0 0 -20 0 0 0 1
+mpmath deg16 1 0 0 0 -3860 0 0 0 -666 0 0 0 -20 0 0 0 1
+findpoly deg16 1 0 0 0 -3860 0 0 0 -666 0 0 0 -20 0 0 0 1
+pari deg16 1 0 0 0 -3860 0 0 0 -666 0 0 0 -20 0 0 0 1
+input deg35 0 0
+input deg35 1 5578a33d7f6c9f2c
+input deg35 2 d20fb587ee1e4164
+input deg35 3 b78e4a085f75fd16
+input deg35 4 6d5823db130773ab
+input deg35 5 311ec15cc720ee3f
+input deg35 6 3d1943a9cbaa2964
+input deg35 7 d852090416197425
+input deg35 8 6efb8e590c0645a0
+input deg35 9 ecedbbdb0d5bbeb2
+input deg35 10 f71c46c610843002
+input deg35 11 eb56e126e97decab
+input deg35 12 ed4454c3a47da5ad
+input deg35 13 9d74cdd1713784b8
+input deg35 14 a90f12aa54ac240d
+input deg35 15 bfda9273fcdafb7a
+input deg35 16 876aeaf4e8ae7ed7
+input deg35 17 b868caaf24376cf6
+input deg35 18 d5475761f7ab6af1
+input deg35 19 6af719bd3ebe8f05
+input deg35 20 24c40c26218ff4a9
+input deg35 21 a5685b7d40fde60e
+input deg35 22 2f18f0541cb96d5b
+input deg35 23 83ae46751f6096d3
+input deg35 24 275841956cb3947e
+input deg35 25 267f9aa7b522e750
+input deg35 26 7edeb9c0dd6eabea
+input deg35 27 5d05a5aad817c43
+input deg35 28 17438415e57eba7
+input deg35 29 66baff2d2362afa1
+input deg35 30 a6e086f89c4898a
+input deg35 31 894bbaa082a6583d
+input deg35 32 1c9f84f7d3c5945e
+input deg35 33 e640109fd21c5140
+input deg35 34 14857e105a8c3104
+input deg35 35 bc36fb8ed33f55b1
+ref deg35 relation 371 -5040 17010 40320 325080 -448 1484280 -405 579600 241920 672 -2785860 0 945000 270 -560 178920 0 287700 0 280 -90 0 13650 0 -84 0 0 15 0 14 0 0 0 0 -1
+mpmath deg35 371 -5040 17010 40320 325080 -448 1484280 -405 579600 241920 672 -2785860 0 945000 270 -560 178920 0 287700 0 280 -90 0 13650 0 -84 0 0 15 0 14 0 0 0 0 -1
+pari deg35 371 -5040 17010 40320 325080 -448 1484280 -405 579600 241920 672 -2785860 0 945000 270 -560 178920 0 287700 0 280 -90 0 13650 0 -84 0 0 15 0 14 0 0 0 0 -1
+input machin 0 24e088a67cc7402
+input machin 1 4461272e98073ccc
+input machin 2 98f52181d64651e
+ref machin relation 1 -4 1
+mpmath machin 1 -4 1
+pari machin 1 -4 1
+input machin5 0 24e088a67cc7402
+input machin5 1 336532395e2c7d8
+input machin5 2 53906e0036ed1066
+input machin5 3 98f52181d64651e
+input machin5 4 11b6d0d15b0d2fcf
+ref machin5 relation 1 -12 -32 5 -12
+mpmath machin5 1 -12 -32 5 -12
+pari machin5 1 -12 -32 5 -12
+input bbp 0 39b22514a08798e3
+input bbp 1 ccd3d4dc2ceaeec9
+input bbp 2 c8611c66c126c4bf
+input bbp 3 22332ca1c5da970b
+input bbp 4 bba0abfeca6ea0e7
+ref bbp relation 1 -4 2 1 1
+mpmath bbp 1 -4 2 1 1
+pari bbp 1 -4 2 1 1
+input logs 0 afa2be7b876206df
+input logs 1 49ac6554bc169066
+input logs 2 addcf3881ca9f2c6
+input logs 3 b611d1ef0beb143a
+input logs 4 50ead8c6f9fe9931
+ref logs relation 31 -17 11 4 -1
+mpmath logs 31 -17 11 4 -1
+pari logs 31 -17 11 4 -1
+input zeta3_pi 0 0
+input zeta3_pi 1 39b22514a08798e3
+input zeta3_pi 2 bfb5c6827329d7d9
+ref zeta3_pi nonebelow 1607313056929.5544242462137841
+input zeta3_pi3 0 bfb5c6827329d7d9
+input zeta3_pi3 1 952c9b746bfe4c79
+ref zeta3_pi3 nonebelow 284847010319513384190.921216862
+input euler_poly6 0 0
+input euler_poly6 1 f8a96d1567899aab
+input euler_poly6 2 f0e734e305e7533e
+input euler_poly6 3 1e8e6d0d36b0701a
+input euler_poly6 4 200b93bd86b87061
+input euler_poly6 5 c7273124d34db089
+input euler_poly6 6 dc5ff33fed712f83
+ref euler_poly6 nonebelow 1150852.4840355007954698313776
+input constants 0 0
+input constants 1 19b3cd3a431b302b
+input constants 2 e363630c75d8f682
+input constants 3 52fb4afa1b10ed2f
+input constants 4 9ccb621057d11057
+input constants 5 4d663f739c42ec96
+ref constants nonebelow 104107593.912850193146228090168
+input acot 0 24e088a67cc7402
+input acot 1 141587261cdf00e3
+input acot 2 f08689eeb2b9e721
+input acot 3 7fa90388b3836b7a
+input acot 4 4461272e98073ccc
+input acot 5 76caa3c0c9b145a0
+input acot 6 471dfa6ed44a3383
+input acot 7 3957d95d9ad922ed
+input acot 8 72fb4fad71b26174
+input acot 9 576277c7e0ff18eb
+ref acot relation 0 1 -1 0 0 0 -1 0 0 0
+input scales 0 10000000000000
+input scales 1 10000000000000
+input scales 2 18000000000000
+ref scales relation 1 -160693804425899027554196209234116260252220299378279283530138 -482081413277697082662588627702348780756660898134837850590413
+input pi_e_1e6 0 24e088a67cc7402
+input pi_e_1e6 1 b9c583ce2d3695aa
+ref pi_e_1e6 nonebelow 1395027.83241408401599447027926
+input pi_e 0 24e088a67cc7402
+input pi_e 1 b9c583ce2d3695aa
+ref pi_e relation 27054725000711464691612200571 -31267885624394453777091929777
+input pi_e_1 0 24e088a67cc7402
+input pi_e_1 1 b9c583ce2d3695aa
+input pi_e_1 2 0
+ref pi_e_1 relation 5841374926267181092 -2263539231538375834 -12198282994129677855

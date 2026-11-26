@@ -24,33 +24,33 @@ use super::limbs::{div_2by1, invert_limb};
 
 /// The largest divisor whose partial remainders [`rem_1`] keeps in two limbs: the sum of a step,
 /// `9 (d - 1)(B - 1) + B - 1`, is below `B²` for `d - 1 <= B / 9`. Larger ones take a third limb.
-pub(in super::super) const REM_1_MAX: u64 = u64::MAX / 9;
+pub(crate) const REM_1_MAX: u64 = u64::MAX / 9;
 
 /// From this many bytes in the dividend, its remainder by a limb of at most [`REM_1_MAX`] is
 /// computed by [`rem_1`], the powers included: measured on an Apple M4 Max as `a %= &b`, 80 bytes
 /// by 10 took 131 cycles so against 155 by the division, and by `2^60 - 59` 155 against 150; 128
 /// bytes 140 and 159 against 198 and 193, and 1 KiB 234 against 1,200. Below, the division by
 /// limbs costs less than the powers.
-pub(in super::super) const REM_1_BYTES: usize = 80;
+pub(crate) const REM_1_BYTES: usize = 80;
 
 /// From this many bytes in the dividend, its remainder by a limb above [`REM_1_MAX`] is computed by
 /// [`rem_1`], with three limbs of partial remainder: measured on an Apple M4 Max as `a %= &b` by
 /// random limbs, 80 bytes took 169 cycles so against 152 by the division, 96 bytes 177 against 177,
 /// 128 bytes 180 against 206, and 1 KiB 351 against 1,165.
-pub(in super::super) const REM_1_BYTES_WIDE: usize = 112;
+pub(crate) const REM_1_BYTES_WIDE: usize = 112;
 
 /// From this many bytes in the dividend, its remainder by a [`Divisor`](super::super::Divisor) of
 /// one limb, which keeps the powers, is computed by [`rem_1`]: every dividend the registers do not
 /// take. Measured on an Apple M4 Max as `a %= &d`, 65 bytes by 10 took 34 cycles so against 104 by
 /// the division, and 1 KiB 166 against 1,126.
-pub(in super::super) const REM_1_PREPARED: usize = 65;
+pub(crate) const REM_1_PREPARED: usize = 65;
 
 /// The powers of `B` modulo a divisor `d` that [`rem_1`] takes, with `d` normalized and its
 /// reciprocal for the last step.
 #[derive(Clone, Copy)]
-pub(in super::super) struct Powers {
+pub(crate) struct Powers {
     /// The divisor.
-    pub(in super::super) d: u64,
+    pub(crate) d: u64,
     /// `c[k] = B^k mod d` for `k` from 1 to 10; `c[0]` is not used.
     c: [u64; 11],
     /// The shift that sets the top bit of `d`.
@@ -69,7 +69,7 @@ impl Powers {
     /// after another, not eight: `c_2` from `c_1²`, `c_3` and `c_4` from `c_2 c_1` and `c_2²`,
     /// `c_5` to `c_8` from `c_4 c_1` to `c_4²`, and `c_9` and `c_10` from `c_8 c_1` and `c_8 c_2`.
     #[inline]
-    pub(in super::super) fn of(d: u64) -> Powers {
+    pub(crate) fn of(d: u64) -> Powers {
         debug_assert!(d >= 2);
         let shift = d.leading_zeros();
         let dn = d << shift;
@@ -121,13 +121,16 @@ fn mul(a: u64, b: u64) -> u128 {
     u128::from(a) * u128::from(b)
 }
 
-/// The remainder of the magnitude of the operand `x` by the divisor `d` of the powers `p`.
+/// The remainder of the magnitude of the operand `x` by the divisor `d` of the powers `p`, for
+/// magnitudes of any length (zero included).
 ///
 /// # Safety
 ///
-/// The operand's vector must be valid for reads.
+/// The operand's `len` bytes at `ptr` must be valid for reads, and its `significant` at most
+/// `len`: the bytes from the least significant one that hold the magnitude (more than the
+/// shortest form is allowed, so long as they are inside the vector).
 #[inline(never)]
-pub(in super::super) unsafe fn rem_1(x: Operand, p: &Powers) -> u64 {
+pub(crate) unsafe fn rem_1(x: Operand, p: &Powers) -> u64 {
     // SAFETY: as the caller guarantees.
     unsafe {
         if p.d <= REM_1_MAX {

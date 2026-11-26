@@ -1,10 +1,18 @@
 //! Montgomery's arithmetic modulo an odd prime in arrays of limbs.
 
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
-use super::aarch64::{mont_add_4, mont_add_6, mont_sub_4, mont_sub_6};
+use super::aarch64::{
+    add_plain_4, add_plain_6, mont_add_4, mont_add_6, mont_mul_nc_4, mont_mul_nc_6, mont_sub_4,
+    mont_sub_6, mul_wide_4, mul_wide_6, p256_mul, p256_sqr, p384_mul, p384_sqr, pseudo_add_4,
+    pseudo_mul_4, pseudo_sqr_4, pseudo_sub_4, redc_wide_4, redc_wide_6, sub_wide_4, sub_wide_6,
+    sub_wide_mod_4, sub_wide_mod_6,
+};
 #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
 use super::same;
 use super::{Field, array_of, halve, number_of};
+use crate::math::field::TypedKernel;
+#[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+use crate::math::field::TypedSpecial;
 use crate::math::numbers::{Number, basecase, redc_inverse, redc_limbs};
 use core::hint::select_unpredictable;
 use core::mem::MaybeUninit;
@@ -30,7 +38,8 @@ const fn invert_limb(m: u64) -> u64 {
 
 /// The field modulo an odd prime `m` of `N` limbs, `R = 2^(64 N)`, whose elements are `x R mod m`,
 /// fully reduced, below `m`.
-pub(in super::super) struct Mont<const N: usize> {
+#[derive(Clone)]
+pub(crate) struct Mont<const N: usize> {
     /// The prime, the low limb first.
     m: [u64; N],
     /// `-1 / m mod 2^64`.
@@ -41,6 +50,22 @@ pub(in super::super) struct Mont<const N: usize> {
     one: [u64; N],
     /// `R^2 mod m`.
     r2: [u64; N],
+    /// Whether the top bit of `m` is clear, `m < R / 2`: then a product's rows never carry out of
+    /// `N + 1` limbs and keep below `2 m`, and the kernels of four and six limbs on aarch64 drop
+    /// the carries above (decided here, once).
+    #[cfg_attr(
+        not(all(target_arch = "aarch64", target_endian = "little", not(miri))),
+        allow(dead_code)
+    )]
+    spare: bool,
+    /// Whether the top two bits of `m` are clear, `4 m < R`: then a sum of two elements below `2 m`
+    /// is one, and the products of two such sums below `m R`, which the lazy reduction of
+    /// [`mul_complex`](Mont::mul_complex) takes (decided here, once).
+    #[cfg_attr(
+        not(all(target_arch = "aarch64", target_endian = "little", not(miri))),
+        allow(dead_code)
+    )]
+    spare2: bool,
     /// The prime as a number.
     p: Number,
 }
@@ -57,8 +82,143 @@ impl<const N: usize> Mont<N> {
             minv2: redc_inverse(m[0], if N > 1 { m[1 % N] } else { 0 }),
             one: array_of(&one),
             r2: array_of(&r2),
+            spare: m[N - 1] >> 63 == 0,
+            spare2: m[N - 1] >> 62 == 0,
             p: p.clone(),
         }
+    }
+
+    /// `a b / R mod m` for a typed field ([`TypedKernel`]): the kernels of [`redc_product`]
+    /// (`Mont::redc_product`), and P-256's and P-384's, chosen by the constants `k`, which a
+    /// constant folds away.
+    #[inline(always)]
+    pub(crate) fn typed_mul(k: &TypedKernel<N>, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        {
+            match (k.special, N) {
+                (TypedSpecial::P256, 4) => return *same(&p256_mul(same(a), same(b))),
+                (TypedSpecial::P384, 6) => return *same(&p384_mul(same(a), same(b))),
+                _ => {}
+            }
+            if k.spare {
+                match N {
+                    4 => return *same(&mont_mul_nc_4(same(a), same(b), same(&k.m), k.minv)),
+                    6 => return *same(&mont_mul_nc_6(same(a), same(b), same(&k.m), k.minv)),
+                    _ => {}
+                }
+            }
+        }
+        if N >= KERNEL {
+            let mut t = MaybeUninit::<[u64; 2 * MAX]>::uninit();
+            let t = t.as_mut_ptr().cast::<u64>();
+            // SAFETY: `t` holds `2 * MAX >= 2 N` limbs (a typed field has at most `MAX`), apart
+            // from `a` and `b`, and the kernel writes all the `2 N` that `reduce` reads.
+            return unsafe {
+                basecase::mul(t, a.as_ptr(), b.as_ptr(), N);
+                reduce(t, &k.m, k.minv2)
+            };
+        }
+        rows(a, b, &k.m, k.minv)
+    }
+
+    /// `a^2 / R mod m` for a typed field.
+    #[inline(always)]
+    pub(crate) fn typed_sqr(k: &TypedKernel<N>, a: &[u64; N]) -> [u64; N] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        {
+            match (k.special, N) {
+                (TypedSpecial::P256, 4) => return *same(&p256_sqr(same(a))),
+                (TypedSpecial::P384, 6) => return *same(&p384_sqr(same(a))),
+                _ => {}
+            }
+            if k.spare {
+                match N {
+                    4 => return *same(&mont_mul_nc_4(same(a), same(a), same(&k.m), k.minv)),
+                    6 => return *same(&mont_mul_nc_6(same(a), same(a), same(&k.m), k.minv)),
+                    _ => {}
+                }
+            }
+        }
+        if N >= KERNEL {
+            let mut t = MaybeUninit::<[u64; 2 * MAX]>::uninit();
+            let t = t.as_mut_ptr().cast::<u64>();
+            // SAFETY: as in `typed_mul`.
+            return unsafe {
+                basecase::sqr(t, a.as_ptr(), N);
+                reduce(t, &k.m, k.minv2)
+            };
+        }
+        rows(a, a, &k.m, k.minv)
+    }
+
+    /// `a + b mod m` for a typed field.
+    #[inline(always)]
+    pub(crate) fn typed_add(k: &TypedKernel<N>, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        match N {
+            4 => return *same(&mont_add_4(same(a), same(b), same(&k.m))),
+            6 => return *same(&mont_add_6(same(a), same(b), same(&k.m))),
+            _ => {}
+        }
+        let (s, carry) = add_n(a, b);
+        let (d, borrow) = sub_n(&s, &k.m);
+        select(carry || !borrow, &d, &s)
+    }
+
+    /// `a - b mod m` for a typed field.
+    #[inline(always)]
+    pub(crate) fn typed_sub(k: &TypedKernel<N>, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        match N {
+            4 => return *same(&mont_sub_4(same(a), same(b), same(&k.m))),
+            6 => return *same(&mont_sub_6(same(a), same(b), same(&k.m))),
+            _ => {}
+        }
+        let (d, borrow) = sub_n(a, b);
+        let (s, _) = add_n(&d, &k.m);
+        select(borrow, &s, &d)
+    }
+
+    /// `-a mod m` for a typed field.
+    #[inline(always)]
+    pub(crate) fn typed_neg(k: &TypedKernel<N>, a: &[u64; N]) -> [u64; N] {
+        let (d, _) = sub_n(&k.m, a);
+        select(a.iter().fold(0, |x, l| x | l) == 0, a, &d)
+    }
+
+    /// `a b` modulo a prime `2^k - c` of four limbs with `2^256 = f` (`f < 2^62`), not reduced
+    /// below it, for a typed field: `Pseudo`'s kernel.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+    #[inline(always)]
+    pub(crate) fn typed_pseudo_mul(a: &[u64; N], b: &[u64; N], f: u64) -> [u64; N] {
+        *same(&pseudo_mul_4(same(a), same(b), f))
+    }
+
+    /// `a^2` modulo the prime with `2^256 = f`, not reduced below it.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+    #[inline(always)]
+    pub(crate) fn typed_pseudo_sqr(a: &[u64; N], f: u64) -> [u64; N] {
+        *same(&pseudo_sqr_4(same(a), f))
+    }
+
+    /// `a + b` modulo the prime with `2^256 = f`, not reduced below it.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+    #[inline(always)]
+    pub(crate) fn typed_pseudo_add(a: &[u64; N], b: &[u64; N], f: u64) -> [u64; N] {
+        *same(&pseudo_add_4(same(a), same(b), f))
+    }
+
+    /// `a - b` modulo the prime with `2^256 = f`, not reduced below it.
+    #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+    #[inline(always)]
+    pub(crate) fn typed_pseudo_sub(a: &[u64; N], b: &[u64; N], f: u64) -> [u64; N] {
+        *same(&pseudo_sub_4(same(a), same(b), f))
+    }
+
+    /// For a prime of one limb, the prime and `-1 / m mod 2^64`.
+    #[inline(always)]
+    pub(crate) fn word(&self) -> Option<(u64, u64)> {
+        (N == 1).then(|| (self.m[0], self.minv))
     }
 
     /// REDC of the `2 N` limbs at `t`, below `R m`, which it clobbers, by the kernel.
@@ -68,21 +228,21 @@ impl<const N: usize> Mont<N> {
     /// `t` must hold `2 N` limbs.
     #[inline(always)]
     unsafe fn reduce(&self, t: *mut u64) -> [u64; N] {
-        let mut r = MaybeUninit::<[u64; N]>::uninit();
-        // SAFETY: `r` has room for the `N` limbs the kernel writes, apart from `t`, and `m` holds
-        // `N` limbs.
-        let (r, over) = unsafe {
-            let over = redc_limbs(r.as_mut_ptr().cast(), t, self.m.as_ptr(), N, self.minv2);
-            (r.assume_init(), over)
-        };
-        // The kernel's result is below `R + m`, and a residue here below `m`.
-        let (d, borrow) = sub_n(&r, &self.m);
-        select(over || !borrow, &d, &r)
+        // SAFETY: forwarded from the caller.
+        unsafe { reduce(t, &self.m, self.minv2) }
     }
 
     /// `a b / R mod m`.
     #[inline(always)]
     fn redc_product(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        if self.spare {
+            match N {
+                4 => return *same(&mont_mul_nc_4(same(a), same(b), same(&self.m), self.minv)),
+                6 => return *same(&mont_mul_nc_6(same(a), same(b), same(&self.m), self.minv)),
+                _ => {}
+            }
+        }
         if N >= KERNEL {
             let mut t = MaybeUninit::<[u64; 2 * MAX]>::uninit();
             let t = t.as_mut_ptr().cast::<u64>();
@@ -99,6 +259,16 @@ impl<const N: usize> Mont<N> {
     /// `a^2 / R mod m`.
     #[inline(always)]
     fn redc_square(&self, a: &[u64; N]) -> [u64; N] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        if self.spare {
+            match N {
+                // The product's rows overlap their reductions, which a square's separate
+                // reduction cannot: the product by itself is the faster square.
+                4 => return *same(&mont_mul_nc_4(same(a), same(a), same(&self.m), self.minv)),
+                6 => return *same(&mont_mul_nc_6(same(a), same(a), same(&self.m), self.minv)),
+                _ => {}
+            }
+        }
         if N >= KERNEL {
             let mut t = MaybeUninit::<[u64; 2 * MAX]>::uninit();
             let t = t.as_mut_ptr().cast::<u64>();
@@ -111,37 +281,166 @@ impl<const N: usize> Mont<N> {
         self.rows(a, a)
     }
 
+    /// The product `(a₀ + a₁u)(b₀ + b₁u)` in `F_m[u] / (u² + 1)`, the arithmetic of `F_m²` when
+    /// `−1` is not a square: `(a₀b₀ − a₁b₁) + ((a₀ + a₁)(b₀ + b₁) − a₀b₀ − a₁b₁)u`, Karatsuba's
+    /// three products.
+    ///
+    /// For a prime with two spare bits, by four and six limbs on aarch64, by a lazy reduction: the
+    /// three products as double-width values, of `2 N` limbs and not reduced, the sums `a₀ + a₁`
+    /// and `b₀ + b₁` not reduced either (below `2 m`, so their product is below `4 m² < m R`), then
+    /// `a₀b₀ − a₁b₁` modulo `m R` (plus `m R` on a borrow) and `(a₀ + a₁)(b₀ + b₁) − a₀b₀ − a₁b₁`,
+    /// which is `a₀b₁ + a₁b₀ < 2 m²` exactly, each reduced once: two reductions in place of three,
+    /// and no reduction of the sums. Otherwise three Montgomery products.
+    #[inline(always)]
+    pub(crate) fn mul_complex(&self, a: &[[u64; N]; 2], b: &[[u64; N]; 2]) -> [[u64; N]; 2] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        if self.spare2 {
+            macro_rules! lazy {
+                ($n:literal, $mul:ident, $add:ident, $sub:ident, $sub_mod:ident, $redc:ident) => {{
+                    let (a0, a1, b0, b1): (&[u64; $n], _, _, _) =
+                        (same(&a[0]), same(&a[1]), same(&b[0]), same(&b[1]));
+                    let m: &[u64; $n] = same(&self.m);
+                    let t0 = $mul(a0, b0);
+                    let t1 = $mul(a1, b1);
+                    let t2 = $mul(&$add(a0, a1), &$add(b0, b1));
+                    let c0 = $sub_mod(&t0, &t1, m);
+                    let c1 = $sub(&$sub(&t2, &t0), &t1);
+                    return [
+                        *same(&$redc(&c0, m, self.minv)),
+                        *same(&$redc(&c1, m, self.minv)),
+                    ];
+                }};
+            }
+            match N {
+                4 => lazy!(
+                    4,
+                    mul_wide_4,
+                    add_plain_4,
+                    sub_wide_4,
+                    sub_wide_mod_4,
+                    redc_wide_4
+                ),
+                6 => lazy!(
+                    6,
+                    mul_wide_6,
+                    add_plain_6,
+                    sub_wide_6,
+                    sub_wide_mod_6,
+                    redc_wide_6
+                ),
+                _ => {}
+            }
+        }
+        let v0 = self.redc_product(&a[0], &b[0]);
+        let v1 = self.redc_product(&a[1], &b[1]);
+        let s = self.redc_product(&self.add(&a[0], &a[1]), &self.add(&b[0], &b[1]));
+        [self.sub(&v0, &v1), self.sub(&self.sub(&s, &v0), &v1)]
+    }
+
+    /// The square `(a₀ + a₁u)²` in `F_m[u] / (u² + 1)`: `(a₀ + a₁)(a₀ − a₁) + 2a₀a₁u`, two
+    /// products.
+    ///
+    /// For a prime with two spare bits, by four and six limbs on aarch64, the operands of the
+    /// products are not reduced: `a₀ + a₁`, `a₀ + (m − a₁)` and `2a₀`, each below `2m`. The
+    /// kernel's rows then stay below `3m < R` and its result `(xy + Qm)/R < (4m² + Rm)/R < 2m`, so
+    /// that its one subtraction still gives a residue below `m`.
+    #[inline(always)]
+    pub(crate) fn sqr_complex(&self, a: &[[u64; N]; 2]) -> [[u64; N]; 2] {
+        #[cfg(all(target_arch = "aarch64", target_endian = "little", not(miri)))]
+        if self.spare2 {
+            macro_rules! lazy {
+                ($n:literal, $mul:ident, $add:ident) => {{
+                    let (a0, a1): (&[u64; $n], &[u64; $n]) = (same(&a[0]), same(&a[1]));
+                    let m: &[u64; $n] = same(&self.m);
+                    let (neg, _) = sub_n(m, a1);
+                    let c0 = $mul(&$add(a0, a1), &$add(a0, &neg), m, self.minv);
+                    let c1 = $mul(&$add(a0, a0), a1, m, self.minv);
+                    return [*same(&c0), *same(&c1)];
+                }};
+            }
+            match N {
+                4 => lazy!(4, mont_mul_nc_4, add_plain_4),
+                6 => lazy!(6, mont_mul_nc_6, add_plain_6),
+                _ => {}
+            }
+        }
+        let c0 = self.redc_product(&self.add(&a[0], &a[1]), &self.sub(&a[0], &a[1]));
+        let ab = self.redc_product(&a[0], &a[1]);
+        [c0, self.add(&ab, &ab)]
+    }
+
+    /// The limbs of the number `x` stands for, below `m`: `x / R mod m`, one reduction.
+    #[inline(always)]
+    pub(crate) fn canonical(&self, x: &[u64; N]) -> [u64; N] {
+        let mut one = [0; N];
+        one[0] = 1;
+        self.redc_product(x, &one)
+    }
+
+    /// The element of the number with the limbs `x`, below `m`: `x R mod m`, one product by
+    /// `R^2`.
+    #[inline(always)]
+    pub(crate) fn residue(&self, x: &[u64; N]) -> [u64; N] {
+        self.redc_product(x, &self.r2)
+    }
+
     /// `a b / R mod m`, a row of the product and a row of the reduction for each limb.
     #[inline(always)]
     fn rows(&self, a: &[u64; N], b: &[u64; N]) -> [u64; N] {
-        let m = &self.m;
-        let mut t = [0u64; N];
-        let mut top = 0u64;
-        for &bi in b {
-            let mut c = 0u64;
-            for j in 0..N {
-                let p = u128::from(a[j]) * u128::from(bi) + u128::from(t[j]) + u128::from(c);
-                t[j] = p as u64;
-                c = (p >> 64) as u64;
-            }
-            let s = u128::from(top) + u128::from(c);
-            let (tn, tn1) = (s as u64, (s >> 64) as u64);
-            let q = t[0].wrapping_mul(self.minv);
-            let p = u128::from(q) * u128::from(m[0]) + u128::from(t[0]);
-            let mut c = (p >> 64) as u64;
-            for j in 1..N {
-                let p = u128::from(q) * u128::from(m[j]) + u128::from(t[j]) + u128::from(c);
-                t[j - 1] = p as u64;
-                c = (p >> 64) as u64;
-            }
-            let s = u128::from(tn) + u128::from(c);
-            t[N - 1] = s as u64;
-            top = tn1 + (s >> 64) as u64;
-        }
-        // Below `2 m`: one subtraction when it is at least `m`.
-        let (d, borrow) = sub_n(&t, m);
-        select(top != 0 || !borrow, &d, &t)
+        rows(a, b, &self.m, self.minv)
     }
+}
+
+/// `a b / R mod m`, a row of the product and a row of the reduction for each limb, for the prime
+/// `m` with `minv = -1 / m mod 2^64`.
+#[inline(always)]
+fn rows<const N: usize>(a: &[u64; N], b: &[u64; N], m: &[u64; N], minv: u64) -> [u64; N] {
+    let mut t = [0u64; N];
+    let mut top = 0u64;
+    for &bi in b {
+        let mut c = 0u64;
+        for j in 0..N {
+            let p = u128::from(a[j]) * u128::from(bi) + u128::from(t[j]) + u128::from(c);
+            t[j] = p as u64;
+            c = (p >> 64) as u64;
+        }
+        let s = u128::from(top) + u128::from(c);
+        let (tn, tn1) = (s as u64, (s >> 64) as u64);
+        let q = t[0].wrapping_mul(minv);
+        let p = u128::from(q) * u128::from(m[0]) + u128::from(t[0]);
+        let mut c = (p >> 64) as u64;
+        for j in 1..N {
+            let p = u128::from(q) * u128::from(m[j]) + u128::from(t[j]) + u128::from(c);
+            t[j - 1] = p as u64;
+            c = (p >> 64) as u64;
+        }
+        let s = u128::from(tn) + u128::from(c);
+        t[N - 1] = s as u64;
+        top = tn1 + (s >> 64) as u64;
+    }
+    // Below `2 m`: one subtraction when it is at least `m`.
+    let (d, borrow) = sub_n(&t, m);
+    select(top != 0 || !borrow, &d, &t)
+}
+
+/// REDC of the `2 N` limbs at `t`, below `R m`, which it clobbers, by the kernel, for the prime
+/// `m` with `minv2 = -1 / m mod 2^128`.
+///
+/// # Safety
+///
+/// `t` must hold `2 N` limbs.
+#[inline(always)]
+unsafe fn reduce<const N: usize>(t: *mut u64, m: &[u64; N], minv2: [u64; 2]) -> [u64; N] {
+    let mut r = MaybeUninit::<[u64; N]>::uninit();
+    // SAFETY: `r` has room for the `N` limbs the kernel writes, apart from `t`, and `m` holds `N`
+    // limbs.
+    let (r, over) = unsafe {
+        let over = redc_limbs(r.as_mut_ptr().cast(), t, m.as_ptr(), N, minv2);
+        (r.assume_init(), over)
+    };
+    // The kernel's result is below `R + m`, and a residue here below `m`.
+    let (d, borrow) = sub_n(&r, m);
+    select(over || !borrow, &d, &r)
 }
 
 /// `a + b` and the carry out.

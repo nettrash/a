@@ -1382,3 +1382,80 @@ fn products_by_transforms_allocate_one_buffer_more() {
     assert_product_residues(&result, &a, &a, &|| "&a * &a".into());
     assert_eq!(allocations, 3, "&a * &a");
 }
+
+/// The product of two polynomials modulo the word `n` by the schoolbook method in `u128`s.
+fn word_poly_product(a: &[u64], b: &[u64], n: u64) -> Vec<u64> {
+    let mut r = vec![0u64; a.len() + b.len() - 1];
+    for (i, &x) in a.iter().enumerate() {
+        for (j, &y) in b.iter().enumerate() {
+            let t = (u128::from(x) * u128::from(y) + u128::from(r[i + j])) % u128::from(n);
+            r[i + j] = t as u64;
+        }
+    }
+    r
+}
+
+#[test]
+fn word_polynomial_products_past_a_power_of_two_match_the_schoolbook() {
+    // Products of `2^j + d` coefficients take the transforms of `2^j` points and the product of
+    // the low `d` coefficients (from the multiplication's transforms of polynomials modulo a
+    // word; by the schoolbook below 56 coefficients, so `d` = 55 and 56 too), squares and
+    // unbalanced shapes, moduli of 2 to 64 bits, against the schoolbook. The polynomials take the
+    // transforms from 129 coefficients with NEON, and elsewhere only from 8192 in the two operands
+    // together (Kronecker's substitution below): the shapes past 2^13 reach the wrapped transforms
+    // on every target.
+    use a::math::poly::ModPolynomial;
+    let mut state = 0x6A09E667_F3BCC908;
+    let moduli = [65_521u64, 3, (1 << 31) - 1, (1 << 50) - 27, u64::MAX - 58];
+    let mut shapes = Vec::new();
+    for j in [7u32, 8, 10, 11] {
+        let p = 1usize << j;
+        for d in [1, 2, p / 8, p / 4 - 1, p / 4, p / 4 + 1, 55, 56] {
+            let len = p + d;
+            shapes.push((len.div_ceil(2), len + 1 - len.div_ceil(2), false));
+            shapes.push((p, d + 1, false));
+            shapes.push((len.div_ceil(2), 0, true));
+        }
+    }
+    shapes.extend([
+        (4097, 4097, false),
+        (5120, 5121, false),
+        (7000, 1300, false),
+        (4097, 0, true),
+        (5120, 0, true),
+    ]);
+    for (i, &(la, lb, square)) in shapes.iter().enumerate() {
+        if la + lb > size(10_300, 0) {
+            continue;
+        }
+        let n = moduli[i % moduli.len()];
+        let mut coeffs = |l: usize| -> Vec<u64> {
+            (0..l)
+                .map(|_| {
+                    if i % 4 == 0 {
+                        n - 1
+                    } else {
+                        xorshift(&mut state) % n
+                    }
+                })
+                .collect()
+        };
+        let a = coeffs(la);
+        let b = if square { a.clone() } else { coeffs(lb) };
+        let (pa, pb) = (
+            ModPolynomial::from_u64(&a, n),
+            ModPolynomial::from_u64(&b, n),
+        );
+        let r = if square { &pa * &pa } else { &pa * &pb };
+        let mut want = word_poly_product(&a, &b, n);
+        while want.last() == Some(&0) {
+            want.pop();
+        }
+        assert_eq!(
+            r.word_coeffs().unwrap_or(&[]),
+            &want[..],
+            "{la} x {} coefficients modulo {n}",
+            if square { la } else { lb }
+        );
+    }
+}

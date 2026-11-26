@@ -140,6 +140,10 @@ impl<'c, C: Curve> Point<'c, C> {
     /// [`Divisor`](crate::math::numbers::Divisor) is for divisions. Measured on an Apple M4 Max on
     /// P-256, building the table for 256 bits took the time of 30 products, and each product
     /// afterwards an eighth of the time of one of [`Mul`].
+    ///
+    /// # Panics
+    ///
+    /// When the table is too long to allocate.
     pub fn prepare(&self, bits: usize) -> Prepared<'c, C> {
         Prepared {
             curve: self.curve,
@@ -172,7 +176,8 @@ impl<'c, C: Curve> Prepared<'c, C> {
     pub fn mul(&self, k: &Number) -> Point<'c, C> {
         let scalar = limbs_of(k);
         let mut limbs = self.point.clone();
-        if k.bits() as usize <= self.table.bits {
+        // In 64 bits: on 32-bit targets `as usize` would cut the bits of a scalar of 512 MiB short.
+        if k.bits() <= self.table.bits as u64 {
             self.curve
                 .prepared_limbs(&mut limbs, &self.table, &scalar, k.is_negative());
         } else {

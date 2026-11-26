@@ -23,6 +23,7 @@
 //! `2k + 1` limbs each and are added at their positions in the end, the high part of each folded
 //! into the next one so that every position of the product is written once.
 
+use super::super::scratch::{Scratch, need};
 use super::kernels::{divexact_finish, mul_1};
 use super::limbs::{
     abs_diff, add_1, add_ext, add_n, cmp_n, mul, mul_itch, sqr, sqr_itch, sub_ext, sub_n,
@@ -81,11 +82,14 @@ pub(super) fn toom33_itch(nx: usize, ny: usize) -> usize {
     4 * k + 4 + 3 * stride(k) + parts_itch(k, nx - 2 * k, ny - 2 * k)
 }
 
-/// The scratch that [`toom42`] needs for operands of `nx >= ny` limbs, as [`toom33`] does.
+/// The scratch that [`toom42`] needs for operands of `nx >= ny` limbs, as [`toom33`] does, and that
+/// of the product at -1, of a value of `k + 1` limbs by one of `k`. That one is below the others at
+/// every length of every build's thresholds, often by nothing; as `mul_itch` is not monotone, it is
+/// planned rather than assumed.
 pub(super) fn toom42_itch(nx: usize, ny: usize) -> usize {
     let k = toom42_part(nx, ny);
     let (sx, ty) = (nx - 3 * k, ny - k);
-    4 * k + 4 + 3 * stride(k) + parts_itch(k, sx.max(ty), sx.min(ty))
+    4 * k + 4 + 3 * stride(k) + parts_itch(k, sx.max(ty), sx.min(ty)).max(mul_itch(k + 1, k))
 }
 
 /// The scratch that [`toom3_sqr`] needs for an operand of `n` limbs.
@@ -128,11 +132,12 @@ pub(super) unsafe fn toom33(
     nx: usize,
     y: *const u64,
     ny: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     let k = nx.div_ceil(3);
     let (sx, ty) = (nx - 2 * k, ny - 2 * k);
     debug_assert!(0 < ty && ty <= sx && sx <= k);
+    need!(s, toom33_itch(nx, ny));
     // SAFETY: the scratch holds the two products of `2k + 2` limbs, the three values of `k + 1`
     // in `stride(k) <= k + 2` limbs each and, after them, the scratch of the products of parts;
     // the values in `r`, at limbs `0..3 stride(k)`, lie below `nx + ny = 4k + sx + ty` as
@@ -140,13 +145,11 @@ pub(super) unsafe fn toom33(
     // written apart from its operands.
     unsafe {
         let v = stride(k);
-        let (vm1, v2) = (s, s.add(2 * k + 2));
-        let (xp1, xm1, ym1) = (
-            s.add(4 * k + 4),
-            s.add(4 * k + 4 + v),
-            s.add(4 * k + 4 + 2 * v),
-        );
-        let rest = s.add(4 * k + 4 + 3 * v);
+        let (vm1, rest) = s.split(2 * k + 2);
+        let (v2, rest) = rest.split(2 * k + 2);
+        let (xp1, rest) = rest.split(v);
+        let (xm1, rest) = rest.split(v);
+        let (ym1, rest) = rest.split(v);
         let (yp1, xp2, yp2) = (r, r.add(v), r.add(2 * v));
         let negative_x = eval3(xp1, xm1, xp2, x, k, sx);
         let negative_y = eval3(yp1, ym1, yp2, y, k, ty);
@@ -167,16 +170,18 @@ pub(super) unsafe fn toom33(
 ///
 /// `n >= 3`; the limbs of `x` must be valid for reads, those of `r` for writes, and the
 /// [`toom3_sqr_itch`]`(n)` limbs at `s` for reads and writes, all apart.
-pub(super) unsafe fn toom3_sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
+pub(super) unsafe fn toom3_sqr(r: *mut u64, x: *const u64, n: usize, s: Scratch) {
     let k = n.div_ceil(3);
     let sx = n - 2 * k;
     debug_assert!(0 < sx && sx <= k);
+    need!(s, toom3_sqr_itch(n));
     // SAFETY: as in `toom33`, with the value at 2 in `r`, at limbs `0..k + 1`, below `2n`.
     unsafe {
         let v = stride(k);
-        let (vm1, v2) = (s, s.add(2 * k + 2));
-        let (p1, m1) = (s.add(4 * k + 4), s.add(4 * k + 4 + v));
-        let rest = s.add(4 * k + 4 + 2 * v);
+        let (vm1, rest) = s.split(2 * k + 2);
+        let (v2, rest) = rest.split(2 * k + 2);
+        let (p1, rest) = rest.split(v);
+        let (m1, rest) = rest.split(v);
         let p2 = r;
         eval3(p1, m1, p2, x, k, sx);
         if *m1.add(k) == 0 {
@@ -246,22 +251,21 @@ pub(super) unsafe fn toom42(
     nx: usize,
     y: *const u64,
     ny: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     let k = toom42_part(nx, ny);
     let (sx, ty) = (nx - 3 * k, ny - k);
     debug_assert!(0 < sx && sx <= k && 0 < ty && ty <= k);
+    need!(s, toom42_itch(nx, ny));
     // SAFETY: as in `toom33`; the magnitude of `x(-2)`, which is not used, and the scratch of its
     // evaluation go where the product at 2 goes later.
     unsafe {
         let v = stride(k);
-        let (vm1, v2) = (s, s.add(2 * k + 2));
-        let (xp1, xm1, ym1) = (
-            s.add(4 * k + 4),
-            s.add(4 * k + 4 + v),
-            s.add(4 * k + 4 + 2 * v),
-        );
-        let rest = s.add(4 * k + 4 + 3 * v);
+        let (vm1, rest) = s.split(2 * k + 2);
+        let (v2, rest) = rest.split(2 * k + 2);
+        let (xp1, rest) = rest.split(v);
+        let (xm1, rest) = rest.split(v);
+        let (ym1, rest) = rest.split(v);
         let (yp1, xp2, yp2) = (r, r.add(v), r.add(2 * v));
         let negative_x = eval4_pm1(xp1, xm1, x, k, sx, v2);
         eval4_pm2(xp2, v2, x, k, sx, v2.add(k + 1));
@@ -392,11 +396,12 @@ pub(super) unsafe fn toom44(
     nx: usize,
     y: *const u64,
     ny: usize,
-    s: *mut u64,
+    s: Scratch,
 ) {
     let k = nx.div_ceil(4);
     let (sx, ty) = (nx - 3 * k, ny - 3 * k);
     debug_assert!(0 < ty && ty <= sx && sx <= k);
+    need!(s, toom44_itch(nx, ny));
     // SAFETY: the scratch holds the four products of `2k + 2` limbs, two values of `k + 1` in
     // `stride(k) <= k + 2` limbs each, which serve [`interpolate7`] as its `2k + 1` limbs of
     // scratch, and, after them, the scratch of the products of parts; the values in `r`, at limbs
@@ -404,9 +409,13 @@ pub(super) unsafe fn toom44(
     // that is written over it. Every product is written apart from its operands.
     unsafe {
         let (n, v) = (2 * k + 2, stride(k));
-        let (w1, w3, w4, w5) = (s, s.add(n), s.add(2 * n), s.add(3 * n));
-        let (ya, g) = (s.add(4 * n), s.add(4 * n + v));
-        let rest = s.add(4 * n + 2 * v);
+        let (w1, rest) = s.split(n);
+        let (w3, rest) = rest.split(n);
+        let (w4, rest) = rest.split(n);
+        let (w5, rest) = rest.split(n);
+        // `ya` and `g`, together, are the `2k + 1` limbs of `interpolate7`'s scratch.
+        let ya = rest.take(2 * v);
+        let (g, rest) = rest.add(v).split(v);
         let (xa, xb, yb) = (r, r.add(v), r.add(2 * v));
         let negative_x = eval4_pm2(xa, xb, x, k, sx, g);
         let negative_y = eval4_pm2(ya, yb, y, k, ty, g);
@@ -441,17 +450,21 @@ pub(super) unsafe fn toom44(
 ///
 /// `n >= 4`; the limbs of `x` must be valid for reads, those of `r` for writes, and the
 /// [`toom4_sqr_itch`]`(n)` limbs at `s` for reads and writes, all apart.
-pub(super) unsafe fn toom4_sqr(r: *mut u64, x: *const u64, n: usize, s: *mut u64) {
+pub(super) unsafe fn toom4_sqr(r: *mut u64, x: *const u64, n: usize, s: Scratch) {
     let k = n.div_ceil(4);
     let sx = n - 3 * k;
     debug_assert!(0 < sx && sx <= k);
+    need!(s, toom4_sqr_itch(n));
     // SAFETY: as in `toom44`, with the values at limbs `0..2 stride(k)` of `r`, and the scratch
     // of the evaluations and of `interpolate7` in the `2 stride(k)` limbs after the products.
     unsafe {
         let (m, v) = (2 * k + 2, stride(k));
-        let (w1, w3, w4, w5) = (s, s.add(m), s.add(2 * m), s.add(3 * m));
-        let g = s.add(4 * m);
-        let rest = s.add(4 * m + 2 * v);
+        let (w1, rest) = s.split(m);
+        let (w3, rest) = rest.split(m);
+        let (w4, rest) = rest.split(m);
+        let (w5, rest) = rest.split(m);
+        // The scratch of the evaluations, and the `2k + 1` limbs of `interpolate7`'s.
+        let (g, rest) = rest.split(2 * v);
         let (a, b) = (r, r.add(v));
         eval4_pm2(a, b, x, k, sx, g);
         sqr(w4, a, k + 1, rest);
@@ -672,8 +685,9 @@ unsafe fn interpolate7(
 /// # Safety
 ///
 /// The `k + 1` limbs at `a` and `b` must be valid for reads, the `2k + 2` at `r` for writes, and
-/// the `mul_itch(k + 1, k + 1)` at `s` for reads and writes, all apart.
-unsafe fn product_of_values(r: *mut u64, a: *const u64, b: *const u64, k: usize, s: *mut u64) {
+/// the `mul_itch(k + 1, k + 1).max(mul_itch(k, k))` at `s` for reads and writes, all apart: the
+/// shorter product can need more.
+unsafe fn product_of_values(r: *mut u64, a: *const u64, b: *const u64, k: usize, s: Scratch) {
     // SAFETY: as the caller guarantees.
     unsafe {
         if *a.add(k) | *b.add(k) == 0 {

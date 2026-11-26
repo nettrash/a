@@ -1,0 +1,34 @@
+[package]
+name = "ratbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../lib" }
+malachite-q = "0.14"
+malachite-nz = "0.14"
+malachite-base = "0.14"
+num-rational = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+rug = { version = "1.30", default-features = false, features = ["integer", "rational", "std"], optional = true }
+gmp-mpfr-sys = { version = "1.7", default-features = false, features = ["use-system-libs"], optional = true }
+
+[build-dependencies]
+cc = "1.2"
+
+[features]
+default = ["rug"]
+rug = ["dep:rug", "dep:gmp-mpfr-sys"]
+
+# The default release profile: opt-level 3, no LTO, default codegen units, no target-cpu.
+
+# A second figure for ours (run.sh with LTO=1): fat LTO and one codegen unit.
+[profile.lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

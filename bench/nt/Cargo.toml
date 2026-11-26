@@ -1,0 +1,21 @@
+[package]
+name = "ntbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[dependencies]
+a = { path = "../../lib", package = "nettrash-a" }
+primal = "0.3.3"
+machine-prime = { version = "1.5.7", features = ["wide"] }
+machine-factor = "0.2.5"
+malachite-base = "0.15"
+malachite-nz = "0.15"
+
+[profile.fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

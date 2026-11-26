@@ -7,7 +7,8 @@ use crate::math::numbers::{ByteOrder, Divisor, Number};
 /// are numbers below it, in little-endian order, where `Number`'s paths are the fastest; its
 /// reductions go through a [`Divisor`], which pays for itself from a few divisions, with the
 /// multiplication's and the division's own methods for long primes.
-pub(in super::super) struct Big {
+#[derive(Clone)]
+pub(crate) struct Big {
     /// The prime.
     p: Number,
     /// The prime prepared for division.

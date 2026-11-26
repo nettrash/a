@@ -3,18 +3,83 @@
 //! * [`complex`]: complex numbers with `f32` or `f64` parts, their arithmetic with `+`, `-`, `*`
 //!   and `/`, and their absolute values, arguments, exponentials, logarithms, square roots and
 //!   powers.
-//! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, whose
-//!   points add with `+`, subtract with `-` and multiply by a number with `*`, and the curves in
-//!   common use; on numbers, and not constant-time.
-//! * [`matrix`]: matrices of floats, complex numbers or numbers, their arithmetic with `+`, `-`
-//!   and `*`, transposes, row and column operations, determinants, decompositions, eigenvalues
-//!   and functions of matrices.
+//! * [`dual`]: dual and hyper-dual numbers for forward-mode automatic differentiation, which
+//!   nest, with the elementary functions; derivatives, gradients, Jacobians and Hessians, exact
+//!   up to the rounding of the arithmetic but for one rule at `0·∞`, in the shapes the methods
+//!   of [`numerics`] take.
+//! * [`ec`]: elliptic curves over prime fields in Weierstrass, Montgomery and Edwards form, and
+//!   over binary fields, whose points add with `+`, subtract with `-` and multiply by a number
+//!   with `*`; the curves in common use and the 18 of SEC 2; hashing to curves (RFC 9380); not
+//!   constant-time.
+//! * [`fft`]: fast Fourier transforms of real and complex sequences of any length, in one, two
+//!   and three dimensions and in batches; cosine and sine transforms of types I to IV; and linear
+//!   and circular convolutions and correlations.
+//! * [`field`]: finite fields: prime fields `GF(p)` with batch inversion, square roots and the
+//!   Legendre symbol, extensions `GF(pᵏ)` and the towers `F_p² → F_p⁶ → F_p¹²`, binary fields
+//!   `GF(2ᵐ)` in polynomial and normal bases, and `GF(2⁸)` and `GF(2¹²⁸)` of AES and GCM.
+//! * [`float`]: binary floats of any precision, each result correctly rounded in four modes as
+//!   MPFR rounds it: their arithmetic, roots and powers, conversions and text, exponentials,
+//!   logarithms, hyperbolic and circular functions and constants; and complex numbers of two
+//!   such parts, as GNU MPC's, with their elementary functions.
+//! * [`lattice`]: the reduction of lattice bases by LLL, exactly or by the L² algorithm, by LLL
+//!   with deep insertions and by BKZ; shortest and closest vectors by enumeration; and integer
+//!   relations among real numbers by PSLQ.
+//! * [`matrix`]: matrices of floats, complex numbers, numbers or rationals, their arithmetic with
+//!   `+`, `-` and `*`, transposes, row and column operations, determinants, decompositions,
+//!   eigenvalues and functions of matrices, the exact determinants, solutions and inverses of
+//!   matrices of numbers and rationals, the Hermite and Smith normal forms, and matrices over the
+//!   prime fields `GF(p)` and over `GF(2)`.
 //! * [`numbers`]: integers of any size, stored as a sign and the bytes of the absolute value
 //!   in either byte order; they add with `+` and `+=`, subtract with `-` and `-=`, multiply
 //!   with `*` and `*=`, divide with `/`, `/=`, `%` and `%=`, shift with `<<`, `>>`, `<<=` and
 //!   `>>=`, and are written and read as text in any radix from 2 to 36.
+//! * [`numerics`]: numerical methods on `f32` and `f64`: the zeros of functions and of systems of
+//!   equations, integrals in one and several dimensions and the Gaussian rules, initial value
+//!   problems for stiff and non-stiff ordinary differential equations with dense output and
+//!   events, minima with and without bounds, least squares and linear programming, splines,
+//!   Chebyshev and rational approximation, and derivatives.
+//! * [`pairing`]: the optimal ate pairing on BN254 and BLS12-381, with their groups `G1`, `G2`
+//!   and `GT`; hashing to BLS12-381's `G1` and `G2` (RFC 9380) and to BN254's `G1` (gnark-crypto's
+//!   suite).
+//! * [`poly`]: polynomials in one variable with coefficients that are numbers, rationals, floats,
+//!   complex numbers or residues modulo an integer, their arithmetic, division and powers modulo a
+//!   polynomial, greatest common divisors and resultants, evaluation at many points and
+//!   interpolation, roots in double precision, certified or correctly rounded, and factorisation.
+//! * [`quaternion`]: quaternions with `f32` or `f64` parts, their arithmetic, exponentials,
+//!   logarithms and powers, and rotations: axis and angle, rotation vectors and matrices, Euler
+//!   angles in SciPy's 24 conventions, rotating vectors, slerp, nlerp and shortest arcs.
+//! * [`rational`]: rational numbers in lowest terms over [`numbers`], their arithmetic with `+`,
+//!   `-`, `*` and `/`, with numbers and primitive integers too, comparisons, rounding, and their
+//!   conversions from and to integers, text and floats; continued fractions, best approximations
+//!   and rational reconstruction; and the Bernoulli and harmonic numbers.
+//! * [`sparse`]: sparse matrices of floats and complex numbers in compressed row, compressed
+//!   column and coordinate form, read and written as Matrix Market files, their products and
+//!   other operations, the orderings that keep the fill of a factorisation low, the sparse
+//!   Cholesky, `L·D·Lᴴ`, LU and QR factorisations, the Krylov methods with their preconditioners,
+//!   and a few eigenvalues by the Lanczos and Arnoldi methods.
+//! * [`special`]: special functions of floats, and of complex numbers for some: the gamma family
+//!   with the incomplete gamma and beta functions and their inverses, the error functions,
+//!   Bessel and Airy functions, the Riemann and Hurwitz zeta functions and polylogarithms, the
+//!   Lambert W function, exponential and elliptic integrals and the orthogonal polynomials.
+//! * [`uint`]: fixed-width integers of `N` 64-bit limbs on the stack, unsigned and signed, with
+//!   the operators and the checked, wrapping, overflowing and saturating arithmetic of the
+//!   primitive integers, text in any radix, and conversions to and from [`numbers`]; Montgomery
+//!   multiplication, and `pow_mod` modulo any number; not constant-time.
 
 pub mod complex;
+pub mod dual;
 pub mod ec;
+pub mod fft;
+pub mod field;
+pub mod float;
+pub mod lattice;
 pub mod matrix;
 pub mod numbers;
+pub mod numerics;
+pub mod pairing;
+pub mod poly;
+pub mod quaternion;
+pub mod rational;
+pub mod sparse;
+pub mod special;
+pub mod uint;

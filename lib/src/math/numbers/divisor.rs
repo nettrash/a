@@ -16,6 +16,7 @@ use super::div::{
     wide_division, wide_number, wider_division, working_memory,
 };
 use super::mul::{Operand, Product, STACK_LIMBS, WIDE, Wide, on_heap, on_stack, put_wide};
+use super::scratch::scratch;
 use super::sub::Negated;
 use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
@@ -366,10 +367,9 @@ impl Divisor {
             y.pre = self.prepared.get_or_init(|| unsafe { prepare(y.d, y.n) });
         }
         let compute = |s: *mut MaybeUninit<u64>| {
+            let s = scratch!(s.cast(), need);
             // SAFETY: the working memory holds `need` limbs; the rest as the caller guarantees.
-            unsafe {
-                compute_by::<EUCLIDEAN, R>(s.cast(), x, y, negative_x, negative_y, want, place)
-            }
+            unsafe { compute_by::<EUCLIDEAN, R>(s, x, y, negative_x, negative_y, want, place) }
         };
         if need <= STACK_LIMBS {
             on_stack(compute)

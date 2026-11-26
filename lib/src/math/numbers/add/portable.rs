@@ -1,6 +1,7 @@
-//! The portable kernels, for Miri and for the targets without assembly kernels: all but
+//! The portable kernels, for Miri and for the targets without assembly kernels: all but 64-bit
 //! `x86_64` and the 64-bit little-endian aarch64 targets whose operating system allows
-//! unaligned accesses, so also the strict-alignment aarch64 ones (hermit, nuttx, bare metal).
+//! unaligned accesses, so also x32 and the strict-alignment aarch64 ones (hermit, nuttx, bare
+//! metal).
 //! The limbs are `u64`s read from and written as `[u8; 8]`, which has alignment 1: the
 //! pointers need no alignment, and the compiler makes only the accesses the target allows. The
 //! carry between limbs is taken from `overflowing_add` (or `overflowing_sub`) pairs, which

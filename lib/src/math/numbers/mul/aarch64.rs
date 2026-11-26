@@ -186,6 +186,20 @@ pub(crate) unsafe fn mul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> 
     unsafe { mul_1(r.cast(), x.cast(), n, y) }
 }
 
+/// Adds the `n` little-endian limbs at `x` times `y` to those at `r`, at any addresses, and returns
+/// the limb that carries out of them: [`addmul_1`] on the bytes of numbers, as [`mul_1_bytes`] is
+/// [`mul_1`] on them.
+///
+/// # Safety
+///
+/// As for [`addmul_1`], for the `8 n` bytes at each pointer.
+#[inline(always)]
+pub(crate) unsafe fn addmul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    // SAFETY: as the caller guarantees; the assembly reads and writes the limbs with `ldp`, `ldr`,
+    // `stp` and `str`, which take any address here, and the pointers are not dereferenced in Rust.
+    unsafe { addmul_1(r.cast(), x.cast(), n, y) }
+}
+
 /// Adds the `n` limbs at `x` times `y` to the `n` limbs at `r`, and returns the limb that
 /// carries out of them: two chains a step, as the module documentation describes.
 ///
@@ -523,6 +537,18 @@ unsafe fn diag_addlsh1(r: *mut u64, x: *const u64, n: usize) {
             options(nostack),
         );
     }
+}
+
+/// Doubles the `2n` limbs at `r` and adds the squares of the `n` limbs at `x` at the even
+/// positions, by [`diag_addlsh1`]: the last pass of a square, for the short squares.
+///
+/// # Safety
+///
+/// As for [`diag_addlsh1`].
+#[inline(always)]
+pub(super) unsafe fn double_and_add_squares(r: *mut u64, x: *const u64, n: usize) {
+    // SAFETY: as the caller guarantees.
+    unsafe { diag_addlsh1(r, x, n) }
 }
 
 /// The longest rows of a square's triangle that [`sqr_basecase`] adds two at a time; longer ones

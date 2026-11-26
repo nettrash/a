@@ -1,0 +1,419 @@
+//! Magnitudes as native limbs, the least significant first, without zero limbs at the top: the
+//! integers that the arithmetic of [`BigFloat`](super::BigFloat) rounds.
+
+use crate::math::numbers::{ByteOrder, Magnitude, Number, nat};
+use core::cmp::Ordering;
+
+/// Drops the zero limbs at the top of `v`.
+#[inline]
+pub(crate) fn trim(v: &mut Vec<u64>) {
+    while v.last() == Some(&0) {
+        v.pop();
+    }
+}
+
+/// The number of bits of the magnitude `m`, 0 for zero; `m` without zero limbs at the top.
+#[inline]
+pub(crate) fn bit_len(m: &[u64]) -> u64 {
+    match m.last() {
+        None => 0,
+        Some(&top) => {
+            debug_assert!(top != 0);
+            64 * (m.len() as u64 - 1) + u64::from(64 - top.leading_zeros())
+        }
+    }
+}
+
+/// Bit `i` of `m`.
+#[inline]
+pub(crate) fn bit(m: &[u64], i: u64) -> bool {
+    let (k, b) = ((i / 64) as usize, i % 64);
+    k < m.len() && m[k] >> b & 1 == 1
+}
+
+/// Whether the bits of `m` below bit `i` are all zero.
+#[inline]
+pub(crate) fn zero_below(m: &[u64], i: u64) -> bool {
+    let (k, b) = ((i / 64) as usize, i % 64);
+    let k = k.min(m.len());
+    m[..k].iter().all(|&x| x == 0) && (k == m.len() || b == 0 || m[k] << (64 - b) == 0)
+}
+
+/// The number of zero bits at the bottom of the magnitude `m`, which is not zero.
+#[inline]
+pub(crate) fn trailing_zeros(m: &[u64]) -> u64 {
+    let k = m
+        .iter()
+        .position(|&x| x != 0)
+        .expect("a magnitude that is not zero");
+    64 * k as u64 + u64::from(m[k].trailing_zeros())
+}
+
+/// `m·2^s`, without zero limbs at the top.
+pub(crate) fn shl(m: &[u64], s: u64) -> Vec<u64> {
+    if m.is_empty() {
+        return Vec::new();
+    }
+    let (k, b) = ((s / 64) as usize, (s % 64) as u32);
+    let mut r = Vec::with_capacity(m.len() + k + 1);
+    r.resize(k, 0);
+    if b == 0 {
+        r.extend_from_slice(m);
+    } else {
+        let mut carry = 0u64;
+        for &x in m {
+            r.push(x << b | carry);
+            carry = x >> (64 - b);
+        }
+        r.push(carry);
+    }
+    trim(&mut r);
+    r
+}
+
+/// `floor(m·2^-s)`, without zero limbs at the top.
+pub(crate) fn shr(m: &[u64], s: u64) -> Vec<u64> {
+    let (k, b) = ((s / 64) as usize, (s % 64) as u32);
+    if k >= m.len() {
+        return Vec::new();
+    }
+    let m = &m[k..];
+    let mut r = Vec::with_capacity(m.len());
+    if b == 0 {
+        r.extend_from_slice(m);
+    } else {
+        for i in 0..m.len() {
+            let hi = m.get(i + 1).map_or(0, |&x| x << (64 - b));
+            r.push(m[i] >> b | hi);
+        }
+    }
+    trim(&mut r);
+    r
+}
+
+/// The order of the magnitudes `a` and `b`, both without zero limbs at the top.
+#[inline]
+pub(crate) fn cmp(a: &[u64], b: &[u64]) -> Ordering {
+    a.len()
+        .cmp(&b.len())
+        .then_with(|| a.iter().rev().cmp(b.iter().rev()))
+}
+
+/// `a + b`.
+pub(crate) fn add(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let (a, b) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+    let mut r = Vec::with_capacity(a.len() + 1);
+    r.extend_from_slice(a);
+    if nat::add_assign(&mut r, b) {
+        r.push(1);
+    }
+    r
+}
+
+/// `a + 1`.
+#[allow(dead_code, reason = "the interface of the other modules of floats")]
+pub(crate) fn increment(a: &mut Vec<u64>) {
+    for x in a.iter_mut() {
+        let (s, c) = x.overflowing_add(1);
+        *x = s;
+        if !c {
+            return;
+        }
+    }
+    a.push(1);
+}
+
+/// `a - b` for `a >= b`, without zero limbs at the top.
+pub(crate) fn sub(a: &[u64], b: &[u64]) -> Vec<u64> {
+    debug_assert!(cmp(a, b) != Ordering::Less);
+    let mut r = a.to_vec();
+    let borrow = nat::sub_assign(&mut r, b);
+    debug_assert!(!borrow);
+    trim(&mut r);
+    r
+}
+
+/// `a·b`, without zero limbs at the top.
+#[allow(dead_code, reason = "the interface of the other modules of floats")]
+pub(crate) fn mul(a: &[u64], b: &[u64]) -> Vec<u64> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    let mut r = Vec::new();
+    let mut scratch = Vec::new();
+    if core::ptr::eq(a, b) {
+        nat::sqr_into(&mut r, a, &mut scratch);
+    } else {
+        nat::mul_into(&mut r, a, b, &mut scratch);
+    }
+    trim(&mut r);
+    r
+}
+
+/// The magnitude of `n` as limbs.
+pub(crate) fn of_number(n: &Number) -> Vec<u64> {
+    let m = Magnitude::of(n);
+    let b = m.bytes;
+    let mut r = Vec::with_capacity(b.len().div_ceil(8));
+    // Eight bytes at a time from the least significant end; the bytes are significant, so the
+    // top limb is not zero.
+    if m.big_endian {
+        let (rest, whole) = b.as_rchunks::<8>();
+        r.extend(whole.iter().rev().map(|c| u64::from_be_bytes(*c)));
+        if !rest.is_empty() {
+            let mut t = [0u8; 8];
+            t[8 - rest.len()..].copy_from_slice(rest);
+            r.push(u64::from_be_bytes(t));
+        }
+    } else {
+        let (whole, rest) = b.as_chunks::<8>();
+        r.extend(whole.iter().map(|c| u64::from_le_bytes(*c)));
+        if !rest.is_empty() {
+            let mut t = [0u8; 8];
+            t[..rest.len()].copy_from_slice(rest);
+            r.push(u64::from_le_bytes(t));
+        }
+    }
+    debug_assert!(r.last() != Some(&0));
+    r
+}
+
+/// The magnitude of `n` in a `u128` when it has at most 128 bits, its sign apart.
+#[inline]
+pub(crate) fn small_of_number(n: &Number) -> Option<(bool, u128)> {
+    let m = Magnitude::of(n);
+    (m.bytes.len() <= 16).then(|| (m.negative, m.small()))
+}
+
+/// The number of the magnitude `m` and the sign `negative`, in the byte order `order`, in the
+/// shortest form; zero is never negative.
+pub(crate) fn to_number(m: &[u64], negative: bool, order: ByteOrder) -> Number {
+    let Some(t) = m.iter().rposition(|&w| w != 0) else {
+        return Number {
+            value: vec![0],
+            negative: false,
+            byte_order: order,
+        };
+    };
+    // The bytes of the top limb that are significant, one to eight.
+    let top = m[t];
+    let tb = 8 - (top.leading_zeros() / 8) as usize;
+    // Written once, into a vector of the exact length: the whole limbs by an iterator of known
+    // length (which the standard library extends with as a copy), the top limb's bytes apart.
+    let mut v = Vec::with_capacity(8 * t + tb);
+    if order == ByteOrder::BigEndian {
+        v.extend_from_slice(&top.to_be_bytes()[8 - tb..]);
+        v.extend(m[..t].iter().rev().flat_map(|w| w.to_be_bytes()));
+    } else {
+        v.extend(m[..t].iter().flat_map(|w| w.to_le_bytes()));
+        v.extend_from_slice(&top.to_le_bytes()[..tb]);
+    }
+    Number {
+        value: v,
+        negative,
+        byte_order: order,
+    }
+}
+
+/// [`to_number`] in little-endian bytes of the mantissa `m` (its top bit set) shifted down by
+/// `s < 64` bits, the shifted limbs written straight into the bytes, with no vector of limbs
+/// between.
+pub(crate) fn to_number_shr(m: &[u64], s: u32, negative: bool) -> Number {
+    debug_assert!(s < 64 && m.last().is_some_and(|&t| t >> 63 == 1));
+    if s == 0 {
+        return to_number(m, negative, ByteOrder::LittleEndian);
+    }
+    let t = m.len() - 1;
+    let top = m[t] >> s;
+    let tb = 8 - (top.leading_zeros() / 8) as usize;
+    let mut v = Vec::with_capacity(8 * t + tb);
+    v.extend(
+        m.windows(2)
+            .flat_map(|w| (w[0] >> s | w[1] << (64 - s)).to_le_bytes()),
+    );
+    v.extend_from_slice(&top.to_le_bytes()[..tb]);
+    Number {
+        value: v,
+        negative,
+        byte_order: ByteOrder::LittleEndian,
+    }
+}
+
+/// The integer `±w` (`w` not zero) as a [`Number`] of its significant bytes in the order `order`.
+#[inline]
+pub(crate) fn word_number(w: u128, negative: bool, order: ByteOrder) -> Number {
+    debug_assert!(w != 0);
+    let n = (128 - w.leading_zeros() as usize).div_ceil(8);
+    let value = if order == ByteOrder::BigEndian {
+        w.to_be_bytes()[16 - n..].to_vec()
+    } else {
+        w.to_le_bytes()[..n].to_vec()
+    };
+    Number {
+        value,
+        negative,
+        byte_order: order,
+    }
+}
+
+/// Bits `pos..pos + 64` of the magnitude `m` as one limb, the bits outside `m` (below bit 0 for
+/// a negative `pos`, or above its top) zero.
+#[inline]
+pub(crate) fn extract(m: &[u64], pos: i128) -> u64 {
+    if pos <= -64 || pos >= 64 * m.len() as i128 {
+        return 0;
+    }
+    let k = pos.div_euclid(64);
+    let b = pos.rem_euclid(64) as u32;
+    let at = |i: i128| -> u64 {
+        if (0..m.len() as i128).contains(&i) {
+            m[i as usize]
+        } else {
+            0
+        }
+    };
+    if b == 0 {
+        at(k)
+    } else {
+        at(k) >> b | at(k + 1) << (64 - b)
+    }
+}
+
+/// Whether the bits of `m` below bit `pos` hold a one; none below 0.
+#[inline]
+pub(crate) fn any_below(m: &[u64], pos: i128) -> bool {
+    if pos <= 0 {
+        return false;
+    }
+    let p = pos.min(64 * m.len() as i128) as u64;
+    !zero_below(m, p)
+}
+
+/// The order of the mantissas `0.a` and `0.b`, aligned at their top bits, of any lengths.
+#[inline]
+pub(crate) fn cmp_top(a: &[u64], b: &[u64]) -> Ordering {
+    let (na, nb) = (a.len(), b.len());
+    let k = na.min(nb);
+    for i in 1..=k {
+        let (x, y) = (a[na - i], b[nb - i]);
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    // The longer one is larger unless its other limbs are zero.
+    if na > nb {
+        if a[..na - k].iter().any(|&x| x != 0) {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    } else if nb > na {
+        if b[..nb - k].iter().any(|&x| x != 0) {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        }
+    } else {
+        Ordering::Equal
+    }
+}
+
+/// Sets `dst` to the top `dst.len()` limbs of the magnitude `0.a·2^-c` for the mantissa `a`,
+/// whose top limb's top bit is set, and `c` in `0..64`: limb `i` of `dst` is bits `64(a.len() -
+/// dst.len() + i) + c..` of `a` as an integer, zero below its lowest bit. Returns whether any bit
+/// of `a` lies below those taken.
+#[inline]
+pub(crate) fn top_limbs(a: &[u64], c: u32, dst: &mut [u64]) -> bool {
+    let (la, k) = (a.len() as i128, dst.len() as i128);
+    let p0 = 64 * (la - k) + i128::from(c);
+    if c == 0 && la >= k {
+        let s = (la - k) as usize;
+        dst.copy_from_slice(&a[s..]);
+        return a[..s].iter().any(|&x| x != 0);
+    }
+    if la >= k {
+        // Limb `i` is `a[s + i] >> c | a[s + i + 1] << (64 - c)`, `0 < c < 64`, the top one
+        // without a limb above.
+        let s = (la - k) as usize;
+        let n = dst.len();
+        for i in 0..n - 1 {
+            dst[i] = a[s + i] >> c | a[s + i + 1] << (64 - c);
+        }
+        dst[n - 1] = a[la as usize - 1] >> c;
+        return a[s] << (64 - c) != 0 || a[..s].iter().any(|&x| x != 0);
+    }
+    // A mantissa shorter than `dst`: zeros, then the bits of `a` shifted up by `64 - c` (by
+    // whole limbs for `c = 0`); nothing lies below them.
+    let (la, k) = (la as usize, k as usize);
+    let z = k - la;
+    for d in &mut dst[..z - 1] {
+        *d = 0;
+    }
+    if c == 0 {
+        dst[z - 1] = 0;
+        dst[z..].copy_from_slice(a);
+    } else {
+        dst[z - 1] = a[0] << (64 - c);
+        for j in 1..la {
+            dst[z - 1 + j] = a[j - 1] >> c | a[j] << (64 - c);
+        }
+        dst[k - 1] = a[la - 1] >> c;
+    }
+    debug_assert!(p0 < 0);
+    false
+}
+
+/// The number of zero limbs at the bottom of a mantissa, which is not zero.
+#[inline]
+pub(crate) fn low_zeros(m: &[u64]) -> usize {
+    m.iter().position(|&x| x != 0).unwrap_or(0)
+}
+
+/// Working memory of the arithmetic: vectors that each thread keeps between operations, so that
+/// an operation allocates nothing but its result. An operation that panics drops them; the next
+/// takes new ones.
+#[derive(Default)]
+pub(crate) struct Work {
+    pub(crate) a: Vec<u64>,
+    pub(crate) b: Vec<u64>,
+    pub(crate) c: Vec<u64>,
+    pub(crate) scratch: Vec<u64>,
+}
+
+std::thread_local! {
+    /// The thread's working memory.
+    static WORK: core::cell::Cell<Option<Box<Work>>> = const { core::cell::Cell::new(None) };
+    /// A vector kept for the result of an assigning operator, which hands the old mantissa back.
+    static SPARE: core::cell::Cell<Vec<u64>> = const { core::cell::Cell::new(Vec::new()) };
+}
+
+/// The longest vectors, in limbs, that a thread keeps between operations: 1 MiB each.
+const KEEP: usize = 1 << 17;
+
+/// Runs `f` with the thread's working memory: a nested call gets memory of its own.
+#[inline]
+pub(crate) fn with_work<R>(f: impl FnOnce(&mut Work) -> R) -> R {
+    let mut w = WORK.take().unwrap_or_default();
+    let r = f(&mut w);
+    for v in [&mut w.a, &mut w.b, &mut w.c, &mut w.scratch] {
+        if v.capacity() > KEEP {
+            *v = Vec::new();
+        }
+    }
+    WORK.set(Some(w));
+    r
+}
+
+/// The thread's spare vector, empty, for a result.
+#[inline]
+pub(crate) fn take_spare() -> Vec<u64> {
+    SPARE.take()
+}
+
+/// Gives a vector back to the thread as its spare, unless it is too long to keep.
+#[inline]
+pub(crate) fn give_spare(v: Vec<u64>) {
+    if v.capacity() <= KEEP {
+        SPARE.set(v);
+    }
+}

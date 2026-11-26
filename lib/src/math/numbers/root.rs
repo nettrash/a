@@ -15,15 +15,17 @@
 //! (see [`nth`]). The results are written in the byte order of `self`, in the shortest form.
 
 mod nth;
-mod sqrt;
+pub(super) mod sqrt;
 
 use super::add::{SMALL, read_small, write_small};
 use super::mul::{Operand, Product, STACK_LIMBS, WIDE, on_heap, on_stack, read_wide, to_limbs};
+use super::scratch::scratch;
 use super::{ByteOrder, Number};
 use core::mem::MaybeUninit;
 
 pub(super) use nth::quotient;
-pub(super) use sqrt::sqrt_rem_u128;
+pub(super) use nth::{root as root_limbs, root_itch};
+pub(super) use sqrt::{sqrt_rem_u128, sqrt_rem_wide, sqrtrem, sqrtrem_itch};
 
 impl Number {
     /// Returns the square root of `self` rounded down, `floor(sqrt(self))`: the largest integer
@@ -379,8 +381,8 @@ fn long_square_root<const REM: bool>(a: &Number) -> (Number, Number) {
     let tn = an.div_ceil(2);
     // The magnitude, the root and the remainder, each in an even number of limbs, then the working
     // memory of `sqrtrem`.
-    let need =
-        even(an) + even(tn + 1) + if REM { even(tn + 1) } else { 0 } + sqrt::sqrtrem_itch(an);
+    let itch = sqrt::sqrtrem_itch(an);
+    let need = even(an) + even(tn + 1) + if REM { even(tn + 1) } else { 0 } + itch;
     let compute = |w: *mut MaybeUninit<u64>| {
         let w: *mut u64 = w.cast();
         // SAFETY: the working memory holds the `need` limbs counted above; the operand is that of
@@ -390,7 +392,7 @@ fn long_square_root<const REM: bool>(a: &Number) -> (Number, Number) {
             let r = s.add(even(tn + 1));
             let t = if REM { r.add(even(tn + 1)) } else { r };
             to_limbs(x, m);
-            let rn = sqrt::sqrtrem::<REM>(s, r, m, an, t);
+            let rn = sqrt::sqrtrem::<REM>(s, r, m, an, scratch!(t, itch));
             let root = limbs_number(s, tn, false, order);
             let rem = if REM {
                 limbs_number(r, rn, false, order)
@@ -464,7 +466,8 @@ fn long_root(a: &Number, n: u32) -> Number {
         };
     }
     // The magnitude, then the working memory of `nth::root`, which starts with the root.
-    let need = even(an) + nth::root_itch(an, n);
+    let itch = nth::root_itch(an, n);
+    let need = even(an) + itch;
     let compute = |w: *mut MaybeUninit<u64>| {
         let w: *mut u64 = w.cast();
         // SAFETY: the working memory holds the `need` limbs counted above; the operand is that of
@@ -472,7 +475,7 @@ fn long_root(a: &Number, n: u32) -> Number {
         unsafe {
             let (m, r) = (w, w.add(even(an)));
             to_limbs(x, m);
-            let sn = nth::root(m, an, n, r);
+            let sn = nth::root(m, an, n, scratch!(r, itch));
             limbs_number(r, sn, negative, order)
         }
     };

@@ -1,0 +1,19 @@
+[package]
+name = "polybench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../lib" }
+rustfft = "=6.4.1"
+realfft = "=3.5.1"
+
+# The crate as a user gets it: the default release profile (opt-level 3, no LTO).
+# `--profile lto` gives the second figure the brief allows.
+[profile.lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

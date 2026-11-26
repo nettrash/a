@@ -198,6 +198,27 @@ pub(crate) unsafe fn mul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> 
     }
 }
 
+/// Adds the `n` little-endian limbs at `x` times `y` to those at `r`, at any addresses, and returns
+/// the limb that carries out of them: the kernel with BMI2, whose `mov`s and `adc`s from memory
+/// take any address; the portable code, which reads bytes, without.
+///
+/// # Safety
+///
+/// `n >= 1`; the `8 n` bytes at `x` must be valid for reads and those at `r` for reads and writes,
+/// and apart from them.
+#[inline]
+pub(crate) unsafe fn addmul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    // SAFETY: forwarded; BMI2 is checked before its kernel runs, and its pointers are not
+    // dereferenced in Rust.
+    unsafe {
+        if bmi2() {
+            addmul_1(r.cast(), x.cast(), n, y)
+        } else {
+            portable::addmul_1_bytes(r, x, n, y)
+        }
+    }
+}
+
 /// Completes an exact division in place, as the portable code does.
 ///
 /// # Safety
@@ -209,10 +230,23 @@ pub(super) unsafe fn divexact_finish(r: *mut u64, n: usize) {
     unsafe { portable::divexact_finish(r, n) }
 }
 
+/// Doubles the `2n` limbs at `r` and adds the squares of the `n` limbs at `x` at the even
+/// positions, as the portable code does.
+///
+/// # Safety
+///
+/// `n >= 1`; the `2n` limbs at `r` must be valid for reads and writes, the `n` at `x` for reads,
+/// apart from them, and the top bit of `r` clear.
+#[inline]
+pub(super) unsafe fn double_and_add_squares(r: *mut u64, x: *const u64, n: usize) {
+    // SAFETY: forwarded.
+    unsafe { portable::double_and_add_squares(r, x, n) }
+}
+
 /// Whether the CPU has BMI2, which the kernels need: looked up once, by the standard library.
 #[inline(always)]
 fn bmi2() -> bool {
-    std::is_x86_feature_detected!("bmi2")
+    !cfg!(a_baseline) && std::is_x86_feature_detected!("bmi2")
 }
 
 /// Sets the `nx + ny` limbs at `r` to the product of the `nx` limbs at `x` and the `ny` at `y`:
@@ -234,6 +268,23 @@ pub(super) unsafe fn mul_basecase(r: *mut u64, x: *const u64, nx: usize, y: *con
         *r.add(nx) = mul_1_bmi2(r, x, nx, *y);
         for j in 1..ny {
             *r.add(nx + j) = addmul_1(r.add(j), x, nx, *y.add(j));
+        }
+    }
+}
+
+/// [`addmul_1`] when the CPU has BMI2, the portable kernel's otherwise.
+///
+/// # Safety
+///
+/// As for [`addmul_1`], but for BMI2.
+#[inline]
+pub(super) unsafe fn addmul_1_any(r: *mut u64, x: *const u64, n: usize, y: u64) -> u64 {
+    // SAFETY: as the caller guarantees, and BMI2 is checked before its kernel runs.
+    unsafe {
+        if bmi2() {
+            addmul_1(r, x, n, y)
+        } else {
+            portable::addmul_1(r, x, n, y)
         }
     }
 }

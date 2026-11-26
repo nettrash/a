@@ -12,6 +12,7 @@
 
 use super::super::mul::limbs::mul;
 use super::super::root::{mul_1, sqrt_rem_u128};
+use super::super::scratch::Scratch;
 use super::Limbs;
 use super::primes::{Remainders, Sieve};
 use super::product::{Packer, product, squared, times};
@@ -130,8 +131,7 @@ pub(super) fn small_product(f: &[u64], out: &mut [u64; SMALL_LIMBS]) -> usize {
     let (mut na, mut nb) = (1, 1);
     // SAFETY: each array holds its product's limbs, all written before they are read, and room for
     // one more, as each product divides the whole one, which fits `out`; the product of the two
-    // takes `nx + ny` limbs, at most one more than the whole product's, and below Karatsuba's
-    // method it needs no scratch.
+    // takes `nx + ny` limbs, at most one more than the whole product's.
     unsafe {
         *a = f[0];
         *b = 1;
@@ -156,7 +156,10 @@ pub(super) fn small_product(f: &[u64], out: &mut [u64; SMALL_LIMBS]) -> usize {
         } else {
             ((b, nb), (a, na))
         };
-        mul(out.as_mut_ptr(), x, nx, y, ny, core::ptr::null_mut());
+        // `nx + ny <= SMALL_LIMBS` and `ny <= nx`, so `ny` is at most 16, below the 24 limbs of
+        // Karatsuba's method and the 125 or more of the transforms on every target: the schoolbook
+        // product, which needs no scratch, as `mul` checks.
+        mul(out.as_mut_ptr(), x, nx, y, ny, Scratch::none());
         let mut n = nx + ny;
         while out[n - 1] == 0 {
             n -= 1;

@@ -17,11 +17,11 @@ mod p521;
 mod pseudo;
 mod special;
 
-pub(super) use big::Big;
-pub(super) use mont::Mont;
-pub(super) use p521::P521;
-pub(super) use pseudo::Pseudo;
-pub(super) use special::Nist;
+pub(crate) use big::Big;
+pub(crate) use mont::Mont;
+pub(crate) use p521::P521;
+pub(crate) use pseudo::Pseudo;
+pub(crate) use special::Nist;
 
 use crate::math::numbers::{ByteOrder, Number};
 use std::sync::OnceLock;
@@ -31,7 +31,7 @@ use std::sync::OnceLock;
 /// Elements are held in the field's own form, which [`enter`](Field::enter) and
 /// [`leave`](Field::leave) convert from and to numbers, and which need not be unique: compare them
 /// with [`equal`](Field::equal) and [`is_zero`](Field::is_zero).
-pub(super) trait Field {
+pub(crate) trait Field {
     /// An element.
     type E: Clone;
 
@@ -121,7 +121,7 @@ pub(super) trait Field {
 /// `x^(2^(2 j) - 1) = (x^(2^j - 1))^(2^j) x^(2^j - 1)`: Curve25519's takes 13 products, against 66
 /// by windows alone. The rest goes by a sliding window of up to five bits, a product for each
 /// window of odd value, whenever that takes fewer products than such a run.
-pub(super) fn pow<F: Field>(f: &F, x: &F::E, e: &[u64]) -> F::E {
+pub(crate) fn pow<F: Field>(f: &F, x: &F::E, e: &[u64]) -> F::E {
     let bit = |i: usize| (e[i / 64] >> (i % 64)) & 1 != 0;
     let mut i = bit_length_of(e);
     if i == 0 {
@@ -213,7 +213,7 @@ fn bit_length_of(e: &[u64]) -> usize {
 
 /// Sets each element of `x` that is not zero to its inverse, by Montgomery's trick: the running
 /// products, the inverse of the last, and two products back for each.
-pub(super) fn invert_all<F: Field>(f: &F, x: &mut [F::E]) {
+pub(crate) fn invert_all<F: Field>(f: &F, x: &mut [F::E]) {
     let mut running = Vec::with_capacity(x.len());
     let mut product = f.one();
     for e in x.iter() {
@@ -309,7 +309,8 @@ pub(super) fn sqrt_ratio<F: Field>(f: &F, plan: &SqrtPlan, u: &F::E, v: &F::E) -
 /// The field of a curve, by the shape of its prime. A curve holds one for as long as it lives, so
 /// the sizes of the variants matter little.
 #[allow(clippy::large_enum_variant)]
-pub enum Prime {
+#[derive(Clone)]
+pub(crate) enum Prime {
     Mont1(Mont<1>),
     Mont2(Mont<2>),
     Mont3(Mont<3>),
@@ -381,7 +382,7 @@ const P521_LIMBS: [u64; 9] = [
 
 impl Prime {
     /// The field of the odd prime `p`, the fastest for its shape.
-    fn new(p: &Number) -> Prime {
+    pub(crate) fn new(p: &Number) -> Prime {
         let l = limbs_of(p);
         if l == P256_LIMBS {
             return Prime::P256(Nist::new(Mont::new(p, P256_LIMBS)));
@@ -472,7 +473,7 @@ impl Base {
 }
 
 /// The limbs of the magnitude of `x`, the least significant first, without zeros at the top.
-pub(super) fn limbs_of(x: &Number) -> Vec<u64> {
+pub(crate) fn limbs_of(x: &Number) -> Vec<u64> {
     let mut l: Vec<u64> = if x.byte_order == ByteOrder::LittleEndian {
         x.value
             .chunks(8)
@@ -509,7 +510,7 @@ pub(super) fn reduced(x: &Number, p: &Number) -> Number {
 }
 
 /// The number with the limbs `x`, the least significant first, in the byte order `order`.
-pub(super) fn number_of(x: &[u64], order: ByteOrder) -> Number {
+pub(crate) fn number_of(x: &[u64], order: ByteOrder) -> Number {
     let mut bytes = Vec::with_capacity(8 * x.len());
     for l in x {
         bytes.extend_from_slice(&l.to_le_bytes());
@@ -555,7 +556,7 @@ fn same<const N: usize, const M: usize>(x: &[u64; N]) -> &[u64; M] {
 }
 
 /// The limbs of the number in `[0, p)`, `N` of them.
-pub(super) fn array_of<const N: usize>(x: &Number) -> [u64; N] {
+pub(crate) fn array_of<const N: usize>(x: &Number) -> [u64; N] {
     let l = limbs_of(x);
     let mut r = [0; N];
     r[..l.len()].copy_from_slice(&l);

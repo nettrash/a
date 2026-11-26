@@ -3,6 +3,7 @@
 use super::blas::{Op, gemm};
 use crate::math::complex::{Complex, Float};
 use crate::math::numbers::Number;
+use crate::math::rational::Rational;
 use core::fmt;
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -146,8 +147,10 @@ pub(crate) mod sealed {
     }
 }
 
-/// A type a [`Matrix`](super::Matrix) can hold and compute with exactly: `f32`, `f64`,
-/// [`Complex<f32>`], [`Complex<f64>`] and [`Number`]. The trait is sealed.
+/// A type a [`Matrix`](super::Matrix) can hold and compute with: `f32`, `f64`,
+/// [`Complex<f32>`], [`Complex<f64>`], [`Number`], [`Rational`],
+/// [`BigFloat`](crate::math::float::BigFloat) and [`BigComplex`](crate::math::float::BigComplex).
+/// The trait is sealed.
 pub trait Element: sealed::Element {}
 
 /// An element whose matrices have the numerical algorithms, the decompositions, the eigenvalues
@@ -160,6 +163,76 @@ pub trait Scalar: Element + sealed::Scalar<R = <Self as Scalar>::Real> {
 }
 
 impl Element for Number {}
+impl Element for Rational {}
+
+/// [`sealed::Element`] by the operators of a type of exact numbers, on references, with the
+/// elements `$zero` and `$one`, and the matrix product `$product`.
+macro_rules! exact_element {
+    ($t:ty, $zero:expr, $one:expr, $product:path) => {
+        impl sealed::Element for $t {
+            #[inline]
+            fn zero() -> Self {
+                $zero
+            }
+            #[inline]
+            fn one() -> Self {
+                $one
+            }
+            #[inline]
+            fn is_zero(&self) -> bool {
+                <$t>::is_zero(self)
+            }
+            #[inline]
+            fn conj(&self) -> Self {
+                self.clone()
+            }
+            #[inline]
+            fn add(a: &Self, b: &Self) -> Self {
+                a + b
+            }
+            #[inline]
+            fn sub(a: &Self, b: &Self) -> Self {
+                a - b
+            }
+            #[inline]
+            fn mul(a: &Self, b: &Self) -> Self {
+                a * b
+            }
+            #[inline]
+            fn neg(a: &Self) -> Self {
+                -a
+            }
+            #[inline]
+            fn add_assign(a: &mut Self, b: &Self) {
+                *a += b;
+            }
+            #[inline]
+            fn sub_assign(a: &mut Self, b: &Self) {
+                *a -= b;
+            }
+            #[inline]
+            fn mul_assign(a: &mut Self, b: &Self) {
+                *a *= b;
+            }
+            #[inline]
+            fn mul_add(c: &mut Self, a: &Self, b: &Self) {
+                if !a.is_zero() {
+                    *c += a * b;
+                }
+            }
+            fn product(c: &mut [Self], a: &[Self], b: &[Self], m: usize, k: usize, n: usize) {
+                $product(c, a, b, m, k, n);
+            }
+        }
+    };
+}
+
+exact_element!(
+    Rational,
+    Rational::default(),
+    Rational::from(1u8),
+    super::rational::product
+);
 
 impl sealed::Element for Number {
     #[inline]
@@ -211,6 +284,11 @@ impl sealed::Element for Number {
         if !a.is_zero() {
             *c += a * b;
         }
+    }
+    /// Classically below a crossover that falls as the elements grow, and by Strassen–Winograd's
+    /// recursion above it ([`strassen`](super::strassen)), with the same result.
+    fn product(c: &mut [Self], a: &[Self], b: &[Self], m: usize, k: usize, n: usize) {
+        super::strassen::numbers(c, a, b, m, k, n);
     }
 }
 

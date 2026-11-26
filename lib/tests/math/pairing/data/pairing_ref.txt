@@ -1,0 +1,29 @@
+# Reference outputs for tests/math/pairing: FNV-1a 64 digests of the canonical bytes of outputs
+# on SplitMix64 inputs. arkworks 0.5, from gen_ark.rs, which asserts that the bls12_381 crate 0.8
+# and blst 0.3 give the same BLS12-381 pairings; py_ecc 8 and the digests of the bls12_381 crate's
+# test vectors (zcash_*: digest and length), from gen_py.py.
+bls_g1_mul 780e7fd3aa75cb65
+bls_g2_mul f9bbf522c7089fa4
+bls_pairing f71356e3cd3ca9af
+bls_multi_pairing c5f0ebee34ad0b61
+bls_g1_subgroup a8c7f832281a39c5
+bls_g1_clear_cofactor 3b1fed20c3fc58d5
+bls_g1_mul_by_cofactor 78556a720ce4de92
+bls_g2_subgroup a8c7f832281a39c5
+bls_g2_clear_cofactor 481f32e4cecfef8b
+bls_g2_mul_by_cofactor 014a717a77fcaad1
+bn_g1_mul 2b1e6667e584848f
+bn_g2_mul ca568709be92bde0
+bn_pairing 0ddd2d6ba261fd5a
+bn_multi_pairing c0d78a648f74de14
+bn_g1_subgroup e7e395a2ad0bc74d
+bn_g2_subgroup a8c7f832281a39c5
+bn_g2_mul_by_cofactor d7b66cc525c7cb2c
+zcash_g1_compressed cc4551bef9af5204 48000
+zcash_g1_uncompressed 38b6cad5c46a2367 96000
+zcash_g2_compressed ec96ed45883bb118 96000
+zcash_g2_uncompressed 71eb7f2401673ee3 192000
+bls_pairing_py_ecc 3a3309cef90deaa1
+bn_pairing_py_ecc f1964a70af90986d
+bls_pairing_py_ecc_raw ef887ef1daae90bd
+bn_pairing_py_ecc_raw 66235e58f40d4023

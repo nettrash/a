@@ -123,6 +123,9 @@ use arch::{V, four};
 
 pub(super) use arch::{FFT_MUL, FFT_MUL_UNBALANCED, FFT_SQR};
 
+// Products of polynomials modulo a word by these transforms.
+pub(in super::super) mod poly;
+
 // Primes and their constants
 
 /// The primes, the eight largest of the form `c 2^21 + 1` below `2^29`, the largest first, and a

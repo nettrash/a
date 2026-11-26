@@ -29,7 +29,8 @@ const EIGHT_P: [u64; 9] = {
 /// always below `p`: a product gives limbs below `3 2^58 + 2^10`, and a sum or a difference carries
 /// each limb's bits above 58 into the next, all at once, for limbs below `2^58 + 16`. Only
 /// [`canonical`](P521::canonical) makes an element unique.
-pub(in super::super) struct P521 {
+#[derive(Clone)]
+pub(crate) struct P521 {
     /// The prime as a number.
     p: Number,
 }
@@ -58,6 +59,18 @@ impl P521 {
             return [0; 9];
         }
         r
+    }
+}
+
+impl P521 {
+    /// The nine limbs of 64 bits of the number `x` stands for, below `p`.
+    pub(crate) fn to_limbs(&self, x: &[u64; 9]) -> [u64; 9] {
+        pack(&self.canonical(x))
+    }
+
+    /// The element of the number with the nine limbs of 64 bits `x`, below `p`.
+    pub(crate) fn of_limbs(&self, x: &[u64; 9]) -> [u64; 9] {
+        unpack(x)
     }
 }
 

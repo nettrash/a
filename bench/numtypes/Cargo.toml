@@ -1,0 +1,36 @@
+[package]
+name = "numtypes-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+# Benchmarks of a::math::{quaternion, dual, uint} against glam, nalgebra, num-dual, ruint,
+# crypto-bigint, bnum, malachite-nz, GMP (and OpenSSL's BN for pow_mod/mod_inverse).
+# Built in release with the default profile (opt-level 3, no LTO, default codegen units, no
+# target-cpu), as users get the crate; `--profile lto` gives the second figure.
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../lib" }
+glam = { version = "=0.33.12" }
+nalgebra = { version = "=0.35.0" }
+num-dual = { version = "=0.16.0" }
+ruint = { version = "=1.21.1" }
+crypto-bigint = { version = "=0.6.1", features = ["alloc"] }
+bnum = { version = "=0.13.0", features = ["numtraits"] }
+num-integer = "0.1"
+num-traits = "0.2"
+malachite-nz = { version = "=0.14.0" }
+malachite-base = { version = "=0.14.0" }
+
+[profile.release]
+# the default release profile, stated: opt-level 3, no LTO, 16 codegen units, no target-cpu
+opt-level = 3
+debug = false
+
+[profile.lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

@@ -103,6 +103,9 @@ use core::{mem, ptr};
 // `-hyperlight`, `-qtee` and `-teeos`. So the gate names the systems known to allow unaligned
 // accesses rather than those that do not: a new target gets the portable kernels until it is
 // added here.
+//
+// The `x86_64` assembly is for 64-bit pointers only too: x32 (`x86_64-unknown-linux-gnux32`)
+// would pass it 32-bit pointers and sizes in registers whose upper halves are undefined.
 #[cfg(all(
     target_arch = "aarch64",
     target_endian = "little",
@@ -121,7 +124,7 @@ use core::{mem, ptr};
 ))]
 #[path = "add/aarch64.rs"]
 mod kernels;
-#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(miri)))]
 #[path = "add/x86_64.rs"]
 mod kernels;
 #[cfg(not(any(
@@ -141,7 +144,7 @@ mod kernels;
         ),
         not(miri)
     ),
-    all(target_arch = "x86_64", not(miri))
+    all(target_arch = "x86_64", target_pointer_width = "64", not(miri))
 )))]
 #[path = "add/portable.rs"]
 mod kernels;

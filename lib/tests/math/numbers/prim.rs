@@ -142,3 +142,39 @@ fn integers_at_the_edges_operate_as_numbers() {
         }
     }
 }
+
+#[test]
+fn ones_in_a_full_vector_carry_into_one_byte_more() {
+    // `[0xFF; len]` and an integer of its sign: the sum, `256^len`, carries out of the top of a
+    // vector with no room to spare, which grows by a byte; the difference takes it back.
+    for order in ORDERS {
+        for negative in [false, true] {
+            for len in [17, 40] {
+                let a = stored(&[0xFF; 40][..len], negative, order, len);
+                let one = if negative { -1i32 } else { 1 };
+                let mut power = vec![0; len];
+                power.push(1);
+                let expected = number(&power, negative, order);
+                let check = |what: &str, got: &Number, expected: &Number| {
+                    assert!(
+                        same(got, expected),
+                        "{what} with a = {}: {}",
+                        describe(&a),
+                        describe(got)
+                    );
+                };
+                let mut n = copy(&a, 0);
+                n += one;
+                check("a += 1", &n, &expected);
+                n -= one;
+                check("a += 1, then -= 1", &n, &a);
+                let mut n = copy(&a, 0);
+                n -= -one;
+                check("a -= -1", &n, &expected);
+                check("a + 1", &(copy(&a, 0) + one), &expected);
+                check("1 + a", &(one + copy(&a, 0)), &expected);
+                check("&a + 1", &(&a + one), &expected);
+            }
+        }
+    }
+}

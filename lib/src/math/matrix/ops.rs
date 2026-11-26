@@ -4,6 +4,7 @@ use super::element::sealed::Element as Ring;
 use super::{Element, Matrix, Scalar};
 use crate::math::complex::Complex;
 use crate::math::numbers::Number;
+use crate::math::rational::Rational;
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// Panics unless the two matrices have the same shape.
@@ -239,6 +240,66 @@ impl<T: Scalar> DivAssign<T> for Matrix<T> {
     }
 }
 
+impl Div<&Rational> for &Matrix<Rational> {
+    type Output = Matrix<Rational>;
+    /// The quotient of every element by `rhs`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `rhs` is zero and the matrix is not empty.
+    #[track_caller]
+    fn div(self, rhs: &Rational) -> Matrix<Rational> {
+        self.map(|x| x / rhs)
+    }
+}
+
+impl Div<Rational> for &Matrix<Rational> {
+    type Output = Matrix<Rational>;
+    #[track_caller]
+    fn div(self, rhs: Rational) -> Matrix<Rational> {
+        self / &rhs
+    }
+}
+
+impl Div<&Rational> for Matrix<Rational> {
+    type Output = Matrix<Rational>;
+    #[track_caller]
+    fn div(mut self, rhs: &Rational) -> Matrix<Rational> {
+        self /= rhs;
+        self
+    }
+}
+
+impl Div<Rational> for Matrix<Rational> {
+    type Output = Matrix<Rational>;
+    #[track_caller]
+    fn div(mut self, rhs: Rational) -> Matrix<Rational> {
+        self /= &rhs;
+        self
+    }
+}
+
+impl DivAssign<&Rational> for Matrix<Rational> {
+    /// Divides every element by `rhs`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `rhs` is zero and the matrix is not empty.
+    #[track_caller]
+    fn div_assign(&mut self, rhs: &Rational) {
+        for x in &mut self.data {
+            *x /= rhs;
+        }
+    }
+}
+
+impl DivAssign<Rational> for Matrix<Rational> {
+    #[track_caller]
+    fn div_assign(&mut self, rhs: Rational) {
+        *self /= &rhs;
+    }
+}
+
 /// A scalar on the left of a matrix, which the orphan rule leaves to one implementation for each
 /// type of element.
 macro_rules! left {
@@ -278,3 +339,4 @@ left!(f64);
 left!(Complex<f32>);
 left!(Complex<f64>);
 left!(Number);
+left!(Rational);

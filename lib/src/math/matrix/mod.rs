@@ -1,29 +1,55 @@
 //! Matrices: a [`Matrix<T>`] is a rectangular array of elements of the type `T`, which is `f32`,
 //! `f64`, [`Complex<f32>`](crate::math::complex::Complex),
-//! [`Complex<f64>`](crate::math::complex::Complex) or [`Number`](crate::math::numbers::Number).
+//! [`Complex<f64>`](crate::math::complex::Complex), [`Number`](crate::math::numbers::Number),
+//! [`Rational`](crate::math::rational::Rational), [`BigFloat`](crate::math::float::BigFloat) or
+//! [`BigComplex`](crate::math::float::BigComplex); a [`ModMatrix`] is a matrix over a prime
+//! field `GF(p)` with `p < 2^64`, and a [`BitMatrix`] one over `GF(2)`, 64 elements a word.
+//!
+//! Matrices of `f32` and `f64` and of their complex numbers have LAPACK's decompositions,
+//! eigenvalues, singular values and functions of matrices. Matrices of numbers and rationals have
+//! exact determinants, ranks, solutions, inverses and null spaces: the determinant by Bareiss's
+//! elimination, by its residues modulo primes or by Dixon's p-adic lifting, chosen by the order and
+//! the length of the integers, and the products of numbers by Strassen–Winograd's recursion. A
+//! `Matrix<Number>` also has its Hermite and Smith normal forms with their unimodular
+//! transformations ([`Matrix::hermite_normal_form`], [`Matrix::smith_normal_form`]), and its rows
+//! are the bases that [`a::math::lattice`](crate::math::lattice) reduces. [`ModMatrix`] has the PLE
+//! decomposition and what rests on it, with Strassen–Winograd's products; [`BitMatrix`] has the
+//! products of the method of the Four Russians (M4RM) and Bard's elimination (M4RI).
 
 mod basic;
-mod blas;
+mod bigfloat;
+pub(crate) mod blas;
 mod cholesky;
 mod eigen;
 mod element;
 mod exact;
 mod functions;
 mod gemm;
+mod gf2;
 mod hermitian;
-mod householder;
+pub(crate) mod householder;
 mod lu;
+mod modp;
+mod normal;
 mod ops;
 mod properties;
 mod qr;
+mod rational;
 mod schur;
+mod strassen;
 mod svd;
 mod tridiagonal;
+/// The eigenvalues of a real symmetric tridiagonal matrix, for the Gaussian rules of
+/// `a::math::numerics`, whose Jacobi matrices are tridiagonal to begin with.
+pub(crate) use tridiagonal::values as tridiagonal_eigenvalues;
 
 pub use cholesky::Cholesky;
+pub(crate) use cholesky::cholesky_in_place;
 pub use eigen::{Eigen, HermitianEigen};
 pub use element::{Element, Scalar};
+pub use gf2::BitMatrix;
 pub use lu::Lu;
+pub use modp::{ModMatrix, ModPle};
 pub use properties::Norm;
 pub use qr::Qr;
 pub use schur::Schur;

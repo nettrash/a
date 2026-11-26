@@ -76,6 +76,35 @@ pub(super) unsafe fn addmul_1(r: *mut u64, x: *const u64, n: usize, y: u64) -> u
     carry
 }
 
+/// Adds the `n` little-endian limbs at `x` times `y` to those at `r`, at any addresses, and returns
+/// the limb that carries out of them: [`addmul_1`] on the bytes of numbers, each limb read and
+/// written as eight bytes.
+///
+/// # Safety
+///
+/// As for [`addmul_1`], for the `8 n` bytes at each pointer.
+#[inline]
+#[allow(
+    dead_code,
+    reason = "the kernel where the portable code is the kernels', and on x86_64 without BMI2"
+)]
+pub(crate) unsafe fn addmul_1_bytes(r: *mut u8, x: *const u8, n: usize, y: u64) -> u64 {
+    let mut carry = 0;
+    // SAFETY: as the caller guarantees. `x * y + r + carry` fits a `u128`, as in `addmul_1`.
+    unsafe {
+        for i in 0..n {
+            let xi = u64::from_le_bytes(x.add(8 * i).cast::<[u8; 8]>().read());
+            let ri = u64::from_le_bytes(r.add(8 * i).cast::<[u8; 8]>().read());
+            let p = u128::from(xi) * u128::from(y) + u128::from(ri) + u128::from(carry);
+            r.add(8 * i)
+                .cast::<[u8; 8]>()
+                .write((p as u64).to_le_bytes());
+            carry = (p >> 64) as u64;
+        }
+    }
+    carry
+}
+
 /// Sets the `nx + ny` limbs at `r` to the product of the `nx` limbs at `x` and the `ny` at `y`,
 /// one row of `x` per limb of `y`.
 ///

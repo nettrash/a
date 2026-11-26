@@ -1,0 +1,37 @@
+[package]
+name = "special-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+# Scoreboard harness for a::math::special. Not part of the crate.
+
+[lib]
+name = "sbench"
+crate-type = ["rlib", "cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "special-bench"
+path = "src/main.rs"
+
+[dependencies]
+a = { package = "nettrash-a", path = "../../lib" }
+statrs = { version = "=0.18.0", default-features = false }
+puruspe = "=0.4.4"
+special = "=0.11.4"
+libm = "=0.2.16"
+lambert_w = "=1.2.34"
+
+# The crate as a user gets it: the default release profile (opt-level 3, no LTO).
+[profile.release]
+debug = false
+
+# Second figure for our functions only.
+[profile.lto]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]

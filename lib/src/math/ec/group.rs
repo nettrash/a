@@ -86,10 +86,10 @@ pub(super) trait Group {
     }
 }
 
-/// The bits of the magnitude `k`.
-pub(super) fn bit_length(k: &[u64]) -> usize {
+/// The bits of the magnitude `k`, in 64 bits: on 32-bit targets those of 512 MiB pass `usize::MAX`.
+pub(super) fn bit_length(k: &[u64]) -> u64 {
     match k.iter().rposition(|&l| l != 0) {
-        Some(i) => 64 * i + 64 - k[i].leading_zeros() as usize,
+        Some(i) => 64 * i as u64 + 64 - u64::from(k[i].leading_zeros()),
         None => 0,
     }
 }
@@ -111,7 +111,7 @@ fn bits_at(k: &[u64], at: usize, n: u32) -> u64 {
 /// `2^(w - 2)` additions of the table and the `bits / (w + 1)` of the product. Measured on an Apple
 /// M4 Max, a product on P-256 took 86,000, 85,000 and 89,000 cycles for widths 4, 5 and 6, on P-384
 /// 327,000, 314,000 and 321,000, and on P-521 365,000, 361,000 and 368,000.
-pub(super) fn window(bits: usize) -> u32 {
+pub(super) fn window(bits: u64) -> u32 {
     match bits {
         0..=23 => 2,
         24..=75 => 3,
@@ -126,7 +126,8 @@ pub(super) fn window(bits: usize) -> u32 {
 /// The width-`w` non-adjacent form of `k`, the lowest digit first: odd digits below `2^(w - 1)` in
 /// absolute value, at least `w - 1` zeros after each.
 pub(super) fn wnaf(k: &[u64], w: u32) -> Vec<i8> {
-    let len = bit_length(k) + 1;
+    // A digit a bit: past `usize::MAX`, as on 32-bit targets for 512 MiB, too many to allocate.
+    let len = usize::try_from(bit_length(k) + 1).unwrap_or(usize::MAX);
     let mut digits = vec![0i8; len];
     let width = 1u64 << w;
     let mut carry = 0;
@@ -281,14 +282,18 @@ fn signed_digit(k: &[u64], at: usize, c: u32, carry: &mut u64) -> i64 {
 fn pippenger<G: Group + ?Sized>(g: &G, terms: &[(&[u64], bool, G::Proj)]) -> G::Proj {
     let c = bucket_bits(terms.len());
     let bits = terms.iter().map(|t| bit_length(t.0)).max().unwrap_or(0);
-    let windows = (bits + 1).div_ceil(c as usize);
+    let windows = (bits + 1).div_ceil(u64::from(c));
     let based: Vec<G::Proj> = terms
         .iter()
         .map(|(_, negative, p)| if *negative { g.neg(p) } else { p.clone() })
         .collect();
     let table = g.cache_affine(&based);
-    // The digits of each term in each window, the lowest window first.
-    let mut digits = vec![0i32; windows * terms.len()];
+    // The digits of each term in each window, the lowest window first, counted in 64 bits: on
+    // 32-bit targets past `usize::MAX` there are too many to allocate, and once allocated the
+    // windows fit a `usize`.
+    let count = usize::try_from(windows * terms.len() as u64).unwrap_or(usize::MAX);
+    let mut digits = vec![0i32; count];
+    let windows = windows as usize;
     for (t, (k, _, _)) in terms.iter().enumerate() {
         let mut carry = 0;
         for w in 0..windows {
@@ -355,9 +360,11 @@ fn cached_limbs<G: Group + ?Sized>(g: &G) -> usize {
 /// The table of `p` for scalars of up to `bits` bits.
 pub(super) fn prepare<G: Group + ?Sized>(g: &G, p: &G::Proj, bits: usize) -> Table {
     let width = table_width(bits);
-    let windows = (bits + 1).div_ceil(width as usize);
+    // `(bits + 1).div_ceil(width)`, which would wrap at `usize::MAX`; the entries saturate, as so
+    // many cannot be allocated.
+    let windows = bits / width as usize + 1;
     let digits = 1usize << (width - 1);
-    let mut all = Vec::with_capacity(windows * digits);
+    let mut all = Vec::with_capacity(windows.saturating_mul(digits));
     let mut base = p.clone();
     for _ in 0..windows {
         let mut m = base.clone();

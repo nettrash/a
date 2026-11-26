@@ -1,0 +1,6 @@
+# Build outputs, working files, scoreboards of local runs and the mcl build: never committed.
+target/
+work/
+results/
+ext/
+__pycache__/

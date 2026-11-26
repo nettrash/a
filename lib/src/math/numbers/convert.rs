@@ -20,6 +20,13 @@ use core::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TryFromNumberError(());
 
+impl TryFromNumberError {
+    /// The error, for the conversions of other modules (the fixed-width integers).
+    pub(crate) const fn new() -> Self {
+        TryFromNumberError(())
+    }
+}
+
 impl fmt::Display for TryFromNumberError {
     /// Writes what was wrong, in the words of the primitive integers' `TryFromIntError`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

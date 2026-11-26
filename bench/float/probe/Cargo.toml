@@ -1,0 +1,30 @@
+[package]
+name = "floatbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[dependencies]
+nettrash-a = { path = "../../../lib" }
+rug = { version = "1.30", default-features = false, features = ["integer", "float", "complex"] }
+gmp-mpfr-sys = { version = "1.7", default-features = false, features = ["mpfr", "mpc", "use-system-libs"] }
+astro-float = { version = "0.9.6" }
+dashu-float = { version = "0.6.2" }
+dashu-int = { version = "0.6.2" }
+malachite-float = { version = "0.15" }
+malachite-nz = { version = "0.15" }
+malachite-base = { version = "0.15" }
+malachite-q = { version = "0.15" }
+
+# The default release profile: opt-level 3, no LTO, default codegen units, no target-cpu.
+[profile.release]
+debug = false
+
+# Second figure, where it differs by more than 10 %.
+[profile.fat]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[workspace]
