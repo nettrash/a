@@ -97,6 +97,10 @@ NTL 11.5.1, MPC 1.3.1, M4RI 20240729, OpenSSL 3.5):
   `real_root_intervals*` and `real_roots(prec)` (`fmpz_poly_isolate_real_roots`,
   `arb_fmpz_poly_real_roots`, FLINT 3.6) and of lattice's `smith_normal_form`
   (`fmpz_mat_snf_transform`, FLINT 3.5) are left out, and those rows say so in their notes.
+- FLINT before 3.5 computes `fmpz_mat_snf` of a singular or non-square matrix by Kannan–Bachem,
+  whose entries grow without bound (5 GB in two minutes on lattice's "30×30 rank 20"; on the
+  runner it took the whole machine): lattice's `elementary_divisors` rows of those matrices have
+  no FLINT figure there, and say so. Square nonsingular ones keep it.
 - PARI before 2.19 can answer `bestappr(x, D)` with a convergent where a closer semiconvergent
   exists (fixed in 2.19.0): rational's `limit_denominator` rows with PARI say "not the same work";
   at 4096 limbs with a bound of half the length it needs more than 6 GB of stack, so that row has
@@ -106,7 +110,10 @@ NTL 11.5.1, MPC 1.3.1, M4RI 20240729, OpenSSL 3.5):
 **Memory.** sparse's Cholesky command of one matrix peaks at up to about 6.2 GB (lap2d-1000;
 measured on Linux, see `peak_gb` in `sparse/src/g_chol.rs`). A matrix whose peak, with a quarter
 more, exceeds the memory available (`MemAvailable` of `/proc/meminfo`, `hw.memsize` on macOS,
-`BENCH_MEM_GB=n` to set it) skips itself and leaves rows that say so, without figures.
+`BENCH_MEM_GB=n` to set it) skips itself and leaves rows that say so, without figures. On the
+x86 workflow's runners a guard in the Run step also kills the largest process when less than
+1 GB stays available (`MEM_FLOOR_KB`): that group fails and says so in the log, and the shard
+goes on, rather than the runner stopping with no log or artifact.
 
 The references are found by `pkg-config` or in the standard prefixes (Homebrew's, `/usr/local`,
 `/usr` and the multiarch directories). A reference that is missing loses its rows (the build

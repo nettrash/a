@@ -119,12 +119,23 @@ pub fn normal(ctx: &Ctx) {
             let d = a.elementary_divisors();
             let dt: String = d.iter().map(|x| format!("{x} ")).collect();
             let mut refs_v: Vec<Ref> = Vec::new();
+            #[allow(unused_mut)]
+            let mut note = String::new();
+            // Before 3.5 (the release that added fmpz_mat_snf_transform), FLINT's fmpz_mat_snf
+            // takes Kannan-Bachem on every singular or non-square matrix, and its entries grow
+            // without bound: on "30×30 rank 20" FLINT 3.4 filled 5 GB in two minutes and, on a
+            // 16 GB runner, stopped the whole shard. 3.5 iterates Hermite forms instead.
             #[cfg(has_flint)]
-            {
+            if square_full || refs::flint::has_snf_transform() {
                 let same = refs::flint::snf(&fl, false, true).unwrap_or_default() == dt;
                 refs_v.push(Ref::new("FLINT 3.6 fmpz_mat_snf", format!("divisors equal: {same}"), |_| {
                     black_box(refs::flint::snf(&fl, false, false));
                 }));
+            } else {
+                note = format!(
+                    "no FLINT row: FLINT {}'s fmpz_mat_snf uses Kannan-Bachem on singular or non-square matrices, whose entries grow past the machine's memory here (3.5 and later iterate Hermite forms)",
+                    refs::flint::version()
+                );
             }
             #[cfg(has_pari)]
             {
@@ -142,7 +153,7 @@ pub fn normal(ctx: &Ctx) {
             }
             ctx.row("normal", "elementary_divisors", name, Side::new("ours", |_| {
                 black_box(a.elementary_divisors());
-            }), refs_v, "");
+            }), refs_v, &note);
         }
         // smith_normal_form (with U, V)
         if big <= 50 && ctx.wants("smith_normal_form", name) {

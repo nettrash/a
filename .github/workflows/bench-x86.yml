@@ -162,7 +162,29 @@ jobs:
           # about 45 minutes on the runner, where Polynomial<Rational>::interpolate at 256 points
           # takes about a minute a call, so it lost its last row at 40.
           LIMIT: "5400"
-        run: bench/run_all.sh --args "$SHARD_ARGS" ${{ matrix.area }}
+          # Memory guard (below): the floor of available memory, in kB.
+          MEM_FLOOR_KB: "1048576"
+        run: |
+          # A reference that fills the machine stops the runner itself: it "lost communication",
+          # and the shard left no log and no artifact (FLINT 3.4's fmpz_mat_snf in lattice-2).
+          # Below MEM_FLOOR_KB of available memory the largest process, a scoreboard binary or a
+          # Python reference, is killed instead: its group fails, the shard goes on and uploads.
+          (
+            while sleep 5; do
+              avail=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+              if [ "${avail:-0}" -lt "$MEM_FLOOR_KB" ]; then
+                pid=$(ps -eo pid=,rss=,args= --sort=-rss | grep -v -e Runner.Listener -e Runner.Worker | awk 'NR == 1 {print $1}')
+                echo "::warning::$((avail / 1024)) MB of memory available: killing the largest process, $(ps -o args= -p "$pid" | cut -c1-200)"
+                kill -9 "$pid" 2>/dev/null || true
+                sleep 5
+              fi
+            done
+          ) &
+          guard=$!
+          status=0
+          bench/run_all.sh --args "$SHARD_ARGS" ${{ matrix.area }} || status=$?
+          kill "$guard" 2>/dev/null || true
+          exit "$status"
 
       - name: Upload the scoreboard
         if: always()
