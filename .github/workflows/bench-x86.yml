@@ -96,7 +96,16 @@ jobs:
 
       - name: Install the C and C++ references
         run: |
-          sudo apt-get update
+          # The runner image also lists third-party repositories the benchmarks do not use, and
+          # one of them (packages.microsoft.com, 403 Forbidden) once failed a shard here. Retry,
+          # then go on with the lists that were fetched: a package that is really missing still
+          # fails the install below.
+          updated=
+          for attempt in 1 2 3; do
+            if sudo apt-get update; then updated=1; break; fi
+            [ "$attempt" = 3 ] || sleep 20
+          done
+          [ -n "$updated" ] || echo "::warning::apt-get update reported errors (see above); installing from the package lists it fetched"
           # m4: float builds GMP, MPFR and MPC from source here (gmp-mpfr-sys; Ubuntu's MPC is
           # older than it accepts), and GMP's configure needs m4.
           sudo apt-get install -y --no-install-recommends \
@@ -149,6 +158,10 @@ jobs:
         continue-on-error: true
         env:
           SHARD_ARGS: ${{ matrix.args }}
+          # bench/poly cuts a group after LIMIT seconds (2400 by default). Its eval group needs
+          # about 45 minutes on the runner, where Polynomial<Rational>::interpolate at 256 points
+          # takes about a minute a call, so it lost its last row at 40.
+          LIMIT: "5400"
         run: bench/run_all.sh --args "$SHARD_ARGS" ${{ matrix.area }}
 
       - name: Upload the scoreboard
