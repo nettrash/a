@@ -168,6 +168,50 @@ pub fn sig3(x: f64) -> String {
     if d > 0 { format!("{:.*}", d as usize, x) } else { format!("{:.0}", x) }
 }
 
+/// The memory a process may use here, in bytes: MemAvailable of /proc/meminfo (Linux), else
+/// sysctl hw.memsize (macOS); BENCH_MEM_GB overrides both. None when it cannot be told.
+pub fn mem_available() -> Option<f64> {
+    if let Some(g) = std::env::var("BENCH_MEM_GB").ok().and_then(|v| v.parse::<f64>().ok()) {
+        return Some(g * 1e9);
+    }
+    if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
+        let kb = |key: &str| {
+            t.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .and_then(|r| r.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
+                .map(|k| k * 1024.0)
+        };
+        return kb("MemAvailable:").or_else(|| kb("MemTotal:"));
+    }
+    let o = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()?;
+    String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok()
+}
+
+/// Whether a problem whose peak memory is about `need_gb` GB fits in this machine's memory (with
+/// a quarter more for safety). When it does not, prints a row per operation it would have timed,
+/// without figures, saying why, and returns false: the problem skips itself instead of driving the
+/// machine out of memory.
+pub fn fits(group: &str, ops: &[&str], params: &str, need_gb: f64) -> bool {
+    if need_gb <= 0.0 {
+        return true;
+    }
+    let Some(have) = mem_available() else {
+        return true;
+    };
+    if need_gb * 1.25e9 <= have {
+        return true;
+    }
+    let why = format!(
+        "skipped: needs about {need_gb} GB of memory at its peak (and a quarter more to spare), this machine has {:.1} GB available",
+        have / 1e9
+    );
+    note(&format!("{params}: {why}"));
+    for op in ops {
+        println!("sparse\t{group}\t{op}\t{params}\t-\t-\t-\t-\t{why}");
+    }
+    false
+}
+
 /// Progress on stderr.
 pub fn note(s: &str) {
     eprintln!("[sparse-bench] {s}");

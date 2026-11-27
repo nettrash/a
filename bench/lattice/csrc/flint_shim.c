@@ -12,6 +12,13 @@
 #include <flint/nmod_mat.h>
 #include <stdio.h>
 
+/* fmpz_mat_snf_transform is in FLINT 3.5 and later (Ubuntu 26.04 has 3.4). */
+#if defined(__FLINT_RELEASE) && __FLINT_RELEASE >= 30500
+#define LB_FLINT_HAS_SNF_TRANSFORM 1
+#else
+#define LB_FLINT_HAS_SNF_TRANSFORM 0
+#endif
+
 void lb_free(char *s) { free(s); }
 
 static char *zmat_text(const fmpz_mat_t A) {
@@ -153,12 +160,18 @@ char *fl_snf(const void *A_, int with_uv, int want) {
     fmpz_mat_t S;
     fmpz_mat_init(S, A->r, A->c);
     if (with_uv) {
+#if LB_FLINT_HAS_SNF_TRANSFORM
         fmpz_mat_t U, V;
         fmpz_mat_init(U, A->r, A->r);
         fmpz_mat_init(V, A->c, A->c);
         fmpz_mat_snf_transform(S, U, V, A);
         fmpz_mat_clear(U);
         fmpz_mat_clear(V);
+#else
+        /* not in this FLINT: the harness asks fl_has_snf_transform first */
+        fmpz_mat_clear(S);
+        return NULL;
+#endif
     } else {
         fmpz_mat_snf(S, A);
     }
@@ -420,3 +433,4 @@ uint64_t fl_nmat_op(int op, const void *A_, const void *B_, uint64_t arg, int wa
 }
 
 const char *fl_version(void) { return FLINT_VERSION; }
+int fl_has_snf_transform(void) { return LB_FLINT_HAS_SNF_TRANSFORM; }

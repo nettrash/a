@@ -1,4 +1,5 @@
 /* FLINT reference shim: nmod_poly, fmpz_mod_poly, fmpz_poly, fmpq_poly, Arb's roots. */
+#include <stdio.h>
 #include <flint/flint.h>
 #include <flint/thread_support.h>
 #include <flint/fmpz.h>
@@ -19,6 +20,14 @@
 #include <flint/arb_fmpz_poly.h>
 #include <flint/acb_poly.h>
 #include "shim.h"
+
+/* fmpz_poly_isolate_real_roots and arb_fmpz_poly_real_roots are in FLINT 3.6 and later (Ubuntu
+ * 26.04 has 3.4): without them their two operations are unsupported, and sf_missing says why. */
+#if defined(__FLINT_RELEASE) && __FLINT_RELEASE >= 30600
+#define PB_FLINT_REAL_ROOTS 1
+#else
+#define PB_FLINT_REAL_ROOTS 0
+#endif
 
 SHIM_EXPORTS(sf)
 const char* sf_label(void* h);
@@ -216,10 +225,27 @@ static void m_finv(fmpz_mod_poly_t finv, const fmpz_mod_poly_t f, const fmpz_mod
     fmpz_mod_poly_clear(r, ctx);
 }
 
+/* Why this FLINT cannot do an operation it has in its table (NULL when it can). */
+const char* sf_missing(const char* name);
+const char* sf_missing(const char* name) {
+#if !PB_FLINT_REAL_ROOTS
+    static char why[160];
+    int op = lookup(name);
+    const char* f = op == Z_ISOLATE ? "fmpz_poly_isolate_real_roots" : op == Z_REAL_ROOTS ? "arb_fmpz_poly_real_roots" : NULL;
+    if (f) {
+        snprintf(why, sizeof why, "no FLINT row: FLINT %s has no %s (3.6 and later)", FLINT_VERSION, f);
+        return why;
+    }
+#else
+    (void)name;
+#endif
+    return NULL;
+}
+
 void* sf_prep(const char* name, const uint64_t* buf, size_t nbuf) {
     flint_set_num_threads(1); /* one thread (FLINT's default, made explicit) */
     int op = lookup(name);
-    if (!op) return NULL;
+    if (!op || sf_missing(name)) return NULL;
     input_t in;
     parse_input(buf, nbuf, &in);
     H* h = (H*)calloc(1, sizeof(H));
@@ -440,10 +466,12 @@ static void run1(H* h, size_t v) {
     case Z_SQUAREFREE: fmpz_poly_factor_squarefree(h->zf, za); break;
     case Z_COUNT_REAL: h->sr = fmpz_poly_num_real_roots(za); break;
     case Z_COUNT_REAL_STURM: h->sr = fmpz_poly_num_real_roots_sturm(za); break;
+#if PB_FLINT_REAL_ROOTS
     case Z_ISOLATE:
         fmpz_poly_isolate_real_roots(h->exact, &h->nexact, h->carr, h->karr, &h->nint, za);
         break;
     case Z_REAL_ROOTS: h->nroots = arb_fmpz_poly_real_roots(h->rr, za, 0, h->k); break;
+#endif
     case Z_COMPLEX_ROOTS: arb_fmpz_poly_complex_roots(h->cr, za, 0, h->k); break;
     case Q_MUL: fmpq_poly_mul(h->qr[0], qa, qb); break;
     case Q_DIVREM: fmpq_poly_divrem(h->qr[0], h->qr[1], qa, qb); break;

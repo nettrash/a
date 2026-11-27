@@ -150,12 +150,16 @@ pub fn normal(ctx: &Ctx) {
             let k = r.min(c);
             let dt: String = (0..k).map(|i| format!("{} ", s[(i, i)])).collect();
             let mut refs_v: Vec<Ref> = Vec::new();
+            #[allow(unused_mut)]
+            let mut note = String::new();
             #[cfg(has_flint)]
-            {
+            if refs::flint::has_snf_transform() {
                 let same = refs::flint::snf(&fl, true, true).unwrap_or_default() == dt;
                 refs_v.push(Ref::new("FLINT 3.6 fmpz_mat_snf_transform", format!("S equal: {same}; U, V not unique"), |_| {
                     black_box(refs::flint::snf(&fl, true, false));
                 }));
+            } else {
+                note = format!("no FLINT row: FLINT {} has no fmpz_mat_snf_transform (3.5 and later)", refs::flint::version());
             }
             #[cfg(has_pari)]
             refs_v.push(Ref::new("PARI 2.19 matsnf(, 1)", "[U, V, D]", |_| {
@@ -163,7 +167,7 @@ pub fn normal(ctx: &Ctx) {
             }));
             ctx.row("normal", "smith_normal_form", name, Side::new("ours", |_| {
                 black_box(a.smith_normal_form());
-            }), refs_v, "");
+            }), refs_v, &note);
         }
     }
 }

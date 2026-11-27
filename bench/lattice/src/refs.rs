@@ -63,6 +63,7 @@ pub mod flint {
         fn fl_nmat_free(a: *mut c_void);
         fn fl_nmat_op(op: c_int, a: *const c_void, b: *const c_void, arg: u64, w: c_int) -> u64;
         fn fl_version() -> *const c_char;
+        fn fl_has_snf_transform() -> c_int;
     }
     handle!(Z, fl_zmat_free);
     handle!(Q, fl_qmat_free);
@@ -96,6 +97,11 @@ pub mod flint {
     }
     pub fn hnf(a: &Z, with_u: bool, want: bool) -> Option<String> {
         take(unsafe { fl_hnf(a.0, with_u as c_int, want as c_int) })
+    }
+    /// Whether this FLINT has fmpz_mat_snf_transform (3.5 and later).
+    pub fn has_snf_transform() -> bool {
+        // SAFETY: no arguments.
+        unsafe { fl_has_snf_transform() != 0 }
     }
     pub fn snf(a: &Z, with_uv: bool, want: bool) -> Option<String> {
         take(unsafe { fl_snf(a.0, with_uv as c_int, want as c_int) })

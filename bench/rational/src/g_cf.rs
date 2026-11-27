@@ -199,13 +199,35 @@ pub fn run(which: &str) {
                 let mut ents = vec![ent_ours(&pairs, |&(x, d)| x.limit_denominator(d))];
                 #[cfg(has_pari)]
                 let pd = Pari::new(&ds.iter().map(q_int).collect::<Vec<_>>());
+                // Before 2.19.0 PARI's bestappr(x, D) can return a convergent where a closer
+                // semiconvergent exists (2.19.0's CHANGES, Fixed 1): not the same work. And with
+                // a bound of half the length its stack grows past 6 GB at 4096 limbs.
+                #[cfg(has_pari)]
+                let (pv, old_pari) = {
+                    let v = pari_version();
+                    (format!("{}.{}.{}", v.0, v.1, v.2), v < (2, 19, 0))
+                };
+                #[cfg(has_pari)]
+                let mut row_note = "FLINT has none".to_string();
+                #[cfg(not(has_pari))]
+                let row_note = "FLINT has none".to_string();
                 #[cfg(has_pari)]
                 if let Some(p) = &p {
-                    let theirs: Vec<String> = (0..k).map(|i| { p.run_one(1, &pd, i); p.last(-1) }).collect();
-                    let nt = agree(&mine, &theirs, "limit pari");
-                    ents.push(Ent::new("PARI bestappr(x, D)", move |c| {
-                        p.run(1, &pd, c);
-                    }).note(&nt));
+                    if old_pari && limbs > 1024 && dbits > 64 {
+                        row_note = format!("{row_note}; no PARI row: PARI {pv}'s bestappr needs more than 6 GB of stack here");
+                    } else {
+                        let theirs: Vec<String> = (0..k).map(|i| { p.run_one(1, &pd, i); p.last(-1) }).collect();
+                        let nt = if old_pari {
+                            let bad = mine.iter().zip(&theirs).filter(|(a, b)| a != b).count();
+                            let differ = if bad > 0 { format!(" ({bad}/{} results differ)", mine.len()) } else { String::new() };
+                            format!("not the same work: PARI {pv}'s bestappr can return a convergent where a closer semiconvergent exists (fixed in 2.19.0){differ}")
+                        } else {
+                            agree(&mine, &theirs, "limit pari")
+                        };
+                        ents.push(Ent::new("PARI bestappr(x, D)", move |c| {
+                            p.run(1, &pd, c);
+                        }).note(&nt));
+                    }
                 }
                 let md: Vec<Natural> = ds.iter().map(nat_of).collect();
                 let theirs: Vec<String> = m.iter().zip(&md).take(k).map(|(x, d)| x.approximate(d).to_string()).collect();
@@ -214,7 +236,7 @@ pub fn run(which: &str) {
                 let nm = m.len();
                 let mut j = 0usize;
                 ents.push(Ent::new("malachite-q approximate", move |c| cyc!(j, nm, c, black_box((&mr[j]).approximate(&md[j])))).note(&nt));
-                row("cf", "limit_denominator", &format!("parts of {label}, {blabel}; pool {n}"), ents, 1.0, "FLINT has none");
+                row("cf", "limit_denominator", &format!("parts of {label}, {blabel}; pool {n}"), ents, 1.0, &row_note);
             }
         }
 

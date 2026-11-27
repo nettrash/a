@@ -80,12 +80,33 @@ Apple's Accelerate (vDSP, LAPACK, Sparse Solvers) is part of macOS: its rows exi
 **Linux x86_64** (Ubuntu): Rust stable and
 
 ```sh
-sudo apt-get install build-essential pkg-config git libgmp-dev libmpfr-dev libmpc-dev \
+sudo apt-get install build-essential pkg-config git m4 libgmp-dev libmpfr-dev libmpc-dev \
   libflint-dev libntl-dev libpari-dev pari-gp libfftw3-dev libgsl-dev libboost-dev \
   libprimesieve-dev libprimecount-dev libecm-dev libm4ri-dev libfplll-dev libssl-dev \
   libsuitesparse-dev libopenblas-dev liblapack-dev        # optional: msieve libmetis-dev
 python3 -m pip install numpy scipy mpmath sympy
 ```
+
+What differs from the Mac on Ubuntu 26.04 (the workflow's runner: FLINT 3.4.0, PARI 2.17.3,
+NTL 11.5.1, MPC 1.3.1, M4RI 20240729, OpenSSL 3.5):
+
+- `float`: gmp-mpfr-sys 1.7 (rug) accepts no MPC older than 1.4, so off macOS it builds the
+  GMP 6.3.0, MPFR 4.2.2 and MPC 1.4.1 it bundles from source (Homebrew's versions; it needs `m4`
+  and a few minutes once), and the probe's MPFR and MPC rows use that build too.
+- FLINT 3.4 lacks three functions the shims call: the FLINT rows of poly's
+  `real_root_intervals*` and `real_roots(prec)` (`fmpz_poly_isolate_real_roots`,
+  `arb_fmpz_poly_real_roots`, FLINT 3.6) and of lattice's `smith_normal_form`
+  (`fmpz_mat_snf_transform`, FLINT 3.5) are left out, and those rows say so in their notes.
+- PARI before 2.19 can answer `bestappr(x, D)` with a convergent where a closer semiconvergent
+  exists (fixed in 2.19.0): rational's `limit_denominator` rows with PARI say "not the same work";
+  at 4096 limbs with a bound of half the length it needs more than 6 GB of stack, so that row has
+  no PARI figure.
+- msieve and OpenSSL 4 are not packaged: nt's msieve rows and curves' OpenSSL 4 rows are absent.
+
+**Memory.** sparse's Cholesky command of one matrix peaks at up to about 6.2 GB (lap2d-1000;
+measured on Linux, see `peak_gb` in `sparse/src/g_chol.rs`). A matrix whose peak, with a quarter
+more, exceeds the memory available (`MemAvailable` of `/proc/meminfo`, `hw.memsize` on macOS,
+`BENCH_MEM_GB=n` to set it) skips itself and leaves rows that say so, without figures.
 
 The references are found by `pkg-config` or in the standard prefixes (Homebrew's, `/usr/local`,
 `/usr` and the multiarch directories). A reference that is missing loses its rows (the build
@@ -104,11 +125,11 @@ area), `CARGO_BUILD_JOBS` (default every core), `BENCH_SLOT` (the timing wrapper
 
 | area | what (`a::math::…`) | references | arguments of `run.sh` |
 |---|---|---|---|
-| `nt` | number theory of `numbers` (#15): sieves, π(x), primality, factoring (trial, ρ, p±1, ECM, SIQS), CRT, orders, discrete logs, Kronecker, square roots, arithmetic functions, sequences | primesieve, primecount, GMP, FLINT, PARI, GMP-ECM, msieve, primal, machine-prime, machine-factor, malachite | tasks (`ntbench list`); `NT_LONG=1` adds the rows of minutes, `NT_FILTER`, `NT_SAMPLES`, `NT_BUDGET` |
+| `nt` | number theory of `numbers` (#15): sieves, π(x), primality, factoring (trial, ρ, p±1, ECM, SIQS), CRT, orders, discrete logs, Kronecker, square roots, arithmetic functions, sequences | primesieve, primecount, GMP, FLINT, PARI, GMP-ECM, msieve, primal, machine-prime, machine-factor, malachite | tasks (`ntbench list`); `NT_LONG=1` adds the rows of minutes, `NT_FILTER`, `NT_SAMPLES`, `NT_BUDGET`, `NT_SKIP` |
 | `numbers` | the kernels of `Number` the pass added: short products, Jacobi, continued-fraction quotients (white-box: the crate's source compiled into the probe) | GMP (*required*) | `mul quadratic gcd` |
 | `numerics` | roots, systems, quadrature, cubature, Gauss rules, ODEs, optimisation, L-BFGS-B, interpolation, AAA (#21) | GSL and Boost (*required*), argmin, ode_solvers, roots, SciPy | `roots systems quad cubature gauss ode opt lbfgsb interp aaa` |
 | `lp` | `LinearProgram::solve` (#21; the numerics probe's group `lp`) | HiGHS 1.12 through SciPy (*required*) | — |
-| `float` | `BigFloat`, `BigComplex` (#17) | MPFR, MPC (*required*), rug, malachite-float, astro-float, dashu-float, Arb (FLINT) | `[--quick] [--filter s] [--skip s] [--samples n] [GROUP…]`; `PROFILE=fat` |
+| `float` | `BigFloat`, `BigComplex` (#17) | MPFR, MPC (*required* on macOS; built from source elsewhere), rug, malachite-float, astro-float, dashu-float, Arb (FLINT) | `[--quick] [--filter s] [--skip s] [--samples n] [GROUP…]`; `PROFILE=fat` |
 | `curves` | pairings (BLS12-381, BN254), hashing to curves, binary curves, SHA-2 (#24) | arkworks, blst, bls12_381, substrate-bn, mcl, OpenSSL 3 and 4, ring, sha2, RustCrypto curves, curve25519-dalek | `pairing h2c binary sha` |
 | `special` | special functions (#20), f64 and f32 | statrs, special, puruspe, libm, lambert_w, the system libm, Boost.Math, GSL, SciPy | `[--quick] [GROUP…]` (`gamma … orthopoly f32 scipy`) |
 | `rational` | `Rational` (#16, #27), rational and integer matrices | GMP (*required*), FLINT, PARI, malachite-q, num-rational, rug | groups (`ratbench list`); `LTO=1`, `SKIP_LONG=1` |
@@ -117,7 +138,7 @@ area), `CARGO_BUILD_JOBS` (default every core), `BENCH_SLOT` (the timing wrapper
 | `numtypes` | quaternions, dual numbers, fixed-width integers (#25) | glam, nalgebra, num-dual, ruint, crypto-bigint, bnum, malachite-nz, GMP, OpenSSL BN | `uint mont quat dual`; `PROFILE=lto` |
 | `fields` | prime fields, extension fields, towers, binary fields, GF(2⁸)/GF(2¹²⁸)/GHASH (#24) | FLINT, NTL, GMP, OpenSSL, mcl, arkworks, blst, bls12_381, ghash, polyval | `prime ext tower binary gf2` |
 | `lattice` | LLL, deep insertions, BKZ, enumeration, PSLQ, normal forms, exact linear algebra, `ModMatrix`, `BitMatrix` (#23) | FLINT, fplll, NTL, M4RI, PARI, mpmath | jobs `group[:filter]` (see `run.sh`); `LATBENCH_PROFILE=fat` |
-| `sparse` | sparse storage and operations, Matrix Market I/O, orderings, Cholesky, LU, QR, Krylov, eigenvalues (#22) | SuiteSparse (*required*), Accelerate (macOS), faer, sprs, nalgebra-sparse, SciPy | `ops io ordering chol lu qr iter eigen py-…`; `QUICK=1` |
+| `sparse` | sparse storage and operations, Matrix Market I/O, orderings, Cholesky, LU, QR, Krylov, eigenvalues (#22) | SuiteSparse (*required*), Accelerate (macOS), faer, sprs, nalgebra-sparse, SciPy | `ops io ordering chol lu qr iter eigen py-…`; `QUICK=1`, `BENCH_MEM_GB` |
 
 Every `run.sh` also takes `-o FILE` (the scoreboard's path).
 

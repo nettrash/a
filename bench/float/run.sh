@@ -11,14 +11,22 @@
 #   PROFILE=fat ...   ours (and the Rust references) with fat LTO and one codegen unit
 #   Same-work checks alone, untimed: $CARGO_TARGET_DIR/release/floatbench <group> <sub> --check.
 #
-# The probe links GMP, MPFR and MPC statically from the system's archives (Homebrew on macOS;
-# libgmp-dev, libmpfr-dev, libmpc-dev on Ubuntu; required: the area is skipped without them) and
-# FLINT dynamically (libflint-dev; without it the Arb rows are left out, FLOATBENCH_NO_ARB=1 forces
-# that); rug uses the same system libraries (gmp-mpfr-sys with use-system-libs).
+# On macOS the probe links GMP, MPFR and MPC statically from Homebrew's archives (required: the
+# area is skipped without them), and rug uses the same libraries (gmp-mpfr-sys with
+# use-system-libs). Elsewhere gmp-mpfr-sys builds the GMP 6.3.0, MPFR 4.2.2 and MPC 1.4.1 it
+# bundles from source, for rug and the probe alike (gmp-mpfr-sys 1.7 accepts no system MPC older
+# than 1.4; Ubuntu 26.04 has 1.3.1): that needs m4 and a C compiler, and some minutes once. FLINT
+# is linked dynamically (libflint-dev; without it the Arb rows are left out, FLOATBENCH_NO_ARB=1
+# forces that).
 AREA=float
 . "$(cd "$(dirname "$0")/.." && pwd)/common.sh"
-if ! have_header mpfr.h mpfr || ! have_header mpc.h; then
-  empty_board "MPFR or MPC not found"
+if [ "$(uname -s)" = Darwin ]; then
+  if ! have_header mpfr.h mpfr || ! have_header mpc.h; then
+    empty_board "MPFR or MPC not found"
+    exit 0
+  fi
+elif ! command -v m4 >/dev/null 2>&1; then
+  empty_board "m4 not found (GMP's configure needs it; gmp-mpfr-sys builds GMP, MPFR and MPC from source here)"
   exit 0
 fi
 if [ -n "$(brew_prefix)" ]; then

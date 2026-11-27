@@ -62,10 +62,19 @@ fn find(pc: &str, header: &str, libname: &str, extra: &[&str]) -> Option<Lib> {
         }
     }
     for p in prefixes() {
-        let inc = p.join("include");
-        if !inc.join(header).exists() {
-            continue;
+        // The prefix's include/ or, on Debian and Ubuntu, its multiarch include directory
+        // (gmp.h is in /usr/include/x86_64-linux-gnu there).
+        let mut incs = vec![p.join("include")];
+        if let Ok(rd) = std::fs::read_dir(p.join("include")) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().ends_with("-linux-gnu") {
+                    incs.push(e.path());
+                }
+            }
         }
+        let Some(inc) = incs.into_iter().find(|d| d.join(header).exists()) else {
+            continue;
+        };
         let mut dirs = vec![p.join("lib")];
         if let Ok(rd) = std::fs::read_dir(p.join("lib")) {
             for e in rd.flatten() {
@@ -134,6 +143,8 @@ fn main() {
             link(&l);
             println!("cargo:rustc-cfg=has_gmp");
             summary.push("gmp");
+        } else {
+            println!("cargo:warning=fieldbench: GMP not found, its rows are left out");
         }
     }
     if !skip("FLINT") {
@@ -145,6 +156,8 @@ fn main() {
             link(&l);
             println!("cargo:rustc-cfg=has_flint");
             summary.push("flint");
+        } else {
+            println!("cargo:warning=fieldbench: FLINT not found, its rows are left out");
         }
     }
     if !skip("NTL") {
@@ -157,6 +170,8 @@ fn main() {
             link(&l);
             println!("cargo:rustc-cfg=has_ntl");
             summary.push("ntl");
+        } else {
+            println!("cargo:warning=fieldbench: NTL not found, its rows are left out");
         }
     }
     if !skip("OSSL") {
@@ -168,6 +183,8 @@ fn main() {
             link(&l);
             println!("cargo:rustc-cfg=has_ossl");
             summary.push("openssl");
+        } else {
+            println!("cargo:warning=fieldbench: OpenSSL not found, its rows are left out");
         }
     }
     // mcl (herumi/mcl, BSD-3), a build of its default MCL_FP_BIT=384, MCL_FR_BIT=256 made apart:
@@ -185,6 +202,8 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib={}", if cfg!(target_os = "macos") { "c++" } else { "stdc++" });
             println!("cargo:rustc-cfg=has_mcl");
             summary.push("mcl");
+        } else {
+            println!("cargo:warning=fieldbench: mcl not built (bench/mcl.sh), its rows are left out");
         }
     }
     println!("cargo:rustc-env=FIELDBENCH_CREFS={}", summary.join(","));

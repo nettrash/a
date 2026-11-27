@@ -47,6 +47,7 @@ unsafe extern "C" {
 #[cfg(has_pari)]
 unsafe extern "C" {
     fn pa_init();
+    fn pa_version_code() -> c_long;
     fn pp_new(n: usize) -> *mut c_void;
     fn pp_free(p: *mut c_void);
     fn pp_set(p: *mut c_void, i: usize, nb: *const u8, nl: usize, neg: c_int, db: *const u8, dl: usize);
@@ -242,6 +243,13 @@ impl Drop for FlintMat {
 #[cfg(has_pari)]
 pub fn pari_init() {
     unsafe { pa_init() }
+}
+
+/// PARI's version as (major, minor, patch).
+#[cfg(has_pari)]
+pub fn pari_version() -> (u32, u32, u32) {
+    let v = unsafe { pa_version_code() } as u32;
+    (v >> 16, (v >> 8) & 255, v & 255)
 }
 
 #[cfg(has_pari)]

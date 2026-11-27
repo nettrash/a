@@ -210,3 +210,7 @@ pub fn mix_setup(n: usize, double: bool) {
         }
     }
 }
+
+/// Without Accelerate there is no vDSP setup to make between plans: nothing.
+#[cfg(not(target_os = "macos"))]
+pub fn mix_setup(_n: usize, _double: bool) {}

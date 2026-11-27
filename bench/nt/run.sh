@@ -12,8 +12,8 @@
 #   PROFILE=fat ...       the crate and the probe with fat LTO and one codegen unit
 #
 # The C references are found by pkg-config or in Homebrew's prefix, /usr/local and /usr
-# (build.rs; extra prefixes in NT_PREFIXES, colon-separated); a missing one is left out with a
-# warning and its rows time ours only. msieve is optional, found on PATH.
+# (build.rs; extra prefixes in NT_PREFIXES, colon-separated; NT_SKIP=gmp,pari,... leaves some out
+# on purpose); a missing one is left out with a warning and its rows time ours only. msieve is optional, found on PATH.
 # Ubuntu: libgmp-dev libflint-dev libpari-dev pari-gp libecm-dev libprimesieve-dev
 # libprimecount-dev (msieve where packaged).
 AREA=nt

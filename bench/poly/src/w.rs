@@ -79,6 +79,9 @@ pub fn run_case(
 ) {
     let r: Vec<(Lib, &str, &str)> = refs.iter().map(|(l, o, f)| (*l, o.as_str(), f.as_str())).collect();
     let refs = shims(&r, buf);
+    // A case whose only references the installed versions lack keeps just the reason.
+    let missing = missing_notes(&r);
+    let notes = if refs.is_empty() && !missing.is_empty() { missing } else { join(notes, &missing) };
     out.case(Case {
         group,
         op: op.to_string(),
@@ -86,7 +89,7 @@ pub fn run_case(
         ours,
         refs,
         cmp,
-        notes: notes.to_string(),
+        notes,
         check_note: None,
     });
 }

@@ -66,6 +66,24 @@ fn pkg_config(pkg: &str, flag: &str) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// M4RI's version (its headers have no version macro): `pkg-config --modversion`, else the
+/// Version line of m4ri.pc (whose Requires, libpng, may be missing), else empty.
+fn m4ri_version(prefixes: &[String], arch: &str) -> String {
+    if let Some(v) = pkg_config("m4ri", "--modversion").filter(|v| !v.is_empty()) {
+        return v;
+    }
+    for p in prefixes {
+        for d in [format!("{p}/lib/pkgconfig"), format!("{p}/lib/{arch}-linux-gnu/pkgconfig"), format!("{p}/share/pkgconfig")] {
+            if let Ok(t) = std::fs::read_to_string(format!("{d}/m4ri.pc")) {
+                if let Some(v) = t.lines().find_map(|l| l.strip_prefix("Version:")) {
+                    return v.trim().to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=csrc");
@@ -101,16 +119,24 @@ fn main() {
                         .collect(),
                 )
             } else {
-                match prefixes
-                    .iter()
-                    .find(|p| Path::new(&format!("{p}/include/{}", lib.header)).exists())
-                {
-                    Some(p) => {
+                // The prefix's include/ and, on Debian and Ubuntu, its multiarch include
+                // directory (PARI's headers are in /usr/include/x86_64-linux-gnu/pari there).
+                let incs = |p: &str| {
+                    let mut v = vec![format!("{p}/include")];
+                    if os == "linux" {
+                        v.push(format!("{p}/include/{arch}-linux-gnu"));
+                    }
+                    v
+                };
+                match prefixes.iter().find_map(|p| {
+                    incs(p).into_iter().find(|d| Path::new(&format!("{d}/{}", lib.header)).exists()).map(|d| (p, d))
+                }) {
+                    Some((p, inc)) => {
                         let mut l = vec![format!("{p}/lib")];
                         if os == "linux" {
                             l.push(format!("{p}/lib/{arch}-linux-gnu"));
                         }
-                        (vec![format!("-I{p}/include")], l)
+                        (vec![format!("-I{inc}")], l)
                     }
                     None => {
                         println!("cargo:warning=latbench: {} not found, its rows are skipped", lib.name);
@@ -153,6 +179,9 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib={l}");
         }
         println!("cargo:rustc-cfg=has_{}", lib.name);
+        if lib.name == "m4ri" {
+            println!("cargo:rustc-env=LATBENCH_M4RI_VERSION={}", m4ri_version(&prefixes, &arch));
+        }
         any_cxx |= lib.cxx;
     }
     println!("cargo:rustc-link-search=native={}", out.display());

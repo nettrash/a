@@ -1,7 +1,8 @@
-// Finds GMP, MPFR and GNU MPC (static archives, as the earlier campaigns linked them) and FLINT
-// (Arb; a shared library) by pkg-config when it exists, else in the standard places of Homebrew
-// and of Debian/Ubuntu. `FLOATBENCH_LIBDIR` (colon-separated) is searched first;
-// `FLOATBENCH_NO_ARB=1` leaves Arb out.
+// GMP, MPFR and GNU MPC: on macOS the system's static archives (Homebrew's, as the earlier
+// campaigns linked them), searched by pkg-config when it exists, else in the standard places;
+// `FLOATBENCH_LIBDIR` (colon-separated) is searched first. Elsewhere gmp-mpfr-sys builds them from
+// its bundled sources (Cargo.toml) and links them itself: nothing to find here. FLINT (Arb; a
+// shared library) is found the same way on every system; `FLOATBENCH_NO_ARB=1` leaves Arb out.
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,22 +46,31 @@ fn main() {
     ] {
         dirs.push(PathBuf::from(d));
     }
-    // A directory holding only the static archives, searched first, so that `-lgmp` from
-    // gmp-mpfr-sys (rug) resolves to the same archive as ours: one copy of GMP and MPFR.
-    let st = out.join("static");
-    fs::create_dir_all(&st).unwrap();
     let mut found = Vec::new();
-    for lib in ["mpc", "mpfr", "gmp"] {
-        let name = format!("lib{lib}.a");
-        let a = find(&name, &dirs).unwrap_or_else(|| panic!("{name} not found in {dirs:?}"));
-        let dst = st.join(&name);
-        let _ = fs::remove_file(&dst);
-        std::os::unix::fs::symlink(&a, &dst).unwrap();
-        found.push(a.display().to_string());
-    }
-    println!("cargo:rustc-link-search=native={}", st.display());
-    for lib in ["mpc", "mpfr", "gmp"] {
-        println!("cargo:rustc-link-lib=static={lib}");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        // A directory holding only the static archives, searched first, so that `-lgmp` from
+        // gmp-mpfr-sys (rug) resolves to the same archive as ours: one copy of GMP and MPFR.
+        let st = out.join("static");
+        fs::create_dir_all(&st).unwrap();
+        for lib in ["mpc", "mpfr", "gmp"] {
+            let name = format!("lib{lib}.a");
+            let a = find(&name, &dirs).unwrap_or_else(|| panic!("{name} not found in {dirs:?}"));
+            let dst = st.join(&name);
+            let _ = fs::remove_file(&dst);
+            std::os::unix::fs::symlink(&a, &dst).unwrap();
+            found.push(a.display().to_string());
+        }
+        println!("cargo:rustc-link-search=native={}", st.display());
+        for lib in ["mpc", "mpfr", "gmp"] {
+            println!("cargo:rustc-link-lib=static={lib}");
+        }
+    } else {
+        // gmp-mpfr-sys's own build (links = "gmp" gives its directories): rug and the probe's
+        // bindings both use it.
+        let d = env::var("DEP_GMP_LIB_DIR").unwrap_or_else(|_| "?".into());
+        for lib in ["mpc", "mpfr", "gmp"] {
+            found.push(format!("{d}/lib{lib}.a (gmp-mpfr-sys, from source)"));
+        }
     }
     if env::var("FLOATBENCH_NO_ARB").is_err() {
         let so = if cfg!(target_os = "macos") { "libflint.dylib" } else { "libflint.so" };

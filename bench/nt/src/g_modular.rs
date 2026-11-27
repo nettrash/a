@@ -311,7 +311,8 @@ pub fn dlog_methods(ctx: &mut Ctx) {
         let params = format!("order q of {qb} bits modulo 2q + 1, g = 4");
         type M = fn(&Number, &Number, &Number, &Number) -> Option<Number>;
         let methods: [(&str, M); 2] = [("dlog::bsgs", dlog::bsgs), ("dlog::rho", dlog::rho)];
-        let mut ref_pools = vec![];
+        #[cfg(has_pari)]
+        let mut ref_pools: Vec<(Pool, Pool)> = vec![];
         for (name, mf) in methods {
             let mut cs = vec![c("a", move |i0, k| (0..k).map(|j| lo(&mf(&hr[(i0 + j) % nt], gr, &mr[(i0 + j) % nt], &qr[(i0 + j) % nt]).unwrap())).fold(0, u64::wrapping_add))];
             #[cfg(has_pari)]

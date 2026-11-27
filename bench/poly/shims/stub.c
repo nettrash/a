@@ -8,3 +8,4 @@ void CAT(P, _run)(void* h, uint64_t r) { (void)h; (void)r; }
 size_t CAT(P, _check)(void* h, uint64_t* o, size_t c) { (void)h; (void)o; (void)c; return 0; }
 void CAT(P, _free)(void* h) { (void)h; }
 const char* CAT(P, _label)(void* h) { (void)h; return ""; }
+const char* CAT(P, _missing)(const char* op) { (void)op; return 0; }

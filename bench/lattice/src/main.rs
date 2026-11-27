@@ -53,6 +53,10 @@ fn versions() -> &'static Vec<(String, String)> {
             let num = pv.split_whitespace().find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit())).unwrap_or("?").to_string();
             v.push(("PARI 2.19".into(), format!("PARI {}", short(num))));
         }
+        #[cfg(has_m4ri)]
+        if !env!("LATBENCH_M4RI_VERSION").is_empty() {
+            v.push(("M4RI 20260122".into(), format!("M4RI {}", env!("LATBENCH_M4RI_VERSION"))));
+        }
         v
     })
 }
@@ -168,7 +172,7 @@ fn main() {
         #[cfg(has_ntl)]
         eprintln!("NTL {} (SP bits {})", refs::ntl::version(), refs::ntl::sp_nbits());
         #[cfg(has_m4ri)]
-        eprintln!("M4RI present");
+        eprintln!("M4RI {}", if env!("LATBENCH_M4RI_VERSION").is_empty() { "(version unknown)" } else { env!("LATBENCH_M4RI_VERSION") });
         #[cfg(has_pari)]
         eprintln!("PARI {}", refs::pari::version());
         return;

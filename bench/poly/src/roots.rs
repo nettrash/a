@@ -141,7 +141,7 @@ fn real_case(
         ours: o,
         refs,
         cmp: Cmp::Roots(1e-6),
-        notes: String::new(),
+        notes: missing_notes(&libs),
         check_note: Some(Box::new(move |ours, refv| {
             format!(
                 "max backward error ours {:.1e} ref {:.1e}",

@@ -110,7 +110,8 @@ pub fn real<T: P>(o: &mut Out, cfg: &Cfg, n: usize) {
     race.reference("realfft", "a fresh RealFftPlanner, plan_fft_forward", us, || {
         black_box(RealFftPlanner::<T>::new().plan_fft_forward(black_box(n)));
     });
-    if n.is_power_of_two() {
+    // (vDSP on macOS only: elsewhere its stand-in makes no setup, nothing to time.)
+    if n.is_power_of_two() && crate::vdsp::available() {
         race.reference(
             "vDSP fft_setup",
             "vDSP_create_fftsetup(log2 n) and destroy (zrip's setup)",

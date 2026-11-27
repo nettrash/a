@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn sf_check(h: *mut c_void, out: *mut u64, cap: usize) -> usize;
     fn sf_free(h: *mut c_void);
     fn sf_label(h: *mut c_void) -> *const c_char;
+    fn sf_missing(op: *const c_char) -> *const c_char;
     fn sn_prep(op: *const c_char, buf: *const u64, n: usize) -> *mut c_void;
     fn sn_run(h: *mut c_void, reps: u64);
     fn sn_check(h: *mut c_void, out: *mut u64, cap: usize) -> usize;
@@ -68,6 +69,22 @@ impl Lib {
                     "LAPACK"
                 }
             }
+        }
+    }
+    /// Why the installed library cannot do `op` although the shim knows it (an older version
+    /// without the function), or None.
+    pub fn missing(self, op: &str) -> Option<String> {
+        if self != Lib::Flint || !self.available() {
+            return None;
+        }
+        let c = CString::new(op).unwrap();
+        // SAFETY: a NUL-terminated name; the result is null or a static C string.
+        let p = unsafe { sf_missing(c.as_ptr()) };
+        if p.is_null() {
+            None
+        } else {
+            // SAFETY: non-null, NUL-terminated.
+            Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
         }
     }
     pub fn available(self) -> bool {
@@ -840,6 +857,17 @@ pub fn shims(libs: &[(Lib, &str, &str)], buf: &[u64]) -> Vec<Ref> {
         }
     }
     v
+}
+
+/// The notes of the references that the installed versions cannot run (`Lib::missing`).
+pub fn missing_notes(libs: &[(Lib, &str, &str)]) -> String {
+    let mut n = String::new();
+    for (lib, op, _) in libs {
+        if let Some(m) = lib.missing(op) {
+            n = join(&n, &m);
+        }
+    }
+    n
 }
 
 /// Number of input variants for a size: fresh inputs per repetition where they matter.

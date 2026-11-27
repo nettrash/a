@@ -8,6 +8,9 @@
 volatile uint64_t p_sink;
 static int inited;
 
+/* PARI's version, (major << 16) + (minor << 8) + patch. */
+long pa_version_code(void) { return PARI_VERSION_CODE; }
+
 void pa_init(void) {
   if (inited) return;
   // No signal handlers, no GMP memory functions of PARI's.

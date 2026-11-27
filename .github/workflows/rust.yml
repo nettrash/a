@@ -27,7 +27,7 @@ jobs:
         working-directory: lib
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master
@@ -58,7 +58,7 @@ jobs:
       RUSTFLAGS: --cfg a_baseline
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@master

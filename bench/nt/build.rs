@@ -24,6 +24,7 @@ const LIBS: &[Lib] = &[
     Lib { cfg: "primesieve", header: "primesieve.h", pkg: "primesieve", link: &["primesieve", "primecount"], shim: "refs_ps.c", needs: &[] },
 ];
 
+/// pkg-config's compile flags and `-L` directories of PKG, when it has a .pc file.
 fn pkg_config(pkg: &str) -> Option<(Vec<String>, Vec<String>)> {
     if pkg.is_empty() {
         return None;
@@ -37,10 +38,37 @@ fn pkg_config(pkg: &str) -> Option<(Vec<String>, Vec<String>)> {
     Some((split(c.stdout), split(l.stdout)))
 }
 
+/// The include directories of a prefix: its include/ and, on Debian and Ubuntu, the multiarch
+/// one (gmp.h and pari/ live in /usr/include/x86_64-linux-gnu there).
+fn include_dirs(p: &Path, multiarch: &str) -> Vec<PathBuf> {
+    let mut v = vec![p.join("include")];
+    if !multiarch.is_empty() {
+        v.push(p.join("include").join(multiarch));
+    }
+    v
+}
+
+/// The library directories of a prefix: lib/, the multiarch lib/<triple>/ and lib64/.
+fn lib_dirs(p: &Path, multiarch: &str) -> Vec<PathBuf> {
+    let mut v = vec![p.join("lib")];
+    if !multiarch.is_empty() {
+        v.push(p.join("lib").join(multiarch));
+    }
+    v.push(p.join("lib64"));
+    v
+}
+
+fn has_lib(d: &Path, name: &str) -> bool {
+    ["so", "dylib", "a"].iter().any(|e| d.join(format!("lib{name}.{e}")).exists())
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=csrc");
     println!("cargo:rerun-if-env-changed=NT_PREFIXES");
+    println!("cargo:rerun-if-env-changed=NT_SKIP");
+    // NT_SKIP=gmp,pari,...: leaves those references out on purpose (as if not installed).
+    let skip: Vec<String> = env::var("NT_SKIP").unwrap_or_default().split(',').map(str::to_string).collect();
     for l in LIBS {
         println!("cargo::rustc-check-cfg=cfg(has_{})", l.cfg);
     }
@@ -62,37 +90,41 @@ fn main() {
     let mut found: Vec<&str> = Vec::new();
     let mut objects = Vec::new();
     for l in LIBS {
+        if skip.iter().any(|x| x == l.cfg) {
+            println!("cargo:warning=nt bench: {} left out (NT_SKIP)", l.cfg);
+            continue;
+        }
         if !l.needs.iter().all(|n| found.contains(n)) {
             println!("cargo:warning=nt bench: {} needs {:?}, left out", l.cfg, l.needs);
             continue;
         }
-        let (mut cflags, mut ldirs) = pkg_config(l.pkg).unwrap_or_default();
-        let mut ok = cflags.iter().any(|f| f.starts_with("-I") && Path::new(&f[2..]).join(l.header).exists());
-        if !ok {
-            for p in &prefixes {
-                let inc = p.join("include");
-                if inc.join(l.header).exists() {
-                    cflags.push(format!("-I{}", inc.display()));
-                    for d in [p.join("lib"), p.join("lib").join(multiarch), p.join("lib64")] {
-                        if d.exists() {
-                            ldirs.push(format!("-L{}", d.display()));
-                        }
-                    }
-                    ok = true;
-                    break;
-                }
-            }
+        // pkg-config first (its directories may be the compiler's defaults, then it prints no
+        // -I or -L), then the prefixes with their multiarch directories.
+        let pc = pkg_config(l.pkg);
+        let (mut cflags, mut ldirs) = pc.unwrap_or_default();
+        let mut inc_dirs: Vec<PathBuf> = cflags.iter().filter_map(|f| f.strip_prefix("-I")).map(PathBuf::from).collect();
+        let mut lib_dirs_all: Vec<PathBuf> = ldirs.iter().filter_map(|f| f.strip_prefix("-L")).map(PathBuf::from).collect();
+        for p in &prefixes {
+            inc_dirs.extend(include_dirs(p, multiarch));
+            lib_dirs_all.extend(lib_dirs(p, multiarch));
         }
-        if !ok && Path::new("/usr/include").join(l.header).exists() {
-            ok = true;
-        }
-        if !ok {
+        let header_dir = inc_dirs.iter().find(|d| d.join(l.header).exists()).cloned();
+        let lib_dir = lib_dirs_all.iter().find(|d| has_lib(d, l.link[0])).cloned();
+        let (Some(hd), Some(ld)) = (header_dir, lib_dir) else {
             println!("cargo:warning=nt bench: {} not found, its rows time our side only", l.cfg);
             continue;
+        };
+        // /usr/include and its multiarch directory are the compiler's own: no -I for them (an
+        // -I/usr/include would break the #include_next of C++ headers).
+        let inc = format!("-I{}", hd.display());
+        if !hd.starts_with("/usr/include") && !cflags.contains(&inc) {
+            cflags.push(inc);
         }
-        if l.cfg == "primesieve" && !cflags.iter().any(|f| f.starts_with("-I") && Path::new(&f[2..]).join("primecount.h").exists())
-            && !prefixes.iter().any(|p| p.join("include/primecount.h").exists())
-        {
+        let lib = format!("-L{}", ld.display());
+        if !ldirs.contains(&lib) {
+            ldirs.push(lib);
+        }
+        if l.cfg == "primesieve" && !inc_dirs.iter().any(|d| d.join("primecount.h").exists()) {
             println!("cargo:warning=nt bench: primecount not found, primesieve left out too");
             continue;
         }

@@ -32,17 +32,26 @@ fn main() {
         incs.push(format!("{prefix}/include"));
         libdirs.push(format!("{prefix}/lib"));
     } else {
-        for f in pkg_config("flint", "--cflags-only-I") {
-            incs.push(f.trim_start_matches("-I").to_string());
+        for lib in ["flint", "ntl", "gmp"] {
+            for f in pkg_config(lib, "--cflags-only-I") {
+                incs.push(f.trim_start_matches("-I").to_string());
+            }
+            for f in pkg_config(lib, "--libs-only-L") {
+                libdirs.push(f.trim_start_matches("-L").to_string());
+            }
         }
-        for f in pkg_config("flint", "--libs-only-L") {
-            libdirs.push(f.trim_start_matches("-L").to_string());
-        }
-        incs.push("/usr/include".into());
         incs.push("/usr/local/include".into());
         libdirs.push("/usr/local/lib".into());
     }
-    let found = |h: &str| incs.iter().any(|d| Path::new(d).join(h).exists());
+    // Searched for the headers but not passed with -I: the compiler's own directories, among them
+    // Debian's and Ubuntu's multiarch one (gmp.h and PARI's pari/ are in
+    // /usr/include/x86_64-linux-gnu there).
+    let mut sys_incs: Vec<String> = Vec::new();
+    if target_os != "macos" {
+        sys_incs.push("/usr/include".into());
+        sys_incs.push(format!("/usr/include/{target_arch}-linux-gnu"));
+    }
+    let found = |h: &str| incs.iter().chain(sys_incs.iter()).any(|d| Path::new(d).join(h).exists());
     let cc = env::var("CC").unwrap_or_else(|_| "cc".into());
     let cxx = env::var("CXX").unwrap_or_else(|_| "c++".into());
     let native = if target_arch == "aarch64" { "-mcpu=native" } else { "-march=native" };
@@ -78,15 +87,29 @@ fn main() {
     let have_flint = found("flint/flint.h") && env::var("POLYBENCH_NO_FLINT").is_err();
     let have_ntl = found("NTL/ZZ.h") && env::var("POLYBENCH_NO_NTL").is_err();
     let have_pari = found("pari/pari.h") && env::var("POLYBENCH_NO_PARI").is_err();
-    let have_lapack = (target_os == "macos"
-        || ["/usr/lib/x86_64-linux-gnu/liblapack.so", "/usr/lib/aarch64-linux-gnu/liblapack.so", "/usr/lib/liblapack.so"]
-            .iter()
-            .any(|p| Path::new(p).exists()))
+    let mut lapack_dirs: Vec<String> = pkg_config("lapack", "--libs-only-L").iter().map(|f| f.trim_start_matches("-L").to_string()).collect();
+    lapack_dirs.extend([format!("/usr/lib/{target_arch}-linux-gnu"), "/usr/lib64".into(), "/usr/lib".into(), "/usr/local/lib".into()]);
+    let have_lapack = (target_os == "macos" || lapack_dirs.iter().any(|d| Path::new(d).join("liblapack.so").exists()))
         && env::var("POLYBENCH_NO_LAPACK").is_err();
+    for (name, have, var) in [
+        ("FLINT", have_flint, "POLYBENCH_NO_FLINT"),
+        ("NTL", have_ntl, "POLYBENCH_NO_NTL"),
+        ("PARI", have_pari, "POLYBENCH_NO_PARI"),
+        ("LAPACK", have_lapack, "POLYBENCH_NO_LAPACK"),
+    ] {
+        if !have && env::var(var).is_err() {
+            println!("cargo:warning=poly bench: {name} not found, its rows are left out");
+        }
+    }
     build("pbflint", "flint.c", false, "sf", have_flint);
     build("pbntl", "ntl.cpp", true, "sn", have_ntl);
     build("pbpari", "pari.c", false, "sp", have_pari);
     build("pblapack", "lapack.c", false, "sl", have_lapack);
+    if have_lapack && target_os != "macos" {
+        if let Some(d) = lapack_dirs.iter().find(|d| Path::new(d).join("liblapack.so").exists()) {
+            libdirs.push(d.clone());
+        }
+    }
     for d in &libdirs {
         println!("cargo:rustc-link-search=native={d}");
         if target_os == "macos" {

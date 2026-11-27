@@ -8,7 +8,11 @@ build = "build.rs"
 [dependencies]
 nettrash-a = { path = "../../../lib" }
 rug = { version = "1.30", default-features = false, features = ["integer", "float", "complex"] }
-gmp-mpfr-sys = { version = "1.7", default-features = false, features = ["mpfr", "mpc", "use-system-libs"] }
+# GMP, MPFR and MPC, one copy for rug and the probe's own bindings: on macOS the system's
+# (Homebrew's, use-system-libs); elsewhere gmp-mpfr-sys builds the versions it bundles from source
+# (GMP 6.3.0, MPFR 4.2.2, MPC 1.4.1, Homebrew's versions), since gmp-mpfr-sys 1.7 accepts no MPC
+# older than 1.4 and Ubuntu 26.04 has 1.3.1. The build needs m4 (GMP's configure).
+gmp-mpfr-sys = { version = "1.7", default-features = false, features = ["mpfr", "mpc"] }
 astro-float = { version = "0.9.6" }
 dashu-float = { version = "0.6.2" }
 dashu-int = { version = "0.6.2" }
@@ -16,6 +20,9 @@ malachite-float = { version = "0.15" }
 malachite-nz = { version = "0.15" }
 malachite-base = { version = "0.15" }
 malachite-q = { version = "0.15" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gmp-mpfr-sys = { version = "1.7", default-features = false, features = ["mpfr", "mpc", "use-system-libs"] }
 
 # The default release profile: opt-level 3, no LTO, default codegen units, no target-cpu.
 [profile.release]
